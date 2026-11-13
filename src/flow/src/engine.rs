@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Define a trait for flow engine, which is used by both streaming engine and batch engine
+//! Defines the flow engine trait implemented by the flownode engine
 
 use std::collections::HashMap;
 

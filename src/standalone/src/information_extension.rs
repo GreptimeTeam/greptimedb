@@ -26,7 +26,7 @@ use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_query::request::QueryRequest;
 use common_stat::{ResourceStatImpl, ResourceStatRef};
 use datanode::region_server::RegionServer;
-use flow::FlowDualEngineRef;
+use flow::FlownodeEngineRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::RwLock;
@@ -35,7 +35,7 @@ pub struct StandaloneInformationExtension {
     region_server: RegionServer,
     procedure_manager: ProcedureManagerRef,
     start_time_ms: u64,
-    flow_engine: RwLock<Option<FlowDualEngineRef>>,
+    flow_engine: RwLock<Option<FlownodeEngineRef>>,
     resource_stat: ResourceStatRef,
 }
 
@@ -53,7 +53,7 @@ impl StandaloneInformationExtension {
     }
 
     /// Set the flow engine for the standalone instance.
-    pub async fn set_flow_engine(&self, flow_engine: FlowDualEngineRef) {
+    pub async fn set_flow_engine(&self, flow_engine: FlownodeEngineRef) {
         let mut guard = self.flow_engine.write().await;
         *guard = Some(flow_engine);
     }

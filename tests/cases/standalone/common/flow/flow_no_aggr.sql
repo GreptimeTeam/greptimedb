@@ -8,8 +8,11 @@ CREATE TABLE sink (
     ts TIMESTAMP TIME INDEX
 );
 
+-- A projection/filter flow has no time window, so it runs as an explicit
+-- full-query flow on the batching scheduler and needs a schedule.
 CREATE FLOW filter_out
 SINK TO sink
+EVAL INTERVAL '1h'
 AS
 SELECT desc_str, ts FROM base
 WHERE desc_str IN ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j');
@@ -44,6 +47,7 @@ CREATE TABLE sink (
 
 CREATE FLOW filter_out
 SINK TO sink
+EVAL INTERVAL '1h'
 AS
 SELECT desc_str, ts FROM base
 WHERE desc_str NOT IN ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j');

@@ -29,7 +29,7 @@ SHOW FLOWS LIKE 'filter_numbers_show';
 +-------+
 +-------+
 
-CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number FROM numbers_input_show where number > 10;
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number FROM numbers_input_show where number > 10;
 
 Affected Rows: 0
 
@@ -40,6 +40,7 @@ SHOW CREATE FLOW filter_numbers_show;
 +---------------------+------------------------------------------------------------+
 | filter_numbers_show | CREATE FLOW IF NOT EXISTS filter_numbers_show              |
 |                     | SINK TO public.out_num_cnt_show                            |
+|                     | EVAL INTERVAL '3600 s'                                     |
 |                     | AS SELECT number FROM numbers_input_show WHERE number > 10 |
 +---------------------+------------------------------------------------------------+
 
@@ -50,6 +51,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show              | greptime.public.numbers_input_show |
 |                     |               | SINK TO public.out_num_cnt_show                            |                                    |
+|                     |               | EVAL INTERVAL '3600 s'                                     |                                    |
 |                     |               | AS SELECT number FROM numbers_input_show WHERE number > 10 |                                    |
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
 
@@ -81,7 +83,7 @@ SHOW FLOWS LIKE 'filter_numbers_show';
 
 -- also test `CREATE OR REPLACE` and `IF NOT EXISTS`
 -- (flow exists, replace, if not exists)=(false, false, false)
-CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > 10;
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > 10;
 
 Affected Rows: 0
 
@@ -92,12 +94,13 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
 |                     |               | SINK TO public.out_num_cnt_show                                |                                    |
+|                     |               | EVAL INTERVAL '3600 s'                                         |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 10 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
 -- this one should error out
 -- (flow exists, replace, if not exists)=(true, false, false)
-CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > 15;
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > 15;
 
 Error: 8000(FlowAlreadyExists), Flow already exists: greptime.filter_numbers_show
 
@@ -108,6 +111,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
 |                     |               | SINK TO public.out_num_cnt_show                                |                                    |
+|                     |               | EVAL INTERVAL '3600 s'                                         |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 10 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -138,7 +142,7 @@ SELECT number, ts FROM out_num_cnt_show;
 
 -- after this one, the flow SHOULD NOT be replaced
 -- (flow exists, replace, if not exists)=(true, false, true)
-CREATE FLOW IF NOT EXISTS filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > 5;
+CREATE FLOW IF NOT EXISTS filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > 5;
 
 Affected Rows: 0
 
@@ -149,6 +153,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
 |                     |               | SINK TO public.out_num_cnt_show                                |                                    |
+|                     |               | EVAL INTERVAL '3600 s'                                         |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 10 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -180,7 +185,7 @@ SELECT number, ts FROM out_num_cnt_show;
 
 -- after this, the flow SHOULD be replaced
 -- (flow exists, replace, if not exists)=(true, true, false)
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > 3;
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > 3;
 
 Affected Rows: 0
 
@@ -191,6 +196,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+---------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                 | greptime.public.numbers_input_show |
 |                     |               | SINK TO public.out_num_cnt_show                               |                                    |
+|                     |               | EVAL INTERVAL '3600 s'                                        |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 3 |                                    |
 +---------------------+---------------+---------------------------------------------------------------+------------------------------------+
 
@@ -216,6 +222,9 @@ SELECT number, ts FROM out_num_cnt_show;
 | number | ts                      |
 +--------+-------------------------+
 | 4      | 1970-01-01T00:00:00.002 |
+| 4      | 1970-01-01T00:00:00.004 |
+| 5      | 1970-01-01T00:00:00.004 |
+| 10     | 1970-01-01T00:00:00     |
 | 10     | 1970-01-01T00:00:00.003 |
 | 11     | 1970-01-01T00:00:00.004 |
 | 15     | 1970-01-01T00:00:00.001 |
@@ -235,6 +244,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+---------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                 | greptime.public.numbers_input_show |
 |                     |               | SINK TO public.out_num_cnt_show                               |                                    |
+|                     |               | EVAL INTERVAL '3600 s'                                        |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 3 |                                    |
 +---------------------+---------------+---------------------------------------------------------------+------------------------------------+
 
@@ -260,7 +270,7 @@ Error: 8001(FlowNotFound), Flow not found: greptime.filter_numbers_show
 
 -- following always create since didn't exist
 -- (flow exists, replace, if not exists)=(false, true, false)
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > -2;
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > -2;
 
 Affected Rows: 0
 
@@ -271,6 +281,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
 |                     |               | SINK TO public.out_num_cnt_show                                |                                    |
+|                     |               | EVAL INTERVAL '3600 s'                                         |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > -2 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -279,7 +290,7 @@ DROP FLOW filter_numbers_show;
 Affected Rows: 0
 
 -- (flow exists, replace, if not exists)=(false, false, true)
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > -3;
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > -3;
 
 Affected Rows: 0
 
@@ -290,6 +301,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
 |                     |               | SINK TO public.out_num_cnt_show                                |                                    |
+|                     |               | EVAL INTERVAL '3600 s'                                         |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > -3 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -311,6 +323,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
 |                     |               | SINK TO public.out_num_cnt_show                                |                                    |
+|                     |               | EVAL INTERVAL '3600 s'                                         |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > -3 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -320,6 +333,9 @@ SELECT * FROM out_num_cnt_show;
 | number | ts                      |
 +--------+-------------------------+
 | 4      | 1970-01-01T00:00:00.002 |
+| 4      | 1970-01-01T00:00:00.004 |
+| 5      | 1970-01-01T00:00:00.004 |
+| 10     | 1970-01-01T00:00:00     |
 | 10     | 1970-01-01T00:00:00.003 |
 | 11     | 1970-01-01T00:00:00.004 |
 | 15     | 1970-01-01T00:00:00.001 |
@@ -348,7 +364,11 @@ SELECT * FROM out_num_cnt_show;
 +--------+-------------------------+
 | -2     | 1970-01-01T00:00:00.002 |
 | -1     | 1970-01-01T00:00:00.003 |
+| 3      | 1970-01-01T00:00:00.001 |
 | 4      | 1970-01-01T00:00:00.002 |
+| 4      | 1970-01-01T00:00:00.004 |
+| 5      | 1970-01-01T00:00:00.004 |
+| 10     | 1970-01-01T00:00:00     |
 | 10     | 1970-01-01T00:00:00.003 |
 | 11     | 1970-01-01T00:00:00.004 |
 | 15     | 1970-01-01T00:00:00.001 |
@@ -384,7 +404,7 @@ create table out_num_cnt_show (
 
 Affected Rows: 0
 
-CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number as n1 FROM numbers_input_show where number > 10;
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number as n1 FROM numbers_input_show where number > 10;
 
 Affected Rows: 0
 
@@ -412,15 +432,20 @@ SELECT number FROM out_num_cnt_show;
 | 16     |
 +--------+
 
+-- The sink schema mismatch is detected on the flownode. In distributed mode the
+-- error crosses gRPC and loses its source chain, so normalize the trailing chain
+-- to keep both environments comparable; the rejection itself is identical.
 -- should mismatch, hence the old flow remains
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2 FROM numbers_input_show where number > 15;
+-- SQLNESS REPLACE (in\x20context:\x20Failed\x20to\x20rewrite\x20plan).* in context: Failed to rewrite plan
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number AS n1, number AS n2 FROM numbers_input_show where number > 15;
 
-Error: 3001(EngineExecuteQuery), Invalid query: Flow output column 1 has type Int32(Int32Type), but sink column ts has type Timestamp(Millisecond(TimestampMillisecondType))
+Error: 3001(EngineExecuteQuery), Datafusion error: Plan("Cannot match flow output column 'n2' to sink column 'ts' by position: incompatible data types, flow output type is Int32(Int32Type), sink column type is Timestamp(Millisecond(TimestampMillisecondType)). Flow output schema does not match sink table schema: found 2 flow output columns and 2 sink table columns. flow output columns: [\"n1\", \"n2\"], sink table columns: [\"number\", \"ts\"], extra flow columns not in sink: [\"n1\", \"n2\"], missing sink columns from flow output: [\"number\", \"ts\"]") in context: Failed to rewrite plan
 
 -- should mismatch, hence the old flow remains
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2, number AS n3 FROM numbers_input_show where number > 15;
+-- SQLNESS REPLACE (in\x20context:\x20Failed\x20to\x20rewrite\x20plan).* in context: Failed to rewrite plan
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number AS n1, number AS n2, number AS n3 FROM numbers_input_show where number > 15;
 
-Error: 3001(EngineExecuteQuery), Invalid query: Flow output has 3 columns, but sink has 2 columns; only zero, one, or two trailing auto columns are supported
+Error: 3001(EngineExecuteQuery), Datafusion error: Plan("Flow output schema does not match sink table schema: found 3 flow output columns and 2 sink table columns. flow output columns: [\"n1\", \"n2\", \"n3\"], sink table columns: [\"number\", \"ts\"], extra flow columns not in sink: [\"n1\", \"n2\", \"n3\"], missing sink columns from flow output: [\"number\", \"ts\"]") in context: Failed to rewrite plan
 
 SELECT flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
@@ -429,6 +454,7 @@ SELECT flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE f
 +------------------------------------------------------------------+------------------------------------+
 | CREATE FLOW IF NOT EXISTS filter_numbers_show                    | greptime.public.numbers_input_show |
 | SINK TO public.out_num_cnt_show                                  |                                    |
+| EVAL INTERVAL '3600 s'                                           |                                    |
 | AS SELECT number AS n1 FROM numbers_input_show WHERE number > 10 |                                    |
 +------------------------------------------------------------------+------------------------------------+
 
@@ -457,6 +483,7 @@ SELECT number FROM out_num_cnt_show;
 | 15     |
 | 15     |
 | 16     |
+| 16     |
 | 18     |
 +--------+
 
@@ -466,6 +493,7 @@ Affected Rows: 0
 
 CREATE FLOW filter_numbers_show
 SINK TO out_num_cnt_show
+EVAL INTERVAL '1h'
 WITH (defer_on_missing_source = true)
 AS SELECT number AS n1 FROM numbers_input_show where number > 10;
 
@@ -478,6 +506,7 @@ SHOW CREATE FLOW filter_numbers_show;
 +---------------------+------------------------------------------------------------------+
 | filter_numbers_show | CREATE FLOW IF NOT EXISTS filter_numbers_show                    |
 |                     | SINK TO public.out_num_cnt_show                                  |
+|                     | EVAL INTERVAL '3600 s'                                           |
 |                     | WITH (defer_on_missing_source = 'true')                          |
 |                     | AS SELECT number AS n1 FROM numbers_input_show WHERE number > 10 |
 +---------------------+------------------------------------------------------------------+
@@ -489,6 +518,7 @@ SELECT flow_definition FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_num
 +------------------------------------------------------------------+
 | CREATE FLOW IF NOT EXISTS filter_numbers_show                    |
 | SINK TO public.out_num_cnt_show                                  |
+| EVAL INTERVAL '3600 s'                                           |
 | WITH (defer_on_missing_source = 'true')                          |
 | AS SELECT number AS n1 FROM numbers_input_show WHERE number > 10 |
 +------------------------------------------------------------------+
