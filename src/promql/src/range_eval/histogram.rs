@@ -26,7 +26,7 @@ use crate::grid_series::GridSample;
 use crate::histogram_eval::HistogramAggregate;
 use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::histogram_eval::sum_or_avg;
-use crate::range_eval::function::{extrapolation_factor, seconds};
+use crate::range_eval::function::{ExtrapolationSpan, extrapolation_factor, seconds};
 use crate::range_eval::{FloatWindow, RangeFunction, WindowKernel};
 
 /// Histogram samples of one window at their shifted timestamps, in time order.
@@ -241,52 +241,35 @@ pub(super) fn evaluate(
                 return Ok(None);
             };
             let effective_first_ts = synthetic_zero.unwrap_or(*first_ts);
-            let sample_count_minus_one =
-                histograms.len() - 1 + usize::from(synthetic_zero.is_some());
             if *last_ts <= effective_first_ts {
                 return Ok(None);
             }
-            let zero_point = (is_counter && synthetic_zero.is_none() && result.count > 0.0)
-                .then(|| first.count / result.count);
-            let factor = if let Some(synthetic_zero_start) = synthetic_zero {
-                // The sampled interval runs from the synthetic zero while the average interval is
-                // measured between the real samples, as `native_extrapolated_rate` does: they are
-                // two different spans, and taking one for the other shifts the average by a whole
-                // sample interval.
-                let sampled_interval = (*last_ts - synthetic_zero_start) as f64;
-                let average_interval =
-                    (*last_ts - *first_ts) as f64 / (histograms.len() - 1) as f64;
-                let duration_to_start = 0.0;
-                let duration_to_end = (eval_ts - *last_ts) as f64;
-                let threshold = average_interval * 1.1;
-                let extrapolated = sampled_interval
-                    + if duration_to_start < threshold {
-                        duration_to_start
-                    } else {
-                        average_interval / 2.0
-                    }
-                    + if duration_to_end < threshold {
-                        duration_to_end
-                    } else {
-                        average_interval / 2.0
-                    };
-                let factor = extrapolated / sampled_interval;
-                if function == Rate {
-                    factor / (range_ms as f64 / 1000.0)
-                } else {
-                    factor
-                }
+            // A synthetic zero *is* the counter's zero point, so nothing is extrapolated before it
+            // and `zero_point` says so with `0`; the counter instead extrapolates towards zero from
+            // its first real sample, and only when that sample is not itself negative.
+            let zero_point = if synthetic_zero.is_some() {
+                Some(0.0)
             } else {
-                extrapolation_factor(
-                    (effective_first_ts, *last_ts),
-                    sample_count_minus_one,
-                    eval_ts,
-                    range_ms,
-                    is_counter,
-                    function == Rate,
-                    zero_point,
-                )
+                (is_counter && result.count > 0.0 && first.count >= 0.0)
+                    .then(|| first.count / result.count)
             };
+            // The sampled interval runs from the synthetic zero while the average interval is
+            // measured between the real samples, as `native_extrapolated_rate` does: they are two
+            // different spans, and taking one for the other shifts the average by a whole sample
+            // interval.
+            let factor = extrapolation_factor(
+                ExtrapolationSpan {
+                    sampled_from: effective_first_ts,
+                    average_from: *first_ts,
+                    last: *last_ts,
+                    samples_minus_one: histograms.len() - 1,
+                },
+                eval_ts,
+                range_ms,
+                is_counter,
+                function == Rate,
+                zero_point,
+            );
             if synthetic_zero.is_some() && result.add(first).is_err() {
                 record_warning(
                     collector,
