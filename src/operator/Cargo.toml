@@ -65,6 +65,7 @@ meter-core.workspace = true
 meter-macros.workspace = true
 mito-codec.workspace = true
 moka = { workspace = true, features = ["future"] }
+mysql_async.workspace = true
 object-store.workspace = true
 partition.workspace = true
 percent-encoding.workspace = true

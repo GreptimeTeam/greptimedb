@@ -38,9 +38,10 @@ use datatypes::schema::{
 use snafu::{ResultExt, ensure};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::parser::Parser;
+use sqlparser::parser::{Parser, ParserError};
 use table::requests::{
-    SEMANTIC_PREFIX, VALID_DDL_OPTION_KEYS, validate_semantic_option, validate_table_option,
+    SEMANTIC_PREFIX, VALID_DDL_OPTION_KEYS, redact_connection_in_text, validate_semantic_option,
+    validate_table_option,
 };
 
 use crate::error::{
@@ -434,9 +435,19 @@ pub fn parse_with_options(parser: &mut Parser) -> Result<OptionMap> {
     parse_with_options_inner(parser, false)
 }
 
+fn redact_parser_error(error: ParserError) -> ParserError {
+    match error {
+        ParserError::ParserError(message) => {
+            ParserError::ParserError(redact_connection_in_text(&message))
+        }
+        other => other,
+    }
+}
+
 fn parse_with_options_inner(parser: &mut Parser, ddl_only: bool) -> Result<OptionMap> {
     let options = parser
         .parse_options(Keyword::WITH)
+        .map_err(redact_parser_error)
         .context(SyntaxSnafu)?
         .into_iter()
         .map(parse_option_string)
