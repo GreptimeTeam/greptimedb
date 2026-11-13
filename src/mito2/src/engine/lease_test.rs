@@ -390,7 +390,6 @@ fn granted_lease(engine: &MitoEngine) -> Option<GrantedLease> {
     engine.inner.workers.granted_leases().get(REGION_ID)
 }
 
-/// Grants `role` for a heartbeat sent at `sent_at` with `candidate_lease_id`.
 fn grant_candidate_at(
     engine: &MitoEngine,
     role: RegionRole,
