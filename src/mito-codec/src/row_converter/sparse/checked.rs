@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::ControlFlow;
+
 use bytes::Buf;
 use snafu::{OptionExt, ensure};
 use store_api::storage::ColumnId;
@@ -99,24 +101,33 @@ impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
         let Some(encoded) = self.encoded_value(column_id)? else {
             return Ok(None);
         };
-        if encoded[0] == 0 {
-            return Ok(None);
-        }
+        decode_label(encoded, buffer)
+    }
 
-        buffer.clear();
-        // encoded_value checked the markers and every chunk length. Reserve once
-        // before unchunking so the buffer does not grow for each 8-byte chunk.
-        buffer.reserve(encoded.len() - 2);
-        for chunk in encoded[2..].as_chunks::<9>().0 {
-            let len = usize::from(chunk[8]).min(8);
-            buffer.extend_from_slice(&chunk[..len]);
-        }
-        std::str::from_utf8(buffer).map(Some).map_err(|_| {
-            InvalidSparsePrimaryKeySnafu {
-                reason: "label is not valid UTF-8",
+    /// Visits selected labels in encoded order with one sequential traversal.
+    /// Unselected payloads are checked for valid framing but are not decoded.
+    /// Returning [`ControlFlow::Break`] stops before inspecting subsequent labels.
+    pub fn for_each_label(
+        &self,
+        buffer: &mut Vec<u8>,
+        selected: impl Fn(ColumnId) -> bool,
+        mut visit: impl FnMut(ColumnId, Option<&str>) -> ControlFlow<()>,
+    ) -> Result<()> {
+        let mut remaining = &self.pk[TAGS_START_OFFSET..];
+        while !remaining.is_empty() {
+            let id = remaining.first_chunk::<COLUMN_ID_ENCODE_SIZE>().context(
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "truncated label column id",
+                },
+            )?;
+            let id = u32::from_be_bytes(*id);
+            let encoded = encoded_label(&remaining[COLUMN_ID_ENCODE_SIZE..])?;
+            if selected(id) && visit(id, decode_label(encoded, buffer)?).is_break() {
+                break;
             }
-            .build()
-        })
+            remaining = &remaining[COLUMN_ID_ENCODE_SIZE + encoded.len()..];
+        }
+        Ok(())
     }
 
     /// Returns the table id from the non-null prefix validated by [`Self::new`].
@@ -128,6 +139,27 @@ impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
     pub fn tsid(&self) -> u64 {
         (&self.pk[TSID_VALUE_OFFSET + 1..]).get_u64()
     }
+}
+
+/// Decodes a label whose framing has already been validated.
+fn decode_label<'a>(encoded: &[u8], buffer: &'a mut Vec<u8>) -> Result<Option<&'a str>> {
+    if encoded[0] == 0 {
+        return Ok(None);
+    }
+    buffer.clear();
+    // The caller checked the markers and every chunk length. Reserve once
+    // before unchunking so the buffer does not grow for each 8-byte chunk.
+    buffer.reserve(encoded.len() - 2);
+    for chunk in encoded[2..].as_chunks::<9>().0 {
+        let len = usize::from(chunk[8]).min(8);
+        buffer.extend_from_slice(&chunk[..len]);
+    }
+    std::str::from_utf8(buffer).map(Some).map_err(|_| {
+        InvalidSparsePrimaryKeySnafu {
+            reason: "label is not valid UTF-8",
+        }
+        .build()
+    })
 }
 
 /// Finds the end of an Option<String> without allocating or reading its payload.
@@ -150,6 +182,56 @@ mod tests {
     use super::*;
     use crate::index::IndexValueCodec;
     use crate::row_converter::{PrimaryKeyCodec, SortField, SparsePrimaryKeyCodec};
+
+    #[test]
+    fn test_visit_sparse_labels() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut pk = Vec::new();
+        codec.encode_internal(42, 9, &mut pk).unwrap();
+        codec
+            .encode_raw_tag_value(
+                [
+                    (90, "中文".as_bytes()),
+                    (7, b"".as_slice()),
+                    (3, b"skip".as_slice()),
+                ]
+                .into_iter(),
+                &mut pk,
+            )
+            .unwrap();
+        pk.extend_from_slice(&2_u32.to_be_bytes());
+        pk.push(0);
+        let mut cache = SparseOffsetsCache::new();
+        let mut buffer = Vec::new();
+        let mut view = SparsePrimaryKeyView::new(&pk, &mut cache).unwrap();
+        // Prior lazy access must not affect sequential visitation.
+        assert_eq!(view.label(7, &mut buffer).unwrap(), Some(""));
+        let mut visited = Vec::new();
+        view.for_each_label(
+            &mut buffer,
+            |id| id != 3,
+            |id, value| {
+                visited.push((id, value.map(str::to_owned)));
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            visited,
+            vec![
+                (90, Some("中文".into())),
+                (7, Some(String::new())),
+                (2, None)
+            ]
+        );
+        assert_eq!(view.label(90, &mut buffer).unwrap(), Some("中文"));
+        pk.push(1);
+        let view = SparsePrimaryKeyView::new(&pk, &mut cache).unwrap();
+        assert!(
+            view.for_each_label(&mut buffer, |_| false, |_, _| ControlFlow::Continue(()))
+                .is_err()
+        );
+    }
 
     #[test]
     fn index_bytes_match_full_decode_across_chunks_and_lookup_orders() {

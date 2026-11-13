@@ -30,6 +30,7 @@
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -49,6 +50,7 @@ use mito_codec::row_converter::{
     DensePrimaryKeyCodec, PrimaryKeyCodec, SparseOffsetsCache, build_primary_key_codec,
 };
 use parquet::file::metadata::RowGroupMetaData;
+use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
@@ -962,8 +964,8 @@ impl DecodedPrimaryKeys {
             .collect()
     }
 
-    /// Gets multiple sparse tag column arrays in one pass over the distinct keys,
-    /// sharing each key's offset discovery between the columns.
+    /// Materializes sparse tag columns by visiting each key's present labels once.
+    /// Missing runs are appended in bulk when the next value arrives or at the end.
     ///
     /// Must only be called for sparse primary keys. Columns hold their values in
     /// the order of `columns`, whose entries are tag column ids and data types.
@@ -992,14 +994,62 @@ impl DecodedPrimaryKeys {
             .iter()
             .map(|(_, column_type)| column_type.create_mutable_vector(distinct_keys.len()))
             .collect();
-        for &key in distinct_keys.iter() {
+        let mut label_columns: HashMap<ColumnId, SmallVec<[usize; 1]>> = HashMap::new();
+        let mut reserved_columns = Vec::new();
+        for (index, (id, _)) in columns.iter().enumerate() {
+            if matches!(*id, RESERVED_COLUMN_ID_TABLE_ID | RESERVED_COLUMN_ID_TSID) {
+                reserved_columns.push((index, *id));
+            } else {
+                label_columns.entry(*id).or_default().push(index);
+            }
+        }
+        let mut last_seen_rows = vec![usize::MAX; columns.len()];
+        for (row, &key) in distinct_keys.iter().enumerate() {
             let pk = values.value(key as usize);
             let mut view = SparsePrimaryKeyView::new(pk, pk_offsets).context(DecodeSnafu)?;
-            // Visit all columns before moving to the next key so offset
-            // discovery is shared between columns.
-            for ((column_id, _), builder) in columns.iter().zip(&mut builders) {
-                push_sparse_tag_value_in_view(&mut view, *column_id, &mut **builder, value_buf)?;
+            for &(index, id) in &reserved_columns {
+                push_sparse_tag_value_in_view(&mut view, id, &mut *builders[index], value_buf)?;
             }
+            if label_columns.is_empty() {
+                continue;
+            }
+            let mut remaining_labels = label_columns.len();
+            view.for_each_label(
+                value_buf,
+                |id| label_columns.contains_key(&id),
+                |id, value| {
+                    let Some(indexes) = label_columns.get(&id) else {
+                        return ControlFlow::Continue(());
+                    };
+                    let Some(&first_index) = indexes.first() else {
+                        return ControlFlow::Continue(());
+                    };
+                    if last_seen_rows[first_index] == row {
+                        return ControlFlow::Continue(());
+                    }
+                    // A null first occurrence also consumes the label. Repeated IDs
+                    // must not overwrite it or terminate traversal prematurely.
+                    last_seen_rows[first_index] = row;
+                    if let Some(value) = value {
+                        for &index in indexes {
+                            let builder = &mut builders[index];
+                            // Missing runs are filled only when a present value arrives.
+                            builder.push_nulls(row - builder.len());
+                            builder.push_value_ref(&ValueRef::String(value));
+                        }
+                    }
+                    remaining_labels -= 1;
+                    if remaining_labels == 0 {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                },
+            )
+            .context(DecodeSnafu)?;
+        }
+        for builder in &mut builders {
+            builder.push_nulls(distinct_keys.len() - builder.len());
         }
 
         columns

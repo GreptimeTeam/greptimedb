@@ -16,7 +16,9 @@
 //! `decode_primary_keys` plus one `get_tag_column` call per projected tag.
 //! The `pk_tag_filters` group measures precise filtering with 1/2/4/8/16/32
 //! predicates over 40 tags, using both one and 32 rows per primary key.
-//! Input generation is excluded from the timed section.
+//! `wide_sparse_tags` distributes 12 or 120 present tags across up to 3,600 columns,
+//! varying distinct key count and label length. Input generation is excluded
+//! from the timed section.
 //!
 //! Run on the baseline revision with `--save-baseline before`, then on the candidate
 //! with `--baseline before` (arguments after `--` in the command below):
@@ -107,6 +109,16 @@ fn input(tags: u32, rows_per_key: usize) -> RecordBatch {
 }
 
 fn input_with_label_len(tags: u32, rows_per_key: usize, label_len: usize) -> RecordBatch {
+    input_with_sparse_tags(tags, tags, rows_per_key, label_len)
+}
+
+/// Distributes present labels deterministically across the schema without storing absent labels.
+fn input_with_sparse_tags(
+    present_tags: u32,
+    schema_tags: u32,
+    rows_per_key: usize,
+    label_len: usize,
+) -> RecordBatch {
     let codec = SparsePrimaryKeyCodec::schemaless();
     let mut keys = BinaryDictionaryBuilder::<UInt32Type>::new();
     for series in 0..ROWS / rows_per_key {
@@ -114,8 +126,9 @@ fn input_with_label_len(tags: u32, rows_per_key: usize, label_len: usize) -> Rec
         codec
             .encode_internal((series / 128) as u32, series as u64, &mut key)
             .unwrap();
-        let labels: Vec<_> = (0..tags)
-            .map(|id| {
+        let mut labels: Vec<_> = (0..present_tags)
+            .map(|offset| {
+                let id = (series as u32 * 13 + offset) % schema_tags;
                 let mut value = format!("tag-{id:03}-value-{series:010}");
                 value.extend(std::iter::repeat_n(
                     'x',
@@ -124,6 +137,7 @@ fn input_with_label_len(tags: u32, rows_per_key: usize, label_len: usize) -> Rec
                 (id, value)
             })
             .collect();
+        labels.sort_unstable_by_key(|(id, _)| *id);
         codec
             .encode_raw_tag_value(
                 labels.iter().map(|(id, value)| (*id, value.as_bytes())),
@@ -213,6 +227,91 @@ fn bench_pk_tag_column(c: &mut Criterion) {
                 let mut decoded = decode_primary_keys(&codec, black_box(&batch)).unwrap();
                 black_box(decoded.get_sparse_tag_columns(black_box(&columns)).unwrap());
             });
+        });
+    }
+    group.finish();
+}
+
+/// Includes input decoding and output construction, excluding input generation.
+fn bench_wide_sparse_tags(c: &mut Criterion) {
+    let codec = SparsePrimaryKeyCodec::schemaless();
+    let mut group = c.benchmark_group("wide_sparse_tags");
+    group.sample_size(20);
+    for (columns, present, rows_per_key, label_len) in [
+        (40, 12, 1, 24),
+        (3600, 12, 1, 24),
+        (3600, 12, 32, 24),
+        (3600, 120, 1, 24),
+        (3600, 12, 1, 1024),
+    ] {
+        let batch = input_with_sparse_tags(present, columns, rows_per_key, label_len);
+        let requested: Vec<_> = (0..columns)
+            .map(|id| (id, ConcreteDataType::string_datatype()))
+            .collect();
+        group.bench_function(
+            format!(
+                "{columns}cols_{present}present_{}keys_{label_len}bytes",
+                ROWS / rows_per_key
+            ),
+            |b| {
+                b.iter(|| {
+                    let mut decoded = decode_primary_keys(&codec, black_box(&batch)).unwrap();
+                    black_box(
+                        decoded
+                            .get_sparse_tag_columns(black_box(&requested))
+                            .unwrap(),
+                    );
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Measures small projections from keys with many present tags.
+fn bench_sparse_tag_projection(c: &mut Criterion) {
+    let codec = SparsePrimaryKeyCodec::schemaless();
+    let batch = input(3600, 32);
+    let mut group = c.benchmark_group("sparse_tag_projection");
+    group.sample_size(20);
+    for (name, requested) in [
+        (
+            "reserved",
+            vec![
+                (
+                    ReservedColumnId::table_id(),
+                    ConcreteDataType::uint32_datatype(),
+                ),
+                (
+                    ReservedColumnId::tsid(),
+                    ConcreteDataType::uint64_datatype(),
+                ),
+            ],
+        ),
+        (
+            "first_two",
+            vec![
+                (0, ConcreteDataType::string_datatype()),
+                (1, ConcreteDataType::string_datatype()),
+            ],
+        ),
+        (
+            "last_two",
+            vec![
+                (3598, ConcreteDataType::string_datatype()),
+                (3599, ConcreteDataType::string_datatype()),
+            ],
+        ),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let mut decoded = decode_primary_keys(&codec, black_box(&batch)).unwrap();
+                black_box(
+                    decoded
+                        .get_sparse_tag_columns(black_box(&requested))
+                        .unwrap(),
+                );
+            })
         });
     }
     group.finish();
@@ -351,6 +450,8 @@ criterion_group!(
     benches,
     bench_pk_tag_column,
     bench_pk_tag_filters,
+    bench_wide_sparse_tags,
+    bench_sparse_tag_projection,
     bench_dense_pk_tag_column
 );
 criterion_main!(benches);
