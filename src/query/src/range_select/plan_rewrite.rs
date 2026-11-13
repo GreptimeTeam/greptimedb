@@ -1428,6 +1428,40 @@ mod test {
             .unwrap();
     }
 
+    #[test]
+    fn range_deep_union_all_sql() {
+        // Regression for #9356 through the SQL planner: debug builds poll queries on 8 MiB worker
+        // stacks. Chains a little longer than this one still overflow there while cloning the
+        // statement in `TryFrom<&Statement> for DfStatement`.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let union_all = |select: &str| vec![select; 400].join(" UNION ALL ");
+
+                        let plan = do_query(&union_all("SELECT 1 AS a")).await.unwrap();
+                        assert!(matches!(plan, LogicalPlan::Union(_)));
+
+                        let query = format!(
+                            "SELECT timestamp, tag_0, avg(field_0) RANGE '5m' FROM ({}) ALIGN '1h' BY (tag_0)",
+                            union_all("SELECT timestamp, tag_0, field_0 FROM test")
+                        );
+                        let plan = do_query(&query).await.unwrap();
+                        let LogicalPlan::Extension(extension) = plan else {
+                            panic!("expected RangeSelect rewrite output");
+                        };
+                        assert!(extension.node.as_any().is::<RangeSelect>());
+                    })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn range_in_expr() {
         let query = r#"SELECT sin(avg(field_0 + field_1) RANGE '5m' + 1) FROM test ALIGN '1h' by (tag_0,tag_1);"#;
