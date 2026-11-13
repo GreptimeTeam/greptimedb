@@ -351,6 +351,23 @@ impl MitoEngine {
         self.inner.workers.node_lease().renew(deadline);
     }
 
+    /// Records a lease of a heartbeat sent at `sent_at` as the latest one the region received, if
+    /// it is the latest. Only records it: the region's role does not change. Does nothing if the
+    /// region is not open.
+    pub fn record_granted_lease(
+        &self,
+        region_id: RegionId,
+        candidate_lease_id: Option<u64>,
+        sent_at: Instant,
+    ) {
+        self.inner
+            .workers
+            .granted_leases()
+            .record(region_id, candidate_lease_id, sent_at, || {
+                self.inner.find_region(region_id).is_ok()
+            });
+    }
+
     /// Freezes the clock of the lease checks at `at`.
     #[cfg(any(test, feature = "test"))]
     pub fn freeze_lease_clock(&self, at: Instant) {
@@ -1695,12 +1712,9 @@ impl RegionEngine for MitoEngine {
         deadline: Instant,
         candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
-        let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
         // Before the role, so a lease the region ignores still counts.
-        self.inner
-            .workers
-            .granted_leases()
-            .record(region_id, candidate_lease_id, sent_at);
+        self.record_granted_lease(region_id, candidate_lease_id, sent_at);
+        let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
         // Before the role, and even if the role leaves the region's state unchanged.
         if role.writable() {
             region.manifest_ctx.leader_deadline.extend(deadline);

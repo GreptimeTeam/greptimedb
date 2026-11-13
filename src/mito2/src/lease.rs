@@ -106,19 +106,25 @@ pub(crate) struct GrantedLease {
 pub(crate) struct GrantedLeases(Mutex<HashMap<RegionId, GrantedLease>>);
 
 impl GrantedLeases {
+    /// Records the lease if `region_is_open` holds. The check runs under the same lock as
+    /// [Self::remove], which a worker calls after it removes the region, so a lease recorded
+    /// concurrently with the removal does not outlive it.
     pub(crate) fn record(
         &self,
         region_id: RegionId,
         candidate_lease_id: Option<u64>,
         issued_at: Instant,
+        region_is_open: impl FnOnce() -> bool,
     ) {
         let lease = GrantedLease {
             candidate_lease_id,
             issued_at,
         };
-        self.0
-            .lock()
-            .unwrap()
+        let mut leases = self.0.lock().unwrap();
+        if !region_is_open() {
+            return;
+        }
+        leases
             .entry(region_id)
             .and_modify(|latest| {
                 if issued_at > latest.issued_at {
@@ -135,5 +141,31 @@ impl GrantedLeases {
     #[cfg(any(test, feature = "test"))]
     pub(crate) fn get(&self, region_id: RegionId) -> Option<GrantedLease> {
         self.0.lock().unwrap().get(&region_id).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn test_record_racing_with_remove_leaves_no_record() {
+        let leases = Arc::new(GrantedLeases::default());
+        let region_id = RegionId::new(1, 1);
+        let mut remover = None;
+        leases.record(region_id, Some(1), Instant::now(), || {
+            // The worker removes the region right after the check finds it open.
+            let leases = leases.clone();
+            remover = Some(thread::spawn(move || leases.remove(region_id)));
+            thread::sleep(Duration::from_millis(20));
+            true
+        });
+        remover.unwrap().join().unwrap();
+
+        assert_eq!(leases.get(region_id), None);
     }
 }

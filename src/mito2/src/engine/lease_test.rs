@@ -416,7 +416,8 @@ async fn test_granted_lease_keeps_latest_heartbeat_across_catchup_reopen() {
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
     // The memtable is not empty, so the catchup below reopens the region.
     put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
-    let sent_before = Instant::now() - Duration::from_millis(1);
+    // After the first grant and before the downgrade.
+    let sent_before = Instant::now();
     engine
         .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::Follower)
         .await

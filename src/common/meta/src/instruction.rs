@@ -1663,11 +1663,21 @@ mod tests {
             candidate_lease_id: None,
         }]);
         assert_eq!(upgrade_region_instruction, upgrade_region);
-        // Without a candidate lease id, the upgrade is encoded as before the field existed.
-        assert!(
-            !serde_json::to_string(&upgrade_region)
-                .unwrap()
-                .contains("candidate_lease_id")
+    }
+
+    #[test]
+    fn test_upgrade_region_candidate_lease_id_json() {
+        let upgrade_region = UpgradeRegion {
+            region_id: RegionId::new(1024, 1),
+            replay_timeout: Duration::from_millis(1000),
+            candidate_lease_id: Some(7),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&upgrade_region).unwrap();
+        assert_eq!(json["candidate_lease_id"], 7);
+        assert_eq!(
+            serde_json::from_value::<UpgradeRegion>(json).unwrap(),
+            upgrade_region
         );
     }
 

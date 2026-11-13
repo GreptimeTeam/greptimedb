@@ -148,23 +148,6 @@ impl MemoryRegionKeeper {
         inner.contains_key(&(datanode_id, region_id))
     }
 
-    /// Extracts all operating regions with roles from `region_ids`.
-    pub fn extract_operating_region_roles(
-        &self,
-        datanode_id: DatanodeId,
-        region_ids: &HashSet<RegionId>,
-    ) -> HashMap<RegionId, RegionRole> {
-        let inner = self.inner.read().unwrap();
-        region_ids
-            .iter()
-            .filter_map(|region_id| {
-                inner
-                    .get(&(datanode_id, *region_id))
-                    .map(|region| (*region_id, region.role))
-            })
-            .collect()
-    }
-
     /// Extracts all operating regions from `region_ids`.
     pub fn extract_operating_regions(
         &self,
@@ -230,7 +213,7 @@ mod tests {
             RegionId::from_u64(2),
             RegionId::from_u64(3),
         ]);
-        let output = keeper.extract_operating_region_roles(1, &regions);
+        let output = keeper.extract_operating_regions(1, &regions);
         assert_eq!(output.len(), 2);
 
         assert!(output.contains_key(&RegionId::from_u64(1)));
@@ -242,12 +225,24 @@ mod tests {
             RegionId::from_u64(2),
             RegionId::from_u64(3),
         ]);
-        let output = keeper.extract_operating_region_roles(1, &regions);
+        let output = keeper.extract_operating_regions(1, &regions);
         assert_eq!(
             output,
             HashMap::from([
-                (RegionId::from_u64(1), RegionRole::Leader),
-                (RegionId::from_u64(2), RegionRole::Follower),
+                (
+                    RegionId::from_u64(1),
+                    OperatingRegion {
+                        role: RegionRole::Leader,
+                        candidate_lease_id: None,
+                    }
+                ),
+                (
+                    RegionId::from_u64(2),
+                    OperatingRegion {
+                        role: RegionRole::Follower,
+                        candidate_lease_id: None,
+                    }
+                ),
             ])
         );
         assert_eq!(keeper.len(), 2);

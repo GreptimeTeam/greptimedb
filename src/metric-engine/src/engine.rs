@@ -406,7 +406,15 @@ impl RegionEngine for MetricEngine {
                 candidate_lease_id,
             ) {
                 Ok(true) => {}
-                Ok(false) => return Ok(false),
+                Ok(false) => {
+                    // The data region does not take the grant but has received it.
+                    self.inner.mito.record_granted_lease(
+                        utils::to_data_region_id(region_id),
+                        candidate_lease_id,
+                        sent_at,
+                    );
+                    return Ok(false);
+                }
                 Err(e) if e.status_code() != StatusCode::RegionNotFound => return Err(e),
                 Err(_) => {}
             }
@@ -985,12 +993,17 @@ mod test {
                     RegionRole::Leader,
                     sent_at,
                     sent_at + lease,
-                    None,
+                    Some(7),
                 )
                 .unwrap()
         };
         assert!(!grant(sent_at));
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Follower));
+        // The data region still records the grant it did not take.
+        assert_eq!(
+            mito.granted_candidate_lease_id(utils::to_data_region_id(physical_region_id)),
+            Some(7)
+        );
 
         assert!(grant(Instant::now()));
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
