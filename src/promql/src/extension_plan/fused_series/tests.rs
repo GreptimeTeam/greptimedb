@@ -87,7 +87,8 @@ use super::{
     series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
-use crate::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+use crate::extension_plan::raw_series_source::tests::{per_series_scan, raw_source};
+use crate::extension_plan::{RawSeriesSourceExec, SeriesRepartitionExec, SeriesRouting};
 use crate::histogram_eval::HistogramFunction;
 use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
@@ -209,6 +210,20 @@ fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
 /// The tree `rate(x[5m])` compiles to over one field.
 fn rate_tree() -> NativeTree {
     rate_tree_of(raw_schema())
+}
+
+/// [`rate_tree`] with its window function replaced by `function`.
+///
+/// Only the kernel changes: the input stays raw samples and the output stays the same evaluated
+/// schema, so a tree built here differs from [`rate_tree`] in the one thing a function decides -
+/// whether the metric name survives its window.
+fn window_tree_of(function: RangeFunction) -> NativeTree {
+    let mut root = rate_tree().root().clone();
+    let NativeExpr::Window { op, .. } = &mut root.expr else {
+        panic!("the rate fixture is a window root");
+    };
+    op.function = function;
+    NativeTree::try_new(root).expect("a window function keeps the raw input and its grid")
 }
 
 /// `left + right` on one grid, both operands reading the one actual source.
@@ -715,6 +730,110 @@ fn partition_disjoint_requires_proven_input() {
 
     let scalar = scalar_tree(grid(), 1.0);
     assert!(!super::preserves_partition_identity(scalar.root()));
+}
+
+#[test]
+fn partition_disjoint_accepts_a_raw_source_that_kept_its_per_series_scan() {
+    let tree = NativeTree::try_new(instant_of(0, &grid())).unwrap();
+    let source = raw_source(per_series_scan(2));
+    assert!(
+        source
+            .downcast_ref::<RawSeriesSourceExec>()
+            .expect("the fixture input is the region's raw source")
+            .is_per_series_scan(),
+        "the fixture input keeps the per-series provenance the region planner declared"
+    );
+
+    assert!(
+        partition_disjoint(tree, source),
+        "a raw source over a per-series scan confines each identity to one scan partition, so the \
+         fused node above it keeps that placement"
+    );
+}
+
+#[test]
+fn partition_disjoint_accepts_a_window_that_keeps_the_metric_name() {
+    let source = raw_source(per_series_scan(2));
+    for function in [RangeFunction::LastOverTime, RangeFunction::FirstOverTime] {
+        let tree = window_tree_of(function);
+        assert!(
+            super::preserves_partition_identity(tree.root()),
+            "{function:?} answers one series per input series under the labels it read"
+        );
+        assert!(
+            partition_disjoint(tree, Arc::clone(&source)),
+            "a window root that keeps the metric name is one output identity per input series, so \
+             the per-series scan below it still places each identity on one partition"
+        );
+    }
+}
+
+#[test]
+fn partition_disjoint_rejects_a_window_that_drops_the_metric_name() {
+    let tree = window_tree_of(RangeFunction::Rate);
+    assert!(
+        !super::preserves_partition_identity(tree.root()),
+        "rate drops the metric name, which is part of what tells two series apart"
+    );
+    assert!(
+        !partition_disjoint(tree, raw_source(per_series_scan(2))),
+        "two input series whose remaining labels are equal meet under one output label set, and \
+         the per-series scan does not say those two were read on one partition"
+    );
+}
+
+#[test]
+fn partition_disjoint_rejects_a_multi_input_tree() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("the logical node accepts two dense sources");
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                raw_source(per_series_scan(2)),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                raw_source(per_series_scan(2)),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect("both sources are per-series scans");
+    let fused = exec
+        .downcast_ref::<super::FusedSeriesExec>()
+        .expect("the fused node is the root here");
+    assert_eq!(
+        2,
+        fused.inputs.len(),
+        "the fixture really has more than one input"
+    );
+    assert!(
+        !fused.has_partition_disjoint_identities(),
+        "a tree reading several sources matches their series against each other, so no output \
+         identity is one input's"
+    );
+}
+
+#[test]
+fn partition_disjoint_fails_closed_across_a_repartition() {
+    let tree = window_tree_of(RangeFunction::LastOverTime);
+    let repartitioned: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(raw_source(per_series_scan(2)), 2)
+            .expect("a raw frame routes by its primary key"),
+    );
+    assert!(
+        !partition_disjoint(tree, repartitioned),
+        "a redistribution below the producer breaks the one-identity-one-partition contract, so the \
+         per-series provenance below it cannot be inherited through it"
+    );
 }
 
 #[test]

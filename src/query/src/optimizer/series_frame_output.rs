@@ -115,6 +115,7 @@ mod tests {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+    use datafusion::physical_optimizer::ensure_coop::EnsureCooperative;
     use datafusion::physical_plan::PhysicalExpr;
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -473,6 +474,32 @@ mod tests {
             promql::extension_plan::IdentityCompletion::CompleteDisjoint,
             router.identity_completion(),
             "a per-series scan owns each identity in one partition"
+        );
+    }
+
+    #[test]
+    fn a_cooperative_scan_keeps_the_per_series_raw_root_on_complete_disjoint() {
+        let root = raw_source_root(series_scan(2));
+        // The physical optimizer wraps the scan leaf, so the raw source is rebuilt over a child that
+        // is no longer the scan itself.
+        let root = EnsureCooperative::new()
+            .optimize(root, &ConfigOptions::default())
+            .expect("the plan is optimized");
+        assert!(
+            root.downcast_ref::<RawSeriesSourceExec>()
+                .expect("the root is still the region's raw source")
+                .is_per_series_scan(),
+            "a cooperative wrapper moves the scan, not the series it answers"
+        );
+
+        let exec = optimized(root).unwrap();
+        let router = exec
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("the root is routed");
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::CompleteDisjoint,
+            router.identity_completion(),
+            "the scan's per-partition ownership survives the wrapper"
         );
     }
 
