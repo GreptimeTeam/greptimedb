@@ -427,6 +427,10 @@ impl WorkerGroup {
         handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
     }
 
+    pub(crate) fn node_lease_permit(&self) -> Arc<NodeLease> {
+        self.node_lease.clone()
+    }
+
     /// Get worker for specific `region_id`.
     pub(crate) fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let index = region_id_to_index(region_id, self.workers.len());

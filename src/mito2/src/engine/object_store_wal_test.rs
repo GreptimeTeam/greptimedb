@@ -618,6 +618,33 @@ fn held_wal_config() -> ObjectStoreWalConfig {
     }
 }
 
+#[tokio::test]
+async fn test_node_lease_fences_wal_and_renews_without_region_grants() {
+    let mut env = TestEnv::with_prefix("wal-node-lease").await;
+    let (engine, log_store) = env
+        .create_engine_with_object_store_wal(MitoConfig::default(), &held_wal_config())
+        .await;
+    engine.require_write_lease();
+    log_store.set_io_permit(engine.object_store_wal_io_permit());
+    let region_id = RegionId::new(1, 1);
+    let (_, schema, deadline) = create_leased_region_on(&engine, region_id).await;
+    engine.renew_node_lease(deadline);
+    put_range(&engine, region_id, &schema, 0, 3).await;
+    engine.freeze_lease_clock(deadline);
+    let error = log_store.seal_open_batch().await.unwrap_err();
+    assert!(error.retry_hint().is_retryable());
+    assert!(stored_entry_ids(&log_store, region_id).await.is_empty());
+
+    // Node renewal, including an empty heartbeat grant list, unblocks WAL I/O
+    // independently of this region's expired Leader grant.
+    engine.renew_node_lease(deadline + Duration::from_secs(10));
+    log_store.seal_open_batch().await.unwrap();
+    assert_eq!(1, stored_entry_ids(&log_store, region_id).await.len());
+    assert_eq!(3, count_rows(&engine, region_id).await);
+    log_store.stop().await.unwrap();
+    engine.stop().await.unwrap();
+}
+
 async fn new_log_store() -> Arc<ObjectStoreLogStore> {
     ObjectStoreLogStore::try_new(
         ObjectStore::new(Memory::default()).unwrap(),
