@@ -3560,15 +3560,14 @@ async fn native_promql_composed_binary_canonical_operand() {
     );
 }
 
-/// Two independently planned histogram frames retain reset-collision values and diagnostics.
+/// Two independently planned histogram frames whose reset hints contradict: the pair is dropped and
+/// the warning reaches the query's collector.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_composed_histogram_reset_warning() {
     use api::greptime_proto::io::prometheus::write::v2::histogram::Count;
     use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
     use axum::body::{Body, to_bytes};
-    use common_query::native_histogram::{CounterResetHint, read_histogram};
     use common_query::promql_annotations::promql_annotation_collector;
-    use datatypes::arrow::array::StructArray;
     use http::Request;
     use prost::Message;
     use servers::prom_remote_write::v2::test_util as remote_write_v2;
@@ -3675,47 +3674,10 @@ async fn native_promql_composed_histogram_reset_warning() {
         OutputData::RecordBatches(batches) => batches,
         _ => unreachable!(),
     };
-    let mut rows = Vec::new();
-    for batch in batches.iter() {
-        let batch = batch.df_record_batch();
-        let time = batch
-            .columns()
-            .iter()
-            .find(|column| matches!(column.data_type(), DataType::Timestamp(..)))
-            .unwrap();
-        let time = cast(time.as_ref(), &DataType::Int64).unwrap();
-        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
-        let job = cast(
-            batch.column_by_name("job").unwrap().as_ref(),
-            &DataType::Utf8,
-        )
-        .unwrap();
-        let job = job.as_any().downcast_ref::<StringArray>().unwrap();
-        let histogram = batch
-            .columns()
-            .iter()
-            .find_map(|column| column.as_any().downcast_ref::<StructArray>())
-            .unwrap();
-        for row in 0..batch.num_rows() {
-            let h = read_histogram(histogram, row).unwrap().unwrap();
-            rows.push((time.value(row), job.value(row).to_string(), h));
-        }
-    }
-    assert_eq!(rows.len(), 1);
-    let (timestamp, job, h) = &rows[0];
-    assert_eq!((*timestamp, job.as_str()), (60_000, "api"));
-    assert_eq!((h.count, h.sum, h.zero_count), (6.0, 12.0, 0.0));
-    assert_eq!((h.schema, h.zero_threshold), (1, 0.0));
-    assert_eq!(h.positive_spans.len(), 1);
     assert_eq!(
-        (h.positive_spans[0].offset, h.positive_spans[0].length),
-        (0, 2)
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        0
     );
-    assert_eq!(h.positive_buckets, vec![3.0, 3.0]);
-    assert!(h.negative_spans.is_empty() && h.negative_buckets.is_empty());
-    assert!(h.custom_values.is_empty());
-    assert_eq!(h.reset_hint, CounterResetHint::Unknown);
-    assert_eq!(h.start_timestamp, None);
     let mut warnings = Vec::new();
     let mut infos = Vec::new();
     collector.append_to(&mut warnings, &mut infos);

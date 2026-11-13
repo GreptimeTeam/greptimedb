@@ -135,6 +135,9 @@ pub enum ScalarOperand {
 /// Applies float math to every field of one evaluated series and drops the metric name, like
 /// Prometheus' `simpleFloatFunc`.
 ///
+/// Transcendental functions use Rust's platform math library. Results can differ from Prometheus
+/// for subnormals, overflow boundaries, large trigonometric inputs, and rounding-sensitive inputs.
+///
 /// The explicit schema and actual grid range are preserved. Fields are processed in their own
 /// chunk boundaries, without expanding to the full grid or densifying chunked samples. Missing
 /// samples stay missing; ordinary NaNs remain values. An empty or all-missing input is valid.
@@ -198,8 +201,7 @@ pub fn map_negate(schema: &SeriesSchema, series: &Series) -> Result<Series> {
 /// Applies arithmetic against a constant scalar to every field and drops the metric name.
 ///
 /// Shares the evaluated-grid, missingness, unsupported-type and same-labelset contract of
-/// [`map_math`]. Results follow Prometheus `vectorElemBinop` within the comparison tolerance;
-/// `^`, `%` and `atan2` are the standard library's.
+/// [`map_math`]. Arithmetic uses [`ArithmeticOp::calculate`], including its platform math behavior.
 pub fn map_arithmetic(
     schema: &SeriesSchema,
     series: &Series,
@@ -492,7 +494,10 @@ fn go_min(x: f64, y: f64) -> f64 {
 }
 
 impl ArithmeticOp {
-    /// Prometheus `vectorElemBinop` for two floats.
+    /// Evaluates two floats using Rust arithmetic and platform math, also used by constant folding.
+    /// `^` can differ from Prometheus for subnormal bases or large exponents; `atan2` can differ
+    /// when both operands are negative and their ratio underflows to zero.
+    #[inline]
     pub fn calculate(self, left: f64, right: f64) -> f64 {
         match self {
             Self::Add => left + right,
