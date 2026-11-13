@@ -1359,8 +1359,7 @@ impl PromPlanner {
         let root = tree.root();
         // The placement facts the split and the segmentation below are chosen from, and the same
         // facts that say whether one node can run over the scans at all.
-        let per_partition =
-            !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
+        let per_partition = region_local_segment(root);
         let locality = input_locality(root);
         let computed_key_case =
             matches!(locality, InputLocality::SinglePartition) && matching_operands_drop_key(root);
@@ -1925,112 +1924,6 @@ fn reads_presence(expr: &PromExpr) -> bool {
     presence.0
 }
 
-/// The subtrees a [`NativeNode`] reads, in the order the node evaluates them.
-fn node_children(expr: &NativeExpr) -> Vec<&NativeNode> {
-    match expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => Vec::new(),
-        NativeExpr::VectorOf { input }
-        | NativeExpr::Instant { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. }
-        | NativeExpr::ScalarOf { input } => vec![input],
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        }
-        | NativeExpr::ParameterizedHistogram {
-            input, parameters, ..
-        } => std::iter::once(input.as_ref())
-            .chain(parameters.iter())
-            .collect(),
-        NativeExpr::ParameterizedTopK {
-            input, parameter, ..
-        } => vec![input, parameter],
-        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            vec![left, right]
-        }
-        NativeExpr::Info { base, info, .. } => vec![base, info],
-    }
-}
-
-/// `expr` with its children replaced, in the order [`node_children`] reports them.
-fn with_node_children(
-    expr: &NativeExpr,
-    mut children: std::vec::IntoIter<NativeNode>,
-) -> NativeExpr {
-    let mut next = || children.next().expect("one replacement per child");
-    match expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => expr.clone(),
-        NativeExpr::VectorOf { .. } => NativeExpr::VectorOf {
-            input: Box::new(next()),
-        },
-        NativeExpr::Instant { op, .. } => NativeExpr::Instant {
-            input: Box::new(next()),
-            op: op.clone(),
-        },
-        NativeExpr::Merge { .. } => NativeExpr::Merge {
-            input: Box::new(next()),
-        },
-        NativeExpr::Window { op, .. } => NativeExpr::Window {
-            input: Box::new(next()),
-            op: op.clone(),
-        },
-        NativeExpr::Map { op, .. } => NativeExpr::Map {
-            input: Box::new(next()),
-            op: op.clone(),
-        },
-        NativeExpr::ParameterizedMap { op, parameters, .. } => NativeExpr::ParameterizedMap {
-            input: Box::new(next()),
-            op: *op,
-            parameters: (0..parameters.len()).map(|_| next()).collect(),
-        },
-        NativeExpr::ScalarOf { .. } => NativeExpr::ScalarOf {
-            input: Box::new(next()),
-        },
-        NativeExpr::ParameterizedTopK { op, .. } => NativeExpr::ParameterizedTopK {
-            input: Box::new(next()),
-            op: op.clone(),
-            parameter: Box::new(next()),
-        },
-        NativeExpr::ParameterizedHistogram { op, parameters, .. } => {
-            NativeExpr::ParameterizedHistogram {
-                input: Box::new(next()),
-                op: op.clone(),
-                parameters: (0..parameters.len()).map(|_| next()).collect(),
-            }
-        }
-        NativeExpr::Timestamp { .. } => NativeExpr::Timestamp {
-            input: Box::new(next()),
-        },
-        NativeExpr::Aggregate { op, .. } => NativeExpr::Aggregate {
-            input: Box::new(next()),
-            op: op.clone(),
-        },
-        NativeExpr::Vector { op, .. } => NativeExpr::Vector {
-            input: Box::new(next()),
-            op: op.clone(),
-        },
-        NativeExpr::Binary { matching, .. } => NativeExpr::Binary {
-            left: Box::new(next()),
-            right: Box::new(next()),
-            matching: matching.clone(),
-        },
-        NativeExpr::Set { op, .. } => NativeExpr::Set {
-            left: Box::new(next()),
-            right: Box::new(next()),
-            op: op.clone(),
-        },
-        NativeExpr::Info { selector, .. } => NativeExpr::Info {
-            base: Box::new(next()),
-            info: Box::new(next()),
-            selector: selector.clone(),
-        },
-    }
-}
-
 /// Whether a segment can hand `node`'s values to another segment.
 ///
 /// A boundary carries an evaluated series frame: values addressed on a grid, under the labels of
@@ -2108,11 +2001,10 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
 /// a statement on the existing plan until that pairing is covered, and it has to look at every
 /// merge, not only a root one.
 fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
-    (matches!(node.expr, NativeExpr::Merge { .. })
-        && node.output_field_kind(input_kind) == Some(FieldKind::Histogram))
-        || node_children(&node.expr)
-            .into_iter()
-            .any(|child| merge_answers_histogram(child, input_kind))
+    node.any(&|node| {
+        matches!(node.expr, NativeExpr::Merge { .. })
+            && node.output_field_kind(input_kind) == Some(FieldKind::Histogram)
+    })
 }
 
 /// Whether the merge producer's entire prefix can run on each scan partition independently.
@@ -2127,29 +2019,21 @@ fn canonical_local_prefix(node: &NativeNode) -> bool {
         }
         NativeExpr::ParameterizedMap {
             input, parameters, ..
-        } => canonical_local_prefix(input) && parameters.iter().all(data_free),
+        } => canonical_local_prefix(input) && parameters.iter().all(NativeNode::is_data_free),
         NativeExpr::Binary { left, right, .. } => {
-            (data_free(left) && canonical_local_prefix(right))
-                || (data_free(right) && canonical_local_prefix(left))
+            (left.is_data_free() && canonical_local_prefix(right))
+                || (right.is_data_free() && canonical_local_prefix(left))
         }
         _ => false,
     }
 }
 
 fn contains_canonical_merge(node: &NativeNode) -> bool {
-    matches!(node.expr, NativeExpr::Merge { .. })
-        || node_children(&node.expr)
-            .into_iter()
-            .any(contains_canonical_merge)
+    node.any(&|node| matches!(node.expr, NativeExpr::Merge { .. }))
 }
 
 fn contains_global_consumer(node: &NativeNode) -> bool {
-    if is_global_consumer(node) {
-        return true;
-    }
-    node_children(&node.expr)
-        .into_iter()
-        .any(contains_global_consumer)
+    node.any(&is_global_consumer)
 }
 
 /// Whole-vector consumers remain global, but can be cut out as evaluated segments so a pointwise
@@ -2199,7 +2083,7 @@ fn collect_segment(
             }
         }
         expr => {
-            for child in node_children(expr) {
+            for child in expr.children() {
                 if cut_as_segment(child, canonical_segmentation) {
                     cut.push(child.clone());
                 } else {
@@ -2212,16 +2096,9 @@ fn collect_segment(
 
 /// Collects every scan input in a selected segment without looking for nested cuts.
 fn collect_segment_inputs(node: &NativeNode, sources: &mut Vec<usize>) {
-    match &node.expr {
-        NativeExpr::Input(input) => {
-            if !sources.contains(&input.source_index) {
-                sources.push(input.source_index);
-            }
-        }
-        expr => {
-            for child in node_children(expr) {
-                collect_segment_inputs(child, sources);
-            }
+    for input in node.inputs() {
+        if !sources.contains(&input.source_index) {
+            sources.push(input.source_index);
         }
     }
 }
@@ -2237,13 +2114,11 @@ fn rewrite_inner_segment(node: &NativeNode, sources: &[usize]) -> NativeNode {
             output: input.output.clone(),
             ordering: input.ordering,
         }),
-        expr => with_node_children(
-            expr,
-            node_children(expr)
+        expr => expr.with_children(
+            expr.children()
                 .into_iter()
                 .map(|child| rewrite_inner_segment(child, sources))
-                .collect::<Vec<_>>()
-                .into_iter(),
+                .collect(),
         ),
     };
     NativeNode {
@@ -2270,7 +2145,8 @@ fn rewrite_segment(
             ordering: input.ordering,
         }),
         expr => {
-            let children = node_children(expr)
+            let children = expr
+                .children()
                 .into_iter()
                 .map(|child| {
                     if cut_as_segment(child, canonical_segmentation) {
@@ -2289,7 +2165,7 @@ fn rewrite_segment(
                     }
                 })
                 .collect::<Vec<_>>();
-            with_node_children(expr, children.into_iter())
+            expr.with_children(children)
         }
     };
     NativeNode {
@@ -2465,12 +2341,9 @@ fn is_raw_series_source(plan: &LogicalPlan) -> bool {
 }
 
 fn find_input_node(node: &NativeNode, source_index: usize) -> Option<&BoundInput> {
-    match &node.expr {
-        NativeExpr::Input(input) if input.source_index == source_index => Some(input),
-        expr => node_children(expr)
-            .into_iter()
-            .find_map(|child| find_input_node(child, source_index)),
-    }
+    node.inputs()
+        .into_iter()
+        .find(|input| input.source_index == source_index)
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -3215,69 +3088,23 @@ fn scan_operand(node: &NativeNode) -> bool {
 /// histogram entering an aggregate is refused; a float-producing prefix such as
 /// `count_over_time` over a histogram stays eligible.
 fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
-    match &node.expr {
-        // An aggregate that folds the payload - `sum`, `avg` - is refused unless the kind entering
-        // it is provably a float. "Cannot name it" is not "not a histogram": a canonical merge
-        // (`label_replace` collapsing a label) and a set operation both hand on the samples they
-        // were given without the walk describing them, and reading that silence as float is what
-        // admitted `sum(label_replace(h, ...))` to a native fold over histograms.
-        NativeExpr::Aggregate { input, op } => {
-            // Three kinds take a histogram and still run here: `count` and `group` count it as one
-            // present sample, and `min`/`max`/`stddev`/`stdvar` skip it the way Prometheus does.
-            // Only `sum` and `avg` would have to fold the payload, and this route has no histogram
-            // aggregate state yet, so only they refuse the kind entering them. `quantile` is not
-            // among the skipping kinds: the native runtime has no `quantile` kernel either, so it
-            // keeps the existing plan after this check instead of folding here.
-            let folds_payload = matches!(op.kind, AggregateKind::Sum | AggregateKind::Avg);
-            (folds_payload
-                && !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float)))
-                || aggregate_reads_histogram(input, input_kind)
-        }
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::Vector { input, .. } => aggregate_reads_histogram(input, input_kind),
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        } => {
-            aggregate_reads_histogram(input, input_kind)
-                || parameters
-                    .iter()
-                    .any(|node| aggregate_reads_histogram(node, input_kind))
-        }
-        // `vector()` answers one float series, but the walk asks about aggregates anywhere in
-        // the tree: `vector(scalar(sum(h)))` still folds histogram input. `scalar()` also reads
-        // its input, and both wrappers can hide an aggregate that must be refused.
-        NativeExpr::VectorOf { input } | NativeExpr::ScalarOf { input } => {
-            aggregate_reads_histogram(input, input_kind)
-        }
-        // The dynamic nodes read their parameters beside their input, so every child matters.
-        NativeExpr::ParameterizedTopK {
-            input, parameter, ..
-        } => {
-            aggregate_reads_histogram(input, input_kind)
-                || aggregate_reads_histogram(parameter, input_kind)
-        }
-        NativeExpr::ParameterizedHistogram {
-            input, parameters, ..
-        } => {
-            aggregate_reads_histogram(input, input_kind)
-                || parameters
-                    .iter()
-                    .any(|node| aggregate_reads_histogram(node, input_kind))
-        }
-        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            aggregate_reads_histogram(left, input_kind)
-                || aggregate_reads_histogram(right, input_kind)
-        }
-        NativeExpr::Info { base, info, .. } => {
-            aggregate_reads_histogram(base, input_kind)
-                || aggregate_reads_histogram(info, input_kind)
-        }
-    }
+    // Only `sum` and `avg` fold the payload, and this route has no histogram aggregate state yet:
+    // `count` and `group` count a histogram as one present sample, `min`/`max`/`stddev`/`stdvar`
+    // skip it the way Prometheus does, and `quantile` has no native kernel and keeps the existing
+    // plan after this check.
+    //
+    // The kind entering them has to be provably a float. "Cannot name it" is not "not a
+    // histogram": a canonical merge and a set operation hand on the samples they were given
+    // without the walk describing them, and reading that silence as float is what admitted
+    // `sum(label_replace(h, ...))` to a native fold over histograms.
+    node.any(&|node| {
+        matches!(
+            &node.expr,
+            NativeExpr::Aggregate { input, op }
+                if matches!(op.kind, AggregateKind::Sum | AggregateKind::Avg)
+                    && !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float))
+        )
+    })
 }
 
 /// Whether every plan is a scan of one table. Filters, projections and bounds are
@@ -3319,17 +3146,6 @@ pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
                 !["__schema__", "__database__", "__field__", METRIC_NAME]
                     .contains(&matcher.name.as_str())
             }))
-}
-
-/// Whether `node` reads no data at all: a constant, the evaluation time, or an operation between
-/// them. Every execution computes the same value for it.
-fn data_free(node: &NativeNode) -> bool {
-    match &node.expr {
-        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
-        NativeExpr::Binary { left, right, .. } => data_free(left) && data_free(right),
-        NativeExpr::VectorOf { input } => data_free(input),
-        _ => false,
-    }
 }
 
 /// Whether `node` holds an operation whose answer depends on the order its input arrives in.
@@ -3451,7 +3267,7 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
         // A parameter that reads no data has the same value in every execution.
         NativeExpr::ParameterizedMap {
             input, parameters, ..
-        } => pointwise_operand(input) && parameters.iter().all(data_free),
+        } => pointwise_operand(input) && parameters.iter().all(NativeNode::is_data_free),
         // A scalar that reads no data is broadcast over the vector side's positions. Two vectors
         // are a match between two series sets, which is the shape this route cannot split.
         NativeExpr::Binary {
@@ -3462,8 +3278,8 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
             let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
             matching.cardinality == Cardinality::OneToOne
                 && match (scalar(left), scalar(right)) {
-                    (true, false) => data_free(left) && pointwise_operand(right),
-                    (false, true) => data_free(right) && pointwise_operand(left),
+                    (true, false) => left.is_data_free() && pointwise_operand(right),
+                    (false, true) => right.is_data_free() && pointwise_operand(left),
                     _ => false,
                 }
         }
@@ -3795,8 +3611,8 @@ mod tests {
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
         NativeType, aggregate_reads_histogram, collect_selectors_with_set_operations, cut_segments,
         fused_output_schema, independent_scan_pair, native_promql_requested,
-        native_raw_plan_bounds_region_reads, node_children, plans_over_remote_regions,
-        reads_across_series, region_local_segment, scan_time_filter,
+        native_raw_plan_bounds_region_reads, plans_over_remote_regions, reads_across_series,
+        region_local_segment, scan_time_filter,
     };
 
     #[test]
@@ -3899,20 +3715,10 @@ mod tests {
     }
 
     fn input_sources(root: &NativeNode) -> Vec<usize> {
-        fn collect(node: &NativeNode, sources: &mut Vec<usize>) {
-            match &node.expr {
-                NativeExpr::Input(input) => sources.push(input.source_index),
-                expr => {
-                    for child in node_children(expr) {
-                        collect(child, sources);
-                    }
-                }
-            }
-        }
-
-        let mut sources = Vec::new();
-        collect(root, &mut sources);
-        sources
+        root.inputs()
+            .into_iter()
+            .map(|input| input.source_index)
+            .collect()
     }
 
     /// The selectors `query` names, in the order the compiler binds them.

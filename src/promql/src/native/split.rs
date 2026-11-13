@@ -354,43 +354,17 @@ pub(crate) fn split(
 /// one series at a time and the tree reads exactly one source, so the first raw input answers for
 /// all of them.
 pub(crate) fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
-    fn raw_fields(node: &NativeNode) -> Option<Vec<FieldSpec>> {
-        match &node.expr {
-            NativeExpr::Input(input) => input
+    tree.root()
+        .inputs()
+        .into_iter()
+        .find_map(|input| {
+            input
                 .output
                 .samples()
                 .filter(|schema| schema.eval_grid.is_none())
-                .map(|schema| schema.fields.to_vec()),
-            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => None,
-            NativeExpr::Instant { input, .. }
-            | NativeExpr::Window { input, .. }
-            | NativeExpr::Map { input, .. }
-            | NativeExpr::Merge { input }
-            | NativeExpr::Timestamp { input }
-            | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input }
-            | NativeExpr::ScalarOf { input } => raw_fields(input),
-            NativeExpr::ParameterizedMap {
-                input, parameters, ..
-            } => raw_fields(input).or_else(|| parameters.iter().find_map(raw_fields)),
-            NativeExpr::ParameterizedTopK {
-                input, parameter, ..
-            } => raw_fields(input).or_else(|| raw_fields(parameter)),
-            NativeExpr::ParameterizedHistogram {
-                input, parameters, ..
-            } => raw_fields(input).or_else(|| parameters.iter().find_map(raw_fields)),
-            NativeExpr::Binary { left, right, .. }
-            | NativeExpr::Set { left, right, .. }
-            | NativeExpr::Info {
-                base: left,
-                info: right,
-                ..
-            } => raw_fields(left).or_else(|| raw_fields(right)),
-        }
-    }
-
-    raw_fields(tree.root()).ok_or_else(|| declined("a tree that reads no raw series"))
+                .map(|schema| schema.fields.to_vec())
+        })
+        .ok_or_else(|| declined("a tree that reads no raw series"))
 }
 
 /// Refuses an aggregate whose state the split cannot carry, and one grouped by a value field.

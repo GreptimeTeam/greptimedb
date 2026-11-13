@@ -62,17 +62,14 @@ const METRIC_NAME: &str = "__name__";
 /// Metadata labels the runtime removes from histogram result label sets.
 const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
-/// The labels `node` reports, from the labels each input reports and the ones the nodes above it
-/// write.
+/// A conservative set of reportable label names for `node`.
 ///
-/// `source_tags` holds what each source reports, indexed by the `source_index` of the leaf that
-/// reads it, and decides which question this answers. The canonical pass passes the complete
-/// run-time label sets: a scan bound to a single metric names every series it hands over even
-/// though the name is not one of its tag columns, so `__name__` is in that source's entry, and the
-/// answer is the identity a [`NativeExpr::Merge`] groups by and a vector match reads. The query
-/// planner passes the tag columns each source declares, and the answer is the output columns. One
-/// walk serves both so they cannot disagree on where a kernel drops the name, which is exactly
-/// where the runtime does.
+/// `source_tags` is indexed by each leaf's `source_index`. The canonical pass supplies runtime
+/// label names, including `__name__` for named scans; the planner supplies declared tag columns
+/// to derive output columns. The result need not describe the labels of any individual series:
+/// `or` includes a nullable `__name__` column even when both operands drop their names. Math
+/// operations remove only `__name__` here, while their runtime also removes `__type__` and
+/// `__unit__`.
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
@@ -429,10 +426,7 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
 /// operation computes new values, and `bool` reports the comparison's own outcome rather than
 /// either operand's samples, so both drop the name.
 fn keeps_metric_name(matching: &BinaryMatching) -> bool {
-    matches!(
-        matching.op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
-    ) && !matching.return_bool
+    matching.op.is_comparison() && !matching.return_bool
 }
 
 /// The labels a node reports after the metric name is dropped, which is what a kernel that computes
@@ -1084,6 +1078,157 @@ pub struct NativeNode {
     pub expr: NativeExpr,
     /// What this node produces.
     pub output: NativeType,
+}
+
+impl NativeExpr {
+    /// The subtrees this expression reads, in the order the node evaluates them.
+    pub fn children(&self) -> Vec<&NativeNode> {
+        match self {
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
+                Vec::new()
+            }
+            NativeExpr::VectorOf { input }
+            | NativeExpr::Instant { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::ScalarOf { input } => vec![input],
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            }
+            | NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => std::iter::once(input.as_ref())
+                .chain(parameters.iter())
+                .collect(),
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => vec![input, parameter],
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                vec![left, right]
+            }
+            NativeExpr::Info { base, info, .. } => vec![base, info],
+        }
+    }
+
+    /// This expression with its children replaced, in the order [`Self::children`] reports them.
+    ///
+    /// Panics when `children` holds fewer nodes than the expression reads.
+    pub fn with_children(&self, children: Vec<NativeNode>) -> NativeExpr {
+        let mut children = children.into_iter();
+        let mut next = || children.next().expect("one replacement per child");
+        match self {
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
+                self.clone()
+            }
+            NativeExpr::VectorOf { .. } => NativeExpr::VectorOf {
+                input: Box::new(next()),
+            },
+            NativeExpr::Instant { op, .. } => NativeExpr::Instant {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Merge { .. } => NativeExpr::Merge {
+                input: Box::new(next()),
+            },
+            NativeExpr::Window { op, .. } => NativeExpr::Window {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Map { op, .. } => NativeExpr::Map {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::ParameterizedMap { op, parameters, .. } => NativeExpr::ParameterizedMap {
+                input: Box::new(next()),
+                op: *op,
+                parameters: (0..parameters.len()).map(|_| next()).collect(),
+            },
+            NativeExpr::ScalarOf { .. } => NativeExpr::ScalarOf {
+                input: Box::new(next()),
+            },
+            NativeExpr::ParameterizedTopK { op, .. } => NativeExpr::ParameterizedTopK {
+                input: Box::new(next()),
+                op: op.clone(),
+                parameter: Box::new(next()),
+            },
+            NativeExpr::ParameterizedHistogram { op, parameters, .. } => {
+                NativeExpr::ParameterizedHistogram {
+                    input: Box::new(next()),
+                    op: op.clone(),
+                    parameters: (0..parameters.len()).map(|_| next()).collect(),
+                }
+            }
+            NativeExpr::Timestamp { .. } => NativeExpr::Timestamp {
+                input: Box::new(next()),
+            },
+            NativeExpr::Aggregate { op, .. } => NativeExpr::Aggregate {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Vector { op, .. } => NativeExpr::Vector {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Binary { matching, .. } => NativeExpr::Binary {
+                left: Box::new(next()),
+                right: Box::new(next()),
+                matching: matching.clone(),
+            },
+            NativeExpr::Set { op, .. } => NativeExpr::Set {
+                left: Box::new(next()),
+                right: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Info { selector, .. } => NativeExpr::Info {
+                base: Box::new(next()),
+                info: Box::new(next()),
+                selector: selector.clone(),
+            },
+        }
+    }
+}
+
+impl NativeNode {
+    /// Whether `predicate` holds for this node or any node below it.
+    pub fn any(&self, predicate: &impl Fn(&NativeNode) -> bool) -> bool {
+        predicate(self)
+            || self
+                .expr
+                .children()
+                .into_iter()
+                .any(|child| child.any(predicate))
+    }
+
+    /// The input leaves below this node, in the order the tree evaluates them. A source that two
+    /// leaves read is listed once per leaf.
+    pub fn inputs(&self) -> Vec<&BoundInput> {
+        fn collect<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a BoundInput>) {
+            if let NativeExpr::Input(input) = &node.expr {
+                inputs.push(input);
+            }
+            for child in node.expr.children() {
+                collect(child, inputs);
+            }
+        }
+        let mut inputs = Vec::new();
+        collect(self, &mut inputs);
+        inputs
+    }
+
+    /// Whether this node reads no data at all: a constant, the evaluation time, or an operation
+    /// between them. Every execution computes the same value for it.
+    pub fn is_data_free(&self) -> bool {
+        match &self.expr {
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
+            NativeExpr::Binary { left, right, .. } => left.is_data_free() && right.is_data_free(),
+            NativeExpr::VectorOf { input } => input.is_data_free(),
+            _ => false,
+        }
+    }
 }
 
 /// Whether this tree can hand over two series that share one canonical label set.
@@ -1926,10 +2071,7 @@ impl NativeNode {
 /// applies: arithmetic and a `bool` comparison answer a series under the metric name dropped, and a
 /// filtering comparison keeps the label set it read.
 fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
-    !matches!(
-        matching.op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
-    ) || matching.return_bool
+    !matching.op.is_comparison() || matching.return_bool
 }
 
 /// Whether `node` hands over one logical series per canonical label set, or several.

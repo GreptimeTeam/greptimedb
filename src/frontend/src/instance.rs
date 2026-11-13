@@ -1305,9 +1305,33 @@ struct MetricDiscoveryVisitor {
     all_unresolved_are_discoverable: bool,
     schemas: HashSet<String>,
     current_schema: String,
+    /// Addresses of the label selectors of `info` calls, which the walk reaches after their call.
+    /// Compared only, never read through; plain integers keep the visitor `Send` across awaits.
+    info_label_selectors: Vec<usize>,
 }
 
 impl MetricDiscoveryVisitor {
+    fn new(current_schema: String) -> Self {
+        Self {
+            all_unresolved_are_discoverable: true,
+            current_schema,
+            ..Default::default()
+        }
+    }
+
+    /// The planner reads the info table this selector stands for and never discovers with it, so
+    /// it must not authorize a schema here. A shape the table extractor leaves unresolved keeps
+    /// the whole expression unresolved.
+    fn inspect_info_labels(&mut self, labels: &promql_parser::parser::VectorSelector) {
+        self.info_label_selectors
+            .push(std::ptr::from_ref(labels) as usize);
+        let names = labels.matchers.find_matchers(METRIC_NAME);
+        let exact_name =
+            labels.name.is_some() || (names.len() == 1 && names[0].op == MatchOp::Equal);
+        self.all_unresolved_are_discoverable &=
+            exact_name || sql::util::reads_default_info_metric(labels);
+    }
+
     /// Whether this selector is answered by enumerating the schema's metric tables.
     ///
     /// The planner decides the same thing before it scans anything, and the two answers have to
@@ -1351,7 +1375,18 @@ impl ExprVisitor for MetricDiscoveryVisitor {
         expr: &promql_parser::parser::Expr,
     ) -> std::result::Result<bool, Self::Error> {
         match expr {
-            promql_parser::parser::Expr::VectorSelector(selector) => {
+            promql_parser::parser::Expr::Call(call) if call.func.name == "info" => {
+                if let Some(promql_parser::parser::Expr::VectorSelector(labels)) =
+                    call.args.args.get(1).map(|labels| labels.as_ref())
+                {
+                    self.inspect_info_labels(labels);
+                }
+            }
+            promql_parser::parser::Expr::VectorSelector(selector)
+                if !self
+                    .info_label_selectors
+                    .contains(&(std::ptr::from_ref(selector) as usize)) =>
+            {
                 self.inspect_selector(selector);
             }
             promql_parser::parser::Expr::MatrixSelector(selector) => {
@@ -1386,12 +1421,7 @@ impl Instance {
             Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
             return Ok(());
         }
-        let mut visitor = MetricDiscoveryVisitor {
-            needs_discovery: false,
-            all_unresolved_are_discoverable: true,
-            schemas: HashSet::new(),
-            current_schema: query_ctx.current_schema(),
-        };
+        let mut visitor = MetricDiscoveryVisitor::new(query_ctx.current_schema());
         let _ = walk_expr(&mut visitor, expr);
         if !visitor.needs_discovery {
             return Ok(());
@@ -1457,12 +1487,7 @@ impl Instance {
         expr: &promql_parser::parser::Expr,
         scope: &MetricDiscoveryScope,
     ) -> server_error::Result<()> {
-        let mut visitor = MetricDiscoveryVisitor {
-            needs_discovery: false,
-            all_unresolved_are_discoverable: true,
-            schemas: HashSet::new(),
-            current_schema: String::new(),
-        };
+        let mut visitor = MetricDiscoveryVisitor::new(String::new());
         let _ = walk_expr(&mut visitor, expr);
         if visitor.needs_discovery && matches!(scope, MetricDiscoveryScope::Unavailable) {
             return Err(server_error::Error::Internal {
@@ -1539,12 +1564,7 @@ impl PrometheusHandler for Instance {
         let mut targets =
             self.prom_queries_permission_targets(std::slice::from_ref(&query), &query_ctx)?;
         if matches!(targets, PermissionTableTargets::Unresolved) {
-            let mut visitor = MetricDiscoveryVisitor {
-                needs_discovery: false,
-                all_unresolved_are_discoverable: true,
-                schemas: HashSet::new(),
-                current_schema: query_ctx.current_schema(),
-            };
+            let mut visitor = MetricDiscoveryVisitor::new(query_ctx.current_schema());
             let _ = walk_expr(&mut visitor, parsed_expr);
             if visitor.needs_discovery && visitor.all_unresolved_are_discoverable {
                 match query_ctx.metric_discovery_scope() {
@@ -4099,6 +4119,80 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        Ok(())
+    }
+
+    /// `info` reads `target_info` without naming it. With a label selector the query used to be
+    /// answered as a discovery over the tables the caller may read, which never named it either.
+    #[tokio::test]
+    async fn test_info_query_checks_the_info_table() -> TestResult<()> {
+        struct DenyInfoTable;
+
+        impl PermissionChecker for DenyInfoTable {
+            fn check_permission(
+                &self,
+                _user_info: UserInfoRef,
+                _req: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: UserInfoRef,
+                _req: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                let reject = match targets {
+                    PermissionTableTargets::Unresolved => true,
+                    PermissionTableTargets::Resolved(targets) => {
+                        targets.iter().any(|target| target.table == "target_info")
+                    }
+                };
+                Ok(if reject {
+                    PermissionResp::Reject
+                } else {
+                    PermissionResp::Allow
+                })
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(DenyInfoTable));
+        let instance = test_instance_with_plugins_and_metric_names(
+            test_logical_table(1024, "target_info")?,
+            test_logical_table(1025, "target")?,
+            plugins,
+            None,
+        )
+        .await?;
+        let ctx = Arc::new(
+            QueryContextBuilder::default()
+                .channel(Channel::Mysql)
+                .conn_info(ConnInfo::new(None, Channel::Mysql))
+                .extensions(HashMap::from([(
+                    query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY.to_string(),
+                    "true".to_string(),
+                )]))
+                .build(),
+        );
+
+        for promql in [
+            "info(target)",
+            r#"info(target, {version="v1"})"#,
+            // Not a shape that reads `target_info`, and not a discovery either: unresolved.
+            r#"info(target, {__schema__="public", version="v1"})"#,
+        ] {
+            let query = PromQuery {
+                query: promql.to_string(),
+                ..Default::default()
+            };
+            let err = PrometheusHandler::do_query(&instance, &query, ctx.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(StatusCode::PermissionDenied, err.status_code(), "{promql}");
+        }
 
         Ok(())
     }

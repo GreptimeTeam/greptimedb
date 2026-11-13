@@ -692,7 +692,9 @@ impl FusedSeries {
     /// produce, so a caller that needs to recognize the second half of a split does not have to
     /// read the first one's labels.
     pub fn reads_aggregate_state(&self) -> bool {
-        tree_inputs(&self.tree)
+        self.tree
+            .root()
+            .inputs()
             .iter()
             .any(|input| matches!(input.output, NativeType::AggregateState(_)))
     }
@@ -1175,7 +1177,7 @@ impl PartialOrd for FusedSeries {
 
 /// The schemas read by distinct raw sources, in dense source-index order.
 fn collect_source_schemas(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesSchema>>> {
-    collect_source_schemas_from_inputs(tree_inputs(tree))
+    collect_source_schemas_from_inputs(tree.root().inputs())
 }
 
 fn collect_source_schemas_from_inputs(
@@ -1242,21 +1244,6 @@ pub enum InputLocality {
     SinglePartition,
 }
 
-/// Whether `node` answers its values without reading any source.
-///
-/// The set is the planner's `data_free` one: a constant, the evaluation time, a binary operation
-/// between those and `vector()` of one. It is what [`same_source`] needs on the scalar side of a
-/// broadcast: a scalar is not the same thing as a source-free value, because `scalar(a)` is a scalar
-/// that has read a whole vector to become one.
-fn reads_no_source(node: &NativeNode) -> bool {
-    match &node.expr {
-        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
-        NativeExpr::Binary { left, right, .. } => reads_no_source(left) && reads_no_source(right),
-        NativeExpr::VectorOf { input } => reads_no_source(input),
-        _ => false,
-    }
-}
-
 /// The one source every leaf of `node` reads, when the tree keeps the matching key of that source.
 fn same_source(node: &NativeNode) -> Option<usize> {
     match &node.expr {
@@ -1295,7 +1282,7 @@ fn same_source(node: &NativeNode) -> Option<usize> {
             left,
             right,
             matching,
-        } if matches!(left.output, NativeType::Scalar(_)) && reads_no_source(left) => {
+        } if matches!(left.output, NativeType::Scalar(_)) && left.is_data_free() => {
             let _ = matching;
             same_source(right)
         }
@@ -1303,7 +1290,7 @@ fn same_source(node: &NativeNode) -> Option<usize> {
             left,
             right,
             matching,
-        } if matches!(right.output, NativeType::Scalar(_)) && reads_no_source(right) => {
+        } if matches!(right.output, NativeType::Scalar(_)) && right.is_data_free() => {
             let _ = matching;
             same_source(left)
         }
@@ -1390,16 +1377,7 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
             right,
             matching: binary,
         } if matches!(left.output, NativeType::Scalar(_)) => {
-            let drops_labels = binary.return_bool
-                || !matches!(
-                    binary.op,
-                    crate::vector_match::BinaryOp::Eq
-                        | crate::vector_match::BinaryOp::Ne
-                        | crate::vector_match::BinaryOp::Gt
-                        | crate::vector_match::BinaryOp::Lt
-                        | crate::vector_match::BinaryOp::Ge
-                        | crate::vector_match::BinaryOp::Le
-                );
+            let drops_labels = binary.return_bool || !binary.op.is_comparison();
             (!drops_labels || !labels_removed(&COMPUTED_LABELS))
                 && preserves_matching_key(right, matching)
         }
@@ -1408,16 +1386,7 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
             right,
             matching: binary,
         } if matches!(right.output, NativeType::Scalar(_)) => {
-            let drops_labels = binary.return_bool
-                || !matches!(
-                    binary.op,
-                    crate::vector_match::BinaryOp::Eq
-                        | crate::vector_match::BinaryOp::Ne
-                        | crate::vector_match::BinaryOp::Gt
-                        | crate::vector_match::BinaryOp::Lt
-                        | crate::vector_match::BinaryOp::Ge
-                        | crate::vector_match::BinaryOp::Le
-                );
+            let drops_labels = binary.return_bool || !binary.op.is_comparison();
             (!drops_labels || !labels_removed(&COMPUTED_LABELS))
                 && preserves_matching_key(left, matching)
         }
@@ -1499,7 +1468,7 @@ fn matching_site(node: &NativeNode) -> Option<(&NativeNode, &NativeNode, &Matchi
             matching,
         } => {
             let scalar = |side: &NativeNode| {
-                matches!(side.output, NativeType::Scalar(_)) && reads_no_source(side)
+                matches!(side.output, NativeType::Scalar(_)) && side.is_data_free()
             };
             if scalar(left) {
                 matching_site(right)
@@ -1531,7 +1500,7 @@ pub fn input_locality(root: &NativeNode) -> InputLocality {
     if let Some(index) = same_source(root) {
         let raw = root.output.samples().is_some_and(|_| {
             // The root's grid does not reliably indicate source content after windowing; inspect its bound inputs.
-            tree_inputs_for_locality(root)
+            root.inputs()
                 .into_iter()
                 .find(|input| input.source_index == index)
                 .is_some_and(|input| {
@@ -1569,52 +1538,6 @@ pub fn input_locality(root: &NativeNode) -> InputLocality {
     } else {
         InputLocality::PartitionLocal
     }
-}
-
-fn tree_inputs_for_locality(root: &NativeNode) -> Vec<&crate::native::plan::BoundInput> {
-    fn visit<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a crate::native::plan::BoundInput>) {
-        match &node.expr {
-            NativeExpr::Input(input) => inputs.push(input),
-            NativeExpr::Instant { input, .. }
-            | NativeExpr::Window { input, .. }
-            | NativeExpr::Map { input, .. }
-            | NativeExpr::Timestamp { input }
-            | NativeExpr::VectorOf { input }
-            | NativeExpr::Merge { input }
-            | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. }
-            | NativeExpr::ScalarOf { input } => visit(input, inputs),
-            NativeExpr::ParameterizedMap {
-                input, parameters, ..
-            }
-            | NativeExpr::ParameterizedHistogram {
-                input, parameters, ..
-            } => {
-                visit(input, inputs);
-                for parameter in parameters {
-                    visit(parameter, inputs);
-                }
-            }
-            NativeExpr::ParameterizedTopK {
-                input, parameter, ..
-            } => {
-                visit(input, inputs);
-                visit(parameter, inputs);
-            }
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-                visit(left, inputs);
-                visit(right, inputs);
-            }
-            NativeExpr::Info { base, info, .. } => {
-                visit(base, inputs);
-                visit(info, inputs);
-            }
-            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
-        }
-    }
-    let mut inputs = Vec::new();
-    visit(root, &mut inputs);
-    inputs
 }
 
 /// The owner count and routing policy required by a Final aggregate and its suffix.
@@ -1722,117 +1645,26 @@ fn validate_binding(
     Ok(())
 }
 
-fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
-    fn collect<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a crate::native::plan::BoundInput>) {
-        match &node.expr {
-            NativeExpr::Input(input) => inputs.push(input),
-            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
-            NativeExpr::Instant { input, .. }
-            | NativeExpr::Window { input, .. }
-            | NativeExpr::Merge { input }
-            | NativeExpr::Map { input, .. }
-            | NativeExpr::Timestamp { input }
-            | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input }
-            | NativeExpr::ScalarOf { input } => collect(input, inputs),
-            NativeExpr::ParameterizedHistogram {
-                input, parameters, ..
-            } => {
-                collect(input, inputs);
-                for parameter in parameters {
-                    collect(parameter, inputs);
-                }
-            }
-            NativeExpr::ParameterizedTopK {
-                input, parameter, ..
-            } => {
-                collect(input, inputs);
-                collect(parameter, inputs);
-            }
-            NativeExpr::ParameterizedMap {
-                input, parameters, ..
-            } => {
-                collect(input, inputs);
-                for parameter in parameters {
-                    collect(parameter, inputs);
-                }
-            }
-            NativeExpr::Binary { left, right, .. }
-            | NativeExpr::Set { left, right, .. }
-            | NativeExpr::Info {
-                base: left,
-                info: right,
-                ..
-            } => {
-                collect(left, inputs);
-                collect(right, inputs);
-            }
-        }
-    }
-    let mut inputs = Vec::new();
-    collect(tree.root(), &mut inputs);
-    inputs
-}
-
 /// Sources whose evaluated series must be kept together for partitioned windows.
 fn partitioned_window_sources(node: &NativeNode) -> DataFusionResult<Vec<usize>> {
     fn visit(node: &NativeNode, sources: &mut Vec<usize>) -> DataFusionResult<()> {
-        match &node.expr {
-            NativeExpr::Window { input, op } => {
-                // A subquery window reads an evaluated input, whose fragments belong to one series
-                // wherever they were produced, so it needs no owner of its own. A raw window
-                // anywhere below it still does, so the walk continues into the input.
-                if op.input_grid.is_some() {
-                    return visit(input, sources);
-                }
-                let NativeExpr::Input(bound) = &input.expr else {
-                    return Err(DataFusionError::Plan(
-                        "partitioned FusedSeries windows require a direct Input under Window"
-                            .into(),
-                    ));
-                };
-                if !sources.contains(&bound.source_index) {
-                    sources.push(bound.source_index);
-                }
-                visit(input, sources)?;
+        // A subquery window reads an evaluated input, whose fragments belong to one series
+        // wherever they were produced, so it needs no owner of its own. A raw window anywhere
+        // below it still does, so the walk continues into the input either way.
+        if let NativeExpr::Window { input, op } = &node.expr
+            && op.input_grid.is_none()
+        {
+            let NativeExpr::Input(bound) = &input.expr else {
+                return Err(DataFusionError::Plan(
+                    "partitioned FusedSeries windows require a direct Input under Window".into(),
+                ));
+            };
+            if !sources.contains(&bound.source_index) {
+                sources.push(bound.source_index);
             }
-            NativeExpr::Instant { input, .. }
-            | NativeExpr::Merge { input }
-            | NativeExpr::Map { input, .. }
-            | NativeExpr::Timestamp { input }
-            | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input }
-            | NativeExpr::ScalarOf { input } => visit(input, sources)?,
-            NativeExpr::ParameterizedMap {
-                input, parameters, ..
-            }
-            | NativeExpr::ParameterizedHistogram {
-                input, parameters, ..
-            } => {
-                visit(input, sources)?;
-                for parameter in parameters {
-                    visit(parameter, sources)?;
-                }
-            }
-            NativeExpr::ParameterizedTopK {
-                input, parameter, ..
-            } => {
-                visit(input, sources)?;
-                visit(parameter, sources)?;
-            }
-            NativeExpr::Binary { left, right, .. }
-            | NativeExpr::Set { left, right, .. }
-            | NativeExpr::Info {
-                base: left,
-                info: right,
-                ..
-            } => {
-                visit(left, sources)?;
-                visit(right, sources)?;
-            }
-            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
+        }
+        for child in node.expr.children() {
+            visit(child, sources)?;
         }
         Ok(())
     }
@@ -1917,7 +1749,7 @@ fn validate_physical_tree(
 ) -> DataFusionResult<(Vec<Arc<SeriesSchema>>, Vec<FusedInputKind>, FusedInputKind)> {
     let schemas = collect_source_schemas(tree)?;
     let mut source_kinds = Vec::new();
-    for input in tree_inputs(tree) {
+    for input in tree.root().inputs() {
         let kind = FusedInputKind::from_native_type(&input.output)?;
         if source_kinds.len() <= input.source_index {
             source_kinds.resize(input.source_index + 1, kind);
@@ -2148,42 +1980,14 @@ pub(crate) fn classify_output(
 
 /// Whether the tree has a binary with two vector operands that can produce a duplicate verdict.
 fn native_tree_has_vector_binary(node: &NativeNode) -> bool {
-    match &node.expr {
-        NativeExpr::Binary { left, right, .. } => {
-            (!matches!(left.output, NativeType::Scalar(_))
-                && !matches!(right.output, NativeType::Scalar(_)))
-                || native_tree_has_vector_binary(left)
-                || native_tree_has_vector_binary(right)
-        }
-        NativeExpr::VectorOf { input }
-        | NativeExpr::ScalarOf { input }
-        | NativeExpr::Instant { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. } => native_tree_has_vector_binary(input),
-        NativeExpr::ParameterizedTopK {
-            input, parameter, ..
-        } => native_tree_has_vector_binary(input) || native_tree_has_vector_binary(parameter),
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        }
-        | NativeExpr::ParameterizedHistogram {
-            input, parameters, ..
-        } => {
-            native_tree_has_vector_binary(input)
-                || parameters.iter().any(native_tree_has_vector_binary)
-        }
-        NativeExpr::Set { left, right, .. } => {
-            native_tree_has_vector_binary(left) || native_tree_has_vector_binary(right)
-        }
-        NativeExpr::Info { base, info, .. } => {
-            native_tree_has_vector_binary(base) || native_tree_has_vector_binary(info)
-        }
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
-    }
+    node.any(&|node| {
+        matches!(
+            &node.expr,
+            NativeExpr::Binary { left, right, .. }
+                if !matches!(left.output, NativeType::Scalar(_))
+                    && !matches!(right.output, NativeType::Scalar(_))
+        )
+    })
 }
 
 /// Evidence shared by the output partitions of this plan's single execution.
@@ -2537,7 +2341,9 @@ impl FusedSeriesExec {
             } else {
                 *ordering
             };
-            if tree_inputs(&tree)
+            if tree
+                .root()
+                .inputs()
                 .iter()
                 .filter(|node| node.source_index == index)
                 .any(|node| !ordering_satisfies(required_ordering, node.ordering))
@@ -2571,7 +2377,9 @@ impl FusedSeriesExec {
                     unpack_raw_series(empty(), Some(raw_schemas[index].clone()))?;
                 }
                 FusedInputKind::AggregateState => {
-                    let bound = tree_inputs(&tree)
+                    let bound = tree
+                        .root()
+                        .inputs()
                         .into_iter()
                         .find(|bound| bound.source_index == index)
                         .ok_or_else(|| {
@@ -2799,7 +2607,7 @@ impl ExecutionPlan for FusedSeriesExec {
         state.register_metrics(&self.metric, partition);
         let mut streams: Vec<futures::stream::BoxStream<'static, Result<FusedFeed, BoxedError>>> =
             Vec::new();
-        let bound_inputs = tree_inputs(&self.tree);
+        let bound_inputs = self.tree.root().inputs();
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
             let frames = input.execute(partition, Arc::clone(&context))?;
             match self.source_kinds[source] {

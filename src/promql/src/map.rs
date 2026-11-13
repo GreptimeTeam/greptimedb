@@ -19,7 +19,6 @@
 
 mod broadcast;
 mod comparison;
-mod go_math;
 #[cfg(test)]
 mod tests;
 
@@ -412,18 +411,18 @@ impl MathOp {
     /// The function applied to one sample.
     pub(crate) fn calculate(self, v: f64) -> f64 {
         match self {
-            Self::Exp => go_math::exp(v),
-            Self::Ln => go_math::log(v),
-            Self::Log2 => go_math::log2(v),
-            Self::Log10 => go_math::log10(v),
-            Self::Sin => go_math::sin(v),
-            Self::Cos => go_math::cos(v),
-            Self::Tan => go_math::tan(v),
+            Self::Exp => v.exp(),
+            Self::Ln => v.ln(),
+            Self::Log2 => v.log2(),
+            Self::Log10 => v.log10(),
+            Self::Sin => v.sin(),
+            Self::Cos => v.cos(),
+            Self::Tan => v.tan(),
             Self::Asin => v.asin(),
-            Self::Acos => go_math::acos(v),
+            Self::Acos => v.acos(),
             Self::Atan => v.atan(),
-            Self::Sinh => go_math::sinh(v),
-            Self::Cosh => go_math::cosh(v),
+            Self::Sinh => v.sinh(),
+            Self::Cosh => v.cosh(),
             Self::Tanh => v.tanh(),
             Self::Asinh => v.asinh(),
             Self::Acosh => v.acosh(),
@@ -494,15 +493,16 @@ fn go_min(x: f64, y: f64) -> f64 {
 
 impl ArithmeticOp {
     /// Prometheus `vectorElemBinop` for two floats.
+    #[inline]
     pub fn calculate(self, left: f64, right: f64) -> f64 {
         match self {
             Self::Add => left + right,
             Self::Subtract => left - right,
             Self::Multiply => left * right,
             Self::Divide => left / right,
-            Self::Modulo => go_math::fmod(left, right),
-            Self::Power => go_math::pow(left, right),
-            Self::Atan2 => go_math::atan2(left, right),
+            Self::Modulo => left % right,
+            Self::Power => left.powf(right),
+            Self::Atan2 => left.atan2(right),
         }
     }
 

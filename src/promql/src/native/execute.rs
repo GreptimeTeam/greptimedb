@@ -71,7 +71,7 @@ use crate::native::state::{StateChunk, state_bytes};
 use crate::range_eval::RangeEvaluator;
 use crate::select::{self, SortOrder};
 use crate::vector_match::{
-    BinaryMatching, BinaryOp, Cardinality, DuplicateEvidence, FillValues, MatchingLabels,
+    BinaryKind, BinaryMatching, Cardinality, DuplicateEvidence, FillValues, MatchingLabels,
     binary_vectors_with_reservation, set_vectors_with_reservation, validate_binary_operand,
 };
 
@@ -6893,20 +6893,9 @@ fn broadcast_op(matching: &BinaryMatching) -> Result<BroadcastOp> {
             Ok(BroadcastOp::Compare(Comparison::Filter(op)))
         }
     };
-    match matching.op {
-        BinaryOp::Add => arithmetic(ArithmeticOp::Add),
-        BinaryOp::Sub => arithmetic(ArithmeticOp::Subtract),
-        BinaryOp::Mul => arithmetic(ArithmeticOp::Multiply),
-        BinaryOp::Div => arithmetic(ArithmeticOp::Divide),
-        BinaryOp::Mod => arithmetic(ArithmeticOp::Modulo),
-        BinaryOp::Pow => arithmetic(ArithmeticOp::Power),
-        BinaryOp::Atan2 => arithmetic(ArithmeticOp::Atan2),
-        BinaryOp::Eq => comparison(ComparisonOp::Equal),
-        BinaryOp::Ne => comparison(ComparisonOp::NotEqual),
-        BinaryOp::Gt => comparison(ComparisonOp::Greater),
-        BinaryOp::Lt => comparison(ComparisonOp::Less),
-        BinaryOp::Ge => comparison(ComparisonOp::GreaterEqual),
-        BinaryOp::Le => comparison(ComparisonOp::LessEqual),
+    match matching.op.kind() {
+        BinaryKind::Arithmetic(op) => arithmetic(op),
+        BinaryKind::Comparison(op) => comparison(op),
     }
 }
 
