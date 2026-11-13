@@ -1397,6 +1397,90 @@ fn single_histogram_start_timestamp_is_compared_on_shifted_axis() {
     }
 }
 
+/// A first histogram whose count is negative is not extrapolated towards zero.
+///
+/// The zero point is `first.count / increase`, and a negative one would pull the sampled start
+/// *backwards* (`duration_to_zero < duration_to_start`), handing the counter time it never spent
+/// below zero. Prometheus guards it with `first.count >= 0`, which is what the histogram route now
+/// reads too: without the guard this window answers 15 instead of 24.
+#[test]
+fn a_negative_first_histogram_count_is_not_extrapolated_towards_zero() {
+    let schema = raw_schema(1);
+    let make_chunk = |ts, count, is_last| {
+        let offsets = [0];
+        let lengths = [2];
+        // The buckets follow the count, so the increase is the count difference bucket by bucket.
+        let buckets = [count / 2.0; 2];
+        let mut builder = HistogramBatchBuilder::new();
+        let index = builder
+            .push(HistogramView {
+                schema: 0,
+                zero_threshold: 0.0,
+                zero_count: 0.0,
+                count,
+                sum: count,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp: None,
+                custom_values: &[],
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: &buckets,
+                },
+                negative: BucketSideView {
+                    span_offsets: &[],
+                    span_lengths: &[],
+                    buckets: &[],
+                },
+            })
+            .unwrap();
+        let samples = Samples::try_from_histogram(
+            UInt32Array::from(vec![Some(index)]),
+            builder.finish().unwrap(),
+        )
+        .unwrap();
+        RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(0u64.to_le_bytes().to_vec()),
+            Some(metric(0)),
+            RawTimestamps::try_new(ScalarBuffer::from(vec![ts])).unwrap(),
+            SeriesFields::try_from_vec(vec![samples]).unwrap(),
+            is_last,
+        )
+        .unwrap()
+    };
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(6_500, 6_000, 1),
+        RangeWindow {
+            range_ms: 6_000,
+            offset_ms: 0,
+            anchor_ms: None,
+            modifier: None,
+        },
+        RangeFunction::Increase,
+    )
+    .unwrap();
+    let chunks = collect_chunks(
+        &mut evaluator,
+        &[make_chunk(2_000, -3.0, false), make_chunk(5_000, 9.0, true)],
+    );
+    let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+    match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+        // 9 - (-3) = 12 over the 3000ms between the samples, extrapolated 1500ms to the window's
+        // open end and 1500ms past the last sample: 12 * 2.
+        SampleRef::Histogram(histogram) => assert!(
+            (histogram.count - 24.0).abs() < 1e-12,
+            "increase {}",
+            histogram.count
+        ),
+        other => panic!(
+            "expected a histogram increase, got {}",
+            describe_sample(Some(other))
+        ),
+    }
+}
+
 /// What a sample is, for a failure message: `SampleRef` carries a borrowed histogram payload and
 /// cannot be printed itself.
 fn describe_sample(sample: Option<SampleRef<'_>>) -> String {
