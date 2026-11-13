@@ -637,19 +637,20 @@ pub trait Compactor: Send + Sync + 'static {
 /// implementations in tests.
 #[async_trait::async_trait]
 pub trait SstMerger: Send + Sync + 'static {
+    /// Merges an output, observing cancellation at safe boundaries and draining
+    /// in-flight writers before returning.
     async fn merge_single_output(
         &self,
         context: CompactionContext,
         output: CompactionOutput,
         write_opts: WriteOptions,
+        cancellation: Arc<CancellationHandle>,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)>;
 }
 
 /// The production [`SstMerger`] that reads, merges, and writes SST files.
-#[derive(Clone, Default)]
-pub struct DefaultSstMerger {
-    cancellation: Option<Arc<CancellationHandle>>,
-}
+#[derive(Clone)]
+pub struct DefaultSstMerger;
 
 /// File-level sequence metadata is independent of physical row encoding.
 struct OutputSequenceMetadata {
@@ -702,6 +703,7 @@ impl SstMerger for DefaultSstMerger {
         context: CompactionContext,
         output: CompactionOutput,
         write_opts: WriteOptions,
+        cancellation: Arc<CancellationHandle>,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let uncommitted = UncommittedSsts::new(
             context.region_id,
@@ -709,7 +711,7 @@ impl SstMerger for DefaultSstMerger {
             Some(context.cache_manager.clone()),
         );
         let result = self
-            .merge_output(context, output, write_opts, &uncommitted)
+            .merge_output(context, output, write_opts, &uncommitted, cancellation)
             .await;
         if result.is_err() {
             uncommitted.cleanup().await;
@@ -737,6 +739,7 @@ impl DefaultSstMerger {
         output: CompactionOutput,
         write_opts: WriteOptions,
         uncommitted: &UncommittedSsts,
+        cancellation: Arc<CancellationHandle>,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = context.region_id;
         validate_region_compaction_output(region_id, &output)?;
@@ -810,14 +813,10 @@ impl DefaultSstMerger {
                 .with_puffin_metadata_cache(context.cache_manager.puffin_metadata_cache().cloned()),
             can_merge_inputs,
         });
-        let source = if let Some(cancellation) = &self.cancellation {
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
-                source = builder.build_flat_sst_reader() => source?,
-            }
-        } else {
-            builder.build_flat_sst_reader().await?
+        let source = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
+            source = builder.build_flat_sst_reader() => source?,
         };
         let source = spawn_merge(source);
 
@@ -852,7 +851,7 @@ impl DefaultSstMerger {
                 &mut metrics,
                 crate::sst::parquet::writer::SstWriteContext {
                     guard: Some(Arc::new(uncommitted.clone())),
-                    cancellation: self.cancellation.clone(),
+                    cancellation: Some(cancellation),
                     ..Default::default()
                 },
             )
@@ -945,9 +944,7 @@ impl DefaultCompactor {
     /// the returned [`MergeOutput`]; incomplete outputs are cleaned up.
     pub fn new_with_cancel_handle(cancel_handle: Arc<CancellationHandle>) -> Self {
         Self {
-            merger: DefaultSstMerger {
-                cancellation: Some(cancel_handle.clone()),
-            },
+            merger: DefaultSstMerger,
             cancel_handle,
             uncommitted: None,
         }
@@ -958,9 +955,7 @@ impl DefaultCompactor {
         uncommitted: UncommittedSsts,
     ) -> Self {
         Self {
-            merger: DefaultSstMerger {
-                cancellation: Some(cancel_handle.clone()),
-            },
+            merger: DefaultSstMerger,
             cancel_handle,
             uncommitted: Some(uncommitted),
         }
@@ -1014,6 +1009,7 @@ impl<M: SstMerger> DefaultCompactor<M> {
                             ),
                         encode_runtime: EncodeRuntime::Compact,
                     },
+                    self.cancel_handle.clone(),
                 )
                 .await?;
             if let Some(uncommitted) = &self.uncommitted {
@@ -1098,9 +1094,10 @@ where
             let merger = self.merger.clone();
             let context = context.clone();
             let uncommitted = self.uncommitted.clone();
+            let cancellation = self.cancel_handle.clone();
             let fut = async move {
                 let result = merger
-                    .merge_single_output(context, output, write_opts)
+                    .merge_single_output(context, output, write_opts, cancellation)
                     .await;
                 if let (Some(uncommitted), Ok((_, infos))) = (&uncommitted, &result) {
                     uncommitted.track(infos);
@@ -1209,6 +1206,7 @@ mod tests {
     use std::time::Duration;
 
     use datatypes::arrow::record_batch::RecordBatch;
+    use object_store::layers::mock::{self, MockLayerBuilder};
     use parquet::arrow::ArrowWriter;
     use store_api::storage::{FileId, RegionId};
     use tokio::sync::{mpsc, oneshot};
@@ -1337,6 +1335,109 @@ mod tests {
             prepared.existing_index_inputs.as_ref().unwrap()
         ));
         assert!(Arc::ptr_eq(&context.index_plan, &prepared.index_plan));
+    }
+
+    struct PendingCompactionReader {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl mock::oio::Read for PendingCompactionReader {
+        async fn open(
+            &self,
+            _: mock::BytesRange,
+        ) -> object_store::Result<(mock::RpRead, Box<dyn mock::oio::ReadStreamDyn>)> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+
+        async fn read(
+            &self,
+            _: mock::BytesRange,
+        ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::unit(true)]
+    #[case::outputs(false)]
+    #[tokio::test]
+    async fn test_default_merger_observes_compactor_cancellation(#[case] merge_unit: bool) {
+        use object_store::services::Memory;
+
+        let mut region = new_test_compaction_region().await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let signal = started.clone();
+        let layer = MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |_, _, _| {
+                Box::new(PendingCompactionReader {
+                    started: signal.clone(),
+                })
+            }))
+            .build()
+            .unwrap();
+        let store = object_store::ObjectStore::new(Memory::default())
+            .unwrap()
+            .layer(layer);
+        let access = &region.access_layer;
+        region.access_layer = Arc::new(crate::access_layer::AccessLayer::new(
+            access.table_dir(),
+            access.path_type(),
+            store.clone(),
+            access.puffin_manager_factory().clone(),
+            access.intermediate_manager().clone(),
+        ));
+        let input = new_file_handle(dummy_file_meta());
+        store
+            .write(
+                &input.file_path(
+                    region.access_layer.table_dir(),
+                    region.access_layer.path_type(),
+                ),
+                vec![0; input.meta_ref().file_size as usize],
+            )
+            .await
+            .unwrap();
+        let picker_output = PickerOutput {
+            outputs: vec![CompactionOutput {
+                output_level: 1,
+                inputs: vec![input],
+                filter_deleted: false,
+                output_time_range: None,
+            }],
+            ..Default::default()
+        };
+        let compactor = DefaultCompactor::with_merger(DefaultSstMerger);
+        let context = CompactionContext::from(&region);
+        let mut merge = Box::pin(async {
+            if merge_unit {
+                let unit = CompactionUnit::from_picker(picker_output)
+                    .unwrap()
+                    .pop()
+                    .unwrap();
+                compactor.merge_unit(&context, &unit).await
+            } else {
+                compactor.merge_ssts(&region, picker_output).await
+            }
+        });
+        tokio::select! {
+            _ = started.notified() => {},
+            result = &mut merge => panic!("merge returned before cancellation: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_secs(10)) => panic!("merge did not reach the reader"),
+        }
+        compactor.cancel_handle.cancel();
+        let result = timeout(Duration::from_secs(10), merge).await.unwrap();
+        if merge_unit {
+            assert!(matches!(
+                result,
+                Err(error::Error::CompactionCancelled { .. })
+            ));
+        } else {
+            let result = result.unwrap();
+            assert!(result.files_to_add.is_empty());
+            assert!(result.files_to_remove.is_empty());
+        }
     }
 
     #[test]
@@ -1576,7 +1677,7 @@ mod tests {
             time_window_size: 3600,
             max_file_size: None,
         };
-        let merged = DefaultCompactor::with_merger(DefaultSstMerger::default())
+        let merged = DefaultCompactor::with_merger(DefaultSstMerger)
             .merge_ssts(&compaction_region, picker_output)
             .await
             .unwrap();
@@ -1734,8 +1835,13 @@ mod tests {
             ))
             .await
             .unwrap();
-        let (files, _) = DefaultSstMerger::default()
-            .merge_single_output(context, output, WriteOptions::default())
+        let (files, _) = DefaultSstMerger
+            .merge_single_output(
+                context,
+                output,
+                WriteOptions::default(),
+                Arc::new(CancellationHandle::default()),
+            )
             .await
             .unwrap();
         assert_eq!(1, files.len());
@@ -1796,6 +1902,7 @@ mod tests {
             _context: CompactionContext,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
+            _cancellation: Arc<CancellationHandle>,
         ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
             let idx = self.call_idx.fetch_add(1, Ordering::SeqCst);
             match self.results.lock().unwrap().get(idx) {
@@ -2129,6 +2236,7 @@ mod tests {
             _context: CompactionContext,
             output: CompactionOutput,
             _write_opts: WriteOptions,
+            _cancellation: Arc<CancellationHandle>,
         ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
             let input_id = output.inputs[0].meta_ref().file_id;
             let mut file = dummy_file_meta();

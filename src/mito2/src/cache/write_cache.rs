@@ -284,25 +284,6 @@ impl WriteCache {
         &self.intermediate_manager
     }
 
-    /// Writes SST to the cache and then uploads it to the remote object store.
-    #[cfg(test)]
-    pub(crate) async fn write_and_upload_sst(
-        &self,
-        write_request: SstWriteRequest,
-        upload_request: SstUploadRequest,
-        write_opts: &WriteOptions,
-        metrics: &mut Metrics,
-    ) -> Result<SstInfoArray> {
-        self.write_and_upload_sst_with_context(
-            write_request,
-            upload_request,
-            write_opts,
-            metrics,
-            SstWriteContext::default(),
-        )
-        .await
-    }
-
     /// Preserves write ownership and cancellation through local encoding and upload.
     pub(crate) async fn write_and_upload_sst_with_context(
         &self,
@@ -531,7 +512,7 @@ impl WriteCache {
             .chunk(options.write_buffer_size.as_bytes().max(1) as usize)
             .await
             .context(error::OpenDalSnafu)?
-            .into_bytes_stream(0..cached_value.content_length())
+            .into_stream(0..cached_value.content_length())
             .await
             .context(error::OpenDalSnafu)?;
 
@@ -561,22 +542,34 @@ impl WriteCache {
                     reader.next().await
                 };
                 let Some(bytes) = next else { break };
-                let bytes = bytes.context(error::UploadSnafu {
-                    region_id,
-                    file_id,
-                    file_type: index_key.file_type,
-                })?;
+                let bytes = bytes.context(error::OpenDalSnafu)?;
                 if cancellation.is_some_and(CancellationHandle::is_cancelled) {
                     return error::SstWriteCancelledSnafu.fail();
                 }
                 let len = bytes.len();
-                writer.write(bytes).await.context(error::OpenDalSnafu)?;
+                writer
+                    .write(bytes)
+                    .await
+                    .map_err(std::io::Error::from)
+                    .context(error::UploadSnafu {
+                        region_id,
+                        file_id,
+                        file_type: index_key.file_type,
+                    })?;
                 bytes_written += len as u64;
             }
             if cancellation.is_some_and(CancellationHandle::is_cancelled) {
                 return error::SstWriteCancelledSnafu.fail();
             }
-            writer.close().await.context(error::OpenDalSnafu)?;
+            writer
+                .close()
+                .await
+                .map_err(std::io::Error::from)
+                .context(error::UploadSnafu {
+                    region_id,
+                    file_id,
+                    file_type: index_key.file_type,
+                })?;
             Ok(bytes_written)
         }
         .await;
@@ -806,6 +799,133 @@ mod tests {
         assert!(!remote_store.exists("cancelled.parquet").await.unwrap());
     }
 
+    struct FailingUploadWriter {
+        inner: object_store::layers::mock::oio::Writer,
+        fail_close: bool,
+    }
+
+    impl object_store::layers::mock::oio::Write for FailingUploadWriter {
+        async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+            if !self.fail_close {
+                return Err(object_store::Error::new(
+                    object_store::ErrorKind::NotFound,
+                    "injected write failure",
+                ));
+            }
+            self.inner.write(bytes).await
+        }
+
+        async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
+            Err(object_store::Error::new(
+                object_store::ErrorKind::NotFound,
+                "injected close failure",
+            ))
+        }
+
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::write(false)]
+    #[case::close(true)]
+    #[tokio::test]
+    async fn test_upload_error_preserves_file_context(#[case] fail_close: bool) {
+        use object_store::layers::mock::{MockLayerBuilder, ObservedWriter, WriterObservations};
+
+        let env = TestEnv::new().await;
+        let local_store = ObjectStore::new(Memory::default()).unwrap();
+        let observations = Arc::new(std::sync::Mutex::new(WriterObservations::default()));
+        let observed = observations.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |_, _, inner| {
+                Box::new(ObservedWriter::new(
+                    Box::new(FailingUploadWriter { inner, fail_close }),
+                    observed.clone(),
+                ))
+            }))
+            .build()
+            .unwrap();
+        let remote_store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let cache = env
+            .create_write_cache(local_store.clone(), ReadableSize::mb(10))
+            .await;
+        let key = IndexKey::new(RegionId::new(1024, 1), FileId::random(), FileType::Parquet);
+        local_store
+            .write(&cache.file_cache.cache_file_path(key), vec![42; 4096])
+            .await
+            .unwrap();
+        let err = cache
+            .upload(
+                key,
+                "failed.parquet",
+                &remote_store,
+                UploadOptions {
+                    op_type: OperationType::Compact,
+                    write_buffer_size: ReadableSize::kb(1),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(!err.is_object_not_found());
+        assert!(err.may_have_persisted_manifest_update());
+        match err {
+            error::Error::Upload {
+                region_id,
+                file_id,
+                file_type,
+                error,
+                ..
+            } => {
+                assert_eq!(key.region_id, region_id);
+                assert_eq!(key.file_id, file_id);
+                assert_eq!(key.file_type, file_type);
+                assert_eq!(std::io::ErrorKind::NotFound, error.kind());
+            }
+            err => panic!("expected Upload error, got {err:?}"),
+        }
+        let observations = observations.lock().unwrap();
+        assert_eq!(1, observations.abort_calls);
+        assert_eq!(usize::from(fail_close), observations.close_calls);
+    }
+
+    #[tokio::test]
+    async fn test_upload_local_read_error() {
+        use object_store::layers::mock::MockLayerBuilder;
+
+        let env = TestEnv::new().await;
+        // The unit reader rejects reads after stat and reader creation succeed.
+        let layer = MockLayerBuilder::default()
+            .reader_factory(Arc::new(|_, _, _| Box::new(())))
+            .build()
+            .unwrap();
+        let local_store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let remote_store = ObjectStore::new(Memory::default()).unwrap();
+        let cache = env
+            .create_write_cache(local_store.clone(), ReadableSize::mb(10))
+            .await;
+        let key = IndexKey::new(RegionId::new(1024, 1), FileId::random(), FileType::Parquet);
+        local_store
+            .write(&cache.file_cache.cache_file_path(key), vec![42; 4096])
+            .await
+            .unwrap();
+        let err = cache
+            .upload(
+                key,
+                "failed.parquet",
+                &remote_store,
+                UploadOptions {
+                    op_type: OperationType::Compact,
+                    write_buffer_size: ReadableSize::kb(1),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, error::Error::OpenDal { .. }));
+        assert!(!remote_store.exists("failed.parquet").await.unwrap());
+    }
+
     struct RedirectUploadStoreWrapper {
         target_store: ObjectStore,
         last_op_type: Mutex<Option<OperationType>>,
@@ -935,7 +1055,13 @@ mod tests {
         // Write to cache and upload sst to mock remote store
         let mut metrics = Metrics::new(WriteType::Flush);
         let mut sst_infos = write_cache
-            .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
+            .write_and_upload_sst_with_context(
+                write_request,
+                upload_request,
+                &write_opts,
+                &mut metrics,
+                SstWriteContext::default(),
+            )
             .await
             .unwrap();
         let sst_info = sst_infos.remove(0);
@@ -1049,7 +1175,13 @@ mod tests {
 
         let mut metrics = Metrics::new(WriteType::Flush);
         let mut sst_infos = write_cache
-            .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
+            .write_and_upload_sst_with_context(
+                write_request,
+                upload_request,
+                &write_opts,
+                &mut metrics,
+                SstWriteContext::default(),
+            )
             .await
             .unwrap();
         let sst_info = sst_infos.remove(0);
@@ -1142,7 +1274,13 @@ mod tests {
 
         let mut metrics = Metrics::new(WriteType::Flush);
         write_cache
-            .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
+            .write_and_upload_sst_with_context(
+                write_request,
+                upload_request,
+                &write_opts,
+                &mut metrics,
+                SstWriteContext::default(),
+            )
             .await
             .unwrap_err();
         let atomic_write_dir = write_cache_dir.path().join(ATOMIC_WRITE_DIR);

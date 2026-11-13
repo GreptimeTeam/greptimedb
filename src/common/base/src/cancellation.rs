@@ -51,7 +51,7 @@ impl CancellationHandle {
     pub fn cancel(&self) {
         if self
             .cancelled
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
             self.waker.wake();
@@ -71,7 +71,7 @@ impl CancellationHandle {
 
     /// Is this handle cancelled.
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 

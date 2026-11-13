@@ -433,7 +433,8 @@ impl AccessLayer {
                 )
                 .await?
         } else {
-            // Write cache is disabled, or bypassed by an SST write guard.
+            // The write cache does not enforce SstWriteLimits, so bounded writes
+            // bypass it.
             let store = self.object_store.clone();
             let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
             let puffin_factory = if limits.is_some() {

@@ -259,12 +259,14 @@ pub trait SstWriteGuard: Send + Sync {
 }
 
 /// Optional ownership, cancellation, and resource limits for an SST write.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(crate) struct SstWriteContext {
     /// Registers output ownership before creating files, including cached files.
     pub(crate) guard: Option<Arc<dyn SstWriteGuard>>,
-    /// Bounded writes bypass the write cache and use one upload at a time.
+    /// Resource bounds enforced by the direct writer, with one upload at a time.
+    /// The write cache does not enforce these limits, so bounded writes bypass it.
     pub(crate) limits: Option<SstWriteLimits>,
+    /// Stops writing cooperatively and aborts unfinished output.
     pub(crate) cancellation: Option<Arc<CancellationHandle>>,
 }
 
@@ -1088,69 +1090,60 @@ mod tests {
         #[case] format: FormatType,
         #[values(1, 2)] parallelism: usize,
     ) {
-        common_telemetry::init_default_ut_logging();
-        for repeat in 0..3 {
-            for enabled in [false, true] {
-                let mut env = TestEnv::new().await;
-                let cancellation = Arc::new(CancellationHandle::default());
-                let mut metrics = Metrics::new(WriteType::Compaction);
-                let mut writer = ParquetWriter::new_with_object_store(
-                    env.init_object_store_manager(),
-                    Arc::new(sst_region_metadata()),
-                    IndexConfig::default(),
-                    NoopIndexBuilder,
-                    RegionFilePathFactory::new(String::new(), PathType::Bare),
-                    &mut metrics,
-                )
-                .await
-                .with_cancellation(enabled.then(|| cancellation.clone()));
-                let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
-                let consumed = Arc::new(AtomicUsize::new(0));
-                let observed = consumed.clone();
-                let source = FlatSource::new_stream(
-                    batch.schema(),
-                    Box::pin(async_stream::try_stream! {
-                        for i in 0..32 {
-                            if i == 1 { cancellation.cancel(); }
-                            observed.fetch_add(1, Ordering::Relaxed);
-                            yield new_record_batch_by_range(&["a", "b"], i * 8, i * 8 + 8);
-                        }
-                    }),
-                );
-                let opts = WriteOptions {
-                    row_group_size: 8,
-                    encode_parallelism: parallelism,
-                    ..Default::default()
-                };
-                let start = Instant::now();
-                let result = match format {
-                    FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
-                    FormatType::PrimaryKey => {
-                        writer
-                            .write_all_flat_as_primary_key(source, None, &opts)
-                            .await
+        for enabled in [false, true] {
+            let mut env = TestEnv::new().await;
+            let cancellation = Arc::new(CancellationHandle::default());
+            let mut metrics = Metrics::new(WriteType::Compaction);
+            let mut writer = ParquetWriter::new_with_object_store(
+                env.init_object_store_manager(),
+                Arc::new(sst_region_metadata()),
+                IndexConfig::default(),
+                NoopIndexBuilder,
+                RegionFilePathFactory::new(String::new(), PathType::Bare),
+                &mut metrics,
+            )
+            .await
+            .with_cancellation(enabled.then(|| cancellation.clone()));
+            let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
+            let consumed = Arc::new(AtomicUsize::new(0));
+            let observed = consumed.clone();
+            let source = FlatSource::new_stream(
+                batch.schema(),
+                Box::pin(async_stream::try_stream! {
+                    for i in 0..32 {
+                        if i == 1 { cancellation.cancel(); }
+                        observed.fetch_add(1, Ordering::Relaxed);
+                        yield new_record_batch_by_range(&["a", "b"], i * 8, i * 8 + 8);
                     }
-                };
-                common_telemetry::info!(
-                    "batch_cancellation repeat={repeat} format={format:?} parallelism={parallelism} enabled={enabled} batches={} elapsed_us={}",
-                    consumed.load(Ordering::Relaxed),
-                    start.elapsed().as_micros()
-                );
-                if enabled {
-                    assert!(result.is_err());
-                    assert_eq!(2, consumed.load(Ordering::Relaxed));
-                    assert!(writer.writer.is_none());
-                } else {
-                    assert_eq!(
-                        256,
-                        result
-                            .unwrap()
-                            .iter()
-                            .map(|info| info.num_rows)
-                            .sum::<usize>()
-                    );
-                    assert_eq!(32, consumed.load(Ordering::Relaxed));
+                }),
+            );
+            let opts = WriteOptions {
+                row_group_size: 8,
+                encode_parallelism: parallelism,
+                ..Default::default()
+            };
+            let result = match format {
+                FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
+                FormatType::PrimaryKey => {
+                    writer
+                        .write_all_flat_as_primary_key(source, None, &opts)
+                        .await
                 }
+            };
+            if enabled {
+                assert!(result.is_err());
+                assert_eq!(2, consumed.load(Ordering::Relaxed));
+                assert!(writer.writer.is_none());
+            } else {
+                assert_eq!(
+                    256,
+                    result
+                        .unwrap()
+                        .iter()
+                        .map(|info| info.num_rows)
+                        .sum::<usize>()
+                );
+                assert_eq!(32, consumed.load(Ordering::Relaxed));
             }
         }
     }
