@@ -35,8 +35,8 @@ use crate::error::{InvalidRequestSnafu, NewRecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
 use crate::sst::parquet::Json2RewriteTargets;
-use crate::sst::parquet::flat_format::sst_column_id_indices;
-use crate::sst::parquet::format::FormatProjection;
+use crate::sst::parquet::flat_format::{FlatReadFormat, sst_column_id_indices};
+use crate::sst::parquet::format::{FIXED_POS_COLUMN_NUM, FormatProjection};
 use crate::sst::{
     FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
     with_field_id,
@@ -46,6 +46,10 @@ use crate::sst::{
 ///
 /// This mapper support duplicate and unsorted projection indices.
 /// The output schema is determined by the projection indices.
+/// Input indices address the compatible merge schema, not physical Parquet
+/// columns or temporary predicate projections. Sparse compaction uses
+/// `input_arrow_schema(true)` without expanded tags and bypasses query output
+/// conversion; `CompactionProjectionMapper` normalizes source layouts first.
 pub struct FlatProjectionMapper {
     /// Metadata of the region.
     metadata: RegionMetadataRef,
@@ -484,35 +488,43 @@ pub(crate) struct CompactionProjectionMapper {
 }
 
 impl CompactionProjectionMapper {
-    pub(crate) fn try_new(metadata: &RegionMetadataRef) -> Result<Self> {
-        let projection = metadata
-            .column_metadatas
+    /// Builds a projection from the converted source layout. Encoded-only
+    /// batches already match sparse compaction's layout and need no mapper.
+    /// Compaction must request every source field before constructing this helper.
+    pub(crate) fn try_new(format: &FlatReadFormat) -> Result<Option<Self>> {
+        let metadata = format.metadata();
+        if !metadata
+            .primary_key
             .iter()
-            .enumerate()
-            .filter_map(|(idx, col)| {
-                if matches!(col.semantic_type, SemanticType::Field) {
-                    Some(idx)
-                } else {
-                    None
-                }
+            .any(|id| format.projected_index_by_id(*id).is_some())
+        {
+            return Ok(None);
+        }
+        let projection = metadata
+            .field_columns()
+            .map(|column| {
+                format
+                    .projected_index_by_id(column.column_id)
+                    .with_context(|| InvalidRequestSnafu {
+                        region_id: metadata.region_id,
+                        reason: format!(
+                            "Compaction projection is missing field {}",
+                            column.column_id
+                        ),
+                    })
             })
-            .chain([metadata.time_index_column_pos()])
-            .collect::<Vec<_>>();
-
-        let read_col_ids = metadata.column_metadatas.iter().map(|col| col.column_id);
-        let read_cols = ReadColumns::new(read_col_ids);
-        let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
-        Ok(Self {
-            projection: mapper.batch_indices,
-        })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(Self { projection }))
     }
 
     /// Projects columns and appends internal columns for compaction output.
     ///
-    /// The input batch is expected to be in flat format with internal columns appended.
+    /// Input uses the converted source projection, before compatibility and merge.
+    /// The trailing timestamp, encoded key, sequence and operation are preserved.
+    /// Predicate-only temporary tag arrays must never be appended to this input.
     pub(crate) fn project(&self, batch: DfRecordBatch) -> Result<DfRecordBatch> {
         let mut projection = self.projection.clone();
-        projection.extend(batch.num_columns() - 3..batch.num_columns());
+        projection.extend(batch.num_columns() - FIXED_POS_COLUMN_NUM..batch.num_columns());
         // Projection must preserve the Arrow layouts already produced by compaction Rewrite.
         batch.project(&projection).context(NewRecordBatchSnafu)
     }

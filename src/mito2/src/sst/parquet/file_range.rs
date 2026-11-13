@@ -545,7 +545,9 @@ impl FileRangeContext {
         self.base.compat_batch = compat;
     }
 
-    /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
+    /// Filters converted source batches before compatibility and merge.
+    /// Predicate projections are temporary: only their row mask is applied to the
+    /// original batch, preserving its schema and complete encoded primary keys.
     /// If a partition expr filter is configured, it is also applied.
     /// Physical filter exprs are not evaluated here; they are only applied during prefiltering.
     pub(crate) fn precise_filter_flat(
@@ -649,7 +651,9 @@ impl TagDecodeState {
 }
 
 impl RangeBase {
-    /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
+    /// Filters converted source batches before compatibility and merge.
+    /// Predicate projections are temporary: only their row mask is applied to the
+    /// original batch, preserving its schema and complete encoded primary keys.
     ///
     /// It assumes all necessary tags are already decoded from the primary key.
     ///
@@ -1087,11 +1091,28 @@ mod tests {
         assert_eq!(batch, filtered);
     }
 
-    #[test]
-    fn test_sparse_filter_and_partition_tags_preserve_skip_modes() {
-        let metadata = Arc::new(sst_region_metadata_with_encoding(
-            PrimaryKeyEncoding::Sparse,
-        ));
+    #[rstest::rstest]
+    #[case(2)]
+    #[case(40)]
+    #[case(3600)]
+    fn test_sparse_filter_and_partition_tags_preserve_skip_modes(#[case] tag_count: u32) {
+        let source = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+        let mut keys = source.primary_key.clone();
+        let mut builder = RegionMetadataBuilder::from_existing(source);
+        for id in 4..tag_count + 2 {
+            builder.push_column_metadata(store_api::metadata::ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    format!("tag_{id}"),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: id,
+            });
+            keys.push(id);
+        }
+        builder.primary_key(keys);
+        let metadata = Arc::new(builder.build().unwrap());
         let codec = SparsePrimaryKeyCodec::schemaless();
         let long_tag = "x".repeat(80);
         let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
@@ -1159,6 +1180,13 @@ mod tests {
             )
             .unwrap();
             let batch = read_format.convert_batch(raw.clone(), None).unwrap();
+            let mapper = CompactionProjectionMapper::try_new(&read_format).unwrap();
+            assert_eq!(mapper.is_some(), materialized);
+            let compacted = match mapper {
+                Some(mapper) => mapper.project(batch.clone()).unwrap(),
+                None => batch.clone(),
+            };
+            assert_eq!(compacted, raw);
             let base = RangeBase {
                 filters: filters.clone(),
                 dyn_filters: vec![],
@@ -1180,6 +1208,19 @@ mod tests {
                 (false, true, vec![3, 4, 5]),
                 (true, true, vec![0, 1, 3, 4, 5]),
             ] {
+                let mut state = TagDecodeState::new();
+                base.compute_filter_mask_flat(&batch, skip_fields, skip_tags, &mut state)
+                    .unwrap();
+                let mut decoded = state.decoded_tag_cache.keys().copied().collect::<Vec<_>>();
+                decoded.sort_unstable();
+                assert_eq!(
+                    decoded,
+                    if !materialized && !skip_tags {
+                        vec![0, 1]
+                    } else {
+                        vec![1]
+                    }
+                );
                 let output = base
                     .precise_filter_flat(batch.clone(), skip_fields, skip_tags)
                     .unwrap()
@@ -1193,6 +1234,20 @@ mod tests {
                     timestamps.values().as_ref(),
                     expected.as_slice(),
                     "materialized={materialized}, skip_fields={skip_fields}, skip_tags={skip_tags}"
+                );
+                let compacted =
+                    match CompactionProjectionMapper::try_new(&base.read_format).unwrap() {
+                        Some(mapper) => mapper.project(output).unwrap(),
+                        None => output,
+                    };
+                let mask = BooleanArray::from(
+                    (0..6)
+                        .map(|row| expected.contains(&row))
+                        .collect::<Vec<_>>(),
+                );
+                assert_eq!(
+                    compacted,
+                    datatypes::arrow::compute::filter_record_batch(&raw, &mask).unwrap()
                 );
             }
         }
