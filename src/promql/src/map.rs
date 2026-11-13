@@ -198,8 +198,8 @@ pub fn map_negate(schema: &SeriesSchema, series: &Series) -> Result<Series> {
 /// Applies arithmetic against a constant scalar to every field and drops the metric name.
 ///
 /// Shares the evaluated-grid, missingness, unsupported-type and same-labelset contract of
-/// [`map_math`]. Results follow Prometheus `vectorElemBinop`, including Go's `math.Pow`,
-/// `math.Mod` and `math.Atan2`.
+/// [`map_math`]. Results follow Prometheus `vectorElemBinop` within the comparison tolerance;
+/// `^`, `%` and `atan2` are the standard library's.
 pub fn map_arithmetic(
     schema: &SeriesSchema,
     series: &Series,
