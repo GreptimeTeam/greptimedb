@@ -22,12 +22,18 @@
 //! both estimators leaves two answers for one histogram that differ in their last places.
 //!
 //! These functions read a [`NativeHistogram`] through the borrowed [`HistogramView`] that both
-//! representations share and return the kernel's answer in the shape the legacy UDFs report it.
-//! The scalar arithmetic that follows the same route lives below the estimators.
+//! representations share, hand it to the kernel as the [`FloatHistogram`] the kernel owns, and
+//! return the answer in the shape the legacy UDFs report it. The scalar arithmetic -- `add`, `sub`,
+//! `scale`, `divide_by` -- takes the same route below the estimators, so Prometheus's rules for
+//! reconciling a zero bucket, reducing a schema and intersecting custom bounds live in one place.
 
-use common_query::native_histogram::{NativeHistogram, NativeHistogramQuantileInfo, Span};
+use common_query::native_histogram::{
+    CounterResetHint, NativeHistogram, NativeHistogramQuantileInfo, Span,
+};
+use datafusion::error::Result;
 use datatypes::series::histogram::{BucketSideView, HistogramView};
 
+use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::histogram_eval::native;
 
 /// A [`NativeHistogram`] borrowed as a [`HistogramView`], the form the native kernel reads.
@@ -162,6 +168,155 @@ fn bucket_total(histogram: &NativeHistogram) -> f64 {
     total
 }
 
+/// The native kernel's owned form of `histogram`.
+///
+/// A view borrows the offsets and lengths it needs from two temporary slices, so the copy happens
+/// here and the `FloatHistogram` owns the counts that result.
+fn float_histogram(histogram: &NativeHistogram) -> Result<FloatHistogram> {
+    let view = LegacyView::new(histogram);
+    FloatHistogram::try_from_view(&view.view())
+}
+
+/// The legacy representation of `histogram`, with the span layout it carries.
+fn legacy_histogram(histogram: &FloatHistogram) -> NativeHistogram {
+    let [positive, negative] = histogram.spans();
+    NativeHistogram {
+        schema: histogram.schema,
+        zero_threshold: histogram.zero_threshold,
+        sum: histogram.sum,
+        reset_hint: histogram.reset_hint,
+        start_timestamp: histogram.start_timestamp,
+        custom_values: histogram.custom_values.clone(),
+        positive_spans: legacy_spans(positive),
+        negative_spans: legacy_spans(negative),
+        count: histogram.count,
+        zero_count: histogram.zero_count,
+        positive_buckets: bucket_counts(&histogram.positive),
+        negative_buckets: bucket_counts(&histogram.negative),
+    }
+}
+
+fn legacy_spans(spans: Vec<(i32, i32)>) -> Vec<Span> {
+    spans
+        .into_iter()
+        .map(|(offset, length)| Span { offset, length })
+        .collect()
+}
+
+fn bucket_counts(buckets: &[(i32, f64)]) -> Vec<f64> {
+    buckets.iter().map(|&(_, count)| count).collect()
+}
+
+/// `left + right`, or `None` for a pair the kernel refuses to combine.
+pub(crate) fn add(left: &NativeHistogram, right: &NativeHistogram) -> Option<NativeHistogram> {
+    combine(left, right, false)
+}
+
+/// `left - right`, a gauge histogram the way Prometheus's `-` leaves it.
+pub(crate) fn sub(left: &NativeHistogram, right: &NativeHistogram) -> Option<NativeHistogram> {
+    combine(left, right, true)
+}
+
+fn combine(
+    left: &NativeHistogram,
+    right: &NativeHistogram,
+    subtract: bool,
+) -> Option<NativeHistogram> {
+    let mut combined = float_histogram(left).ok()?;
+    let other = float_histogram(right).ok()?;
+    let outcome = if subtract {
+        combined.sub(&other)
+    } else {
+        combined.add(&other)
+    }
+    .ok()?;
+    // The outcome reports what the kernel already folded into the result, and the legacy callers
+    // report both from the operands before the call: `custom_bounds_reconciled` is the intersection
+    // the kernel keeps in `custom_values`, which `needs_custom_reconciliation` announces, and a
+    // `counter_reset_collision` is the contradiction the kernel answers with an unknown hint, which
+    // is what the legacy arithmetic derived from two hints that disagree. Holding the kernel to
+    // both keeps a change there from dropping either.
+    debug_assert_eq!(
+        outcome.custom_bounds_reconciled,
+        left.needs_custom_reconciliation(right)
+    );
+    if outcome.counter_reset_collision {
+        debug_assert_eq!(combined.reset_hint, CounterResetHint::Unknown);
+    }
+    if subtract {
+        combined.reset_hint = CounterResetHint::Gauge;
+    }
+    // The legacy arithmetic compacted a sum, so a bucket the two sides cancel out of leaves no
+    // span behind; the kernel keeps the bucket until a caller drops it.
+    combined.compact();
+    Some(legacy_histogram(&combined))
+}
+
+/// `histogram * factor`, a gauge histogram for a negative factor.
+pub(crate) fn scale(histogram: &NativeHistogram, factor: f64) -> NativeHistogram {
+    let Ok(mut scaled) = float_histogram(histogram) else {
+        // A layout the kernel cannot read -- spans that disagree with the counts, or a bucket index
+        // that leaves `i32` once expanded -- keeps the field-by-field scaling the legacy caller
+        // had, so such a histogram is still multiplied instead of dropped, and reports its layout
+        // when it is serialized. Scaling has no bounds to reconcile, so nothing is lost here.
+        return field_scaled(histogram, factor);
+    };
+    scaled.mul(factor);
+    legacy_histogram(&scaled)
+}
+
+/// `histogram / divisor`, with no buckets left for a zero divisor.
+pub(crate) fn divide_by(histogram: &NativeHistogram, divisor: f64) -> NativeHistogram {
+    let Ok(mut divided) = float_histogram(histogram) else {
+        return field_divided(histogram, divisor);
+    };
+    divided.div(divisor);
+    legacy_histogram(&divided)
+}
+
+fn field_scaled(histogram: &NativeHistogram, factor: f64) -> NativeHistogram {
+    let mut scaled = histogram.clone();
+    scaled.count *= factor;
+    scaled.zero_count *= factor;
+    scaled.sum *= factor;
+    for count in scaled
+        .positive_buckets
+        .iter_mut()
+        .chain(&mut scaled.negative_buckets)
+    {
+        *count *= factor;
+    }
+    if factor < 0.0 {
+        scaled.reset_hint = CounterResetHint::Gauge;
+    }
+    scaled
+}
+
+fn field_divided(histogram: &NativeHistogram, divisor: f64) -> NativeHistogram {
+    let mut divided = histogram.clone();
+    divided.count /= divisor;
+    divided.zero_count /= divisor;
+    divided.sum /= divisor;
+    if divisor == 0.0 {
+        divided.positive_spans.clear();
+        divided.positive_buckets.clear();
+        divided.negative_spans.clear();
+        divided.negative_buckets.clear();
+    } else {
+        for count in divided
+            .positive_buckets
+            .iter_mut()
+            .chain(&mut divided.negative_buckets)
+        {
+            *count /= divisor;
+        }
+    }
+    if divisor < 0.0 {
+        divided.reset_hint = CounterResetHint::Gauge;
+    }
+    divided
+}
+
 #[cfg(test)]
 mod tests {
     use common_query::native_histogram::{
@@ -169,7 +324,8 @@ mod tests {
     };
     use datatypes::series::histogram::{BucketSideView, HistogramView};
 
-    use super::{fraction_with_info, quantile_with_info};
+    use super::{add, float_histogram, fraction_with_info, quantile_with_info, sub};
+    use crate::histogram_eval::float_histogram::FloatHistogram;
     use crate::histogram_eval::native;
 
     /// Every kind of histogram the legacy representation can hold: exponential and custom, one
@@ -332,6 +488,159 @@ mod tests {
                     expected.to_bits(),
                     "{name} [{lower}, {upper}]: {value} vs {expected}"
                 );
+            }
+        }
+    }
+
+    /// Pairs the legacy arithmetic has to reconcile: the same layout, a resolution difference, a
+    /// zero bucket one side has to grow into the other, mismatched custom bounds, and NaN
+    /// observations.
+    fn pairs() -> Vec<(&'static str, NativeHistogram, NativeHistogram)> {
+        let mut same_left = empty(2, 0.0, 6.0, 6.0, 1.0);
+        same_left.positive_spans = vec![span(0, 2)];
+        same_left.positive_buckets = vec![2.0, 3.0];
+        same_left.negative_spans = vec![span(0, 1)];
+        same_left.negative_buckets = vec![1.0];
+        let mut same_right = empty(2, 0.0, 5.0, 8.0, 0.0);
+        same_right.positive_spans = vec![span(-1, 3)];
+        same_right.positive_buckets = vec![1.0, 2.0, 2.0];
+        same_right.negative_spans = vec![span(1, 1)];
+        same_right.negative_buckets = vec![2.0];
+
+        let mut fine = empty(3, 0.0, 2.0, 2.0, 0.0);
+        fine.positive_spans = vec![span(0, 2)];
+        fine.positive_buckets = vec![1.0, 1.0];
+        let mut coarse = empty(0, 0.0, 4.0, 5.0, 0.0);
+        coarse.positive_spans = vec![span(0, 1)];
+        coarse.positive_buckets = vec![4.0];
+
+        let mut narrow_zero = empty(0, 0.0, 3.0, 3.0, 0.0);
+        narrow_zero.positive_spans = vec![span(0, 1)];
+        narrow_zero.positive_buckets = vec![3.0];
+        let mut wide_zero = empty(0, 2.0, 4.0, 5.0, 1.0);
+        wide_zero.positive_spans = vec![span(1, 1)];
+        wide_zero.positive_buckets = vec![3.0];
+
+        let mut custom_left = empty(CUSTOM_BUCKETS_SCHEMA, 0.0, 6.0, 12.0, 0.0);
+        custom_left.custom_values = vec![1.0, 2.0, 4.0];
+        custom_left.positive_spans = vec![span(0, 3)];
+        custom_left.positive_buckets = vec![1.0, 3.0, 2.0];
+        let mut custom_right = empty(CUSTOM_BUCKETS_SCHEMA, 0.0, 6.0, 14.0, 0.0);
+        custom_right.custom_values = vec![2.0, 3.0, 4.0];
+        custom_right.positive_spans = vec![span(0, 3)];
+        custom_right.positive_buckets = vec![4.0, 1.0, 1.0];
+
+        let mut nan_left = empty(1, 0.0, 10.0, f64::NAN, 0.0);
+        nan_left.positive_spans = vec![span(0, 2)];
+        nan_left.positive_buckets = vec![3.0, 5.0];
+        let mut nan_right = empty(1, 0.0, 2.0, 2.0, 0.0);
+        nan_right.positive_spans = vec![span(0, 1)];
+        nan_right.positive_buckets = vec![2.0];
+
+        vec![
+            ("same_layout", same_left, same_right),
+            ("schema_reduction", fine, coarse),
+            ("zero_threshold", narrow_zero, wide_zero),
+            ("custom_bounds", custom_left, custom_right),
+            ("nan_sum", nan_left, nan_right),
+        ]
+    }
+
+    /// The buckets a side holds that carry observations, by index and bit pattern.
+    fn populated_buckets(spans: &[Span], buckets: &[f64]) -> Vec<(i32, u64)> {
+        let (offsets, lengths) = columns(spans);
+        let mut index = 0;
+        let mut out = Vec::new();
+        let mut counts = buckets.iter();
+        for (position, (offset, length)) in offsets.into_iter().zip(lengths).enumerate() {
+            index = if position == 0 {
+                offset
+            } else {
+                index + offset
+            };
+            for _ in 0..length {
+                let count = *counts.next().unwrap();
+                if count != 0.0 {
+                    out.push((index, count.to_bits()));
+                }
+                index += 1;
+            }
+        }
+        out
+    }
+
+    fn populated(side: &[(i32, f64)]) -> Vec<(i32, u64)> {
+        side.iter()
+            .filter(|(_, count)| *count != 0.0)
+            .map(|(index, count)| (*index, count.to_bits()))
+            .collect()
+    }
+
+    fn assert_same_payload(name: &str, legacy: &NativeHistogram, native: &FloatHistogram) {
+        assert_eq!(legacy.schema, native.schema, "{name}");
+        assert_eq!(
+            legacy.zero_threshold.to_bits(),
+            native.zero_threshold.to_bits(),
+            "{name}"
+        );
+        assert_eq!(legacy.count.to_bits(), native.count.to_bits(), "{name}");
+        assert_eq!(legacy.sum.to_bits(), native.sum.to_bits(), "{name}");
+        assert_eq!(
+            legacy.zero_count.to_bits(),
+            native.zero_count.to_bits(),
+            "{name}"
+        );
+        assert_eq!(
+            populated_buckets(&legacy.positive_spans, &legacy.positive_buckets),
+            populated(&native.positive),
+            "{name} positive"
+        );
+        assert_eq!(
+            populated_buckets(&legacy.negative_spans, &legacy.negative_buckets),
+            populated(&native.negative),
+            "{name} negative"
+        );
+    }
+
+    /// The added histogram is the kernel's addition, bucket for bucket and bit for bit.
+    #[test]
+    fn add_is_the_native_add() {
+        for (name, left, right) in pairs() {
+            let combined = add(&left, &right).unwrap();
+            let mut native = float_histogram(&left).unwrap();
+            native.add(&float_histogram(&right).unwrap()).unwrap();
+            assert_same_payload(name, &combined, &native);
+        }
+    }
+
+    /// The same for subtraction, which the kernel reports as an addition of the negation.
+    #[test]
+    fn sub_is_the_native_sub() {
+        for (name, left, right) in pairs() {
+            let combined = sub(&left, &right).unwrap();
+            assert_eq!(combined.reset_hint, CounterResetHint::Gauge, "{name}");
+            let mut native = float_histogram(&left).unwrap();
+            native.sub(&float_histogram(&right).unwrap()).unwrap();
+            native.reset_hint = CounterResetHint::Gauge;
+            assert_same_payload(name, &combined, &native);
+        }
+    }
+
+    /// Scaling and dividing move every count and leave the layout alone, as the kernel's own
+    /// multiplication and division do.
+    #[test]
+    fn scale_and_divide_by_are_the_native_mul_and_div() {
+        for (name, histogram, _) in pairs() {
+            for factor in [2.0, 0.5, -1.0, 0.0, f64::INFINITY] {
+                let scaled = super::scale(&histogram, factor);
+                let mut native = float_histogram(&histogram).unwrap();
+                native.mul(factor);
+                assert_same_payload(name, &scaled, &native);
+
+                let divided = super::divide_by(&histogram, factor);
+                let mut native = float_histogram(&histogram).unwrap();
+                native.div(factor);
+                assert_same_payload(name, &divided, &native);
             }
         }
     }
