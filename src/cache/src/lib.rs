@@ -234,3 +234,33 @@ pub fn with_default_composite_cache_registry(
 
     Ok(builder.add_cache_registry(registry))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use catalog::kvbackend::TableCacheRef;
+    use common_meta::cache::{
+        SchemaCacheRef, TableInfoCacheRef, TableNameCacheRef, TableRouteCacheRef,
+        TableSchemaCacheRef,
+    };
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use partition::cache::PartitionInfoCacheRef;
+
+    use super::*;
+
+    #[test]
+    fn test_datanode_layered_cache_registry_holds_all_caches() {
+        let registry = build_datanode_layered_cache_registry(Arc::new(MemoryKvBackend::<
+            common_meta::error::Error,
+        >::new()));
+
+        assert!(registry.get::<TableSchemaCacheRef>().is_some());
+        assert!(registry.get::<SchemaCacheRef>().is_some());
+        assert!(registry.get::<TableInfoCacheRef>().is_some());
+        assert!(registry.get::<TableNameCacheRef>().is_some());
+        assert!(registry.get::<TableCacheRef>().is_some());
+        assert!(registry.get::<TableRouteCacheRef>().is_some());
+        assert!(registry.get::<PartitionInfoCacheRef>().is_some());
+    }
+}

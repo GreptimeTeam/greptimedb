@@ -506,6 +506,7 @@ pub struct MergeScanExec {
     captured_remote_dyn_filters: Arc<Mutex<[Vec<CapturedDynFilter>; 2]>>,
     target_partition: usize,
     enable_per_region_metrics: bool,
+    row_estimate: Option<usize>,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -589,24 +590,39 @@ impl MergeScanExec {
             captured_remote_dyn_filters: Arc::default(),
             target_partition,
             enable_per_region_metrics,
+            row_estimate: None,
         })
     }
 
-    /// Conservative row-count upper bound for all selected regions.
+    /// Attaches an ordinary-scan row estimate to this merge scan.
+    pub fn with_row_estimate(mut self, row_estimate: usize) -> Self {
+        self.row_estimate = Some(row_estimate);
+        self
+    }
+
+    /// Row estimate for the whole merge scan, or a conservative plan-derived upper bound.
     ///
-    /// This is not an expected cardinality: DataFusion receives it as an
-    /// inexact estimate only because `Statistics` has no upper-bound precision.
+    /// The explicit estimate is inexact, not a bound. The fallback plan-derived upper bound is
+    /// also represented as inexact because `Statistics` has no upper-bound precision.
     fn estimated_num_rows(&self) -> Precision<usize> {
         if self.regions.is_empty() {
             return Precision::Inexact(0);
         }
 
         let Some(rows_per_region) = remote_plan_row_bound(&self.plan) else {
-            return Precision::Absent;
+            return self
+                .row_estimate
+                .map_or(Precision::Absent, Precision::Inexact);
         };
-        rows_per_region
-            .checked_mul(self.regions.len())
-            .map_or(Precision::Absent, Precision::Inexact)
+        let Some(row_bound) = rows_per_region.checked_mul(self.regions.len()) else {
+            return self
+                .row_estimate
+                .map_or(Precision::Absent, Precision::Inexact);
+        };
+        Precision::Inexact(
+            self.row_estimate
+                .map_or(row_bound, |estimate| estimate.min(row_bound)),
+        )
     }
 
     /// Number of partitions populated by the region striping in [`Self::to_stream`].
@@ -643,6 +659,16 @@ impl MergeScanExec {
         let read_preference = self.query_ctx.read_preference();
         let explain_verbose = self.query_ctx.explain_verbose();
         let live_analyze_metrics = explain_verbose && self.query_ctx.live_analyze_metrics_enabled();
+        // The nesting depth of the reads this plan dispatches. It is not incremented here:
+        // every datanode entry point increments the depth of the reads a request
+        // dispatches, so the frontend's outer reads carry 0 while the reads of a
+        // `MergeScanExec` running inside a datanode carry the depth of that datanode's
+        // request plus one. Depth 0 keeps the datanode admission lane of an outer read
+        // disjoint from the nested lane, see `RegionServerParallelism`.
+        let remote_read_depth = self
+            .query_ctx
+            .remote_read_depth()
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let remote_dyn_filter_registry_lease = acquire_remote_dyn_filter_registry_lease(
             context.as_ref(),
             &query_ctx,
@@ -709,6 +735,10 @@ impl MergeScanExec {
                     region_id,
                     &captured_remote_dyn_filters,
                 );
+                // The depth is written into the request context next to every other
+                // extension, so that remote dynamic filter registrations and the depth
+                // travel together and the datanode can pick the matching admission lane.
+                region_query_ctx.set_remote_read_depth(remote_read_depth);
                 if live_analyze_metrics {
                     let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
                     if let Some(remote_query_id) = remote_query_id {
@@ -1582,6 +1612,88 @@ mod tests {
     }
 
     #[test]
+    fn merge_scan_reports_attached_row_estimate_and_preserves_plan_bound() {
+        let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let uncapped = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let exec = merge_scan_exec_with_plan(regions, uncapped, 10).with_row_estimate(123);
+        let stats = merge_scan_statistics(&exec);
+        assert_eq!(stats.num_rows, Precision::Inexact(123));
+        assert_eq!(stats.total_byte_size, Precision::Absent);
+        assert!(stats.column_statistics.iter().all(|column| {
+            column.null_count == Precision::Absent
+                && column.max_value == Precision::Absent
+                && column.min_value == Precision::Absent
+                && column.distinct_count == Precision::Absent
+        }));
+        assert_eq!(
+            exec.statistics_from_inputs(&[], &StatisticsArgs::new().with_partition(Some(0)),)
+                .unwrap()
+                .num_rows,
+            Precision::Absent
+        );
+        let limited = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        let exec = merge_scan_exec_with_plan(vec![RegionId::new(1024, 1)], limited, 10)
+            .with_row_estimate(100);
+        assert_eq!(
+            merge_scan_statistics(&exec).num_rows,
+            Precision::Inexact(50)
+        );
+
+        let two_region_limit = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        let exec = merge_scan_exec_with_plan(
+            vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+            two_region_limit,
+            10,
+        )
+        .with_row_estimate(123);
+        assert_eq!(
+            merge_scan_statistics(&exec).num_rows,
+            Precision::Inexact(100)
+        );
+
+        let overflow_limit = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(i64::MAX as usize))
+            .unwrap()
+            .build()
+            .unwrap();
+        let overflow_cap = i64::MAX as usize;
+        assert_eq!(Some(overflow_cap), remote_plan_row_bound(&overflow_limit));
+        assert_eq!(None, overflow_cap.checked_mul(3));
+        let exec = merge_scan_exec_with_plan(
+            vec![
+                RegionId::new(1024, 1),
+                RegionId::new(1024, 2),
+                RegionId::new(1024, 3),
+            ],
+            overflow_limit,
+            10,
+        )
+        .with_row_estimate(123);
+        assert_eq!(
+            merge_scan_statistics(&exec).num_rows,
+            Precision::Inexact(123)
+        );
+    }
+
+    #[test]
     fn merge_scan_reports_only_deterministic_plan_bounds() {
         use datafusion::functions_aggregate::expr_fn::count;
         use datafusion_expr::GroupingSet;
@@ -2000,6 +2112,73 @@ mod tests {
         unregister_rx.await.unwrap();
         assert_eq!(handler.unregister_targets(), vec![1]);
         drop(lease);
+    }
+
+    /// Every region request carries the current execution depth of the plan, unchanged:
+    /// the increment happens on the datanode entry that serves the request.
+    #[tokio::test]
+    async fn to_stream_records_current_remote_read_depth_without_incrementing() {
+        for (incoming, expected) in [(None, "0"), (Some("0"), "0"), (Some("1"), "1")] {
+            let handler = Arc::new(DepthRecordingRegionQueryHandler::default());
+            let mut query_ctx = QueryContext::arc().as_ref().clone();
+            if let Some(incoming) = incoming {
+                query_ctx
+                    .set_extension(session::context::REMOTE_READ_DEPTH_EXTENSION_KEY, incoming);
+            }
+            let query_ctx = Arc::new(query_ctx);
+            let state = query_engine_state(handler.clone());
+            let plan = LogicalPlanBuilder::empty(true)
+                .project(vec![lit(1i32).alias("col1")])
+                .unwrap()
+                .build()
+                .unwrap();
+            let schema = plan.schema().as_arrow().clone();
+            let exec = MergeScanExec::new(
+                &SessionStateBuilder::new().build(),
+                TableName::new("catalog", "schema", "table"),
+                vec![RegionId::new(1024, 1)],
+                plan,
+                &schema,
+                handler.clone(),
+                query_ctx.clone(),
+                1,
+                None,
+                false,
+            )
+            .unwrap();
+
+            let stream = exec
+                .to_stream(task_context_with_engine_state(state, query_ctx), 0)
+                .unwrap();
+            stream.try_collect::<Vec<_>>().await.unwrap();
+
+            assert_eq!(
+                vec![Some(expected.to_string())],
+                handler.depths(),
+                "incoming depth {incoming:?} must be recorded as {expected}"
+            );
+        }
+    }
+
+    /// An unreadable depth must fail the read instead of being silently sent as depth 0.
+    #[tokio::test]
+    async fn to_stream_rejects_malformed_remote_read_depth() {
+        let handler = Arc::new(DepthRecordingRegionQueryHandler::default());
+        let mut query_ctx = QueryContext::arc().as_ref().clone();
+        query_ctx.set_extension(session::context::REMOTE_READ_DEPTH_EXTENSION_KEY, "abc");
+        let query_ctx = Arc::new(query_ctx);
+        let state = query_engine_state(handler.clone());
+        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+
+        let error = exec
+            .to_stream(task_context_with_engine_state(state, query_ctx), 0)
+            .err()
+            .expect("the malformed depth must fail the read");
+        assert!(
+            error.to_string().contains("Invalid remote read depth"),
+            "unexpected error: {error}"
+        );
+        assert!(handler.depths().is_empty());
     }
 
     #[tokio::test]
@@ -2475,6 +2654,67 @@ mod tests {
                 .map(|serialized| InitialDynFilterRegs::from_extension_value(&serialized).unwrap())
                 .unwrap();
             *self.registrations.lock().unwrap() = Some(registrations);
+            Ok(empty_record_batch_stream(&request))
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Records the reserved remote read depth of every dispatched region request.
+    #[derive(Default)]
+    struct DepthRecordingRegionQueryHandler {
+        depths: Mutex<Vec<Option<String>>>,
+    }
+
+    impl DepthRecordingRegionQueryHandler {
+        fn depths(&self) -> Vec<Option<String>> {
+            self.depths.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl RegionQueryHandler for DepthRecordingRegionQueryHandler {
+        async fn select_target(
+            &self,
+            _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            Ok(test_target(1))
+        }
+
+        async fn do_get(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            self.depths.lock().unwrap().push(
+                request
+                    .header
+                    .as_ref()
+                    .and_then(|header| header.query_context.as_ref())
+                    .and_then(|query_context| {
+                        query_context
+                            .extensions
+                            .get(session::context::REMOTE_READ_DEPTH_EXTENSION_KEY)
+                            .cloned()
+                    }),
+            );
             Ok(empty_record_batch_stream(&request))
         }
 

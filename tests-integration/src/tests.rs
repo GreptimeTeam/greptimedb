@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod bench_volatile_dist_join;
 mod gc;
 mod instance_kafka_wal_test;
 mod instance_noop_wal_test;
