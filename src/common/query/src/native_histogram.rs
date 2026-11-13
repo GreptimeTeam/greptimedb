@@ -984,6 +984,14 @@ fn add_reset_hint(left: CounterResetHint, right: CounterResetHint) -> CounterRes
 }
 
 /// Estimates a quantile from histogram metadata and a lazily materialized bucket sequence.
+///
+/// This is the estimator [`NativeHistogram::quantile_with_info`] and [`quantile_histogram_view`]
+/// expose, so it stays for callers of this crate. The PromQL `histogram_quantile` does not use it:
+/// that function reads the same histogram through the native kernel in the `promql` crate, which
+/// walks the buckets the way Prometheus does -- from the highest bucket down for a quantile above
+/// the median -- so one histogram has one answer instead of two that differ in their last places.
+/// The exponential boundary below interpolates with `2^x`, which likewise stays only for this
+/// estimator; the kernel interpolates with `exp2` over Prometheus's bound table.
 fn quantile_from_parts(
     q: f64,
     schema: i32,
@@ -1391,6 +1399,15 @@ pub fn exponential_overflow_bucket_index(schema: i32) -> Option<i32> {
     i32::try_from(last_finite.checked_add(1)?).ok()
 }
 
+/// The bound of bucket `idx`: a custom bound, an infinity sentinel, or `2^(idx / 2^schema)`.
+///
+/// The exponential case computes its bound instead of reading one, while Prometheus reads
+/// `ExponentialBounds`: those entries are not all correctly rounded, because a bound becomes a zero
+/// threshold that is compared exactly, and a computed one would not compare as the sender's did.
+/// So the computed bound here agrees with the table the native histogram kernel uses only to within
+/// an ulp. This function keeps serving the renderers and the estimators of this crate's public
+/// `NativeHistogram` API (`promql_string`, `estimated_stdvar`, the legacy quantile above, the
+/// zero-threshold reconciliation in `add`); the PromQL estimators read the kernel's `bound`.
 fn get_bound(idx: i32, schema: i32, custom_values: &[f64]) -> Option<f64> {
     if schema == CUSTOM_BUCKETS_SCHEMA {
         return match idx {

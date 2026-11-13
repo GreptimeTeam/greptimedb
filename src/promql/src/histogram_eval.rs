@@ -24,6 +24,7 @@ mod classic;
 // functions and binary operators, which build on other branches.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod float_histogram;
+pub(crate) mod legacy_bridge;
 mod native;
 #[cfg(test)]
 mod tests;
