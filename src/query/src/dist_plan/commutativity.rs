@@ -274,12 +274,9 @@ impl Categorizer {
                     // partitions hold, and its physical canonical router collects those pieces from
                     // exactly those partitions. A region holds only part of a label set, so a
                     // producer there would answer a label set from one region's share whenever the
-                    // pieces are spread; the one placement that covers a whole label set is a read
-                    // that one region holds entire, and only the planner's proof says that this
-                    // statement's read is one of those. The shape below the node says nothing about
-                    // it - a proven single-region read can hold sources, because a canonical cut
-                    // wraps its inputs in sources independently of how the scan was chosen - so the
-                    // proof is what decides, and the per-series rules below are not consulted: they
+                    // pieces are spread. Nothing below the node changes that: a canonical cut wraps
+                    // its inputs in sources independently of how the scan was chosen, so the shape
+                    // is not a placement proof. The per-series rules below are not consulted: they
                     // describe what a node computes, not where the pieces of a label set are.
                     return Commutativity::NonCommutative;
                 }
@@ -867,11 +864,10 @@ mod tests {
         ));
     }
 
-    /// A canonical producer without the planner's single-region proof never runs in a region,
-    /// whatever its children look like: its router collects the pieces of one label set from
-    /// exactly the partitions the producer runs on, and a region holds only part of a label set. A
-    /// bare scan underneath does not on its own admit the producer, so the node stays above the
-    /// regions with its router.
+    /// A canonical producer never runs in a region, whatever its children look like: its router
+    /// collects the pieces of one label set from exactly the partitions the producer runs on, and a
+    /// region holds only part of a label set. A bare scan underneath does not on its own admit the
+    /// producer, so the node stays above the regions with its router.
     #[test]
     fn a_canonical_producer_is_not_commutative_even_over_a_bare_scan() {
         let plan = canonical_producer_plan(table_scan_plan());
