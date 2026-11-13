@@ -2192,7 +2192,21 @@ async fn test_stale_staging_edit_rejected_after_close_time_flush_fails() {
     };
     let file_id = file.file_id;
     let stale_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
-    let result = submit_staging_edit(&engine, region_id, file.clone(), stale_expr.clone()).await;
+    // The flush task replies before the worker clears its close-time flush state.
+    // Wait for that notification before checking the stale staging identity.
+    // The busy check precedes the identity check, so retrying cannot hide a missed rejection.
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let result =
+                submit_staging_edit(&engine, region_id, file.clone(), stale_expr.clone()).await;
+            if !matches!(&result, Err(Error::RegionBusy { .. })) {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_matches!(result.unwrap_err(), Error::RegionState { .. });
 
     // A later staging for another partition expression does not take the stale edit either.

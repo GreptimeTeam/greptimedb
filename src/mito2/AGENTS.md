@@ -125,10 +125,11 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   (`worker/handle_reload.rs`). Never await a worker sender while holding a manifest guard.
 - Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
   to recover; the flushed entry id never prunes them. Opening a region replays its
-  WAL after `RegionManifest::wal_replay_start`. The WAL releases at open and after
-  a flush stay below this node's tails (`cap_wal_release`); truncate, drop, offline
-  cleanup and catchup release without that cap. Handoff floors are dropped once the
-  flushed entry id reaches them, in `RegionManifestBuilder::try_build`. While a
+  WAL after `RegionManifest::wal_replay_start`. The WAL releases at open, after
+  a flush, and on close stay below this node's tails (`cap_wal_release`); truncate,
+  drop, offline cleanup and catchup release without that cap. Handoff floors are
+  dropped once the flushed entry id reaches them, in
+  `RegionManifestBuilder::try_build`. While a
   region has pending tails, scans and memtable/SST stats fail with
   `RegionPendingTails`, and so do truncate, entering staging, a repartition flush,
   a close with `flush_on_close`, and every ALTER other than adding nullable columns

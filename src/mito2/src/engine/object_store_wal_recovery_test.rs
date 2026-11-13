@@ -34,6 +34,7 @@ use common_wal::config::object_store::{
     AckMode, CorruptedSegmentAction, ObjectStoreWalConfig, STANDALONE_GENERATION,
 };
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use futures::TryStreamExt;
 use log_store::ObjectStoreLogStore;
 use log_store::metrics::{
     METRIC_OBJECT_STORE_WAL_FAILING, METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL,
@@ -56,7 +57,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::engine::pending_tail_test::set_pending_tails;
+use crate::engine::pending_tail_test::{set_pending_tails, tail};
 use crate::manifest::action::{PendingTail, UptoKind};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::test_util::{
@@ -1975,6 +1976,299 @@ async fn test_enqueued_writes_fail_fast_while_the_object_store_refuses_the_backl
         },
         region_recovery_state(&engine, REGION_A).await
     );
+}
+
+#[rstest]
+#[case(AckMode::Durable)]
+#[case(AckMode::Enqueued)]
+#[tokio::test]
+async fn test_close_persists_bounded_release_without_losing_unflushed_rows(
+    #[case] ack_mode: AckMode,
+) {
+    let mut env = TestEnv::with_prefix("close-bounded-release").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    let (other_dir, other_schema) = create_region(&engine, REGION_B, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (REGION_A, rows(&schema, 0, 3)),
+                (REGION_B, rows(&other_schema, 0, 2)),
+            ],
+        )
+        .await;
+    flush_region(&engine, REGION_A, None).await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema, 3, 6))])
+        .await;
+    let expected = scan_rows(&engine, REGION_A).await;
+    let expected_other = scan_rows(&engine, REGION_B).await;
+    // Region B pins the shared object: reclaim-boundary recovery alone cannot
+    // discard region A's flushed entries without the close release record.
+    let before = wal_object_seqs(&object_store).await;
+    tokio::time::timeout(WAIT, close_region(&engine, REGION_A))
+        .await
+        .unwrap();
+    assert_eq!(before, wal_object_seqs(&object_store).await);
+    // The close completes without an upload; sealing persists its bounded release.
+    store.seal_open_batch().await.unwrap();
+    drop(writer);
+    crash(engine, store).await;
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    // Recovery uses the release even before this region is reopened.
+    let batches = store.read(&provider(REGION_A), 0).await.unwrap();
+    let entries: Vec<_> = batches.try_collect().await.unwrap();
+    assert_eq!(1, entries.iter().map(|batch| batch.len()).sum::<usize>());
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(expected, scan_rows(&engine, REGION_A).await);
+    open_region(&engine, REGION_B, &other_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(expected_other, scan_rows(&engine, REGION_B).await);
+    engine.stop().await.unwrap();
+}
+
+#[rstest]
+#[case::local_tail(true)]
+#[case::foreign_tail(false)]
+#[tokio::test]
+async fn test_close_bounded_release_preserves_pending_tails(
+    #[case] local_tail: bool,
+    #[values(AckMode::Durable, AckMode::Enqueued)] ack_mode: AckMode,
+) {
+    let mut env = TestEnv::with_prefix("close-pending-tails")
+        .await
+        .with_node_id(0);
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    let (_, other_schema) = create_region(&engine, REGION_B, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (REGION_A, rows(&schema, 0, 1)),
+                (REGION_B, rows(&other_schema, 0, 1)),
+            ],
+        )
+        .await;
+    for i in 1..3 {
+        writer
+            .put_and_seal(&engine, vec![(REGION_A, rows(&schema, i, i + 1))])
+            .await;
+    }
+    // A foreign tail with a lower bound must not cap this node's release.
+    let mut tails = vec![tail(1, 0, entry_id(3, 1))];
+    if local_tail {
+        tails.push(tail(0, entry_id(2, 1), entry_id(3, 1)));
+        tails.push(tail(0, entry_id(1, 1), entry_id(2, 1)));
+    }
+    set_pending_tails(&engine, REGION_A, tails.clone()).await;
+    flush_region(&engine, REGION_A, None).await;
+    assert_eq!(
+        entry_id(3, 1),
+        engine
+            .get_region(REGION_A)
+            .unwrap()
+            .version()
+            .flushed_entry_id
+    );
+    close_region(&engine, REGION_A).await;
+    store.seal_open_batch().await.unwrap();
+    drop(writer);
+    crash(engine, store).await;
+
+    let store = open_store(&object_store, ack_mode).await;
+    let batches: Vec<_> = store
+        .read(&provider(REGION_A), 0)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let ids: Vec<_> = batches
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.entry_id())
+        .collect();
+    let expected = if local_tail {
+        vec![entry_id(2, 1), entry_id(3, 1)]
+    } else {
+        vec![]
+    };
+    assert_eq!(expected, ids);
+    let engine = new_engine(&mut env, store).await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        tails,
+        engine.get_region(REGION_A).unwrap().version().pending_tails
+    );
+    engine.stop().await.unwrap();
+}
+
+#[rstest]
+#[case(AckMode::Durable)]
+#[case(AckMode::Enqueued)]
+#[tokio::test]
+async fn test_close_reopens_after_its_release_record_is_collected(#[case] ack_mode: AckMode) {
+    let mut env = TestEnv::with_prefix("close-collected-release").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (dir_a, schema_a) = create_region(&engine, REGION_A, &[]).await;
+    let (dir_b, schema_b) = create_region(&engine, REGION_B, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    for i in 0..9 {
+        let (region_id, schema) = if i < 5 {
+            (REGION_A, &schema_a)
+        } else {
+            (REGION_B, &schema_b)
+        };
+        writer
+            .put_and_seal(&engine, vec![(region_id, rows(schema, i, i + 1))])
+            .await;
+    }
+    let expected_a = scan_rows(&engine, REGION_A).await;
+    let expected_b = scan_rows(&engine, REGION_B).await;
+    // A's unflushed data pins the prefix while the higher-watermark B closes.
+    flush_region(&engine, REGION_B, None).await;
+    assert_eq!(
+        entry_id(9, 1),
+        region(&engine, REGION_B).version().flushed_entry_id
+    );
+    close_region(&engine, REGION_B).await;
+    store.seal_open_batch().await.unwrap();
+    wait_for_collection(&store).await;
+    assert!(wal_object_seqs(&object_store).await.contains(&10));
+    flush_region(&engine, REGION_A, None).await;
+    assert_eq!(
+        entry_id(5, 1),
+        region(&engine, REGION_A).version().flushed_entry_id
+    );
+    close_region(&engine, REGION_A).await;
+    store.seal_open_batch().await.unwrap();
+    wait_for_collection(&store).await;
+    // Only A's release remains: neither B's entries nor its release can
+    // short-circuit the history check after restart.
+    assert_eq!(vec![11], wal_object_seqs(&object_store).await);
+    drop(writer);
+    crash(engine, store).await;
+    for _ in 0..2 {
+        let store = open_store(&object_store, ack_mode).await;
+        let engine = new_engine(&mut env, store.clone()).await;
+        open_region(&engine, REGION_B, &dir_b, &[]).await.unwrap();
+        open_region(&engine, REGION_A, &dir_a, &[]).await.unwrap();
+        assert_eq!(expected_b, scan_rows(&engine, REGION_B).await);
+        assert_eq!(expected_a, scan_rows(&engine, REGION_A).await);
+        crash(engine, store).await;
+    }
+}
+
+#[rstest]
+#[case::stopped(true)]
+#[case::poisoned(false)]
+#[tokio::test]
+async fn test_close_handles_unavailable_bounded_release(#[case] stopped: bool) {
+    let mut env = TestEnv::with_prefix("close-release-admission-failure").await;
+    let store = open_store(&memory_store(), AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    create_region(&engine, REGION_A, &[]).await;
+    if stopped {
+        store.stop().await.unwrap();
+    } else {
+        // Exhausting the sequence poisons the live actor: this is a real
+        // admission failure, unlike the expected stop-before-close order.
+        assert!(
+            store
+                .obsolete(&provider(REGION_A), REGION_A, u64::MAX)
+                .await
+                .is_err()
+        );
+    }
+    let failures = crate::metrics::WAL_RELEASE_ADMISSION_FAILURE_TOTAL.get();
+    close_region(&engine, REGION_A).await;
+    assert!(engine.get_region(REGION_A).is_none());
+    assert_eq!(
+        failures + u64::from(!stopped),
+        crate::metrics::WAL_RELEASE_ADMISSION_FAILURE_TOTAL.get()
+    );
+    engine.stop().await.unwrap();
+}
+
+#[rstest]
+#[case(AckMode::Durable)]
+#[case(AckMode::Enqueued)]
+#[tokio::test]
+async fn test_flush_on_close_persists_bounded_release(#[case] ack_mode: AckMode) {
+    let mut env = TestEnv::with_prefix("flush-on-close-bounded-release").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    let (_, other_schema) = create_region(&engine, REGION_B, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (REGION_A, rows(&schema, 0, 3)),
+                (REGION_B, rows(&other_schema, 0, 2)),
+            ],
+        )
+        .await;
+    let expected = scan_rows(&engine, REGION_A).await;
+    tokio::time::timeout(
+        WAIT,
+        engine.handle_request(
+            REGION_A,
+            RegionRequest::Close(RegionCloseRequest {
+                flush_on_close: true,
+            }),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(engine.get_region(REGION_A).is_none());
+    store.seal_open_batch().await.unwrap();
+    drop(writer);
+    crash(engine, store).await;
+    let store = open_store(&object_store, ack_mode).await;
+    // B pins the shared object. Before A is reopened, only the persisted
+    // release can hide its entries; the manifest has not supplied its floor.
+    let entries: Vec<_> = store
+        .read(&provider(REGION_A), 0)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(entries.iter().all(Vec::is_empty));
+    let entries: Vec<_> = store
+        .read(&provider(REGION_B), 0)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(1, entries.iter().map(Vec::len).sum::<usize>());
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(expected, scan_rows(&engine, REGION_A).await);
+    engine.stop().await.unwrap();
 }
 
 /// Reports the actual scheduler state before the worker can process flush

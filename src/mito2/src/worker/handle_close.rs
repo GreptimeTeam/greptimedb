@@ -14,11 +14,13 @@
 
 //! Handling close request.
 
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use store_api::logstore::LogStore;
 use store_api::region_request::{RegionCloseRequest, RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
+use crate::manifest::action::cap_wal_release;
+use crate::metrics::WAL_RELEASE_ADMISSION_FAILURE_TOTAL;
 use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
@@ -85,12 +87,38 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // No close-time flush is required, or the region cannot flush.
         let pending_closes = self.take_pending_closes(region_id);
-        self.remove_region(region_id).await;
+        self.close_region(region_id).await;
         for ddl in pending_closes {
             ddl.sender.send(Ok(0));
         }
         info!("Region {} closed, worker: {}", region_id, self.id);
         sender.send(Ok(0))
+    }
+
+    /// Closes a region and queues a release of its persisted WAL history.
+    /// Pending tails cap the release, as they do after a flush.
+    /// The stopped manifest makes the watermark stable, and the worker awaits
+    /// admission before it can process a reopen. Upload failures are retried by
+    /// the store; failure to admit a release retains extra WAL history.
+    pub(crate) async fn close_region(&mut self, region_id: RegionId) {
+        let Some(region) = self.regions.get_region(region_id) else {
+            return;
+        };
+        self.remove_region(region_id).await;
+        let version = region.version();
+        let release_entry_id = cap_wal_release(
+            &version.pending_tails,
+            self.file_ref_manager.node_id(),
+            version.flushed_entry_id,
+        );
+        if let Err(error) = self
+            .wal
+            .release_entries(region_id, release_entry_id, &region.provider)
+            .await
+        {
+            WAL_RELEASE_ADMISSION_FAILURE_TOTAL.inc();
+            warn!(error; "Failed to queue WAL release for closed region {}", region_id);
+        }
     }
 
     /// Remove a region and stop all related tasks.
