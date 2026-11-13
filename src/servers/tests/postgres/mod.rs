@@ -12,18 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use auth::{
-    BEARER_TOKEN_USER, Identity, Password, UserInfoRef, UserProvider, UserProviderRef,
-    format_pg_scram_sha256_password_verifier, user_provider_from_option,
+    BEARER_TOKEN_USER, Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef,
+    UserProvider, UserProviderRef, format_pg_scram_sha256_password_verifier,
+    user_provider_from_option,
 };
+use common_base::secrets::ExposeSecret;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
@@ -40,6 +43,9 @@ use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::TableRef;
 use table::test_util::MemTable;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
 use crate::create_testing_instance;
@@ -86,6 +92,116 @@ impl UserProvider for BearerProvider {
         assert_eq!("alice", user_info.username());
         self.authorizations.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+const MIXED_AUTH_SCRAM_USER: &str = "scram_user";
+const MIXED_AUTH_SCRAM_PASSWORD: &[u8] = b"scram-password";
+const MIXED_AUTH_CLEARTEXT_USER: &str = "clear_user";
+const MIXED_AUTH_CLEARTEXT_PASSWORD: &str = "clear-password";
+const MIXED_AUTH_DENIED_USER: &str = "denied_user";
+
+/// Selects SCRAM-SHA-256 for [`MIXED_AUTH_SCRAM_USER`] and
+/// [`MIXED_AUTH_DENIED_USER`] (whose authorization is denied) and cleartext
+/// for everyone else, so one endpoint serves both mechanisms.
+struct MixedAuthProvider {
+    scram_verifier: PgScramSha256Verifier,
+    selections: Mutex<HashMap<String, &'static str>>,
+    authorize_calls: Mutex<HashMap<String, usize>>,
+}
+
+#[async_trait]
+impl UserProvider for MixedAuthProvider {
+    fn name(&self) -> &str {
+        "mixed-auth-test"
+    }
+
+    async fn authenticate(
+        &self,
+        id: Identity<'_>,
+        password: Password<'_>,
+    ) -> auth::error::Result<UserInfoRef> {
+        let Identity::UserId(username, _) = id;
+        let Password::PlainText(password) = password else {
+            return auth::error::UnsupportedPasswordTypeSnafu {
+                password_type: "plain_text",
+            }
+            .fail();
+        };
+
+        let verified = if username == MIXED_AUTH_SCRAM_USER || username == MIXED_AUTH_DENIED_USER {
+            self.scram_verifier
+                .verify_plain_password(password.expose_secret().as_bytes())?
+        } else if username == MIXED_AUTH_CLEARTEXT_USER {
+            password.expose_secret() == MIXED_AUTH_CLEARTEXT_PASSWORD
+        } else {
+            return auth::error::UserNotFoundSnafu {
+                username: username.to_string(),
+            }
+            .fail();
+        };
+
+        if verified {
+            Ok(auth::userinfo_by_name(Some(username.to_string())))
+        } else {
+            auth::error::UserPasswordMismatchSnafu {
+                username: username.to_string(),
+            }
+            .fail()
+        }
+    }
+
+    async fn authorize(
+        &self,
+        catalog: &str,
+        schema: &str,
+        user_info: &UserInfoRef,
+    ) -> auth::error::Result<()> {
+        *self
+            .authorize_calls
+            .lock()
+            .unwrap()
+            .entry(user_info.username().to_string())
+            .or_insert(0) += 1;
+
+        if user_info.username() == MIXED_AUTH_DENIED_USER {
+            return auth::error::AccessDeniedSnafu {
+                catalog: catalog.to_string(),
+                schema: schema.to_string(),
+                username: user_info.username().to_string(),
+            }
+            .fail();
+        }
+        Ok(())
+    }
+
+    async fn postgres_auth_info(
+        &self,
+        id: Identity<'_>,
+        _catalog: &str,
+    ) -> auth::error::Result<PgAuthInfo> {
+        let Identity::UserId(username, _) = id;
+        let auth_info = if username == MIXED_AUTH_SCRAM_USER || username == MIXED_AUTH_DENIED_USER {
+            PgAuthInfo::ScramSha256 {
+                verifier: self.scram_verifier.clone(),
+                user_info: Some(auth::userinfo_by_name(Some(username.to_string()))),
+            }
+        } else {
+            PgAuthInfo::Cleartext
+        };
+
+        // Record the mechanism from the returned variant, so the map can
+        // never claim a mechanism the provider did not hand out.
+        let method = match &auth_info {
+            PgAuthInfo::ScramSha256 { .. } => "scram",
+            PgAuthInfo::Cleartext => "cleartext",
+        };
+        self.selections
+            .lock()
+            .unwrap()
+            .insert(username.to_string(), method);
+
+        Ok(auth_info)
     }
 }
 
@@ -211,6 +327,132 @@ async fn test_schema_validating() -> Result<()> {
     assert!(fail.is_err());
     pg_server.shutdown().await.unwrap();
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_database_existence_is_checked_after_authentication_and_authorization() -> Result<()> {
+    let provider = Arc::new(MixedAuthProvider {
+        scram_verifier: PgScramSha256Verifier::from_password(
+            MIXED_AUTH_SCRAM_PASSWORD,
+            b"database-auth-salt",
+            4096,
+        )
+        .unwrap(),
+        selections: Mutex::new(HashMap::new()),
+        authorize_calls: Mutex::new(HashMap::new()),
+    });
+    let (server, port) = start_test_server_with_user_provider(provider, Default::default()).await?;
+    for database in [DEFAULT_SCHEMA_NAME, "missing", "missing_catalog-public"] {
+        for (user, password, authenticated) in [
+            (MIXED_AUTH_CLEARTEXT_USER, "wrong", false),
+            (MIXED_AUTH_SCRAM_USER, "wrong", false),
+            ("unknown", "wrong", false),
+            (MIXED_AUTH_DENIED_USER, "scram-password", false),
+            (
+                MIXED_AUTH_CLEARTEXT_USER,
+                MIXED_AUTH_CLEARTEXT_PASSWORD,
+                true,
+            ),
+            (MIXED_AUTH_SCRAM_USER, "scram-password", true),
+        ] {
+            let result = tokio_postgres::Config::new()
+                .host("127.0.0.1")
+                .port(port)
+                .user(user)
+                .password(password)
+                .dbname(database)
+                .connect_timeout(Duration::from_secs(2))
+                .connect(NoTls)
+                .await;
+            if authenticated && database == DEFAULT_SCHEMA_NAME {
+                let (client, connection) = result.unwrap();
+                let task = tokio::spawn(connection);
+                client.simple_query("SELECT 1").await.unwrap();
+                drop(client);
+                task.await.unwrap().unwrap();
+            } else {
+                let error = match result {
+                    Err(error) => error,
+                    Ok(_) => panic!("unexpected successful login for {user} in {database}"),
+                };
+                assert_eq!(
+                    Some(if !authenticated {
+                        &SqlState::INVALID_PASSWORD
+                    } else if database == "missing_catalog-public" {
+                        &SqlState::INTERNAL_ERROR
+                    } else {
+                        &SqlState::INVALID_CATALOG_NAME
+                    }),
+                    error.code(),
+                    "{user} in {database}: {error}"
+                );
+            }
+        }
+    }
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_startup_database_backend_error_closes_connection() -> Result<()> {
+    let provider = Arc::new(MixedAuthProvider {
+        scram_verifier: PgScramSha256Verifier::from_password(
+            MIXED_AUTH_SCRAM_PASSWORD,
+            b"database-auth-salt",
+            4096,
+        )
+        .unwrap(),
+        selections: Mutex::new(HashMap::new()),
+        authorize_calls: Mutex::new(HashMap::new()),
+    });
+    let (server, port) = start_test_server_with_user_provider(provider, Default::default()).await?;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    // The in-memory catalog reports an error for an unknown catalog, exercising
+    // the backend-error path after successful authentication and authorization.
+    let mut startup = 196608i32.to_be_bytes().to_vec();
+    startup.extend_from_slice(
+        format!("user\0{MIXED_AUTH_CLEARTEXT_USER}\0database\0missing_catalog-public\0\0")
+            .as_bytes(),
+    );
+    stream
+        .write_all(&((startup.len() + 4) as i32).to_be_bytes())
+        .await
+        .unwrap();
+    stream.write_all(&startup).await.unwrap();
+    let mut header = [0; 5];
+    stream.read_exact(&mut header).await.unwrap();
+    assert_eq!(b'R', header[0]);
+    let mut body = vec![0; i32::from_be_bytes(header[1..].try_into().unwrap()) as usize - 4];
+    stream.read_exact(&mut body).await.unwrap();
+    assert_eq!(3i32.to_be_bytes(), body.as_slice());
+    let password = format!("{MIXED_AUTH_CLEARTEXT_PASSWORD}\0");
+    let mut message = vec![b'p'];
+    message.extend_from_slice(&((password.len() + 4) as i32).to_be_bytes());
+    message.extend_from_slice(password.as_bytes());
+    stream.write_all(&message).await.unwrap();
+    stream.read_exact(&mut header).await.unwrap();
+    assert_eq!(b'E', header[0]);
+    let mut body = vec![0; i32::from_be_bytes(header[1..].try_into().unwrap()) as usize - 4];
+    stream.read_exact(&mut body).await.unwrap();
+    assert!(body.windows(7).any(|part| part == b"SFATAL\0"));
+    assert!(body.windows(7).any(|part| part == b"CXX000\0"));
+    // A client that ignores the startup error must not enter the query loop.
+    let query = b"SELECT 1\0";
+    let mut message = vec![b'Q'];
+    message.extend_from_slice(&((query.len() + 4) as i32).to_be_bytes());
+    message.extend_from_slice(query);
+    let _ = stream.write_all(&message).await;
+    let mut response = [0];
+    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut response))
+        .await
+        .unwrap();
+    assert!(
+        matches!(read, Ok(0))
+            || matches!(read, Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+        "{read:?}"
+    );
+    server.shutdown().await.unwrap();
     Ok(())
 }
 
