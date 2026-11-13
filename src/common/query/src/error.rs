@@ -231,11 +231,11 @@ pub enum Error {
 }
 
 impl Error {
-    /// Whether the error says the predicate has no wire form, so the filter must not be
-    /// published to remote regions.
+    /// Whether the error reports a dynamic filter predicate with no wire form.
     ///
-    /// Transport never rewrites an unsupported dynamic predicate to `true`, so producers
-    /// answer this error by skipping the payload and keeping the query running.
+    /// Initial capture omits the refused snapshot; ongoing fanout sends an explicit
+    /// `true` reset to invalidate any stale region-side predicate. Neither path fails
+    /// the query.
     pub fn is_dyn_filter_unsupported(&self) -> bool {
         matches!(self, Error::DynFilterUnsupported { .. })
     }
@@ -272,7 +272,7 @@ impl ErrorExt for Error {
 
             Error::DynFilterPayloadTooLarge { .. } => StatusCode::PlanQuery,
             // An unrepresentable dynamic predicate is a transport limitation, not a
-            // server failure: producers skip the filter and the query keeps running.
+            // server failure: callers omit the initial snapshot or reset the remote predicate.
             Error::DynFilterUnsupported { .. } => StatusCode::Unsupported,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),

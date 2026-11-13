@@ -160,8 +160,8 @@ impl DynFilterPayload {
     /// # Encoder-level no-substitution rule
     ///
     /// This encoder never replaces a node in the producer expression with `true`: it
-    /// either serializes the expression, drops whole membership-free top-level conjuncts,
-    /// or returns one of the typed errors below. A caller decides what a refused
+    /// serializes the expression, retries after dropping whole top-level conjuncts under
+    /// the retention rules above, or returns an error. A caller decides what a refused
     /// generation means for its receiver. Initial capture keeps the parent filter local;
     /// the long-lived query fanout path
     /// (`remote_dyn_filter_registry::fanout_snapshot_for_query`) publishes an explicit
@@ -180,9 +180,9 @@ impl DynFilterPayload {
     ///   as unsupported; it is a size refusal and uses
     ///   [`ConjunctRetention::OverBudget`].
     ///
-    /// Neither error is a query error: initial capture leaves the parent filter local, and
-    /// fanout resets the remote predicate to `true` so a later widening cannot be pruned
-    /// by a stale narrower filter.
+    /// These refusals do not fail the query in either caller: initial capture leaves the
+    /// parent filter local, while fanout sends an explicit `true` reset instead of leaving
+    /// a stale narrower predicate installed.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
