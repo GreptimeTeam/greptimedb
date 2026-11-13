@@ -32,7 +32,7 @@ use tokio::sync::Notify;
 
 use super::ScanRequest;
 use crate::config::MitoConfig;
-use crate::engine::listener::{EventListener, FlushCancellationListener};
+use crate::engine::listener::{CountingStallListener, EventListener, FlushCancellationListener};
 use crate::test_util::{
     CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows, put_rows, rows_schema,
 };
@@ -72,32 +72,6 @@ impl EventListener for FlushCommitListener {
 
     fn on_compaction_scheduled(&self, _region_id: RegionId) {
         self.compaction_scheduled.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-#[derive(Default)]
-struct CountingStallListener {
-    count: AtomicUsize,
-    notify: Notify,
-}
-
-impl CountingStallListener {
-    async fn wait_for_count(&self, expected: usize) {
-        loop {
-            let notified = self.notify.notified();
-            if self.count.load(Ordering::Relaxed) >= expected {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl EventListener for CountingStallListener {
-    fn on_write_stall(&self) {
-        self.count.fetch_add(1, Ordering::Relaxed);
-        self.notify.notify_waiters();
     }
 }
 

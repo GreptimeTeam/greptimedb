@@ -66,7 +66,9 @@ use crate::object_store_wal::format::{
     ChainLink, EncodedObject, FooterEntry, HEADER_LEN, Header, RELEASE_REGION_ID, Record, Release,
     decode_header, decode_releases, decode_segment, encode_object, encode_releases, object_len,
 };
-use crate::object_store_wal::index::{FetchedObject, FetchedObjects, fetch_footers, select_chain};
+use crate::object_store_wal::index::{
+    FetchedObject, FetchedObjects, ensure_vanished_below, fetch_footers, select_chain,
+};
 use crate::object_store_wal::io::{ObjectStoreIo, PutResult, WalObjectIo};
 use crate::object_store_wal::prefetch::READ_PREFETCH_BYTES;
 use crate::object_store_wal::{history, prefetch};
@@ -3061,12 +3063,7 @@ fn finish_recovery(fetched: FetchedObjects) -> Result<Recovered> {
             .context(WalObjectSequenceExhaustedSnafu { last_object_seq })?,
     };
     let reclaim_boundary = tip.map_or(0, |tip| headers[&tip.object_seq].reclaim_boundary);
-    if let Some((_, error)) = vanished
-        .into_iter()
-        .find(|(object_seq, _)| *object_seq >= reclaim_boundary)
-    {
-        return Err(error);
-    }
+    ensure_vanished_below(vanished, reclaim_boundary)?;
     let chain = chain.into_iter().collect::<HashSet<_>>();
 
     let mut catalog = ObjectCatalog::default();

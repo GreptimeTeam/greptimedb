@@ -27,6 +27,7 @@ use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, RegionEditRequest, WorkerRequest, WorkerRequestWithTime};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::RegionWorkerLoop;
+use crate::worker::drain_ended_staging;
 use crate::worker::handle_reload::notify_if_fenced;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -155,10 +156,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender.send(result.map(|_| 0));
                     return;
                 };
-                let mut manager = region.manifest_ctx.manifest_manager.write().await;
-                let result = region.exit_staging_on_success(&mut manager).await;
-                drop(manager);
-                let hook_payload = match result {
+                let manager = region.manifest_ctx.manifest_manager.write().await;
+                let drain = drain_ended_staging(&worker_sender, region_id);
+                let hook_payload = match region.end_staging(manager, drain).await {
                     Ok(payload) => payload,
                     Err(e) => {
                         notify_if_fenced(&worker_sender, &region).await;

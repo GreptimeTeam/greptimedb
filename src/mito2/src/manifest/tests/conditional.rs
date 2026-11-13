@@ -29,8 +29,10 @@ use object_store::layers::mock::{
 use object_store::services::Fs;
 use rstest::rstest;
 use store_api::ManifestVersion;
+use store_api::storage::FileId;
 
 use crate::error::{Error, Result};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::{
     LAST_CHECKPOINT_FILE, ManifestObjectStore, delta_file, gen_path, is_checkpoint_file,
@@ -38,7 +40,8 @@ use crate::manifest::storage::{
 };
 use crate::manifest::tests::utils::{basic_region_metadata, fail_manifest_reads_layer};
 use crate::sst::FormatType;
-use crate::test_util::nop_action;
+use crate::sst::file::FileMeta;
+use crate::test_util::{DeltaFaults, nop_action};
 
 fn temp_store() -> (TempDir, ObjectStore) {
     let dir = create_temp_dir("");
@@ -142,6 +145,16 @@ fn assert_conflict(error: &Error) {
     );
 }
 
+fn import(file_id: FileId) -> RegionMetaActionList {
+    RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+        files_to_add: vec![FileMeta {
+            file_id,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }))
+}
+
 #[rstest]
 #[case::conditional(true)]
 #[case::legacy(false)]
@@ -213,17 +226,17 @@ async fn test_compression_settings_share_one_name() {
     let mut compressed = conditional_store(&store, CompressionType::Gzip);
     let data = vec![b'a'; 1024];
 
-    stored.save(1, &data, false).await.unwrap();
+    stored.save(1, &data).await.unwrap();
     let stored_object = store.read(&delta_key(1)).await.unwrap().to_vec();
     assert!(stored_object.len() > data.len());
 
     // A retry by a writer with the other setting succeeds and leaves the object alone.
-    compressed.save(1, &data, false).await.unwrap();
+    compressed.save(1, &data).await.unwrap();
     let retried_object = store.read(&delta_key(1)).await.unwrap().to_vec();
     assert_eq!(stored_object, retried_object);
     assert_eq!(stored_object.len() as u64, compressed.total_manifest_size());
 
-    compressed.save(2, &data, false).await.unwrap();
+    compressed.save(2, &data).await.unwrap();
     assert!(store.read(&delta_key(2)).await.unwrap().len() < data.len());
     assert_eq!(
         vec![(1, data.clone()), (2, data)],
@@ -254,7 +267,7 @@ async fn test_existing_delta_conflicts(#[case] undecodable: bool, #[case] unread
     };
 
     let error = conditional_store(&writer_store, CompressionType::Gzip)
-        .save(1, b"mine", false)
+        .save(1, b"mine")
         .await
         .unwrap_err();
 
@@ -370,4 +383,35 @@ async fn test_deltas_are_readable_across_modes(
 
     assert_eq!(1, reader.last_version());
     assert_eq!(2, commit(&mut reader).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_staged_commit_retry_writes_same_content() {
+    let (_dir, store) = temp_store();
+    let faults = DeltaFaults::default();
+    let store = store.layer(faults.layer());
+    let mut manager = create_manager(options(&store, CompressionType::Gzip, 0, true)).await;
+    let imported = FileId::random();
+    manager.update(import(imported), true).await.unwrap();
+
+    faults.lose_next_response();
+    let error = manager.commit_staged(|| false).await.unwrap_err();
+    assert!(error.may_have_persisted_manifest_update());
+    assert_eq!(0, manager.last_version());
+
+    // Until the kept commit is retried, only a retried import (empty for a target with no
+    // files) is staged.
+    manager.update(import(imported), true).await.unwrap();
+    let empty = RegionMetaActionList::with_action(RegionMetaAction::Edit(Default::default()));
+    manager.update(empty, true).await.unwrap();
+    let refused = manager.update(import(FileId::random()), true).await;
+    assert!(
+        matches!(refused, Err(Error::EndStagingPending { .. })),
+        "{refused:?}"
+    );
+
+    // The retry writes the same content, so it recognizes its own landed write.
+    assert_eq!(1, manager.commit_staged(|| false).await.unwrap().0);
+    assert!(manager.staged_actions().is_none());
+    assert!(manager.manifest().files.contains_key(&imported));
 }
