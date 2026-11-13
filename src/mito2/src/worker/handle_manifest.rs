@@ -355,7 +355,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         // Unbound imports must not be acknowledged into a manifest that staging can discard.
-        if Self::is_import_without_staging_binding(&request) && region.is_staging_or_staged_edit() {
+        if Self::is_import_without_staging_binding(&request) && region.in_staging_session() {
             request
                 .waiters
                 .reply_with(|| RejectWriteInStagingSnafu { region_id }.fail());
@@ -673,7 +673,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 true
             }
-            DdlRequest::Close(request) if !region.is_staging_or_staged_edit() => {
+            DdlRequest::Close(request) if !region.in_staging_session() => {
                 // Another Close can take queued closes and reply without executing their
                 // handlers, so reject invalid flush-on-close requests before that handoff.
                 !self.flush_scheduler.has_close_time_flush(ddl.region_id)

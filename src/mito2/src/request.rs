@@ -1189,6 +1189,7 @@ impl BackgroundNotify {
             | Self::CompactionFinished(_)
             | Self::CompactionFailed(_)
             | Self::RegionChange(_)
+            | Self::StagingEnded(_)
             | Self::EnterStaging(_) => true,
             // Edit completion dispatches before scheduling compaction, after stalled writes.
             // A completion from an old instance must not dispatch the new instance's queue.
@@ -1201,7 +1202,10 @@ impl BackgroundNotify {
             | Self::DiscardUnflushed(_)
             | Self::CopyRegionFromFinished(_)
             | Self::RegionFenced
-            | Self::RegionReloaded { .. } => false,
+            | Self::RegionReloaded { .. }
+            | Self::RegionBecameWritable
+            | Self::TailReplayCommitted { .. }
+            | Self::TailReplayEnded => false,
         }
     }
 }

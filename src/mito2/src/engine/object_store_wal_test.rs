@@ -877,10 +877,32 @@ async fn test_end_of_staging_after_deadline_sends_nothing() {
         .handle_request(region_id, enter_staging_request())
         .await
         .unwrap();
+    let partition_expr = region
+        .manifest_ctx
+        .staging_partition_info()
+        .unwrap()
+        .partition_expr()
+        .unwrap()
+        .to_string();
+    let (sender, receiver) = oneshot::channel();
     engine
-        .edit_region(region_id, edit_files(vec![file.as_ref().clone()], vec![]))
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::EditRegion(
+                RegionEditRequest::new(
+                    region_id,
+                    edit_files(vec![file.as_ref().clone()], vec![]),
+                    false,
+                    sender,
+                )
+                .for_staging(partition_expr),
+            ),
+        )
         .await
         .unwrap();
+    receiver.await.unwrap().unwrap();
     let version = next_manifest_version(&region).await;
 
     engine.freeze_lease_clock(deadline);

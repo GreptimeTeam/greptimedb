@@ -749,9 +749,14 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
 
     let region = engine.get_region(region_id).unwrap();
     for (file, expected) in source_files.into_iter().zip([11, 12]) {
-        submit_staging_edit(&engine, region_id, file.as_ref().clone(), partition_expr.clone())
-            .await
-            .unwrap();
+        submit_staging_edit(
+            &engine,
+            region_id,
+            file.as_ref().clone(),
+            partition_expr.clone(),
+        )
+        .await
+        .unwrap();
         let current = region.version_control.current();
         assert_eq!(current.last_sequence, expected);
         assert_eq!(current.committed_sequence, 10);
