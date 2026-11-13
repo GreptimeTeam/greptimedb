@@ -45,6 +45,7 @@ use crate::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
+use crate::sst::parquet::writer::SstWriteGuard;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Custom serde functions for Bytes fields serialized as base64 strings.
@@ -1070,7 +1071,7 @@ pub(crate) struct UncommittedSsts {
 }
 
 #[async_trait::async_trait]
-impl crate::sst::parquet::writer::SstWriteGuard for UncommittedSsts {
+impl SstWriteGuard for UncommittedSsts {
     async fn before_create(&self, file_id: RegionFileId) -> crate::error::Result<()> {
         // An index can be created before its final metadata is available.
         self.track_before_upload(file_id.file_id(), true);

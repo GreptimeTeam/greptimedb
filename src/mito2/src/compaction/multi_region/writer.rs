@@ -28,6 +28,7 @@ use crate::sst::index::build::IndexBuildInputs;
 use crate::sst::index::registry::IndexBuildPlan;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
+use crate::sst::parquet::writer::SstWriteContext;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub(crate) struct TargetWriter<'a> {
@@ -79,7 +80,7 @@ impl<'a> TargetWriter<'a> {
                 request,
                 &self.options(),
                 &mut metrics,
-                crate::sst::parquet::writer::SstWriteContext {
+                SstWriteContext {
                     guard: Some(self.context.protection.clone()),
                     limits: Some(self.limits.writer),
                     ..Default::default()
