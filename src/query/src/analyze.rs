@@ -22,7 +22,9 @@ use std::sync::Arc;
 use ahash::HashMap;
 use arrow::array::{StringBuilder, UInt32Builder};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use common_recordbatch::adapter::{MetricCollector, PlanMetrics, RecordBatchMetrics};
+use common_recordbatch::adapter::{
+    MetricCollector, NativeTreeMetrics, PlanMetrics, RecordBatchMetrics,
+};
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion::error::Result as DfResult;
 use datafusion::execution::TaskContext;
@@ -354,6 +356,7 @@ struct JsonMetrics {
 }
 
 impl JsonMetrics {
+    /// Rebuilds the plan tree from the collector's flat, level-tagged list.
     fn from_record_batch_metrics(record_batch_metrics: RecordBatchMetrics) -> Self {
         let mut layers: HashMap<usize, Vec<Self>> = HashMap::default();
 
@@ -361,7 +364,9 @@ impl JsonMetrics {
         for plan_metrics in record_batch_metrics.plan_metrics.into_iter().rev() {
             let (level, mut metrics) = Self::from_plan_metrics(plan_metrics);
             if let Some(next_layer) = layers.remove(&(level + 1)) {
-                metrics.children = next_layer;
+                // The nodes an operator runs come first (it already collected them), then the
+                // physical children the plan gives it: both hang from the same line in the text.
+                metrics.children.extend(next_layer);
             }
             if level == 0 {
                 metrics.memory_usage = Some(memory_usage);
@@ -374,15 +379,48 @@ impl JsonMetrics {
         Self::default()
     }
 
+    /// One node of a tree an operator runs inside itself, and everything below it, as a plan node.
+    ///
+    /// The text `ANALYZE` prints has the same nodes inside the operator's line; here each one is a
+    /// node, so a reader reaches a native operator by name instead of by parsing that text.
+    fn from_native_metrics(native: NativeTreeMetrics) -> Self {
+        let NativeTreeMetrics {
+            line,
+            metrics,
+            children,
+        } = native;
+        let (name, param) = line.split_once(": ").unwrap_or((line.as_str(), ""));
+        Self {
+            name: name.to_string(),
+            param: param.to_string(),
+            // A native node reports figures of its own kind (`groups`, `output_values`, ...) and
+            // neither of the two figures a DataFusion operator leads with, so they stay unset rather
+            // than being invented from a figure that means something else.
+            output_rows: 0,
+            elapsed_compute: 0,
+            metrics: metrics.into_iter().collect(),
+            memory_usage: None,
+            children: children
+                .into_iter()
+                .map(Self::from_native_metrics)
+                .collect(),
+        }
+    }
+
     /// Convert a [`PlanMetrics`] to a [`JsonMetrics`] without children.
     ///
     /// Returns the level of the plan and the [`JsonMetrics`].
     fn from_plan_metrics(plan_metrics: PlanMetrics) -> (usize, Self) {
+        // An operator's line is its own line: one that draws nodes below itself carries them in the
+        // same string for the text, and they are nodes of their own here (`from_native_metrics`).
         let raw_name = plan_metrics.plan.trim_end();
+        let operator_line = raw_name.lines().next().unwrap_or_default();
         let mut elapsed_compute = 0;
         let mut output_rows = 0;
         let mut other_metrics = HashMap::default();
-        let (name, param) = raw_name.split_once(": ").unwrap_or((raw_name, ""));
+        let (name, param) = operator_line
+            .split_once(": ")
+            .unwrap_or((operator_line, ""));
 
         for (name, value) in plan_metrics.metrics.into_iter() {
             if name == "elapsed_compute" {
@@ -394,6 +432,13 @@ impl JsonMetrics {
             }
         }
 
+        // The nodes an operator runs consume what it consumes, which is what a child position
+        // means: they come first, then the physical children the plan gives it.
+        let children = plan_metrics
+            .native
+            .map(Self::from_native_metrics)
+            .into_iter()
+            .collect();
         (
             plan_metrics.level,
             Self {
@@ -403,7 +448,7 @@ impl JsonMetrics {
                 elapsed_compute,
                 metrics: other_metrics,
                 memory_usage: None,
-                children: vec![],
+                children,
             },
         )
     }
@@ -418,6 +463,15 @@ impl Display for JsonMetrics {
 #[cfg(test)]
 mod tests {
     use datafusion::physical_plan::empty::EmptyExec;
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::frame::{FrameLabelMode, raw_series_frame_schema};
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datatypes::series::time::{EvalGrid, GridSpec};
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
+    use promql::native::plan::{
+        BoundInput, BoundInstant, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+    };
+    use store_api::region_engine::RawLabelSource;
 
     use super::*;
 
@@ -519,6 +573,124 @@ mod tests {
         assert!(plan_param.is_empty());
     }
 
+    /// A native operator's tree is nested below the operator, not carried inside its `param`: the
+    /// operator line stops at its own line, and each node it runs is a node with its own figures.
+    ///
+    /// The tree arrives with the collected record, so this also holds for a stage collected on
+    /// another node, which is the only place a fused operator runs in a standalone server.
+    #[test]
+    fn qbs_analyze_json_nests_the_native_tree_below_its_operator() {
+        let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 2).unwrap()).unwrap());
+        let schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec {
+                name: Arc::from("value"),
+            }]),
+            eval_grid: None,
+        });
+        let raw = NativeType::Samples(Arc::clone(&schema));
+        let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: schema.fields.clone(),
+            eval_grid: Some(Arc::clone(&grid)),
+        }));
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        source_index: 0,
+                        output: raw.clone(),
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: raw,
+                }),
+                op: BoundInstant {
+                    lookback_ms: 0,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value: InstantValue::Sample,
+                    output_grid: Arc::clone(&grid),
+                },
+            },
+            output: evaluated,
+        })
+        .unwrap();
+        let frame_schema = raw_series_frame_schema(&schema, FrameLabelMode::Explicit).unwrap();
+        let child = datafusion::logical_expr::LogicalPlan::EmptyRelation(
+            datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(
+                    datafusion_common::DFSchema::try_from(frame_schema.clone()).unwrap(),
+                ),
+            },
+        );
+        let binding = FusedSeriesBinding {
+            grid,
+            metric_name: None,
+            time_index: "time".to_string(),
+            tags: vec![],
+        };
+        let rows = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new(
+                "time",
+                DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let frame = FusedSeries::series_frame_schema(&tree).unwrap();
+        for (output, format, header, param) in [
+            (
+                rows,
+                promql::extension_plan::FusedOutputFormat::PlainRows,
+                "FusedSeriesExec",
+                "",
+            ),
+            (
+                frame,
+                promql::extension_plan::FusedOutputFormat::SeriesFrame,
+                "FusedSeriesExec: (output: series_frame)",
+                "(output: series_frame)",
+            ),
+        ] {
+            let fused = FusedSeries::try_new_with_format(
+                tree.clone(),
+                binding.clone(),
+                vec![child.clone()],
+                Arc::new(datafusion_common::DFSchema::try_from(output).unwrap()),
+                format,
+            )
+            .unwrap();
+            let exec = fused
+                .to_execution_plan(vec![(
+                    Arc::new(EmptyExec::new(frame_schema.clone())),
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous,
+                )])
+                .unwrap();
+            let mut collector = MetricCollector::new(false);
+            accept(exec.as_ref(), &mut collector).unwrap();
+            let mut collected = collector.record_batch_metrics;
+            collected.plan_metrics.truncate(1);
+            let plan = &collected.plan_metrics[0];
+            assert_eq!(plan.plan.lines().next().unwrap(), header, "{}", plan.plan);
+            assert!(plan.native.is_some(), "the native tree must be collected");
+            let metrics = JsonMetrics::from_record_batch_metrics(collected);
+            let value = serde_json::to_value(metrics).unwrap();
+
+            assert_eq!(value["name"], "FusedSeriesExec");
+            assert_eq!(value["param"], param);
+            assert_eq!(value["children"][0]["name"], "Instant");
+            assert_eq!(
+                value["children"][0]["param"],
+                "lookback 0ms offset 0 on grid 0/1000x2"
+            );
+            assert_eq!(value["children"][0]["children"][0]["name"], "Input");
+            assert_eq!(
+                value["children"][0]["children"][0]["param"],
+                "raw samples source=0, contiguous"
+            );
+        }
+    }
+
     #[test]
     fn qbs_analyze_json_splits_plan_name_and_parameters() {
         let (_, metrics) = JsonMetrics::from_plan_metrics(PlanMetrics {
@@ -526,6 +698,7 @@ mod tests {
             plan_name: "FilterExec".to_string(),
             level: 0,
             metrics: vec![],
+            native: None,
         });
 
         assert_eq!(metrics.name, "FilterExec");
@@ -542,12 +715,14 @@ mod tests {
                     plan_name: "RootExec".to_string(),
                     level: 0,
                     metrics: vec![("mem_used".to_string(), 24)],
+                    native: None,
                 },
                 PlanMetrics {
                     plan: "ChildExec".to_string(),
                     plan_name: "ChildExec".to_string(),
                     level: 1,
                     metrics: vec![("mem_used".to_string(), 18)],
+                    native: None,
                 },
             ],
             ..Default::default()

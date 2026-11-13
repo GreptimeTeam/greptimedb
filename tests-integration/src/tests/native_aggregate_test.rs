@@ -1286,9 +1286,14 @@ fn fused_node_count_per_partition(
 ) -> Vec<Option<usize>> {
     let mut per_partition = vec![None; SCAN_PARTITIONS];
     let plan = displayable(fused.as_ref()).indent(false).to_string();
+    // The tree's registrations live in the node's own set: `ExecutionPlan::metrics` leaves them
+    // out, since a flat set cannot say which node recorded what.
     let metrics = fused
-        .metrics()
-        .unwrap_or_else(|| panic!("{context}: the fused producer reports no metrics:\n{plan}"));
+        .downcast_ref::<FusedSeriesExec>()
+        .unwrap_or_else(|| {
+            panic!("{context}: the fused producer is not a FusedSeriesExec:\n{plan}")
+        })
+        .node_metric_set();
     for metric in metrics.iter() {
         let MetricValue::Count { count, .. } = metric.value() else {
             continue;
@@ -1335,8 +1340,9 @@ fn final_input_samples_per_partition(capture: &NativeCapture, context: &str) -> 
     for finalize in &capture.finalize {
         let plan = displayable(finalize.as_ref()).indent(false).to_string();
         let metrics = finalize
-            .metrics()
-            .unwrap_or_else(|| panic!("{context}: Final reports no metrics:\n{plan}"));
+            .downcast_ref::<FusedSeriesExec>()
+            .unwrap_or_else(|| panic!("{context}: Final is not a FusedSeriesExec:\n{plan}"))
+            .node_metric_set();
         for metric in metrics.iter() {
             let MetricValue::Count { count, .. } = metric.value() else {
                 continue;
@@ -1543,13 +1549,17 @@ fn assert_finalize_reads_region_state(
         "{context}: Final input must preserve the Partial state-frame schema:\n{plan}"
     );
     let producer_plan = NodeDisplay(producer.as_ref()).to_string();
+    // The node's own line, then `native_tree=[`, then the tree: the first line inside the brackets
+    // is the root of the tree it runs, unindented and without a path prefix.
     let root_line = producer_plan
         .lines()
         .map(str::trim)
-        .find(|line| line.starts_with("root ") || line.starts_with("root:"))
+        .find(|line| {
+            !line.starts_with("FusedSeriesExec") && !matches!(*line, "native_tree=[" | "]")
+        })
         .unwrap_or_default();
     assert!(
-        root_line.contains("Aggregate") && root_line.contains("partial"),
+        root_line.starts_with("Aggregate:") && root_line.contains(" partial"),
         "{context}: captured region producer must have a Partial root, got `{root_line}`:\n{producer_plan}"
     );
     let declaration =
@@ -2117,19 +2127,26 @@ async fn native_aggregate_topk_over_global_partitions() {
     expected.sort_by(|a, b| (a.ts_millis, &a.labels).cmp(&(b.ts_millis, &b.labels)));
     assert_native_schema(&native, "v", &expected, &sql);
     assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
-    // `topk` above a global aggregate is not split, so the scan side folds per series and the
-    // ranking runs above it. A plan may hold several fused nodes (the frontend root and the region
-    // producers), so select them by what they do instead of counting nodes.
+    // `topk` above a global aggregate is not split, so the scan side answers the rate it reads and
+    // the ranking runs above the merged groups. A plan may hold several fused nodes (the frontend
+    // root and the region producers), so select them by what they do instead of counting nodes: a
+    // producer's tree reads raw samples, and only the node above them ranks.
     let plan_text =
         |node: &Arc<dyn ExecutionPlan>| displayable(node.as_ref()).indent(false).to_string();
     let producers: Vec<_> = capture
         .fused
         .iter()
-        .filter(|node| plan_text(node).contains("segment"))
+        .filter(|node| plan_text(node).contains("Input: raw samples"))
         .collect();
     assert!(
         !producers.is_empty(),
-        "a segmented producer answers the fold"
+        "a segmented producer answers the scan it was given; fused nodes:\n{}",
+        capture
+            .fused
+            .iter()
+            .map(plan_text)
+            .collect::<Vec<_>>()
+            .join("\n=====\n")
     );
     for producer in &producers {
         assert!(
@@ -2145,6 +2162,13 @@ async fn native_aggregate_topk_over_global_partitions() {
         .filter(|node| plan_text(node).to_ascii_lowercase().contains("topk"))
         .collect();
     assert_eq!(1, ranked.len(), "topk runs once, above the merged groups");
+    let ranked_text = plan_text(ranked[0]);
+    assert!(
+        ranked_text.contains("Vector: topk 10 by []")
+            && ranked_text.contains("Aggregate: sum by [hostname] complete")
+            && ranked_text.contains("Input: evaluated samples source=0, contiguous"),
+        "the fold answers the merged sources whole, with the ranking above it:\n{ranked_text}"
+    );
     // The cross-producer requirement lives in the deterministic fixtures instead, which pin which
     // suffixes the split accepts above the cut and which it declines
     // (`native_fused_split_declines_a_whole_vector_suffix`).

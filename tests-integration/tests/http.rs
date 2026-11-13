@@ -1681,16 +1681,95 @@ fn executes_fused_series(plan: &Arc<dyn ExecutionPlan>) -> bool {
     !plan_nodes_named(plan, "FusedSeriesExec").is_empty()
 }
 
+/// The registrations the fused node's tree made, exactly as they were recorded.
+///
+/// [`ExecutionPlan::metrics`] leaves them out: a flat set cannot say which tree node recorded what,
+/// so the node keeps its own set for readers that key by name.
+fn fused_metric_set(
+    fused: &Arc<dyn ExecutionPlan>,
+) -> datafusion::physical_plan::metrics::MetricsSet {
+    fused
+        .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+        .unwrap_or_else(|| panic!("the plan is a FusedSeriesExec, not {}", fused.name()))
+        .node_metric_set()
+}
+
 /// One row of a PromQL result: its tag columns in schema order, its timestamp and its value.
 type PromqlRow = (Vec<(String, String)>, i64, f64);
 
+/// The tree a fused node runs, as `ANALYZE` reports it: one root node, everything below it nested
+/// as that node's own children.
+///
+/// A node publishes the tree it computes ahead of the physical inputs the plan gives it, so the
+/// inputs are the trailing children of `fused`, one per input `executed` reads.
+fn fused_tree<'a>(
+    fused: &'a Value,
+    executed: &Arc<dyn ExecutionPlan>,
+    context: &str,
+) -> &'a [Value] {
+    let children = fused["children"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let inputs = executed.children();
+    assert_eq!(
+        children.len(),
+        inputs.len() + 1,
+        "`{context}`: the fused node publishes {} children for {} inputs, not its tree and its \
+         inputs: {fused}",
+        children.len(),
+        inputs.len()
+    );
+    let (tree, planned) = children.split_at(1);
+    for (node, input) in planned.iter().zip(inputs) {
+        assert_eq!(
+            node["name"].as_str(),
+            Some(input.name()),
+            "`{context}`: the fused node publishes {node} where the plan has a {}",
+            input.name()
+        );
+    }
+    tree
+}
+
+/// Every node of a tree, depth first, the nodes given included.
+fn tree_nodes<'a>(nodes: &'a [Value]) -> Vec<&'a Value> {
+    let mut all = Vec::new();
+    let mut stack: Vec<&'a Value> = nodes.iter().collect();
+    while let Some(node) = stack.pop() {
+        all.push(node);
+        if let Some(children) = node["children"].as_array() {
+            stack.extend(children);
+        }
+    }
+    all
+}
+
+/// How many times the tree says `needle`, e.g. which source an input reads.
+fn tree_mentions(tree: &[Value], needle: &str) -> usize {
+    tree_nodes(tree)
+        .iter()
+        .filter_map(|node| node["param"].as_str())
+        .map(|param| param.matches(needle).count())
+        .sum()
+}
+
+/// Whether the tree binds any input, i.e. reads a frame rather than a constant's own values.
+fn tree_binds_input(tree: &[Value]) -> bool {
+    tree_nodes(tree).iter().any(|node| node["name"] == "Input")
+}
+
 /// Checks that a native result reads no scan for a constant, and one real scan over
-/// `scan_partitions` non-empty partitions for a vector, and returns the fused node it ran.
+/// `scan_partitions` non-empty partitions for a vector.
+///
+/// `executed` is the fused node the request ran: its tree's figures are only in the node's own
+/// set, which [`ExecutionPlan::metrics`] leaves out.
 fn assert_native_plan(
     plan: &Arc<dyn ExecutionPlan>,
+    executed: &Arc<dyn ExecutionPlan>,
     scan_partitions: Option<usize>,
     context: &str,
-) -> Value {
+) {
     let fused = {
         let mut nodes = plan_nodes_named(plan, "FusedSeriesExec");
         assert_eq!(
@@ -1700,30 +1779,34 @@ fn assert_native_plan(
         );
         nodes.remove(0)
     };
-    // The tree the node will run, rendered the way `EXPLAIN` renders it: one line per node.
-    let tree = fused["param"].as_str().unwrap_or_default();
+    // The node's parameter is no longer the tree: a plain-rows node carries none, and a
+    // frame-emitting one only names the frame it emits.
+    let param = fused["param"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{context}: the fused node has no parameter: {fused}"));
+    assert!(
+        param.is_empty() || param == "(output: series_frame)",
+        "{context}: the fused node's parameter is not what it emits: {param}"
+    );
+    // The tree the node will run, one node per node, published as the node's own children.
+    let tree = fused_tree(&fused, executed, context);
     let scans = plan_nodes_named(plan, "SeriesScanExec");
     let Some(partitions) = scan_partitions else {
         // A constant reads no frame: its one value per grid point comes from the tree alone, so the
-        // node has no child, plans no scan and binds no source.
+        // node has no child but its tree, plans no scan and binds no source.
         assert!(
             scans.is_empty(),
             "{context}: a constant planned a scan: {scans:?}"
         );
-        assert_eq!(
-            fused["children"].as_array().map(Vec::len),
-            Some(0),
-            "{context}: a constant's fused node has children: {fused}"
-        );
         assert!(
-            !tree.contains("Input"),
-            "{context}: a constant's tree binds an input: {tree}"
+            !tree_binds_input(tree),
+            "{context}: a constant's tree binds an input: {fused}"
         );
-        return fused;
+        return;
     };
     assert_eq!(
-        fused["children"].as_array().map(Vec::len),
-        Some(1),
+        executed.children().len(),
+        1,
         "{context}: a vector must read exactly one child: {fused}"
     );
     assert_eq!(
@@ -1731,7 +1814,7 @@ fn assert_native_plan(
         1,
         "{context}: a vector must read exactly one scan: {scans:?}"
     );
-    let mut scan = &fused["children"][0];
+    let mut scan = &fused["children"][1];
     // An observed optional transparent wrapper that preserves the scan's partition layout; any
     // other node between the fused node and its scan is rejected.
     if scan["name"] == "CooperativeExec" {
@@ -1758,40 +1841,39 @@ fn assert_native_plan(
     // Both inputs of one selector name the one source, so a tree that reads two sources or none
     // would have had to pair or gather them.
     assert_eq!(
-        tree.matches("source=0").count(),
+        tree_mentions(tree, "source=0"),
         1,
-        "{context}: the tree does not read the one source: {tree}"
+        "{context}: the tree does not read the one source: {fused}"
     );
-    assert!(
-        !tree.contains("source=1"),
-        "{context}: the tree reads a second source: {tree}"
+    assert_eq!(
+        tree_mentions(tree, "source=1"),
+        0,
+        "{context}: the tree reads a second source: {fused}"
     );
     // Every partition the scan exposes did its own work: a gather of the raw input would leave the
     // partitions without the input figure, and a partition that never ran would leave both at zero.
-    // These are input figures: the JSON drops `metric.partition()`, so it cannot say which partition
-    // produced which values.
-    let metrics = fused["metrics"]
-        .as_object()
-        .unwrap_or_else(|| panic!("{context}: the fused node reports no metrics: {fused}"));
+    // A peak is registered per partition on the node's own set, which `ExecutionPlan::metrics`
+    // leaves out: a flat set cannot say which tree node recorded what.
+    let metrics = fused_metric_set(executed);
     for partition in 0..partitions {
         let root_peak = format!("native.p{partition}.root.peak_reserved_bytes");
         assert!(
             metrics
-                .get(&root_peak)
-                .and_then(Value::as_u64)
-                .unwrap_or_default()
-                > 0,
-            "partition {partition} of `{context}` did no native work: {fused}"
+                .iter()
+                .any(|metric| metric.value().name() == root_peak && metric.value().as_usize() > 0),
+            "partition {partition} of `{context}` did no native work: {metrics:?}"
         );
         let prefix = format!("native.p{partition}.root.");
         assert!(
-            metrics.iter().any(|(name, value)| name.starts_with(&prefix)
-                && name.ends_with(".input.peak_reserved_bytes")
-                && value.as_u64().unwrap_or_default() > 0),
-            "partition {partition} of `{context}` read no input: {fused}"
+            metrics.iter().any(|metric| {
+                let name = metric.value().name();
+                name.starts_with(&prefix)
+                    && name.ends_with(".input.peak_reserved_bytes")
+                    && metric.value().as_usize() > 0
+            }),
+            "partition {partition} of `{context}` read no input: {metrics:?}"
         );
     }
-    fused
 }
 
 /// Checks that the fused node that actually ran answered the whole result, one partition at a time.
@@ -1826,9 +1908,9 @@ fn assert_native_partition_output(
              {partitions}"
         );
     }
-    let metrics = fused
-        .metrics()
-        .unwrap_or_else(|| panic!("{context}: the executed fused node reports no metrics"));
+    // The tree's registrations live in the node's own set: `ExecutionPlan::metrics` leaves them out,
+    // since a flat set cannot say which node recorded what.
+    let metrics = fused_metric_set(fused);
     let mut values_by_partition = vec![0_usize; partitions];
     for metric in metrics.iter() {
         if metric.value().name() != "native.root.output_values" {
@@ -2104,7 +2186,6 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
     ] {
         let scan_plan = scan_plan.clone().reset_state().unwrap();
         let exec = promql::extension_plan::FusedSeries::try_new_with_format(
-            Arc::from("native_demo"),
             tree.clone(),
             binding.clone(),
             vec![logical_child.clone()],
@@ -2682,19 +2763,26 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         let (plan, schema, rows) = promql_output(frontend, query, true, start, end).await;
         assert_rows_eq(&rows, &expected, query);
         assert_native_result_schema(&schema, tags, query);
-        let fused = assert_native_plan(&plan, scan_partitions, query);
+        // The body is drained, so every partition has finished.
+        let executed = observer.take(query);
+        assert_native_plan(&plan, &executed, scan_partitions, query);
+        let output_values = fused_metric_set(&executed)
+            .iter()
+            .filter_map(|metric| match metric.value() {
+                MetricValue::Count { name, count }
+                    if name.as_ref() == "native.root.output_values" =>
+                {
+                    Some(count.value())
+                }
+                _ => None,
+            })
+            .sum::<usize>();
         assert_eq!(
-            fused["metrics"]["native.root.output_values"].as_u64(),
-            Some(expected.len() as u64),
+            output_values,
+            expected.len(),
             "`{query}`: the tree reported a different number of values than the result holds"
         );
-        // The body is drained, so every partition has finished.
-        assert_native_partition_output(
-            &observer.take(query),
-            scan_partitions,
-            expected.len(),
-            query,
-        );
+        assert_native_partition_output(&executed, scan_partitions, expected.len(), query);
 
         // Without the per-query hint the same statement runs the legacy pipeline, which must answer
         // with the same rows.
@@ -2737,10 +2825,12 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         "`{query}`: expected one fused node: {fused_nodes:?}"
     );
     let fused = &fused_nodes[0];
-    let tree = fused["param"].as_str().unwrap_or_default();
+    // The body is drained, so the one fused node the request ran has finished.
+    let executed = observer.take(query);
+    let tree = fused_tree(fused, &executed, query);
     assert_eq!(
-        fused["children"].as_array().map(Vec::len),
-        Some(1),
+        executed.children().len(),
+        1,
         "`{query}`: an empty vector must read exactly one child: {fused}"
     );
     let scans = plan_nodes_named(&plan, "SeriesScanExec");
@@ -2751,20 +2841,19 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
     );
     // The tree binds the one source instead of answering as a constant, whose tree binds no input.
     assert!(
-        tree.contains("Input"),
-        "`{query}`: the empty vector planned no input: {tree}"
+        tree_binds_input(tree),
+        "`{query}`: the empty vector planned no input: {fused}"
     );
     assert_eq!(
-        tree.matches("source=0").count(),
+        tree_mentions(tree, "source=0"),
         1,
-        "`{query}`: the tree does not read the one source: {tree}"
+        "`{query}`: the tree does not read the one source: {fused}"
     );
-    assert!(
-        !tree.contains("source=1"),
-        "`{query}`: the tree reads a second source: {tree}"
+    assert_eq!(
+        tree_mentions(tree, "source=1"),
+        0,
+        "`{query}`: the tree reads a second source: {fused}"
     );
-    // The body is drained, so the one fused node the request ran has finished.
-    observer.take(query);
 
     // Without the per-query hint the same statement runs the legacy pipeline, which must answer
     // with the same empty typed result.
@@ -5597,7 +5686,7 @@ pub async fn test_remote_write_v2_histogram_native_partitions(store_type: Storag
     }
     let fused = observer.take("histogram partitions");
     assert_eq!(fused.name(), "FusedSeriesExec");
-    let metrics = fused.metrics().expect("fused metrics");
+    let metrics = fused_metric_set(&fused);
     let mut partitions = BTreeMap::new();
     for metric in metrics.iter() {
         if metric.value().name() == "native.root.output_values"
@@ -5820,9 +5909,9 @@ async fn native_histogram_composition_query(
     assert!(
         descriptions.iter().any(|description| {
             description.lines().any(|line| {
-                let mut words = line.split_whitespace();
-                matches!(words.next(), Some("root" | "input" | "left" | "right"))
-                    && words.next() == Some("Binary")
+                // A tree line names its node first, so a `Binary` line is a binary node wherever it
+                // sits in the tree.
+                matches!(line.split_whitespace().next(), Some("Binary" | "Binary:"))
             })
         }),
         "`{query}` did not execute a native Binary: {descriptions:?}; response: {body}"
