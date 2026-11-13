@@ -48,6 +48,8 @@ pub enum SessionError {
 
 impl common_error::ext::ErrorExt for SessionError {
     fn status_code(&self) -> common_error::status_code::StatusCode {
+        // Keep the shared database-error category; the MySQL writer inspects this
+        // typed cause through error wrappers to emit ER_NO_DB_ERROR (1046).
         common_error::status_code::StatusCode::DatabaseNotFound
     }
 
