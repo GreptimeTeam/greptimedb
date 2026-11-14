@@ -280,6 +280,7 @@ impl Instance {
     fn statement_slow_query_timer(
         &self,
         stmt: &Statement,
+        stmt_text: &str,
         schema_name: String,
     ) -> Option<SlowQueryTimer> {
         if !should_track_statement_process(stmt) || !self.slow_query_options.enable {
@@ -287,7 +288,7 @@ impl Instance {
         }
 
         Some(SlowQueryTimer::new(
-            CatalogQueryStatement::Sql(stmt.clone()),
+            CatalogQueryStatement::Plan(stmt_text.to_string()),
             schema_name,
             self.slow_query_options.threshold,
             self.slow_query_options.sample_ratio,
@@ -296,7 +297,14 @@ impl Instance {
         ))
     }
 
-    async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
+    /// `tracked_text` is set for a statement tracked in the process list (see
+    /// [should_track_statement_process]): its `Display`, which masks credentials.
+    async fn query_statement(
+        &self,
+        stmt: Statement,
+        tracked_text: Option<&str>,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
         let query_ctx = if matches!(&stmt, Statement::SetVariables(_)) {
             query_ctx
@@ -317,10 +325,11 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        if should_track_statement_process(&stmt) {
+        if let Some(stmt_text) = tracked_text {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
-            let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
+            let slow_query_timer =
+                self.statement_slow_query_timer(&stmt, stmt_text, schema_name.clone());
             let timeout_recorder = is_explain_analyze_verbose(&stmt)
                 .then(|| slow_query_timer.as_ref().map(SlowQueryTimer::recorder))
                 .flatten();
@@ -328,7 +337,7 @@ impl Instance {
             let ticket = self.process_manager.register_query(
                 catalog_name,
                 vec![schema_name],
-                stmt.to_string(),
+                stmt_text.to_string(),
                 query_ctx.conn_info().to_string(),
                 Some(query_ctx.process_id()),
                 slow_query_timer,
@@ -453,15 +462,13 @@ impl Instance {
         query_ctx: &QueryContextRef,
         query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
     ) -> Result<Output> {
-        let stmt = QueryStatement::Sql(stmt);
+        // Planning consumes the statement, so copy it only when an interceptor will see it.
+        let stmt_for_hook = query_interceptor.is_some().then(|| stmt.clone());
         let plan = self
             .statement_executor
-            .plan(&stmt, query_ctx.clone())
+            .plan(QueryStatement::Sql(stmt), query_ctx.clone())
             .await?;
-        let QueryStatement::Sql(stmt) = stmt else {
-            unreachable!()
-        };
-        query_interceptor.pre_execute(Some(&stmt), Some(&plan), query_ctx.clone())?;
+        query_interceptor.pre_execute(stmt_for_hook.as_ref(), Some(&plan), query_ctx.clone())?;
 
         self.statement_executor
             .exec_plan(plan, query_ctx.clone())
@@ -654,11 +661,13 @@ impl Instance {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
         let catalog_name = query_ctx.current_catalog().to_string();
         let schema_name = query_ctx.current_schema();
-        let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
+        let stmt_text = stmt.to_string();
+        let slow_query_timer =
+            self.statement_slow_query_timer(&stmt, &stmt_text, schema_name.clone());
         let ticket = self.process_manager.register_query(
             catalog_name,
             vec![schema_name],
-            stmt.to_string(),
+            stmt_text,
             query_ctx.conn_info().to_string(),
             Some(query_ctx.process_id()),
             slow_query_timer,
@@ -803,7 +812,13 @@ impl Instance {
                         break;
                     }
 
-                    match self.query_statement(stmt.clone(), query_ctx.clone()).await {
+                    // `query_statement` consumes the statement, so keep what the error log below
+                    // prints.
+                    let stmt_for_log = StatementForLog::new(&stmt);
+                    match self
+                        .query_statement(stmt, stmt_for_log.tracked_text(), query_ctx.clone())
+                        .await
+                    {
                         Ok(output) => {
                             let output_result =
                                 query_interceptor.post_execute(output, query_ctx.clone());
@@ -813,9 +828,9 @@ impl Instance {
                             if e.status_code().should_log_error() {
                                 error!(e; user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
                                     catalog = query_ctx.current_catalog(), schema = %query_ctx.current_schema(),
-                                    process_id = query_ctx.process_id(), "Failed to execute query: {stmt}");
+                                    process_id = query_ctx.process_id(), "Failed to execute query: {stmt_for_log}");
                             } else {
-                                debug!("Failed to execute query: {stmt}, {e}");
+                                debug!("Failed to execute query: {stmt_for_log}, {e}");
                             }
                             results.push(Err(e));
                             break;
@@ -1085,7 +1100,7 @@ impl Instance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(&QueryStatement::Sql(stmt), query_ctx.clone())
+                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
             self.query_engine
@@ -1645,7 +1660,7 @@ impl PrometheusHandler for Instance {
 
         let plan = self
             .statement_executor
-            .plan(&stmt, query_ctx.clone())
+            .plan(stmt.clone(), query_ctx.clone())
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
@@ -2121,6 +2136,43 @@ fn is_readonly_plan(plan: &LogicalPlan) -> bool {
 fn should_track_statement_process(stmt: &Statement) -> bool {
     stmt.is_readonly()
         || matches!(stmt, Statement::Insert(insert) if insert.has_non_values_query_source())
+}
+
+/// What [Instance::do_query_inner] keeps of a statement for its error log, since executing the
+/// statement consumes it. Both forms print the statement's `Display`, which masks credentials.
+enum StatementForLog {
+    /// A statement tracked in the process list. It is rendered once, and the text serves the
+    /// process list, the slow query log and the error log. The statement itself is not cloned:
+    /// cloning recurses once per `UNION ALL` branch (#9356).
+    Tracked(String),
+    /// A copy of any other statement, rendered only if the statement fails.
+    Untracked(Statement),
+}
+
+impl StatementForLog {
+    fn new(stmt: &Statement) -> Self {
+        if should_track_statement_process(stmt) {
+            Self::Tracked(stmt.to_string())
+        } else {
+            Self::Untracked(stmt.clone())
+        }
+    }
+
+    fn tracked_text(&self) -> Option<&str> {
+        match self {
+            Self::Tracked(text) => Some(text),
+            Self::Untracked(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for StatementForLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tracked(text) => f.write_str(text),
+            Self::Untracked(stmt) => write!(f, "{stmt}"),
+        }
+    }
 }
 
 fn should_track_plan_process(stmt: Option<&Statement>, plan: &LogicalPlan) -> bool {

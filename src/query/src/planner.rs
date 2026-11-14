@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::str::FromStr;
@@ -68,7 +67,7 @@ use crate::{DfContextProviderAdapter, QueryEngineContext};
 
 #[async_trait]
 pub trait LogicalPlanner: Send + Sync {
-    async fn plan(&self, stmt: &QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
+    async fn plan(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
 
     async fn plan_logs_query(
         &self,
@@ -504,10 +503,10 @@ impl DfLogicalPlanner {
     /// `plan_sql` to support Greptime Statements.
     async fn explain_to_plan(
         &self,
-        explain: &ExplainStatement,
+        explain: ExplainStatement,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
-        let plan = self.plan_sql(&explain.statement, query_ctx).await?;
+        let plan = self.plan_sql(*explain.statement, query_ctx).await?;
         if matches!(plan, LogicalPlan::Explain(_)) {
             return plan_err!("Nested EXPLAINs are not supported").context(PlanSqlSnafu);
         }
@@ -557,33 +556,34 @@ impl DfLogicalPlanner {
 
     #[tracing::instrument(skip_all)]
     #[async_recursion::async_recursion]
-    async fn plan_sql(&self, stmt: &Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+    async fn plan_sql(
+        &self,
+        mut stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
         let mut planner_context = PlannerContext::new();
-        let mut stmt = Cow::Borrowed(stmt);
         let mut is_tql_cte = false;
 
         // handle explain before normal processing so we can explain Greptime Statements
-        if let Statement::Explain(explain) = stmt.as_ref() {
-            return self.explain_to_plan(explain, query_ctx).await;
+        if let Statement::Explain(explain) = stmt {
+            return self.explain_to_plan(*explain, query_ctx).await;
         }
 
         // Check for hybrid CTEs before normal processing
-        if self.has_hybrid_ctes(stmt.as_ref()) {
-            let stmt_owned = stmt.into_owned();
-            let mut query = match stmt_owned {
-                Statement::Query(query) => query.as_ref().clone(),
-                _ => unreachable!("has_hybrid_ctes should only return true for Query statements"),
+        if self.has_hybrid_ctes(&stmt) {
+            let Statement::Query(query) = &mut stmt else {
+                unreachable!("has_hybrid_ctes should only return true for Query statements");
             };
-            self.plan_query_with_hybrid_ctes(&query, query_ctx.clone(), &mut planner_context)
+            self.plan_query_with_hybrid_ctes(query, query_ctx.clone(), &mut planner_context)
                 .await?;
 
             // remove the processed TQL CTEs from the query
             query.hybrid_cte = None;
-            stmt = Cow::Owned(Statement::Query(Box::new(query)));
             is_tql_cte = true;
         }
 
-        let mut df_stmt = stmt.as_ref().try_into().context(SqlSnafu)?;
+        // Moved, not cloned: cloning a statement recurses once per `UNION ALL` branch (#9356).
+        let mut df_stmt = DfStatement::try_from(stmt).context(SqlSnafu)?;
         normalize_field_access_after_subscript(
             &mut df_stmt,
             self.session_state
@@ -641,12 +641,11 @@ impl DfLogicalPlanner {
 
         // this IF is to handle different version of ASTs
         let result = if is_tql_cte {
-            let Statement::Query(query) = stmt.into_owned() else {
-                unreachable!("is_tql_cte should only be true for Query statements");
+            let DfStatement::Statement(sqlparser_stmt) = df_stmt else {
+                unreachable!("a Query statement converts to DfStatement::Statement");
             };
-            let sqlparser_stmt = sqlparser::ast::Statement::Query(Box::new(query.inner));
             sql_to_rel
-                .sql_statement_to_plan_with_context(sqlparser_stmt, &mut planner_context)
+                .sql_statement_to_plan_with_context(*sqlparser_stmt, &mut planner_context)
                 .context(PlanSqlSnafu)?
         } else {
             sql_to_rel
@@ -1168,11 +1167,11 @@ fn normalize_field_access_after_subscript(stmt: &mut DfStatement, normalize_iden
 #[async_trait]
 impl LogicalPlanner for DfLogicalPlanner {
     #[tracing::instrument(skip_all)]
-    async fn plan(&self, stmt: &QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+    async fn plan(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         match stmt {
             QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
             // The statement's own plan is what a region receives, so the native route is offered.
-            QueryStatement::Promql(stmt, _alias) => self.plan_pql(stmt, query_ctx, true).await,
+            QueryStatement::Promql(stmt, _alias) => self.plan_pql(&stmt, query_ctx, true).await,
         }
     }
 
@@ -1428,7 +1427,7 @@ mod tests {
         let engine = create_test_engine().await;
         engine
             .planner()
-            .plan(&stmt, QueryContext::arc())
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap()
     }
@@ -1449,7 +1448,7 @@ mod tests {
         )
         .unwrap();
 
-        engine.planner().plan(&stmt, query_ctx).await.unwrap()
+        engine.planner().plan(stmt, query_ctx).await.unwrap()
     }
 
     /// Plans `rate(some_metric[5m])`, which the in-process fixture plans natively, stating the
@@ -1493,7 +1492,7 @@ mod tests {
 
         engine
             .planner()
-            .plan(&stmt, query_ctx)
+            .plan(stmt, query_ctx)
             .await
             .map(|plan| plan.display_indent().to_string())
     }
@@ -1687,7 +1686,7 @@ mod tests {
                 &query_ctx,
             )
             .unwrap();
-            let plan = engine.planner().plan(&stmt, query_ctx).await.unwrap();
+            let plan = engine.planner().plan(stmt, query_ctx).await.unwrap();
             let display = plan.display_indent().to_string();
             assert!(
                 display.contains("FusedSeries"),
@@ -1727,7 +1726,7 @@ mod tests {
         .unwrap();
         engine
             .planner()
-            .plan(&stmt, query_ctx.clone())
+            .plan(stmt, query_ctx.clone())
             .await
             .unwrap()
     }
@@ -2082,7 +2081,7 @@ mod tests {
         let stmt = QueryLanguageParser::parse_sql(sql, query_ctx).unwrap();
         let plan = engine
             .planner()
-            .plan(&stmt, query_ctx.clone())
+            .plan(stmt, query_ctx.clone())
             .await
             .unwrap();
         let context = engine.engine_context(query_ctx.clone()).unwrap();
@@ -2431,7 +2430,7 @@ mod tests {
                         let stmt = QueryLanguageParser::parse_sql(&sql, &query_ctx).unwrap();
                         let plan = create_promql_test_engine()
                             .planner()
-                            .plan(&stmt, query_ctx)
+                            .plan(stmt, query_ctx)
                             .await
                             .unwrap();
                         assert!(matches!(plan, LogicalPlan::Union(_)));

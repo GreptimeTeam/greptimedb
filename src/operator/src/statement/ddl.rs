@@ -1080,7 +1080,7 @@ impl StatementExecutor {
         }
 
         let engine = &self.query_engine;
-        let stmts = ParserContext::create_with_dialect(
+        let mut stmts = ParserContext::create_with_dialect(
             &expr.sql,
             query_ctx.sql_dialect(),
             ParseOptions::default(),
@@ -1094,7 +1094,7 @@ impl StatementExecutor {
                 err_msg: format!("Expect only one statement, found {}", stmts.len())
             }
         );
-        let stmt = &stmts[0];
+        let stmt = stmts.remove(0);
 
         let is_tql_query = is_tql(query_ctx.sql_dialect(), &expr.sql)
             .map_err(BoxedError::new)
@@ -1111,7 +1111,7 @@ impl StatementExecutor {
 
         // Plan before selecting a mode. In particular, instant-TTL sources
         // must not bypass validation of the stateless streaming subset.
-        let plan = match stmt {
+        let plan = match &stmt {
             Statement::Tql(_) => {
                 if has_instant_ttl_source_table {
                     return InvalidSqlSnafu {
@@ -1123,7 +1123,7 @@ impl StatementExecutor {
             }
             _ => engine
                 .planner()
-                .plan(&QueryStatement::Sql(stmt.clone()), query_ctx)
+                .plan(QueryStatement::Sql(stmt), query_ctx)
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?,
@@ -1209,7 +1209,7 @@ impl StatementExecutor {
         let logical_plan = match &*create_view.query {
             Statement::Query(query) => {
                 self.plan(
-                    &QueryStatement::Sql(Statement::Query(query.clone())),
+                    QueryStatement::Sql(Statement::Query(query.clone())),
                     ctx.clone(),
                 )
                 .await?

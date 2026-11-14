@@ -164,7 +164,7 @@ mod test {
         .unwrap();
         let plan = instance
             .statement_executor()
-            .plan(&stmt, QueryContext::arc())
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
         let (table_name, insert_plan) = breakup_insert_plan(&plan, "greptime", "public").unwrap();
@@ -965,7 +965,7 @@ CREATE TABLE {table_name} (
         let plan = instance
             .frontend()
             .statement_executor()
-            .plan(&stmt, QueryContext::arc())
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
         let plan = DFLogicalSubstraitConvertor

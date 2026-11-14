@@ -1024,7 +1024,7 @@ pub async fn sql_to_df_plan(
     let scheduled_time = query::options::parse_scheduled_time_datetime(&query_ctx.extensions())
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-    let stmts = ParserContext::create_with_dialect(
+    let mut stmts = ParserContext::create_with_dialect(
         sql,
         query_ctx.sql_dialect(),
         ParseOptions { scheduled_time },
@@ -1038,8 +1038,8 @@ pub async fn sql_to_df_plan(
             reason: format!("Expect only one statement, found {}", stmts.len())
         }
     );
-    let stmt = &stmts[0];
-    let query_stmt = match stmt {
+    let stmt = stmts.remove(0);
+    let query_stmt = match &stmt {
         Statement::Tql(tql) => match tql {
             Tql::Eval(eval) => {
                 let eval = eval.clone();
@@ -1063,11 +1063,11 @@ pub async fn sql_to_df_plan(
             }
             .fail()?,
         },
-        _ => QueryStatement::Sql(stmt.clone()),
+        _ => QueryStatement::Sql(stmt),
     };
     let plan = engine
         .planner()
-        .plan(&query_stmt, query_ctx.clone())
+        .plan(query_stmt, query_ctx.clone())
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
