@@ -47,7 +47,6 @@ use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use parquet::file::properties::DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT;
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
-use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -64,7 +63,6 @@ use crate::error::{
     UnexpectedSnafu,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
 use crate::series_index::SeriesIndexReadContext;
@@ -469,35 +467,9 @@ impl ParquetReaderBuilder {
         let mut parquet_meta = sst_meta.parquet_metadata();
         let mut parquet_metadata_size = sst_meta.parquet_metadata_size();
         let region_meta = sst_meta.region_metadata();
-        let region_partition_expr_str = self
-            .expected_metadata
-            .as_ref()
-            .and_then(|meta| meta.partition_expr.as_deref());
-        let (_, is_same_region_partition) = Self::is_same_region_partition(
-            region_partition_expr_str,
-            self.file_handle.meta_ref().partition_expr.as_deref(),
-        )?;
-        // Skip auto convert when:
-        // - compaction is enabled
-        // - region partition expr is same with file partition expr (no need to auto convert)
-        let skip_auto_convert = self.compaction && is_same_region_partition;
-
-        // Build a compaction projection helper when:
-        // - compaction is enabled
-        // - region partition expr differs from file partition expr
-        // - flat format is enabled
-        // - primary key encoding is sparse
-        //
-        // This is applied after row-group filtering to align batches with flat output schema
-        // before compat handling.
-        let compaction_projection_mapper = if self.compaction
-            && !is_same_region_partition
-            && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
-        {
-            Some(CompactionProjectionMapper::try_new(&region_meta)?)
-        } else {
-            None
-        };
+        // Sparse compaction preserves encoded keys. Partition predicates decode only
+        // their dependencies into temporary arrays during precise filtering.
+        let skip_auto_convert = self.compaction;
 
         let read_cols = if let Some(read_cols) = &self.read_cols {
             read_cols.clone()
@@ -716,7 +688,6 @@ impl ParquetReaderBuilder {
                 prune_schema,
                 codec,
                 compat_batch: None,
-                compaction_projection_mapper,
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,
             },
@@ -741,6 +712,9 @@ impl ParquetReaderBuilder {
         Ok((region_partition_expr, is_same))
     }
 
+    /// Builds the dependency-only schema for row-level partition evaluation.
+    /// Its indices are independent of both Parquet and converted batch projections;
+    /// precise filtering gathers these columns temporarily before compatibility.
     /// Compare partition expressions from expected metadata and file metadata,
     /// and build a partition filter if they differ.
     fn build_partition_filter(
@@ -927,6 +901,8 @@ impl ParquetReaderBuilder {
     }
 
     /// Computes row groups to read, along with their respective row selections.
+    /// Statistics and index lookups use source-file column mappings, independently
+    /// of whether conversion will later expand encoded tags.
     #[tracing::instrument(
         skip_all,
         fields(
@@ -2969,6 +2945,117 @@ mod tests {
                 assert_eq!(expected_reads, reads.load(Ordering::Relaxed));
                 println!(
                     "coalesce={coalesce} concurrency={CONCURRENCY} cold_storage_reads={expected_reads} warm_storage_reads=0"
+                );
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(None)]
+    #[case(Some(false))]
+    #[case(Some(true))]
+    #[tokio::test]
+    async fn test_sparse_compaction_partition_mismatch_keeps_encoded_layout(
+        #[case] prefilter: Option<bool>,
+    ) {
+        let source = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        );
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
+                crate::sst::parquet::PARQUET_METADATA_KEY.to_string(),
+                source.to_json().unwrap(),
+            )]))
+            .build();
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let (fixture, metadata) = prefilter_test_builder_with(
+            store.clone(),
+            3,
+            2,
+            PageIndexPolicy::Skip,
+            Some(props),
+            Predicate::new(vec![col("tag_0").eq(lit("a"))]),
+            CacheStrategy::Disabled,
+        )
+        .await;
+        for partition in [None, Some("a"), Some("b"), Some("missing")] {
+            let mut expected = metadata.as_ref().clone();
+            expected.set_partition_expr(partition.map(|value| {
+                partition::expr::col("tag_0")
+                    .eq(datatypes::value::Value::String(value.into()))
+                    .as_json_str()
+                    .unwrap()
+            }));
+            for compaction in [false, true] {
+                let builder = ParquetReaderBuilder::new(
+                    "prefilter_test".into(),
+                    PathType::Bare,
+                    fixture.file_handle.clone(),
+                    store.clone(),
+                )
+                .expected_metadata(Some(Arc::new(expected.clone())))
+                .compaction(compaction);
+                let builder = if let Some(enabled) = prefilter {
+                    builder
+                        .predicate(Some(Predicate::new(vec![
+                            col("tag_1").eq(lit("x")),
+                            col("field_0").gt(lit(1_u64)),
+                        ])))
+                        .enable_predicate_prefilter(enabled)
+                } else {
+                    builder
+                };
+                let mut reader = builder.build().await.unwrap().unwrap();
+                assert_eq!(
+                    reader.context.reader_builder().prefilter_builder.is_some(),
+                    prefilter == Some(true),
+                );
+                let mut count = 0;
+                while let Some(batch) = reader.next_record_batch().await.unwrap() {
+                    assert_eq!(
+                        batch.num_columns(),
+                        if compaction {
+                            5
+                        } else {
+                            metadata.column_metadatas.len() + 3
+                        }
+                    );
+                    if compaction {
+                        assert!(
+                            reader
+                                .context
+                                .read_format()
+                                .projected_index_by_id(0)
+                                .is_none()
+                        );
+                        assert!(
+                            reader
+                                .context
+                                .read_format()
+                                .projected_index_by_id(1)
+                                .is_none()
+                        );
+                    }
+                    count += batch.num_rows();
+                }
+                assert_eq!(
+                    count,
+                    match partition {
+                        None =>
+                            if prefilter.is_some() {
+                                4
+                            } else {
+                                6
+                            },
+                        Some("a") =>
+                            if prefilter.is_some() {
+                                3
+                            } else {
+                                5
+                            },
+                        Some("b") => 1,
+                        _ => 0,
+                    }
                 );
             }
         }

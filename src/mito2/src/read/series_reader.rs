@@ -571,11 +571,6 @@ fn scan_series_file_ranges(
                 reader_metrics.filter_metrics.rows_precise_filtered +=
                     num_rows_before_filter - record_batch.num_rows();
 
-                let record_batch = if let Some(mapper) = range.compaction_projection_mapper() {
-                    mapper.project(record_batch)?
-                } else {
-                    record_batch
-                };
                 if let Some(compat) = range.compat_batch() {
                     yield compat.compat(record_batch)?;
                 } else {

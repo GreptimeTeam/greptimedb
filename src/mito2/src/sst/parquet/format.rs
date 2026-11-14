@@ -1651,8 +1651,10 @@ mod tests {
         tag1: String,
     }
 
-    #[test]
-    fn test_flat_read_format_convert_format_with_dense_encoding() {
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_flat_read_format_convert_format_with_dense_encoding(#[case] skip_auto_convert: bool) {
         let metadata = build_test_region_metadata();
 
         let column_ids: Vec<_> = metadata
@@ -1665,7 +1667,7 @@ mod tests {
             ReadColumns::new(column_ids),
             Some(build_test_arrow_schema()),
             "test",
-            false,
+            skip_auto_convert,
         )
         .unwrap();
 

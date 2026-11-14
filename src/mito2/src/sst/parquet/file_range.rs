@@ -46,7 +46,6 @@ use crate::error::{
     NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu, UnexpectedSnafu,
 };
 use crate::read::compat::FlatCompatBatch;
-use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::last_row::FlatRowGroupLastRowCachedReader;
 use crate::read::prune::FlatPruneReader;
 use crate::sst::file::FileHandle;
@@ -388,11 +387,6 @@ impl FileRange {
         self.context.compat_batch()
     }
 
-    /// Returns the helper to project batches.
-    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
-        self.context.compaction_projection_mapper()
-    }
-
     /// Filters a full-projection batch using this range's precise filters.
     pub(crate) fn precise_filter_flat(
         &self,
@@ -535,19 +529,12 @@ impl FileRangeContext {
         self.base.compat_batch.as_ref()
     }
 
-    /// Returns the helper to project batches.
-    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
-        self.base.compaction_projection_mapper.as_ref()
-    }
-
     /// Sets the compat helper to the context.
     pub(crate) fn set_compat_batch(&mut self, compat: Option<FlatCompatBatch>) {
         self.base.compat_batch = compat;
     }
 
-    /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
-    /// If a partition expr filter is configured, it is also applied.
-    /// Physical filter exprs are not evaluated here; they are only applied during prefiltering.
+    /// Applies source-batch filtering; see [RangeBase::precise_filter_flat] for layout invariants.
     pub(crate) fn precise_filter_flat(
         &self,
         input: RecordBatch,
@@ -626,8 +613,6 @@ pub(crate) struct RangeBase {
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<FlatCompatBatch>,
-    /// Optional helper to project batches.
-    pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.
     pub(crate) pre_filter_mode: PreFilterMode,
     /// Partition filter.
@@ -649,9 +634,11 @@ impl TagDecodeState {
 }
 
 impl RangeBase {
-    /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
+    /// Filters converted source batches before compatibility and merge.
+    /// Predicate projections are temporary: only their row mask is applied to the
+    /// original batch, preserving its schema and complete encoded primary keys.
     ///
-    /// It assumes all necessary tags are already decoded from the primary key.
+    /// Missing predicate tags are decoded from the primary key on demand.
     ///
     /// # Arguments
     /// * `input` - The RecordBatch to filter
@@ -1041,7 +1028,6 @@ mod tests {
             prune_schema: metadata.schema.clone(),
             codec: mito_codec::row_converter::build_primary_key_codec(metadata.as_ref()),
             compat_batch: None,
-            compaction_projection_mapper: None,
             pre_filter_mode: PreFilterMode::All,
             partition_filter: None,
         }
@@ -1087,11 +1073,28 @@ mod tests {
         assert_eq!(batch, filtered);
     }
 
-    #[test]
-    fn test_sparse_filter_and_partition_tags_preserve_skip_modes() {
-        let metadata = Arc::new(sst_region_metadata_with_encoding(
-            PrimaryKeyEncoding::Sparse,
-        ));
+    #[rstest::rstest]
+    #[case(2)]
+    #[case(40)]
+    #[case(3600)]
+    fn test_sparse_filter_and_partition_tags_preserve_skip_modes(#[case] tag_count: u32) {
+        let source = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+        let mut keys = source.primary_key.clone();
+        let mut builder = RegionMetadataBuilder::from_existing(source);
+        for id in 4..tag_count + 2 {
+            builder.push_column_metadata(store_api::metadata::ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    format!("tag_{id}"),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: id,
+            });
+            keys.push(id);
+        }
+        builder.primary_key(keys);
+        let metadata = Arc::new(builder.build().unwrap());
         let codec = SparsePrimaryKeyCodec::schemaless();
         let long_tag = "x".repeat(80);
         let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
@@ -1159,7 +1162,10 @@ mod tests {
             )
             .unwrap();
             let batch = read_format.convert_batch(raw.clone(), None).unwrap();
-            let base = RangeBase {
+            if !materialized {
+                assert_eq!(batch, raw);
+            }
+            let mut base = RangeBase {
                 filters: filters.clone(),
                 dyn_filters: vec![],
                 read_format,
@@ -1167,7 +1173,6 @@ mod tests {
                 prune_schema: metadata.schema.clone(),
                 codec: Arc::new(codec.clone()),
                 compat_batch: None,
-                compaction_projection_mapper: None,
                 pre_filter_mode: PreFilterMode::All,
                 partition_filter: Some(PartitionFilterContext {
                     partition_schema: partition_schema.clone(),
@@ -1180,6 +1185,19 @@ mod tests {
                 (false, true, vec![3, 4, 5]),
                 (true, true, vec![0, 1, 3, 4, 5]),
             ] {
+                let mut state = TagDecodeState::new();
+                base.compute_filter_mask_flat(&batch, skip_fields, skip_tags, &mut state)
+                    .unwrap();
+                let mut decoded = state.decoded_tag_cache.keys().copied().collect::<Vec<_>>();
+                decoded.sort_unstable();
+                assert_eq!(
+                    decoded,
+                    if !materialized && !skip_tags {
+                        vec![0, 1]
+                    } else {
+                        vec![1]
+                    }
+                );
                 let output = base
                     .precise_filter_flat(batch.clone(), skip_fields, skip_tags)
                     .unwrap()
@@ -1194,7 +1212,76 @@ mod tests {
                     expected.as_slice(),
                     "materialized={materialized}, skip_fields={skip_fields}, skip_tags={skip_tags}"
                 );
+                let mask = BooleanArray::from(
+                    (0..6)
+                        .map(|row| expected.contains(&row))
+                        .collect::<Vec<_>>(),
+                );
+                assert_eq!(
+                    output,
+                    datatypes::arrow::compute::filter_record_batch(&batch, &mask).unwrap()
+                );
+                // Query materialization stays separate from compaction. Both
+                // compaction consumers pass encoded batches directly to compat.
+                if materialized {
+                    continue;
+                }
+                let compacted = output;
+                assert_eq!(
+                    compacted,
+                    datatypes::arrow::compute::filter_record_batch(&raw, &mask).unwrap()
+                );
+                // Exercise that boundary with an added nullable field.
+                let mut target = RegionMetadataBuilder::from_existing(metadata.as_ref().clone());
+                target.push_column_metadata(store_api::metadata::ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "added",
+                        ConcreteDataType::uint64_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Field,
+                    column_id: tag_count + 2,
+                });
+                let target = Arc::new(target.build().unwrap());
+                let projection =
+                    crate::read::flat_projection::FlatProjectionMapper::all(&target).unwrap();
+                let compat = FlatCompatBatch::try_new(&projection, &base.read_format, true)
+                    .unwrap()
+                    .unwrap();
+                let compatible = compat.compat(compacted.clone()).unwrap();
+                assert_eq!(compatible.schema(), projection.input_arrow_schema(true));
+                assert_eq!(compatible.column(1).null_count(), compatible.num_rows());
+                assert_eq!(compatible.column(0), compacted.column(0));
+                assert_eq!(&compatible.columns()[2..], &compacted.columns()[1..]);
             }
+            // Missing partition tags produce NULL, which must reject the row
+            // even when ordinary tag and field predicates are skipped.
+            base.filters.clear();
+            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                "tag_0",
+                ConcreteDataType::dictionary_datatype(
+                    ConcreteDataType::uint32_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ),
+                true,
+            )]));
+            base.partition_filter = Some(PartitionFilterContext {
+                region_partition_physical_expr: partition_col("tag_0")
+                    .eq(Value::String("".into()))
+                    .try_as_physical_expr(schema.arrow_schema())
+                    .unwrap(),
+                partition_schema: schema.clone(),
+            });
+            let temporary = base
+                .project_record_batch_for_pruning_flat(&batch, &schema, &mut TagDecodeState::new())
+                .unwrap();
+            // Dictionary keys can be valid while the referenced value is NULL.
+            assert_eq!(temporary.column(0).logical_null_count(), 1);
+            let filtered = base
+                .precise_filter_flat(batch.clone(), true, true)
+                .unwrap()
+                .unwrap();
+            assert_eq!(filtered, batch.slice(1, 1));
         }
     }
 
