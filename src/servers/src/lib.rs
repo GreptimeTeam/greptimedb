@@ -27,6 +27,7 @@ pub mod exemplar;
 pub mod grpc;
 
 mod hint_headers;
+mod hints;
 pub mod http;
 pub mod influxdb;
 pub mod interceptor;

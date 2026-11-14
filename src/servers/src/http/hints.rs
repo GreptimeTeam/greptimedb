@@ -13,133 +13,174 @@
 // limitations under the License.
 
 use axum::body::Body;
+use axum::extract::State;
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use common_telemetry::debug;
 use session::context::QueryContext;
-use session::hints::is_reserved_extension_key;
 
-use crate::error::{InvalidParameterSnafu, Result};
 use crate::hint_headers;
+use crate::hints::compatibility::{self, SelectedHints};
+use crate::hints::protocol::{Endpoint, Protocol};
 
+/// Selects sources at the HTTP boundary; source errors precede value validation.
 pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
-    let hints = hint_headers::extract_hints(request.headers());
-    let dedicated_read_preference = request
-        .headers()
-        .contains_key(&crate::http::header::GREPTIME_DB_HEADER_READ_PREFERENCE);
-    let hints = match hint_headers::validate_public_hints(hints) {
-        Ok(hints) => hints,
+    match compatibility::select_http_inputs(
+        hint_headers::extract_hints(request.headers()),
+        request.headers(),
+    ) {
+        Ok(selected) => {
+            request.extensions_mut().insert(selected);
+        }
         Err(error) => return error.into_response(),
-    };
-    if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>()
-        && let Err(error) = apply_hints(query_ctx, hints, dedicated_read_preference)
-    {
-        return error.into_response();
     }
     next.run(request).await
 }
 
-fn apply_hints(
-    query_ctx: &mut QueryContext,
-    hints: Vec<(String, String)>,
-    dedicated_read_preference: bool,
-) -> Result<()> {
-    for (key, value) in hints {
-        if is_reserved_extension_key(&key) {
-            debug!(
-                key = key.as_str(),
-                "Ignoring reserved external query context extension key"
-            );
-            continue;
-        }
-        if key.eq_ignore_ascii_case(session::hints::READ_PREFERENCE_HINT) {
-            if !dedicated_read_preference {
-                let preference = value.parse::<session::ReadPreference>().map_err(|_| {
-                    InvalidParameterSnafu {
-                        reason: format!("Invalid read_preference hint: {value}"),
-                    }
-                    .build()
-                })?;
-                query_ctx.set_read_preference(preference);
+/// Applies a complete batch only after all registered values have been validated.
+pub(crate) async fn apply_protocol_hints(
+    State(protocol): State<Protocol>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    if let Some(selected) = request.extensions_mut().remove::<SelectedHints>() {
+        let parsed = match crate::hints::parse_endpoint(Endpoint::Http(protocol), selected.hints) {
+            Ok(parsed) => parsed,
+            Err(error) => return error.into_response(),
+        };
+        if let Some(context) = request.extensions_mut().get_mut::<QueryContext>() {
+            parsed.apply(context);
+            for hint in selected.dedicated {
+                hint.apply(context);
             }
-        } else {
-            query_ctx.set_extension(key, value);
         }
     }
-    Ok(())
+    next.run(request).await
 }
 
 #[cfg(test)]
 mod tests {
-    use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY as COMMON_INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
-    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
-    use session::context::{QueryContextBuilder, generate_remote_query_id};
-    use session::hints::{
-        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
-        REMOTE_QUERY_ID_EXTENSION_KEY,
+    use crate::http::test_helpers::TestClient;
+    use axum::Router;
+    use axum::middleware;
+    use axum::routing::get;
+    use http::StatusCode;
+    use session::hints;
+
+    use super::*;
+    use crate::http::header::constants::{
+        GREPTIME_DB_HEADER_READ_PREFERENCE, GREPTIME_INSERT_SKIP_WAL_HEADER_NAME,
     };
 
-    use super::apply_hints;
-
-    #[test]
-    fn test_apply_hints_ignores_reserved_extension_keys_only() {
-        let original_query_id = generate_remote_query_id();
-        let mut query_ctx = QueryContextBuilder::default()
-            .set_extension(
-                REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
-                original_query_id.clone(),
-            )
-            .build();
-
-        apply_hints(
-            &mut query_ctx,
-            vec![
-                (
-                    REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
-                    "spoofed".to_string(),
-                ),
-                (
-                    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
-                    "spoofed-regs".to_string(),
-                ),
-                (
-                    READ_PREFERENCE_EXTENSION_KEY.to_string(),
-                    "follower".to_string(),
-                ),
-                (
-                    FLOW_SCHEDULED_TIME_MILLIS.to_string(),
-                    "1700000000000".to_string(),
-                ),
-                ("ttl".to_string(), "7d".to_string()),
-            ],
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(
-            query_ctx.remote_query_id(),
-            Some(original_query_id.as_str())
-        );
-        assert!(
-            query_ctx
-                .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
-                .is_none()
-        );
-        assert_eq!(query_ctx.read_preference(), session::ReadPreference::Leader);
-        assert!(query_ctx.extension(READ_PREFERENCE_EXTENSION_KEY).is_none());
-        assert_eq!(
-            query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
-            Some("1700000000000")
-        );
-        assert_eq!(query_ctx.extension("ttl"), Some("7d"));
+    async fn context_probe(
+        axum::Extension(context): axum::Extension<QueryContext>,
+    ) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({
+            "wal": context.skip_wal(),
+            "table_wal": context.extension(table::requests::SKIP_WAL_KEY),
+            "unbound_wal": context.extension(hints::INSERT_SKIP_WAL_HINT),
+            "custom": context.extension("custom.extension"),
+            "remote_id": context.extension(hints::REMOTE_QUERY_ID_EXTENSION_KEY),
+        }))
     }
 
-    #[test]
-    fn test_initial_dyn_filter_registration_key_matches_common_query_constant() {
-        assert_eq!(
-            INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
-            COMMON_INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY
-        );
+    async fn client(protocol: Protocol) -> TestClient {
+        let app = Router::new()
+            .route("/probe", get(context_probe))
+            .layer(middleware::from_fn_with_state(
+                protocol,
+                apply_protocol_hints,
+            ))
+            .layer(middleware::from_fn(extract_hints))
+            .layer(middleware::from_fn(
+                |mut request: Request<Body>, next: Next| async move {
+                    request
+                        .extensions_mut()
+                        .insert(QueryContext::with("greptime", "public"));
+                    next.run(request).await
+                },
+            ));
+        TestClient::new(app).await
+    }
+
+    #[tokio::test]
+    async fn test_http_hint_sources_reach_context() {
+        let server = client(Protocol::Sql).await;
+        let cases = [
+            (vec![(hints::HINTS_KEY, "insert_skip_wal=true")], true),
+            (vec![], false),
+            (vec![(compatibility::INSERT_SKIP_WAL_HEADER, "true")], true),
+            (vec![(GREPTIME_INSERT_SKIP_WAL_HEADER_NAME, "true")], true),
+            (
+                vec![
+                    (hints::HINTS_KEY, "insert_skip_wal=invalid"),
+                    (GREPTIME_INSERT_SKIP_WAL_HEADER_NAME, "false"),
+                ],
+                false,
+            ),
+            (
+                vec![
+                    (hints::HINTS_KEY, ""),
+                    (compatibility::INSERT_SKIP_WAL_HEADER, "true"),
+                ],
+                false,
+            ),
+            (
+                vec![(
+                    hints::HINTS_KEY,
+                    "insert_skip_wal=true,insert_skip_wal=false",
+                )],
+                false,
+            ),
+        ];
+        for (headers, expected) in cases {
+            let mut request = server.get("/probe");
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            let response = request.send().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.json::<serde_json::Value>().await["wal"], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_hint_invalid_batch_and_source_priority() {
+        let server = client(Protocol::Sql).await;
+        for value in [
+            "invalid",
+            "invalid,insert_skip_wal=true",
+            "true,insert_skip_wal=invalid",
+        ] {
+            let response = server
+                .get("/probe")
+                .header(hints::HINTS_KEY, format!("insert_skip_wal={value}"))
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = server
+            .get("/probe")
+            .header(hints::HINTS_KEY, "query.parallelism=invalid")
+            .header(GREPTIME_INSERT_SKIP_WAL_HEADER_NAME, "invalid")
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.text().await.contains("must be true or false"));
+    }
+
+    #[tokio::test]
+    async fn test_http_hint_extensions_and_legacy_routing() {
+        let server = client(Protocol::Other).await;
+        let response = server.get("/probe")
+            .header(hints::HINTS_KEY, "custom.extension=value,skip_wal=true,insert_skip_wal=true,remote_query_id=spoofed,read_preference=invalid")
+            .header(GREPTIME_DB_HEADER_READ_PREFERENCE, "invalid").send().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.json::<serde_json::Value>().await;
+        assert_eq!(body["custom"], "value");
+        assert_eq!(body["table_wal"], "true");
+        assert_eq!(body["wal"], false);
+        assert_eq!(body["unbound_wal"], "true");
+        assert_ne!(body["remote_id"], "spoofed");
     }
 }

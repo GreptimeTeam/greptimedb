@@ -198,6 +198,11 @@ impl PreparedMetricInserts {
 }
 
 impl Inserter {
+    /// Whether the frontend permits automatic table creation before request hints.
+    pub fn auto_create_table_enabled(&self) -> bool {
+        self.auto_create_table
+    }
+
     /// Checks the assumptions of the logical bulk path without changing tables.
     /// Unsupported requests retain ordinary insertion, including schema policy,
     /// defaults, instant TTL and row-based Flow delivery.

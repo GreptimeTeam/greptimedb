@@ -13,96 +13,55 @@
 // limitations under the License.
 
 use http::HeaderMap;
-use session::hints::{HINT_KEYS, HINTS_KEY, HINTS_KEY_PREFIX};
+use session::hints::HINTS_KEY;
 use tonic::metadata::MetadataMap;
-
-use crate::error::{InvalidParameterSnafu, Result};
 
 pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)> {
     let mut hints = Vec::new();
     if let Some(value_str) = headers.get(HINTS_KEY) {
-        value_str.split(',').for_each(|hint| {
-            let mut parts = hint.splitn(2, '=');
-            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                hints.push((key.trim().to_string(), value.trim().to_string()));
-            } else {
-                let key = hint.trim();
-                let key_lower = key.to_ascii_lowercase();
-                let owned_prefix =
-                    key_lower.starts_with("query.") || key_lower.starts_with("datafusion.");
-                if owned_prefix
-                    || session::query_options::canonical_query_option_name(key).is_some()
-                {
-                    hints.push((key.to_string(), String::new()));
-                }
-            }
-        });
+        for hint in value_str
+            .split(',')
+            .map(str::trim)
+            .filter(|hint| !hint.is_empty())
+        {
+            let (name, value) = hint.split_once('=').unwrap_or((hint, ""));
+            hints.push((name.trim().to_string(), value.trim().to_string()));
+        }
         // If hints are provided in the `x-greptime-hints` header, ignore the rest of the headers
         return hints;
     }
-    for key in HINT_KEYS.iter() {
-        if let Some(value) = headers.get(key) {
-            let new_key = key.replace(HINTS_KEY_PREFIX, "");
-            hints.push((new_key, value.trim().to_string()));
+    for (header, name) in crate::hints::compatibility::legacy_headers(T::HTTP) {
+        if let Some(value) = headers.get(header) {
+            hints.push((name.to_string(), value.trim().to_string()));
         }
     }
     hints
 }
 
-/// Validate query options supplied through public protocol hints.
-pub(crate) fn validate_public_hints(hints: Vec<(String, String)>) -> Result<Vec<(String, String)>> {
-    use std::collections::HashMap;
-
-    let mut normalized = Vec::with_capacity(hints.len());
-    let mut seen = HashMap::new();
-    for (key, value) in hints {
-        if session::hints::is_reserved_extension_key(&key) {
-            continue;
-        }
-        // Older Flownode clients send `query_parallelism=0` to request the
-        // server default; treat it as unset instead of rejecting the request.
-        if key.eq_ignore_ascii_case("query_parallelism") && value == "0" {
-            continue;
-        }
-        match session::query_options::parse_query_option(
-            &key,
-            &value,
-            session::query_options::MAX_PUBLIC_PARALLELISM,
-        ) {
-            Ok(Some((canonical, normalized_value))) => {
-                if let Some(existing) = seen.insert(canonical.clone(), normalized_value.clone())
-                    && existing != normalized_value
-                {
-                    return InvalidParameterSnafu {
-                        reason: format!("Conflicting values for hint `{canonical}`"),
-                    }
-                    .fail();
-                }
-                normalized.push((canonical, normalized_value));
-            }
-            Ok(None) => normalized.push((key, value)),
-            Err(error) => {
-                return InvalidParameterSnafu {
-                    reason: error.to_string(),
-                }
-                .fail();
-            }
-        }
-    }
-    Ok(normalized)
+/// Filters reserved keys and the legacy server-default sentinel before parsing.
+pub(crate) fn filter_public_hints(
+    hints: impl IntoIterator<Item = (String, String)>,
+) -> impl Iterator<Item = (String, String)> {
+    hints.into_iter().filter(|(name, value)| {
+        !session::hints::is_reserved_extension_key(name)
+            && !(name.eq_ignore_ascii_case("query_parallelism") && value == "0")
+    })
 }
 
 pub(crate) trait ToHeaderMap {
+    const HTTP: bool;
     fn get(&self, key: &str) -> Option<&str>;
 }
 
 impl ToHeaderMap for MetadataMap {
+    const HTTP: bool = false;
     fn get(&self, key: &str) -> Option<&str> {
         self.get(key).and_then(|v| v.to_str().ok())
     }
 }
 
 impl ToHeaderMap for HeaderMap {
+    const HTTP: bool = true;
     fn get(&self, key: &str) -> Option<&str> {
         self.get(key).and_then(|v| v.to_str().ok())
     }
@@ -113,6 +72,44 @@ mod tests {
     use tonic::metadata::{MetadataMap, MetadataValue};
 
     use super::*;
+
+    fn assert_legacy_hint_values(hints: Vec<(String, String)>) {
+        let expected = [
+            ("auto_create_table", "true"),
+            ("ttl", "3600d"),
+            ("append_mode", "true"),
+            ("merge_mode", "false"),
+            ("physical_table", "table1"),
+            ("read_preference", "leader"),
+        ];
+        assert_eq!(hints.len(), expected.len());
+        let values: std::collections::BTreeMap<_, _> = hints
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(values, expected.into_iter().collect());
+    }
+
+    #[test]
+    fn test_extract_missing_values_is_independent_of_hint_names() {
+        let value = ", query.parallelism, insert_skip_wal, read_preference, custom.option, , custom.payload=a=b, ";
+        let mut headers = HeaderMap::new();
+        headers.insert(HINTS_KEY, HeaderValue::from_static(value));
+        let mut metadata = MetadataMap::new();
+        metadata.insert(HINTS_KEY, MetadataValue::from_static(value));
+        let expected: Vec<_> = [
+            ("query.parallelism", ""),
+            ("insert_skip_wal", ""),
+            ("read_preference", ""),
+            ("custom.option", ""),
+            ("custom.payload", "a=b"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        assert_eq!(extract_hints(&headers), expected);
+        assert_eq!(extract_hints(&metadata), expected);
+    }
 
     #[test]
     fn test_extract_skip_wal_hint() {
@@ -157,22 +154,7 @@ mod tests {
 
         let hints = extract_hints(&headers);
 
-        assert_eq!(hints.len(), 6);
-        assert_eq!(
-            hints[0],
-            ("auto_create_table".to_string(), "true".to_string())
-        );
-        assert_eq!(hints[1], ("ttl".to_string(), "3600d".to_string()));
-        assert_eq!(hints[2], ("append_mode".to_string(), "true".to_string()));
-        assert_eq!(hints[3], ("merge_mode".to_string(), "false".to_string()));
-        assert_eq!(
-            hints[4],
-            ("physical_table".to_string(), "table1".to_string())
-        );
-        assert_eq!(
-            hints[5],
-            ("read_preference".to_string(), "leader".to_string())
-        );
+        assert_legacy_hint_values(hints);
     }
 
     #[test]
@@ -254,22 +236,7 @@ mod tests {
 
         let hints = extract_hints(&metadata);
 
-        assert_eq!(hints.len(), 6);
-        assert_eq!(
-            hints[0],
-            ("auto_create_table".to_string(), "true".to_string())
-        );
-        assert_eq!(hints[1], ("ttl".to_string(), "3600d".to_string()));
-        assert_eq!(hints[2], ("append_mode".to_string(), "true".to_string()));
-        assert_eq!(hints[3], ("merge_mode".to_string(), "false".to_string()));
-        assert_eq!(
-            hints[4],
-            ("physical_table".to_string(), "table1".to_string())
-        );
-        assert_eq!(
-            hints[5],
-            ("read_preference".to_string(), "leader".to_string())
-        );
+        assert_legacy_hint_values(hints);
     }
 
     #[test]
