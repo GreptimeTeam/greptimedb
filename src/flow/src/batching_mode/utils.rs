@@ -1067,7 +1067,7 @@ pub async fn sql_to_df_plan(
     };
     let plan = engine
         .planner()
-        .plan(&query_stmt, query_ctx.clone())
+        .plan(query_stmt, query_ctx.clone())
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;

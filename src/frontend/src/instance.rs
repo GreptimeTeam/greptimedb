@@ -264,6 +264,7 @@ impl Instance {
     fn statement_slow_query_timer(
         &self,
         stmt: &Statement,
+        stmt_text: &str,
         schema_name: String,
     ) -> Option<SlowQueryTimer> {
         if !should_track_statement_process(stmt) || !self.slow_query_options.enable {
@@ -271,7 +272,7 @@ impl Instance {
         }
 
         Some(SlowQueryTimer::new(
-            CatalogQueryStatement::Sql(stmt.clone()),
+            CatalogQueryStatement::Plan(stmt_text.to_string()),
             schema_name,
             self.slow_query_options.threshold,
             self.slow_query_options.sample_ratio,
@@ -280,7 +281,13 @@ impl Instance {
         ))
     }
 
-    async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
+    /// `stmt_text` is `stmt` rendered by its `Display`, which masks credentials.
+    async fn query_statement(
+        &self,
+        stmt: Statement,
+        stmt_text: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
         let query_ctx = if matches!(&stmt, Statement::SetVariables(_)) {
             query_ctx
@@ -304,7 +311,8 @@ impl Instance {
         if should_track_statement_process(&stmt) {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
-            let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
+            let slow_query_timer =
+                self.statement_slow_query_timer(&stmt, stmt_text, schema_name.clone());
             let timeout_recorder = is_explain_analyze_verbose(&stmt)
                 .then(|| slow_query_timer.as_ref().map(SlowQueryTimer::recorder))
                 .flatten();
@@ -312,7 +320,7 @@ impl Instance {
             let ticket = self.process_manager.register_query(
                 catalog_name,
                 vec![schema_name],
-                stmt.to_string(),
+                stmt_text.to_string(),
                 query_ctx.conn_info().to_string(),
                 Some(query_ctx.process_id()),
                 slow_query_timer,
@@ -437,15 +445,13 @@ impl Instance {
         query_ctx: &QueryContextRef,
         query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
     ) -> Result<Output> {
-        let stmt = QueryStatement::Sql(stmt);
+        // Planning consumes the statement, so copy it only when an interceptor will see it.
+        let stmt_for_hook = query_interceptor.is_some().then(|| stmt.clone());
         let plan = self
             .statement_executor
-            .plan(&stmt, query_ctx.clone())
+            .plan(QueryStatement::Sql(stmt), query_ctx.clone())
             .await?;
-        let QueryStatement::Sql(stmt) = stmt else {
-            unreachable!()
-        };
-        query_interceptor.pre_execute(Some(&stmt), Some(&plan), query_ctx.clone())?;
+        query_interceptor.pre_execute(stmt_for_hook.as_ref(), Some(&plan), query_ctx.clone())?;
 
         self.statement_executor
             .exec_plan(plan, query_ctx.clone())
@@ -638,11 +644,13 @@ impl Instance {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
         let catalog_name = query_ctx.current_catalog().to_string();
         let schema_name = query_ctx.current_schema();
-        let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
+        let stmt_text = stmt.to_string();
+        let slow_query_timer =
+            self.statement_slow_query_timer(&stmt, &stmt_text, schema_name.clone());
         let ticket = self.process_manager.register_query(
             catalog_name,
             vec![schema_name],
-            stmt.to_string(),
+            stmt_text,
             query_ctx.conn_info().to_string(),
             Some(query_ctx.process_id()),
             slow_query_timer,
@@ -787,7 +795,14 @@ impl Instance {
                         break;
                     }
 
-                    match self.query_statement(stmt.clone(), query_ctx.clone()).await {
+                    // Render the statement once, for the process list, the slow query log and
+                    // the error log below; its `Display` masks credentials. The statement itself
+                    // is moved: cloning it recurses once per `UNION ALL` branch (#9356).
+                    let stmt_text = stmt.to_string();
+                    match self
+                        .query_statement(stmt, &stmt_text, query_ctx.clone())
+                        .await
+                    {
                         Ok(output) => {
                             let output_result =
                                 query_interceptor.post_execute(output, query_ctx.clone());
@@ -797,9 +812,9 @@ impl Instance {
                             if e.status_code().should_log_error() {
                                 error!(e; user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
                                     catalog = query_ctx.current_catalog(), schema = %query_ctx.current_schema(),
-                                    process_id = query_ctx.process_id(), "Failed to execute query: {stmt}");
+                                    process_id = query_ctx.process_id(), "Failed to execute query: {stmt_text}");
                             } else {
-                                debug!("Failed to execute query: {stmt}, {e}");
+                                debug!("Failed to execute query: {stmt_text}, {e}");
                             }
                             results.push(Err(e));
                             break;
@@ -1069,7 +1084,7 @@ impl Instance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(&QueryStatement::Sql(stmt), query_ctx.clone())
+                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
             self.query_engine
@@ -1362,7 +1377,7 @@ impl PrometheusHandler for Instance {
 
         let plan = self
             .statement_executor
-            .plan(&stmt, query_ctx.clone())
+            .plan(stmt.clone(), query_ctx.clone())
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;

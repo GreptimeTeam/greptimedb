@@ -1087,7 +1087,7 @@ impl StatementExecutor {
             }
             _ => engine
                 .planner()
-                .plan(&QueryStatement::Sql(stmt.clone()), query_ctx)
+                .plan(QueryStatement::Sql(stmt.clone()), query_ctx)
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?,
@@ -1173,7 +1173,7 @@ impl StatementExecutor {
         let logical_plan = match &*create_view.query {
             Statement::Query(query) => {
                 self.plan(
-                    &QueryStatement::Sql(Statement::Query(query.clone())),
+                    QueryStatement::Sql(Statement::Query(query.clone())),
                     ctx.clone(),
                 )
                 .await?
