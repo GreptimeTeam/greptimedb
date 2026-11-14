@@ -1580,7 +1580,7 @@ pub fn build_flat_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
     mut per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
-    try_stream! {
+    Box::pin(try_stream! {
         let fetch_metrics = if part_metrics.explain_verbose() {
             Some(Arc::new(ParquetFetchMetrics::default()))
         } else {
@@ -1660,7 +1660,7 @@ pub fn build_flat_file_range_scan_stream(
         // Reports metrics.
         reader_metrics.observe_rows(read_type);
         part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
-    }
+    })
 }
 
 /// Build the stream of scanning the extension range in flat format denoted by the [`RowGroupIndex`].
