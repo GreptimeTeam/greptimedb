@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PreparedWrite"],"fn":["prepare","write"],"struct":["Outcome"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SelectorType"],"mod":["common","lease_based","load_based","round_robin","weight_compute","weighted_choose"],"struct":["SelectorOptions"],"trait":["RegionStatAwareSelector","Selector"]};

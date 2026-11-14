@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["FileId","FileRef","FileRefsManifest","GcReport","ParseIdError","ParseIdSnafu"],"type":["IndexVersion"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["bool_to_numeric","numeric_to_bool"],"struct":["BooleanType"]};

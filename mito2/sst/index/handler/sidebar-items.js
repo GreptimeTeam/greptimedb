@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["builtin"],"struct":["BuildContext","PlanContext","PlanEntry"],"trait":["IndexCreator","IndexKindHandler","IndexKindProvider","PlannedIndex"],"type":["IndexKindProviderRef"]};

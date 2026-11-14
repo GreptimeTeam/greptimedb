@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["already_filtered","bound_from_aggregates","column_at_is_from_scan","column_is_from_scan","columns_are_from_scan","extremum_bound","indicator_condition","infer_bound","integer_literal","plain_aggregate","positive_sum_index","safe_operand","safe_predicate"],"struct":["InferAggregateInputBoundsRule"]};

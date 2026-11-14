@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SnapshotCommand"],"fn":["build_object_store_and_resolve_file_path","split_fs_snapshot_path"],"struct":["InfoCommand","MetaInfoTool","MetaRestoreTool","MetaSnapshotTool","RestoreCommand","SaveCommand"]};

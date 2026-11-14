@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cell_from_value","signature_of_cell","signature_of_cell_and_level","value_to_level"],"static":["CELL_TYPES","COORDINATE_TYPES","LEVEL_TYPES"],"struct":["S2CellLevel","S2CellParent","S2CellToToken","S2LatLngToCell"]};

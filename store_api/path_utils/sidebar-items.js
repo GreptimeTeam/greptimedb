@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLUSTER_DIR","DATA_DIR","WAL_DIR"],"fn":["get_storage_path","region_dir","region_name","table_dir"]};

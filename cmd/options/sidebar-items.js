@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["deserialize_plugin_options","flush_dropped_plugin_warnings"],"struct":["GlobalOptions","GreptimeOptions"]};

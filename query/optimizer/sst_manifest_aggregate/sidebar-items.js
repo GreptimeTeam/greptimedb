@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_numeric_column","is_supported_aggregate","is_supported_input","is_supported_predicate"],"struct":["SstManifestAggregate","SstManifestAggregatePlanner","SstManifestAggregateRule"]};

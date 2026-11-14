@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CACHE_TYPES"],"fn":["record_cache_lookup"],"struct":["CACHE_COUNTERS","CACHE_HIT","CACHE_MISS"]};

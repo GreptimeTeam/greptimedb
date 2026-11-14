@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MEMORY_WAIT_TIMEOUT"],"enum":["Error","OnExhaustedPolicy","PermitGranularity"],"mod":["error","granularity","guard","manager","policy"],"struct":["MemoryGuard","MemoryManager","NoOpMetrics"],"trait":["MemoryMetrics"],"type":["Result"]};

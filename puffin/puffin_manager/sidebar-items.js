@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["cache","file_accessor","file_key","fs_puffin_manager","stager"],"struct":["DirMetrics","GuardWithMetadata","PutOptions"],"trait":["BlobGuard","DirGuard","PuffinManager","PuffinReader","PuffinWriter"]};

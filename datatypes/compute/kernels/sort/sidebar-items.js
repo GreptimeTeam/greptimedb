@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["lexsort","lexsort_to_indices","partial_sort","partition_validity","sort","sort_limit","sort_to_indices"],"struct":["FixedLexicographicalComparator","LexicographicalComparator","SortColumn","SortOptions"]};

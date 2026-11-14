@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PrimaryKeyEncoding"],"fn":["infer_primary_key_encoding_from_hint"]};

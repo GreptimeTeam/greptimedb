@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AffinityFallback","AffinityReference"],"struct":["AffinityRequirements","NoopAffinity"],"trait":["Affinity","AffinityResolver","PeerAllocContextProvider"],"type":["AffinityAttributes","AffinityRef","AffinityResolverRef","PeerAllocContextProviderRef"]};

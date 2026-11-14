@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_range_index","build_series_index","reader_input"]};

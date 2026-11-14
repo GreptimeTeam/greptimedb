@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RepairCommand"],"mod":["alter_table","create_table","partition_column"],"struct":["RepairLogicalTablesCommand","RepairTool"]};

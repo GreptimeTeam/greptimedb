@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COMPACT_TYPE_STRICT_WINDOW","COMPACT_TYPE_STRICT_WINDOW_SHORT","DEFAULT_COMPACTION_PARALLELISM"],"fn":["compact_signature","compact_table","flush_signature","flush_table","parse_compact_options","parse_compact_request"],"struct":["CompactTableFunction","FlushTableFunction"]};

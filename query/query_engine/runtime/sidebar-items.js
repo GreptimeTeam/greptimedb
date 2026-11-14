@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["spill_compression_from_options"],"struct":["DefaultQueryRuntimeProvider","QueryRuntimeContext"],"trait":["QueryRuntimeProvider"],"type":["QueryRuntimeProviderRef"]};

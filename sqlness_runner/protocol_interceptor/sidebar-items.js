@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MYSQL","POSTGRES","PREFIX","PROTOCOL_KEY"],"struct":["ProtocolInterceptor","ProtocolInterceptorFactory"]};

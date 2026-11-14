@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CASE_INSENSITIVE_NAME","MATCH_MODE_NAME","MATCH_OP_NAME","PROCESSOR_FILTER","TARGETS_NAME"],"enum":["MatchMode","MatchOp"],"struct":["FilterProcessor"]};

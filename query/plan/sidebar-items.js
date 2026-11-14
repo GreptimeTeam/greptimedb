@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TableType"],"fn":["extra_partition_columns","extract_and_rewrite_full_table_names","has_same_partition_columns","refresh_partition_columns","scanned_base_table","with_unmapped_partition_columns"],"struct":["TableNamesExtractAndRewriter"],"trait":["ExtractExpr"]};

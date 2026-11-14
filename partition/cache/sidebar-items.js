@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CachedPartitionInfo"],"fn":["create_partitions_with_version_from_region_routes","init_factory","new_partition_info_cache"],"struct":["PhysicalPartitionInfo"],"type":["PartitionInfoCache","PartitionInfoCacheRef"]};

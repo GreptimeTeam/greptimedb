@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["apply_df_optimizer","check_group_by_analyzer"],"struct":["CheckGroupByRule","FindColumn"]};

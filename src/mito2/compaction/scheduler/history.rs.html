@@ -1,0 +1,216 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/mito2/src/compaction/scheduler/history.rs`."><title>history.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="mito2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">mito2/compaction/scheduler/</div>history.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright 2023 Greptime Team
+<a href=#2 id=2 data-nosnippet>2</a>//
+<a href=#3 id=3 data-nosnippet>3</a>// Licensed under the Apache License, Version 2.0 (the "License");
+<a href=#4 id=4 data-nosnippet>4</a>// you may not use this file except in compliance with the License.
+<a href=#5 id=5 data-nosnippet>5</a>// You may obtain a copy of the License at
+<a href=#6 id=6 data-nosnippet>6</a>//
+<a href=#7 id=7 data-nosnippet>7</a>//     http://www.apache.org/licenses/LICENSE-2.0
+<a href=#8 id=8 data-nosnippet>8</a>//
+<a href=#9 id=9 data-nosnippet>9</a>// Unless required by applicable law or agreed to in writing, software
+<a href=#10 id=10 data-nosnippet>10</a>// distributed under the License is distributed on an "AS IS" BASIS,
+<a href=#11 id=11 data-nosnippet>11</a>// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+<a href=#12 id=12 data-nosnippet>12</a>// See the License for the specific language governing permissions and
+<a href=#13 id=13 data-nosnippet>13</a>// limitations under the License.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="kw">use </span>std::cmp::Reverse;
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span>std::collections::{HashMap, HashSet};
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span>std::time::{Duration, Instant};
+<a href=#18 id=18 data-nosnippet>18</a>
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">use </span>prometheus::IntCounterVec;
+<a href=#20 id=20 data-nosnippet>20</a>
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">use </span><span class="kw">crate</span>::compaction::twcs::{PickClass, WindowCandidate};
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">use </span><span class="kw">crate</span>::metrics::TWCS_SELECTED_CANDIDATES;
+<a href=#23 id=23 data-nosnippet>23</a>
+<a href=#24 id=24 data-nosnippet>24</a><span class="doccomment">/// Waiting compensation starts after one minute. This is a promotion threshold,
+<a href=#25 id=25 data-nosnippet>25</a>/// not a deadline: an executing batch is never preempted to run an overdue pick.
+<a href=#26 id=26 data-nosnippet>26</a>/// It is checked at pick time and does not wake the scheduler on its own.
+<a href=#27 id=27 data-nosnippet>27</a></span><span class="kw">const </span>PROMOTION_DELAY: Duration = Duration::from_secs(<span class="number">60</span>);
+<a href=#28 id=28 data-nosnippet>28</a>
+<a href=#29 id=29 data-nosnippet>29</a><span class="doccomment">/// A work identity survives file replacement and picking epochs, but not a region
+<a href=#30 id=30 data-nosnippet>30</a>/// incarnation. Different classes in the same window retain independent ages.
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+<a href=#32 id=32 data-nosnippet>32</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>PickKey {
+<a href=#33 id=33 data-nosnippet>33</a>    <span class="doccomment">/// Window identity, independent of the current input files.
+<a href=#34 id=34 data-nosnippet>34</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) window: i64,
+<a href=#35 id=35 data-nosnippet>35</a>    <span class="doccomment">/// Work category whose waiting age is tracked independently in this window.
+<a href=#36 id=36 data-nosnippet>36</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) class: PickClass,
+<a href=#37 id=37 data-nosnippet>37</a>}
+<a href=#38 id=38 data-nosnippet>38</a>
+<a href=#39 id=39 data-nosnippet>39</a><span class="kw">impl </span>From&lt;<span class="kw-2">&amp;</span>WindowCandidate&gt; <span class="kw">for </span>PickKey {
+<a href=#40 id=40 data-nosnippet>40</a>    <span class="kw">fn </span>from(candidate: <span class="kw-2">&amp;</span>WindowCandidate) -&gt; <span class="self">Self </span>{
+<a href=#41 id=41 data-nosnippet>41</a>        <span class="self">Self </span>{
+<a href=#42 id=42 data-nosnippet>42</a>            window: candidate.window,
+<a href=#43 id=43 data-nosnippet>43</a>            class: candidate.pick.class,
+<a href=#44 id=44 data-nosnippet>44</a>        }
+<a href=#45 id=45 data-nosnippet>45</a>    }
+<a href=#46 id=46 data-nosnippet>46</a>}
+<a href=#47 id=47 data-nosnippet>47</a>
+<a href=#48 id=48 data-nosnippet>48</a><span class="doccomment">/// Region-resident scheduling metadata. It owns no file handles or reservations.
+<a href=#49 id=49 data-nosnippet>49</a>/// Planning works on a private snapshot; the accepted plan consumes one fairness
+<a href=#50 id=50 data-nosnippet>50</a>/// turn per selected key. Execution success or failure does not rewrite ages.
+<a href=#51 id=51 data-nosnippet>51</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#52 id=52 data-nosnippet>52</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>PickHistory {
+<a href=#53 id=53 data-nosnippet>53</a>    <span class="doccomment">/// First observation or last fairness turn for each eligible key.
+<a href=#54 id=54 data-nosnippet>54</a>    /// Repeated picks preserve this timestamp until the key is selected.
+<a href=#55 id=55 data-nosnippet>55</a>    </span>waiting: HashMap&lt;PickKey, Instant&gt;,
+<a href=#56 id=56 data-nosnippet>56</a>    selected_metrics: IntCounterVec,
+<a href=#57 id=57 data-nosnippet>57</a>}
+<a href=#58 id=58 data-nosnippet>58</a>
+<a href=#59 id=59 data-nosnippet>59</a><span class="kw">impl </span>Default <span class="kw">for </span>PickHistory {
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#61 id=61 data-nosnippet>61</a>        <span class="self">Self </span>{
+<a href=#62 id=62 data-nosnippet>62</a>            waiting: HashMap::new(),
+<a href=#63 id=63 data-nosnippet>63</a>            selected_metrics: TWCS_SELECTED_CANDIDATES.clone(),
+<a href=#64 id=64 data-nosnippet>64</a>        }
+<a href=#65 id=65 data-nosnippet>65</a>    }
+<a href=#66 id=66 data-nosnippet>66</a>}
+<a href=#67 id=67 data-nosnippet>67</a>
+<a href=#68 id=68 data-nosnippet>68</a><span class="doccomment">/// Ascending fairness order: promoted work, oldest age, class, then newest window.
+<a href=#69 id=69 data-nosnippet>69</a></span><span class="attr">#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+<a href=#70 id=70 data-nosnippet>70</a></span><span class="kw">struct </span>PickPriority {
+<a href=#71 id=71 data-nosnippet>71</a>    not_promoted: bool,
+<a href=#72 id=72 data-nosnippet>72</a>    since: <span class="prelude-ty">Option</span>&lt;Instant&gt;,
+<a href=#73 id=73 data-nosnippet>73</a>    class: PickClass,
+<a href=#74 id=74 data-nosnippet>74</a>    window: Reverse&lt;i64&gt;,
+<a href=#75 id=75 data-nosnippet>75</a>}
+<a href=#76 id=76 data-nosnippet>76</a>
+<a href=#77 id=77 data-nosnippet>77</a><span class="kw">impl </span>PickHistory {
+<a href=#78 id=78 data-nosnippet>78</a>    <span class="doccomment">/// Refreshes all eligible identities before selection limits hide any work.
+<a href=#79 id=79 data-nosnippet>79</a>    /// Preserves surviving ages and drops absent keys without changing selection.
+<a href=#80 id=80 data-nosnippet>80</a>    </span><span class="kw">fn </span>observe(<span class="kw-2">&amp;mut </span><span class="self">self</span>, keys: <span class="kw">impl </span>Iterator&lt;Item = PickKey&gt;, now: Instant) {
+<a href=#81 id=81 data-nosnippet>81</a>        <span class="kw">let </span>live: HashSet&lt;<span class="kw">_</span>&gt; = keys.collect();
+<a href=#82 id=82 data-nosnippet>82</a>        <span class="self">self</span>.waiting.retain(|key, <span class="kw">_</span>| live.contains(key));
+<a href=#83 id=83 data-nosnippet>83</a>        <span class="kw">for </span>key <span class="kw">in </span>live {
+<a href=#84 id=84 data-nosnippet>84</a>            <span class="self">self</span>.waiting.entry(key).or_insert(now);
+<a href=#85 id=85 data-nosnippet>85</a>        }
+<a href=#86 id=86 data-nosnippet>86</a>    }
+<a href=#87 id=87 data-nosnippet>87</a>
+<a href=#88 id=88 data-nosnippet>88</a>    <span class="doccomment">/// Returns an ascending sort key: promoted work first, oldest waiting first.
+<a href=#89 id=89 data-nosnippet>89</a>    /// Below [`PROMOTION_DELAY`], age does not affect class/newest-window ordering.
+<a href=#90 id=90 data-nosnippet>90</a>    /// One shared `now` keeps the comparator consistent across the entire sort.
+<a href=#91 id=91 data-nosnippet>91</a>    </span><span class="kw">fn </span>priority(<span class="kw-2">&amp;</span><span class="self">self</span>, key: PickKey, now: Instant) -&gt; PickPriority {
+<a href=#92 id=92 data-nosnippet>92</a>        <span class="kw">let </span>overdue = <span class="self">self
+<a href=#93 id=93 data-nosnippet>93</a>            </span>.waiting
+<a href=#94 id=94 data-nosnippet>94</a>            .get(<span class="kw-2">&amp;</span>key)
+<a href=#95 id=95 data-nosnippet>95</a>            .copied()
+<a href=#96 id=96 data-nosnippet>96</a>            .filter(|since| now.saturating_duration_since(<span class="kw-2">*</span>since) &gt;= PROMOTION_DELAY);
+<a href=#97 id=97 data-nosnippet>97</a>        PickPriority {
+<a href=#98 id=98 data-nosnippet>98</a>            not_promoted: overdue.is_none(),
+<a href=#99 id=99 data-nosnippet>99</a>            since: overdue,
+<a href=#100 id=100 data-nosnippet>100</a>            class: key.class,
+<a href=#101 id=101 data-nosnippet>101</a>            window: Reverse(key.window),
+<a href=#102 id=102 data-nosnippet>102</a>        }
+<a href=#103 id=103 data-nosnippet>103</a>    }
+<a href=#104 id=104 data-nosnippet>104</a>
+<a href=#105 id=105 data-nosnippet>105</a>    <span class="doccomment">/// Consumes the fairness turn for `key`. Only an accepted plan installs the
+<a href=#106 id=106 data-nosnippet>106</a>    /// private snapshot, so rejected or stale plans never advance resident ages.
+<a href=#107 id=107 data-nosnippet>107</a>    </span><span class="kw">fn </span>serve(<span class="kw-2">&amp;mut </span><span class="self">self</span>, key: PickKey, now: Instant) {
+<a href=#108 id=108 data-nosnippet>108</a>        <span class="self">self</span>.waiting.insert(key, now);
+<a href=#109 id=109 data-nosnippet>109</a>    }
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a>    <span class="doccomment">/// Observes all eligible work and ranks one alternative per window without
+<a href=#112 id=112 data-nosnippet>112</a>    /// consuming a fairness turn. The caller acknowledges only attempted work
+<a href=#113 id=113 data-nosnippet>113</a>    /// after applying its output budget and semantic closure policy.
+<a href=#114 id=114 data-nosnippet>114</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>rank_candidates(
+<a href=#115 id=115 data-nosnippet>115</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#116 id=116 data-nosnippet>116</a>        <span class="kw-2">mut </span>candidates: Vec&lt;WindowCandidate&gt;,
+<a href=#117 id=117 data-nosnippet>117</a>        now: Instant,
+<a href=#118 id=118 data-nosnippet>118</a>    ) -&gt; Vec&lt;WindowCandidate&gt; {
+<a href=#119 id=119 data-nosnippet>119</a>        <span class="self">self</span>.observe(candidates.iter().map(PickKey::from), now);
+<a href=#120 id=120 data-nosnippet>120</a>        candidates.sort_by_key(|candidate| <span class="self">self</span>.priority(PickKey::from(candidate), now));
+<a href=#121 id=121 data-nosnippet>121</a>        <span class="comment">// Alternatives may share files or semantic dependencies within a window.
+<a href=#122 id=122 data-nosnippet>122</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>windows = HashSet::new();
+<a href=#123 id=123 data-nosnippet>123</a>        candidates.retain(|candidate| windows.insert(candidate.window));
+<a href=#124 id=124 data-nosnippet>124</a>        candidates
+<a href=#125 id=125 data-nosnippet>125</a>    }
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="doccomment">/// Consumes turns for attempted seeds, including absorbed or rejected closure
+<a href=#128 id=128 data-nosnippet>128</a>    /// seeds, but not work left behind by the output budget. Only an accepted
+<a href=#129 id=129 data-nosnippet>129</a>    /// plan installs this private snapshot; execution never updates waiting ages.
+<a href=#130 id=130 data-nosnippet>130</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>acknowledge(<span class="kw-2">&amp;mut </span><span class="self">self</span>, keys: <span class="kw">impl </span>Iterator&lt;Item = PickKey&gt;, now: Instant) {
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="kw">for </span>key <span class="kw">in </span>keys {
+<a href=#132 id=132 data-nosnippet>132</a>            <span class="kw">let </span>priority = <span class="kw">if </span><span class="self">self</span>.priority(key, now).since.is_some() {
+<a href=#133 id=133 data-nosnippet>133</a>                <span class="string">"promoted"
+<a href=#134 id=134 data-nosnippet>134</a>            </span>} <span class="kw">else </span>{
+<a href=#135 id=135 data-nosnippet>135</a>                <span class="string">"normal"
+<a href=#136 id=136 data-nosnippet>136</a>            </span>};
+<a href=#137 id=137 data-nosnippet>137</a>            <span class="self">self</span>.selected_metrics
+<a href=#138 id=138 data-nosnippet>138</a>                .with_label_values(<span class="kw-2">&amp;</span>[key.class.as_str(), priority])
+<a href=#139 id=139 data-nosnippet>139</a>                .inc();
+<a href=#140 id=140 data-nosnippet>140</a>            <span class="self">self</span>.serve(key, now);
+<a href=#141 id=141 data-nosnippet>141</a>        }
+<a href=#142 id=142 data-nosnippet>142</a>    }
+<a href=#143 id=143 data-nosnippet>143</a>}
+<a href=#144 id=144 data-nosnippet>144</a>
+<a href=#145 id=145 data-nosnippet>145</a><span class="attr">#[cfg(test)]
+<a href=#146 id=146 data-nosnippet>146</a></span><span class="kw">impl </span>PickHistory {
+<a href=#147 id=147 data-nosnippet>147</a>    <span class="doccomment">/// Uses isolated metric handles while retaining the production acknowledgement path.
+<a href=#148 id=148 data-nosnippet>148</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>with_selected_metrics_for_test(selected_metrics: IntCounterVec) -&gt; <span class="self">Self </span>{
+<a href=#149 id=149 data-nosnippet>149</a>        <span class="self">Self </span>{
+<a href=#150 id=150 data-nosnippet>150</a>            waiting: HashMap::new(),
+<a href=#151 id=151 data-nosnippet>151</a>            selected_metrics,
+<a href=#152 id=152 data-nosnippet>152</a>        }
+<a href=#153 id=153 data-nosnippet>153</a>    }
+<a href=#154 id=154 data-nosnippet>154</a>
+<a href=#155 id=155 data-nosnippet>155</a>    <span class="doccomment">/// Seeds waiting ages for cross-module scheduling tests.
+<a href=#156 id=156 data-nosnippet>156</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>observe_for_test(<span class="kw-2">&amp;mut </span><span class="self">self</span>, keys: <span class="kw">impl </span>Iterator&lt;Item = PickKey&gt;, now: Instant) {
+<a href=#157 id=157 data-nosnippet>157</a>        <span class="self">self</span>.observe(keys, now);
+<a href=#158 id=158 data-nosnippet>158</a>    }
+<a href=#159 id=159 data-nosnippet>159</a>
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="doccomment">/// Seeds one waiting age without pruning unrelated keys.
+<a href=#161 id=161 data-nosnippet>161</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>seed_for_test(<span class="kw-2">&amp;mut </span><span class="self">self</span>, key: PickKey, now: Instant) {
+<a href=#162 id=162 data-nosnippet>162</a>        <span class="self">self</span>.serve(key, now);
+<a href=#163 id=163 data-nosnippet>163</a>    }
+<a href=#164 id=164 data-nosnippet>164</a>
+<a href=#165 id=165 data-nosnippet>165</a>    <span class="doccomment">/// Inspects promoted ages without exposing the private priority representation.
+<a href=#166 id=166 data-nosnippet>166</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>promoted_since_for_test(<span class="kw-2">&amp;</span><span class="self">self</span>, key: PickKey, now: Instant) -&gt; <span class="prelude-ty">Option</span>&lt;Instant&gt; {
+<a href=#167 id=167 data-nosnippet>167</a>        <span class="self">self</span>.priority(key, now).since
+<a href=#168 id=168 data-nosnippet>168</a>    }
+<a href=#169 id=169 data-nosnippet>169</a>}
+<a href=#170 id=170 data-nosnippet>170</a>
+<a href=#171 id=171 data-nosnippet>171</a><span class="attr">#[cfg(test)]
+<a href=#172 id=172 data-nosnippet>172</a></span><span class="kw">mod </span>tests {
+<a href=#173 id=173 data-nosnippet>173</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#174 id=174 data-nosnippet>174</a>
+<a href=#175 id=175 data-nosnippet>175</a>    <span class="kw">fn </span>key(window: i64, class: PickClass) -&gt; PickKey {
+<a href=#176 id=176 data-nosnippet>176</a>        PickKey { window, class }
+<a href=#177 id=177 data-nosnippet>177</a>    }
+<a href=#178 id=178 data-nosnippet>178</a>
+<a href=#179 id=179 data-nosnippet>179</a>    <span class="attr">#[test]
+<a href=#180 id=180 data-nosnippet>180</a>    </span><span class="kw">fn </span>test_aging_survives_repicks_and_other_service() {
+<a href=#181 id=181 data-nosnippet>181</a>        <span class="kw">let </span>start = Instant::now();
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="kw">let </span>l0 = key(<span class="number">100</span>, PickClass::L0Merge);
+<a href=#183 id=183 data-nosnippet>183</a>        <span class="kw">let </span>old = key(<span class="number">0</span>, PickClass::FileReduction);
+<a href=#184 id=184 data-nosnippet>184</a>        <span class="kw">let </span>overlap = key(<span class="number">0</span>, PickClass::OverlapResolution);
+<a href=#185 id=185 data-nosnippet>185</a>        <span class="kw">let </span><span class="kw-2">mut </span>history = PickHistory::default();
+<a href=#186 id=186 data-nosnippet>186</a>        history.observe([l0, old, overlap].into_iter(), start);
+<a href=#187 id=187 data-nosnippet>187</a>        <span class="macro">assert!</span>(history.priority(l0, start) &lt; history.priority(old, start));
+<a href=#188 id=188 data-nosnippet>188</a>        <span class="kw">for </span>seconds <span class="kw">in </span><span class="number">1</span>..=<span class="number">60 </span>{
+<a href=#189 id=189 data-nosnippet>189</a>            <span class="kw">let </span>now = start + Duration::from_secs(seconds);
+<a href=#190 id=190 data-nosnippet>190</a>            history.observe([l0, old, overlap].into_iter(), now);
+<a href=#191 id=191 data-nosnippet>191</a>            history.serve(l0, now);
+<a href=#192 id=192 data-nosnippet>192</a>        }
+<a href=#193 id=193 data-nosnippet>193</a>        <span class="kw">let </span>now = start + PROMOTION_DELAY;
+<a href=#194 id=194 data-nosnippet>194</a>        <span class="macro">assert!</span>(history.priority(old, now) &lt; history.priority(l0, now));
+<a href=#195 id=195 data-nosnippet>195</a>        history.serve(old, now);
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="macro">assert!</span>(history.priority(overlap, now) &lt; history.priority(old, now));
+<a href=#197 id=197 data-nosnippet>197</a>    }
+<a href=#198 id=198 data-nosnippet>198</a>
+<a href=#199 id=199 data-nosnippet>199</a>    <span class="attr">#[test]
+<a href=#200 id=200 data-nosnippet>200</a>    </span><span class="kw">fn </span>test_old_windows_progress_and_obsolete_work_is_pruned() {
+<a href=#201 id=201 data-nosnippet>201</a>        <span class="kw">let </span>start = Instant::now();
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="kw">let </span>old = key(<span class="number">0</span>, PickClass::L0Merge);
+<a href=#203 id=203 data-nosnippet>203</a>        <span class="kw">let </span>new = key(<span class="number">1</span>, PickClass::L0Merge);
+<a href=#204 id=204 data-nosnippet>204</a>        <span class="kw">let </span><span class="kw-2">mut </span>history = PickHistory::default();
+<a href=#205 id=205 data-nosnippet>205</a>        history.observe([old].into_iter(), start);
+<a href=#206 id=206 data-nosnippet>206</a>        <span class="kw">let </span>now = start + PROMOTION_DELAY;
+<a href=#207 id=207 data-nosnippet>207</a>        history.observe([old, new].into_iter(), now);
+<a href=#208 id=208 data-nosnippet>208</a>        <span class="macro">assert!</span>(history.priority(old, now) &lt; history.priority(new, now));
+<a href=#209 id=209 data-nosnippet>209</a>        history.observe([new].into_iter(), now);
+<a href=#210 id=210 data-nosnippet>210</a>        <span class="macro">assert_eq!</span>(<span class="number">1</span>, history.waiting.len());
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="macro">assert!</span>(!history.waiting.contains_key(<span class="kw-2">&amp;</span>old));
+<a href=#212 id=212 data-nosnippet>212</a>        history.observe(std::iter::empty(), now);
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="macro">assert!</span>(history.waiting.is_empty());
+<a href=#214 id=214 data-nosnippet>214</a>    }
+<a href=#215 id=215 data-nosnippet>215</a>}
+</code></pre></div></section></main></body></html>

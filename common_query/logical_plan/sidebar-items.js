@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_insert_to_logical_plan","breakup_insert_plan","build_filter_from_timestamp","build_same_type_ts_filter","is_lossless_substrait_type","rename_logical_plan_columns"],"mod":["expr"],"trait":["SubstraitPlanDecoder"],"type":["SubstraitPlanDecoderRef"]};

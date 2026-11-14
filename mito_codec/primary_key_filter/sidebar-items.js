@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CompiledFastPath"],"struct":["CompiledPrimaryKeyFilter","DensePrimaryKeyFilter","DensePrimaryKeyValueAccessor","PrimaryKeyFilterInner","SparsePrimaryKeyFilter","SparsePrimaryKeyValueAccessor"],"trait":["PrimaryKeyValueAccessor"]};

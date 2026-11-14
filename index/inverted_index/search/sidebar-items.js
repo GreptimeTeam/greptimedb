@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["partition_in_place"],"mod":["fst_apply","fst_values_mapper","index_apply","predicate"]};

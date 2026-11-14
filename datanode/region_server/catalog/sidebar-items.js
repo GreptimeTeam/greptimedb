@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["InternalTableKind"],"mod":["inspect"],"struct":["NameAwareCatalogList","NameAwareCatalogProvider","NameAwareDataSourceInjector","NameAwareDataSourceInjectorBuilder","NameAwareSchemaProvider"]};

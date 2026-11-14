@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FunctionRegistrationResult"],"fn":["get_admin_function","register_admin_function","register_admin_function_in"],"static":["ADMIN_FUNCTION_REGISTRY","FUNCTION_REGISTRY"],"struct":["FunctionRegistry"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["collect_json2_path_stats","collect_json2_rewrite_plans","collect_json2_rewrite_plans_from_parquet","collect_leaf_path_types","rewrite_json2_batch","rewrite_json2_schema","select_dynamic_hints"],"struct":["Json2LeafPathStats","Json2RewritePlan"],"type":["Json2RewritePlans"]};

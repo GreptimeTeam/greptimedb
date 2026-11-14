@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["APPROXIMATE_COLUMN_COUNT"],"fn":["build_trace_table_data","v2_to_grpc_main_insert_requests","write_span_to_row"],"struct":["FixedTraceColumnIndexes"]};

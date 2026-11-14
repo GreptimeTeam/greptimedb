@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["invalid","resolve"],"struct":["Observation","Query","Selector","Series"]};

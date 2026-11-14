@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NAME"],"fn":["cast_to_int64","cast_to_large_utf8","char_to_byte_idx","insert_string"],"struct":["InsertFunction"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_PAGE_SIZE","PAGE_SIZE","PAGE_SIZE_ENV","PAGE_TTL"],"fn":["parse_page_size"],"struct":["ParquetPageCache"]};

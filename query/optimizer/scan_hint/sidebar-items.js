@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["single_evaluation_node_allowed","single_evaluation_projection_expr_allowed"],"struct":["ScanHintRewriter","ScanHintRule"]};

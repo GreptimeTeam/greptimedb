@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLUSTER_NODE_INFO_PREFIX"],"enum":["NodeStatus","Role"],"fn":["calculate_node_id"],"struct":["CLUSTER_NODE_INFO_PREFIX_PATTERN","DatanodeStatus","FlownodeStatus","FrontendStatus","MetasrvStatus","NodeInfo","NodeInfoKey"],"trait":["ClusterInfo"]};

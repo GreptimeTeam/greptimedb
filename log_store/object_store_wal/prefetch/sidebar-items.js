@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["READ_PREFETCH_BYTES","READ_PREFETCH_DEPTH"],"fn":["fetch_segment","segments","spawn_fetch_segment","try_reserve_prefetch_bytes"]};

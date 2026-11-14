@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROCESSOR_LOGFMT"],"fn":["parse_logfmt","parse_quoted_value"],"struct":["LogfmtProcessor"]};
