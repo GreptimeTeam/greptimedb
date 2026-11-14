@@ -98,7 +98,9 @@ impl SimplePredicate {
                 };
                 let (regex, regex_negative) = Self::maybe_build_regex(op, literal).ok()?;
                 Some(Self::Comparison {
-                    literal: literal.to_scalar().ok()?,
+                    literal: datafusion_common::utils::normalize_float_zero_scalar(literal.clone())
+                        .to_scalar()
+                        .ok()?,
                     op,
                     regex,
                     regex_negative,
@@ -621,6 +623,103 @@ mod tests {
                         mask = &mask & &evaluate(&filter);
                     }
                     assert_eq!(selected(mask), expected, "optimized: {plan}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn float_zero_predicates_match_datafusion() {
+        use datafusion::prelude::SessionContext;
+        use datatypes::arrow::array::{Float32Array, Float64Array, Int32Array};
+
+        let float64: ArrayRef = Arc::new(Float64Array::from(vec![
+            Some(-0.0),
+            Some(0.0),
+            Some(1.0),
+            Some(f64::NAN),
+            None,
+        ]));
+        let float32: ArrayRef = Arc::new(Float32Array::from(vec![
+            Some(-0.0),
+            Some(0.0),
+            Some(1.0),
+            Some(f32::NAN),
+            None,
+        ]));
+        for input in [float64, float32] {
+            let literal = |v: f64| {
+                if input.data_type() == &DataType::Float32 {
+                    lit(v as f32)
+                } else {
+                    lit(v)
+                }
+            };
+            let ctx = SessionContext::new();
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("v", input.data_type().clone(), true),
+                Field::new("id", DataType::Int32, false),
+            ]));
+            ctx.register_batch(
+                "floats",
+                RecordBatch::try_new(
+                    schema,
+                    vec![
+                        input.clone(),
+                        Arc::new(Int32Array::from_iter_values(0..input.len() as i32)),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            for expr in [
+                col("v").eq(literal(0.0)),
+                col("v").eq(literal(-0.0)),
+                col("v").not_eq(literal(-0.0)),
+                col("v").lt(literal(0.0)),
+                col("v").lt_eq(literal(-0.0)),
+                col("v").gt(literal(-0.0)),
+                col("v").gt_eq(literal(0.0)),
+                literal(0.0).lt_eq(col("v")),
+                col("v").eq(literal(0.0)).or(col("v").eq(literal(1.0))),
+                col("v").eq(literal(f64::NAN)),
+            ] {
+                let expected = ctx
+                    .table("floats")
+                    .await
+                    .unwrap()
+                    .filter(expr.clone())
+                    .unwrap()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column_by_name("id")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<Int32Array>()
+                            .unwrap()
+                            .values()
+                            .to_vec()
+                    })
+                    .collect::<Vec<_>>();
+                let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
+                let mask = evaluator.evaluate_array(&input).unwrap();
+                let selected = mask
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, matched)| matched.then_some(i as i32))
+                    .collect::<Vec<_>>();
+                assert_eq!(selected, expected, "{expr}");
+                for (i, matched) in mask.iter().enumerate() {
+                    let scalar = ScalarValue::try_from_array(&input, i).unwrap();
+                    assert_eq!(
+                        evaluator.evaluate_scalar(&scalar).unwrap(),
+                        matched,
+                        "{expr}, row={i}"
+                    );
                 }
             }
         }
