@@ -28,12 +28,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use common_base::cancellation::{CancellableFuture, CancellationHandle};
 use common_time::Timestamp;
 use partition::PartitionRuleRef;
 use snafu::{OptionExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -82,7 +82,7 @@ pub struct MultiRegionCompactionContext {
     pub cache: CacheManagerRef,
     pub config: Arc<MitoConfig>,
     pub protection: Arc<dyn SstWriteGuard>,
-    pub cancellation: Arc<CancellationHandle>,
+    pub cancellation: CancellationToken,
 }
 
 /// Source I/O and lossless output accounting, excluding footer and query reads.
@@ -137,9 +137,11 @@ pub async fn compact_regions(
             source::SharedSource::build(&plan, &context, metadata, counters.clone()).await?;
         worker::execute(plan, context, source, counters).await
     };
-    CancellableFuture::new(execution, cancellation)
-        .await
-        .map_err(|_| crate::error::CompactionCancelledSnafu.build())?
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => crate::error::CompactionCancelledSnafu.fail(),
+        result = execution => result,
+    }
 }
 
 fn validate_plan(plan: &MultiRegionCompactionPlan) -> Result<RegionMetadataRef> {

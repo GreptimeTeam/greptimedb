@@ -17,13 +17,12 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::mem;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::Bytes;
+use common_base::cancellation::Cancelled;
 use common_telemetry::debug;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
@@ -34,23 +33,24 @@ use datatypes::arrow::compute::{max, min};
 use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::is_json2_extension_type;
-use object_store::{FuturesAsyncWriter, ObjectStore};
+use futures::future::BoxFuture;
+use object_store::{ObjectStore, Writer};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
+use parquet::errors::ParquetError;
 use parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData};
 use parquet::file::properties::WriterProperties;
 use smallvec::smallvec;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, SequenceNumber};
-use tokio::io::AsyncWrite;
-use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
 use crate::config::{IndexBuildMode, IndexConfig};
 use crate::error::{
-    InvalidMetadataSnafu, InvalidRecordBatchSnafu, OpenDalSnafu, Result, UnexpectedSnafu,
+    Error, InvalidMetadataSnafu, InvalidRecordBatchSnafu, OpenDalSnafu, Result, UnexpectedSnafu,
     WriteParquetSnafu,
 };
 use crate::read::FlatSource;
@@ -65,6 +65,7 @@ use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
 };
+use crate::sst::upload::{self, UploadError};
 use crate::sst::{
     DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator, maybe_wrap_schema,
 };
@@ -179,16 +180,17 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
         }
     }
 
-    async fn close(self) -> parquet::errors::Result<ParquetMetaData> {
+    async fn finish(&mut self) -> parquet::errors::Result<ParquetMetaData> {
         match self {
-            SstArrowWriter::Serial(writer) => writer.close().await,
-            SstArrowWriter::Parallel(writer) => writer.close().await,
+            SstArrowWriter::Serial(writer) => writer.finish().await,
+            SstArrowWriter::Parallel(writer) => writer.finish().await,
         }
     }
 
-    async fn abort(self) {
-        if let SstArrowWriter::Parallel(writer) = self {
-            writer.abort().await;
+    async fn abort(self) -> W {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.into_inner(),
+            SstArrowWriter::Parallel(writer) => writer.abort().await,
         }
     }
 }
@@ -248,28 +250,105 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     /// Write metrics
     metrics: &'a mut Metrics,
     write_guard: Option<Arc<dyn SstWriteGuard>>,
+    cancellation: Option<CancellationToken>,
     memory: WriteMemory,
 }
 
-/// Registers durable ownership before either an SST or its index is published to storage.
+/// Registers output ownership before either an SST or its index is created in storage.
 #[async_trait::async_trait]
 pub trait SstWriteGuard: Send + Sync {
     async fn before_create(&self, file_id: RegionFileId) -> Result<()>;
 }
 
-/// Protection and resource limits travel together for table-compaction output.
+/// Optional ownership, cancellation, and resource limits for an SST write.
+#[derive(Default)]
 pub(crate) struct SstWriteContext {
-    pub(crate) guard: Arc<dyn SstWriteGuard>,
-    pub(crate) limits: SstWriteLimits,
+    /// Registers output ownership before creating files, including cached files.
+    pub(crate) guard: Option<Arc<dyn SstWriteGuard>>,
+    /// Resource bounds enforced by the direct writer, with one upload at a time.
+    /// The write cache does not enforce these limits, so bounded writes bypass it.
+    pub(crate) limits: Option<SstWriteLimits>,
+    /// Signals cancellation; the writer still drains encoders and aborts unfinished output.
+    pub(crate) cancellation: Option<CancellationToken>,
 }
 
 pub trait WriterFactory {
-    type Writer: AsyncWrite + Send + Unpin;
+    type Writer: AsyncFileWriter;
+
+    /// Opens output with the same cancellation signal as its encoders.
     fn create(
         &mut self,
         file_path: &str,
         write_buffer_size: usize,
+        cancellation: Option<&CancellationToken>,
     ) -> impl Future<Output = Result<Self::Writer>>;
+
+    /// Aborts unfinished output after all encoders have stopped using it.
+    fn abort(writer: Self::Writer) -> impl Future<Output = Result<()>>;
+}
+
+/// Bridges an OpenDAL [`Writer`] with Parquet's [`AsyncFileWriter`] and tracks
+/// the number of bytes successfully submitted to the object store.
+pub struct ObjectStoreWriter {
+    inner: Writer,
+    output_bytes: u64,
+    write_buffer_size: usize,
+    cancellation: Option<CancellationToken>,
+}
+
+impl ObjectStoreWriter {
+    pub(crate) fn new(
+        inner: Writer,
+        write_buffer_size: usize,
+        cancellation: Option<CancellationToken>,
+    ) -> Self {
+        Self {
+            inner,
+            output_bytes: 0,
+            write_buffer_size,
+            cancellation,
+        }
+    }
+
+    pub(crate) fn output_bytes(&self) -> u64 {
+        self.output_bytes
+    }
+
+    pub(crate) fn into_inner(self) -> Writer {
+        self.inner
+    }
+}
+
+impl AsyncFileWriter for ObjectStoreWriter {
+    fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
+        Box::pin(async move {
+            let written = upload::write(
+                &mut self.inner,
+                bytes.into(),
+                self.write_buffer_size,
+                self.cancellation.as_ref(),
+            )
+            .await
+            .map_err(|error| match error {
+                UploadError::Cancelled => ParquetError::External(Box::new(Cancelled)),
+                UploadError::Read { source } | UploadError::Write { source } => {
+                    ParquetError::External(Box::new(source))
+                }
+            })?;
+            self.output_bytes += written;
+            Ok(())
+        })
+    }
+
+    fn complete(&mut self) -> BoxFuture<'_, parquet::errors::Result<()>> {
+        Box::pin(async move {
+            self.inner
+                .close()
+                .await
+                .map(|_| ())
+                .map_err(|error| ParquetError::External(Box::new(error)))
+        })
+    }
 }
 
 pub struct ObjectStoreWriterFactory {
@@ -278,16 +357,25 @@ pub struct ObjectStoreWriterFactory {
 }
 
 impl WriterFactory for ObjectStoreWriterFactory {
-    type Writer = Compat<FuturesAsyncWriter>;
+    type Writer = ObjectStoreWriter;
 
-    async fn create(&mut self, file_path: &str, write_buffer_size: usize) -> Result<Self::Writer> {
+    async fn create(
+        &mut self,
+        file_path: &str,
+        write_buffer_size: usize,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Self::Writer> {
         self.object_store
             .writer_with(file_path)
             .chunk(write_buffer_size)
             .concurrent(self.concurrency)
             .await
-            .map(|v| v.into_futures_async_write().compat_write())
+            .map(|writer| ObjectStoreWriter::new(writer, write_buffer_size, cancellation.cloned()))
             .context(OpenDalSnafu)
+    }
+
+    async fn abort(writer: Self::Writer) -> Result<()> {
+        writer.into_inner().abort().await.context(OpenDalSnafu)
     }
 }
 
@@ -361,7 +449,24 @@ where
             file_cleaner: None,
             metrics,
             write_guard: None,
+            cancellation: None,
         }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: Option<CancellationToken>) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        ensure!(
+            !self
+                .cancellation
+                .as_ref()
+                .is_some_and(|handle| handle.is_cancelled()),
+            crate::error::SstWriteCancelledSnafu
+        );
+        Ok(())
     }
 
     pub(crate) fn with_write_guard(mut self, guard: Option<Arc<dyn SstWriteGuard>>) -> Self {
@@ -409,8 +514,9 @@ where
         ssts: &mut SstInfoArray,
         stats: &mut SourceStats,
     ) -> Result<()> {
+        self.check_cancelled()?;
         // maybe_init_writer will re-create a new file.
-        if let Some(mut current_writer) = mem::take(&mut self.writer) {
+        if self.writer.is_some() {
             let mut stats = mem::take(stats);
             // At least one row has been written.
             assert!(stats.num_rows > 0);
@@ -436,9 +542,28 @@ where
                     );
                 }
             }
-            current_writer.flush().await.context(WriteParquetSnafu)?;
-
-            let parquet_metadata = current_writer.close().await.context(WriteParquetSnafu)?;
+            self.check_cancelled()?;
+            self.writer
+                .as_mut()
+                .context(UnexpectedSnafu {
+                    reason: "Missing SST writer during finalization",
+                })?
+                .flush()
+                .await
+                .map_err(map_write_error)?;
+            self.check_cancelled()?;
+            // Keep the upload owned until finalization succeeds, so an error
+            // still reaches the common abort path.
+            let parquet_metadata = self
+                .writer
+                .as_mut()
+                .context(UnexpectedSnafu {
+                    reason: "Missing SST writer during finalization",
+                })?
+                .finish()
+                .await
+                .map_err(map_write_error)?;
+            self.writer.take();
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
             if self.memory.limits.is_some() {
                 self.memory.completed = self.memory.completed.saturating_add(
@@ -517,6 +642,7 @@ where
         );
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
+            self.abort_current_indexer().await;
             self.abort_current_file().await;
         }
         res
@@ -542,6 +668,7 @@ where
         };
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
+            self.abort_current_indexer().await;
             self.abort_current_file().await;
         }
         res
@@ -558,7 +685,17 @@ where
 
         loop {
             let start = Instant::now();
-            let batch = match source.next_batch().await {
+            self.check_cancelled()?;
+            let next = if let Some(cancellation) = &self.cancellation {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return crate::error::SstWriteCancelledSnafu.fail(),
+                    next = source.next_batch() => next,
+                }
+            } else {
+                source.next_batch().await
+            };
+            let batch = match next {
                 Ok(Some(batch)) => batch,
                 Ok(None) => break,
                 Err(e) => {
@@ -622,15 +759,18 @@ where
         stats: &mut SourceStats,
     ) -> Result<()> {
         let result = async {
+            self.check_cancelled()?;
             let arrow_batch = converter.convert_batch(batch)?;
+            self.check_cancelled()?;
             let start = Instant::now();
             self.maybe_init_writer(arrow_batch.schema_ref(), opts)
                 .await?
                 .write(&arrow_batch)
                 .await
-                .context(WriteParquetSnafu)?;
+                .map_err(map_write_error)?;
             self.metrics.write_batch += start.elapsed();
 
+            self.check_cancelled()?;
             stats.update_flat(batch)?;
             if matches!(self.index_config.build_mode, IndexBuildMode::Sync) {
                 let start = Instant::now();
@@ -664,7 +804,10 @@ where
     /// Joins encoders before dropping the writer and deleting its failed output.
     async fn abort_current_file(&mut self) {
         if let Some(writer) = self.writer.take() {
-            writer.abort().await;
+            let output = writer.abort().await;
+            if let Err(error) = F::abort(output.inner).await {
+                common_telemetry::warn!(error; "Failed to abort SST writer, file: {}", self.current_file);
+            }
         }
         if let Some(cleaner) = &self.file_cleaner {
             cleaner.clean_by_file_id(self.current_file).await;
@@ -672,7 +815,7 @@ where
     }
 
     async fn abort_current_indexer(&mut self) {
-        if let Some(indexer) = &mut self.current_indexer {
+        if let Some(mut indexer) = self.current_indexer.take() {
             indexer.abort().await;
         }
     }
@@ -682,6 +825,7 @@ where
         schema: &SchemaRef,
         opts: &WriteOptions,
     ) -> Result<&mut SstArrowWriter<SizeAwareWriter<F::Writer>>> {
+        self.check_cancelled()?;
         if let Some(ref mut w) = self.writer {
             Ok(w)
         } else {
@@ -719,7 +863,11 @@ where
             }
             let writer = SizeAwareWriter::new(
                 self.writer_factory
-                    .create(&sst_file_path, opts.write_buffer_size.as_bytes() as usize)
+                    .create(
+                        &sst_file_path,
+                        opts.write_buffer_size.as_bytes() as usize,
+                        self.cancellation.as_ref(),
+                    )
                     .await?,
                 self.bytes_written.clone(),
             );
@@ -736,12 +884,13 @@ where
                         opts.encode_parallelism,
                         opts.encode_runtime,
                     )
-                    .context(WriteParquetSnafu)?,
+                    .map_err(map_write_error)?
+                    .with_cancellation(self.cancellation.clone()),
                 )
             } else {
                 SstArrowWriter::Serial(
                     AsyncArrowWriter::try_new(writer, schema, Some(writer_props))
-                        .context(WriteParquetSnafu)?,
+                        .map_err(map_write_error)?,
                 )
             };
             self.writer = Some(arrow_writer);
@@ -759,6 +908,16 @@ where
             // safety: self.writer is assigned above
             Ok(self.writer.as_mut().unwrap())
         }
+    }
+}
+
+/// Keeps encoder cancellation inside the SST write error contract.
+fn map_write_error(error: ParquetError) -> Error {
+    match error {
+        ParquetError::External(ref source) if source.is::<Cancelled>() => {
+            crate::error::SstWriteCancelledSnafu.build()
+        }
+        error => WriteParquetSnafu.into_error(error),
     }
 }
 
@@ -875,47 +1034,33 @@ impl<W> SizeAwareWriter<W> {
     }
 }
 
-impl<W> AsyncWrite for SizeAwareWriter<W>
-where
-    W: AsyncWrite + Unpin,
-{
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::result::Result<usize, std::io::Error>> {
-        let this = self.as_mut().get_mut();
-
-        match Pin::new(&mut this.inner).poll_write(cx, buf) {
-            Poll::Ready(Ok(bytes_written)) => {
-                this.size.fetch_add(bytes_written, Ordering::Relaxed);
-                Poll::Ready(Ok(bytes_written))
-            }
-            other => other,
-        }
+impl<W: AsyncFileWriter> AsyncFileWriter for SizeAwareWriter<W> {
+    fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
+        Box::pin(async move {
+            let len = bytes.len();
+            self.inner.write(bytes).await?;
+            self.size.fetch_add(len, Ordering::Relaxed);
+            Ok(())
+        })
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+    fn complete(&mut self) -> BoxFuture<'_, parquet::errors::Result<()>> {
+        self.inner.complete()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+    use object_store::layers::mock::{
+        Metadata, MockLayerBuilder, ObservedWriter, WriterObservations, oio,
+    };
+    use object_store::services::Memory;
+    use object_store::{Buffer, Result as ObjectStoreResult};
     use parquet::arrow::ArrowWriter;
     use parquet::errors::ParquetError;
     use store_api::region_request::PathType;
@@ -925,19 +1070,328 @@ mod tests {
     use super::*;
     use crate::access_layer::{RegionFilePathFactory, WriteType};
     use crate::compaction::memory_manager::new_compaction_memory_manager;
-    use crate::error::Error;
     use crate::sst::FormatType;
     use crate::sst::parquet::tests::NoopIndexBuilder;
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
 
+    struct GatedObjectStoreWriter {
+        inner: oio::Writer,
+        started: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<()>>,
+        completed: Arc<AtomicUsize>,
+    }
+
+    impl oio::Write for GatedObjectStoreWriter {
+        async fn write(&mut self, bytes: Buffer) -> ObjectStoreResult<()> {
+            if let Some(started) = self.started.take() {
+                started.send(()).unwrap();
+                self.release.take().unwrap().await.unwrap();
+            }
+            self.inner.write(bytes).await?;
+            self.completed.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn close(&mut self) -> ObjectStoreResult<Metadata> {
+            self.inner.close().await
+        }
+
+        async fn abort(&mut self) -> ObjectStoreResult<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn test_object_store_writer_cancellation_between_chunks(
+        #[values(false, true)] observe_cancellation: bool,
+    ) {
+        let cancellation = CancellationToken::new();
+        let observations = Arc::new(Mutex::new(WriterObservations::default()));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let gate = Mutex::new(Some((started_tx, release_rx)));
+        let observed = observations.clone();
+        let completed_writes = completed.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |_, _, inner| {
+                let (started, release) = gate.lock().unwrap().take().unwrap();
+                Box::new(ObservedWriter::new(
+                    Box::new(GatedObjectStoreWriter {
+                        inner,
+                        started: Some(started),
+                        release: Some(release),
+                        completed: completed_writes.clone(),
+                    }),
+                    observed.clone(),
+                ))
+            }))
+            .build()
+            .unwrap();
+        let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let inner = store
+            .writer_with("output.parquet")
+            .chunk(4)
+            .concurrent(1)
+            .await
+            .unwrap();
+        let mut writer =
+            ObjectStoreWriter::new(inner, 4, observe_cancellation.then(|| cancellation.clone()));
+        let data = Bytes::from(vec![42; 32]);
+        let mut write = Box::pin(writer.write(data.clone()));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        cancellation.cancel();
+        // A started storage write retains its owner until it completes.
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        assert_eq!(0, completed.load(Ordering::Relaxed));
+        release_tx.send(()).unwrap();
+        let result = timeout(Duration::from_secs(5), write).await.unwrap();
+        {
+            let observed = observations.lock().unwrap();
+            assert_eq!(0, observed.abort_calls);
+            assert_eq!(0, observed.close_calls);
+        }
+        if observe_cancellation {
+            assert!(
+                matches!(result, Err(ParquetError::External(ref source)) if source.is::<Cancelled>())
+            );
+            assert_eq!(1, completed.load(Ordering::Relaxed));
+            assert_eq!(vec![4], observations.lock().unwrap().write_sizes);
+            // The caller owns abort; the adapter only reports cancellation.
+            writer.into_inner().abort().await.unwrap();
+            assert_eq!(1, observations.lock().unwrap().abort_calls);
+            assert!(!store.exists("output.parquet").await.unwrap());
+        } else {
+            result.unwrap();
+            writer.complete().await.unwrap();
+            assert_eq!(data, store.read("output.parquet").await.unwrap().to_bytes());
+            let observed = observations.lock().unwrap();
+            assert_eq!(1, observed.close_calls);
+            assert_eq!(0, observed.abort_calls);
+            assert_eq!(vec![4; 8], observed.write_sizes);
+        }
+    }
+
     #[rstest::rstest]
     #[case::flat(FormatType::Flat)]
     #[case::primary_key(FormatType::PrimaryKey)]
     #[tokio::test]
-    async fn test_source_error_waits_for_encoding_cleanup(#[case] format: FormatType) {
+    async fn test_encoding_error_classification(
+        #[case] format: FormatType,
+        #[values(false, true)] finish_file: bool,
+        #[values(false, true)] cancelled: bool,
+    ) {
         let mut env = TestEnv::new().await;
         let metadata = Arc::new(sst_region_metadata());
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            env.init_object_store_manager(),
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new(String::new(), PathType::Bare),
+            &mut metrics,
+        )
+        .await;
+        let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
+        let converter = match format {
+            FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
+                metadata.clone(),
+                &FlatSchemaOptions::default(),
+            )),
+            FormatType::PrimaryKey => FlatBatchConverter::PrimaryKey {
+                format: PrimaryKeyWriteFormat::new(metadata.clone()),
+                num_fields: metadata.field_columns().count(),
+            },
+        };
+        let schema = converter.convert_batch(&batch).unwrap().schema();
+        let opts = WriteOptions {
+            // A full row group joins the previous task in append_flat_batch;
+            // a partial group joins it in finish_current_file instead.
+            row_group_size: batch.num_rows() + usize::from(finish_file),
+            encode_parallelism: 2,
+            ..Default::default()
+        };
+        let SstArrowWriter::Parallel(parallel) =
+            writer.maybe_init_writer(&schema, &opts).await.unwrap()
+        else {
+            panic!("expected parallel encoding");
+        };
+        let task = common_runtime::spawn_blocking_compact(move || {
+            let source: Box<dyn std::error::Error + Send + Sync> = if cancelled {
+                Box::new(Cancelled)
+            } else {
+                Box::new(std::io::Error::other("encoding failed"))
+            };
+            Err(ParquetError::External(source))
+        });
+        // No SST-level cancellation handle: only the encoder's error can report cancellation.
+        parallel.set_encoding_tasks_for_test(vec![task]);
+        let source =
+            FlatSource::new_stream(batch.schema(), Box::pin(futures::stream::iter([Ok(batch)])));
+        let error = match format {
+            FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
+            FormatType::PrimaryKey => {
+                writer
+                    .write_all_flat_as_primary_key(source, None, &opts)
+                    .await
+            }
+        }
+        .unwrap_err();
+        if cancelled {
+            assert!(matches!(error, Error::SstWriteCancelled { .. }));
+        } else {
+            assert!(
+                matches!(error, Error::WriteParquet { error: ParquetError::External(ref source), .. }
+                if source.downcast_ref::<std::io::Error>().is_some_and(|error| error.to_string() == "encoding failed"))
+            );
+        }
+        assert!(writer.writer.is_none());
+        assert!(writer.current_indexer.is_none());
+        assert_eq!(0, writer.bytes_written.load(Ordering::Relaxed));
+    }
+
+    #[rstest::rstest]
+    #[case::flat(FormatType::Flat)]
+    #[case::primary_key(FormatType::PrimaryKey)]
+    #[tokio::test]
+    async fn test_cancel_pending_source(
+        #[case] format: FormatType,
+        #[values(1, 2)] parallelism: usize,
+    ) {
+        let mut env = TestEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata());
+        let cancellation = CancellationToken::new();
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            env.init_object_store_manager(),
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new(String::new(), PathType::Bare),
+            &mut metrics,
+        )
+        .await
+        .with_cancellation(Some(cancellation.clone()));
+        let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
+        let schema = batch.schema();
+        let source = FlatSource::new_stream(
+            schema,
+            Box::pin(async_stream::try_stream! {
+                yield batch;
+                futures::future::pending::<()>().await;
+            }),
+        );
+        let opts = WriteOptions {
+            row_group_size: 8,
+            encode_parallelism: parallelism,
+            ..Default::default()
+        };
+        let mut write = Box::pin(async {
+            match format {
+                FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
+                FormatType::PrimaryKey => {
+                    writer
+                        .write_all_flat_as_primary_key(source, None, &opts)
+                        .await
+                }
+            }
+        });
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        cancellation.cancel();
+        let error = timeout(Duration::from_secs(5), write)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, Error::SstWriteCancelled { .. }));
+        assert!(writer.writer.is_none());
+    }
+
+    /// Controlled comparison: identical batches and cancellation point, changing
+    /// only whether the writer observes cancellation.
+    #[rstest::rstest]
+    #[case::flat(FormatType::Flat)]
+    #[case::primary_key(FormatType::PrimaryKey)]
+    #[tokio::test]
+    async fn test_batch_cancellation_ablation(
+        #[case] format: FormatType,
+        #[values(1, 2)] parallelism: usize,
+    ) {
+        for enabled in [false, true] {
+            let mut env = TestEnv::new().await;
+            let cancellation = CancellationToken::new();
+            let mut metrics = Metrics::new(WriteType::Compaction);
+            let mut writer = ParquetWriter::new_with_object_store(
+                env.init_object_store_manager(),
+                Arc::new(sst_region_metadata()),
+                IndexConfig::default(),
+                NoopIndexBuilder,
+                RegionFilePathFactory::new(String::new(), PathType::Bare),
+                &mut metrics,
+            )
+            .await
+            .with_cancellation(enabled.then(|| cancellation.clone()));
+            let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
+            let consumed = Arc::new(AtomicUsize::new(0));
+            let observed = consumed.clone();
+            let source = FlatSource::new_stream(
+                batch.schema(),
+                Box::pin(async_stream::try_stream! {
+                    for i in 0..32 {
+                        if i == 1 { cancellation.cancel(); }
+                        observed.fetch_add(1, Ordering::Relaxed);
+                        yield new_record_batch_by_range(&["a", "b"], i * 8, i * 8 + 8);
+                    }
+                }),
+            );
+            let opts = WriteOptions {
+                row_group_size: 8,
+                encode_parallelism: parallelism,
+                ..Default::default()
+            };
+            let result = match format {
+                FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
+                FormatType::PrimaryKey => {
+                    writer
+                        .write_all_flat_as_primary_key(source, None, &opts)
+                        .await
+                }
+            };
+            if enabled {
+                assert!(result.is_err());
+                assert_eq!(2, consumed.load(Ordering::Relaxed));
+                assert!(writer.writer.is_none());
+            } else {
+                assert_eq!(
+                    256,
+                    result
+                        .unwrap()
+                        .iter()
+                        .map(|info| info.num_rows)
+                        .sum::<usize>()
+                );
+                assert_eq!(32, consumed.load(Ordering::Relaxed));
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::flat(FormatType::Flat)]
+    #[case::primary_key(FormatType::PrimaryKey)]
+    #[tokio::test]
+    async fn test_source_error_waits_for_encoding_cleanup(
+        #[case] format: FormatType,
+        #[values(false, true)] cancel_source: bool,
+    ) {
+        let mut env = TestEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata());
+        let cancellation = CancellationToken::new();
         let mut metrics = Metrics::new(WriteType::Compaction);
         let mut writer = ParquetWriter::new_with_object_store(
             env.init_object_store_manager(),
@@ -947,7 +1401,8 @@ mod tests {
             RegionFilePathFactory::new("".to_string(), PathType::Bare),
             &mut metrics,
         )
-        .await;
+        .await
+        .with_cancellation(Some(cancellation.clone()));
         let opts = WriteOptions {
             row_group_size: 8,
             encode_parallelism: 2,
@@ -1010,13 +1465,11 @@ mod tests {
         parallel.set_encoding_tasks_for_test(vec![running, queued]);
         let source = FlatSource::new_stream(
             batch.schema(),
-            Box::pin(futures::stream::iter(vec![
-                Ok(batch),
-                InvalidRecordBatchSnafu {
-                    reason: "source read failed",
-                }
-                .fail(),
-            ])),
+            Box::pin(async_stream::try_stream! {
+                yield batch;
+                if cancel_source { futures::future::pending::<()>().await; }
+                Err(InvalidRecordBatchSnafu { reason: "source read failed" }.build())?;
+            }),
         );
         let memory = new_compaction_memory_manager(1024 * 1024);
         let budget = memory.try_acquire(memory.limit_bytes()).unwrap();
@@ -1034,6 +1487,10 @@ mod tests {
         // The next row group is buffered, then the source fails. No codec timing
         // or I/O wait can make the old indexer-only cleanup pass this assertion.
         assert!(futures::poll!(write.as_mut()).is_pending());
+        if cancel_source {
+            cancellation.cancel();
+            assert!(futures::poll!(write.as_mut()).is_pending());
+        }
         assert!(memory.try_acquire(memory.limit_bytes()).is_none());
         assert!(retained_field.upgrade().is_some());
         release_tx.send(()).unwrap();
@@ -1041,9 +1498,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap_err();
-        assert!(
-            matches!(error, Error::InvalidRecordBatch { reason, .. } if reason == "source read failed")
-        );
+        if cancel_source {
+            assert!(matches!(error, Error::SstWriteCancelled { .. }));
+        } else {
+            assert!(
+                matches!(error, Error::InvalidRecordBatch { reason, .. } if reason == "source read failed")
+            );
+        }
         assert!(!queued_started.load(Ordering::SeqCst));
         assert!(retained_field.upgrade().is_none());
         assert!(memory.try_acquire(memory.limit_bytes()).is_some());

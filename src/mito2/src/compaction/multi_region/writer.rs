@@ -16,6 +16,7 @@ use common_base::readable_size::ReadableSize;
 use partition::expr::PartitionExpr;
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
 use crate::compaction::multi_region::memory::{self, MemoryLimits};
@@ -27,6 +28,7 @@ use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
+use crate::sst::parquet::writer::SstWriteContext;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub(crate) struct TargetWriter<'a> {
@@ -71,13 +73,14 @@ impl<'a> TargetWriter<'a> {
         let infos = self
             .context
             .access_layer
-            .write_sst_with_guard(
+            .write_sst_with_context(
                 request,
                 &self.options(),
                 &mut metrics,
-                crate::sst::parquet::writer::SstWriteContext {
-                    guard: self.context.protection.clone(),
-                    limits: self.limits.writer,
+                SstWriteContext {
+                    guard: Some(self.context.protection.clone()),
+                    limits: Some(self.limits.writer),
+                    ..Default::default()
                 },
             )
             .await?;
@@ -207,7 +210,7 @@ impl<'a> TargetWriter<'a> {
 fn output_projection(
     target: &MultiRegionTarget,
     mut source: FlatSource,
-    cancellation: Arc<common_base::cancellation::CancellationHandle>,
+    cancellation: CancellationToken,
 ) -> Result<FlatSource> {
     let projection: Vec<_> = source
         .schema()
