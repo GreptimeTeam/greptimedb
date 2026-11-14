@@ -284,6 +284,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             senders: Vec::new(),
             request_sender: self.sender.clone(),
             listener: self.listener.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
             sst_writer: self.new_sst_writer(
                 region,
                 WriteType::Flush,
@@ -315,7 +316,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // region option.
             row_group_size: row_group_size.or(region.version().options.max_row_group_row_count),
             cache_manager: self.cache_manager.clone(),
-            manifest_ctx: region.manifest_ctx.clone(),
+            hook: region.manifest_ctx.hook(),
             index_options: region.version().options.index_options.clone(),
             write_semaphore,
             partition_expr: region.metadata().partition_expr.clone(),
