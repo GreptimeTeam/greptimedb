@@ -15,6 +15,7 @@
 use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
 use common_telemetry::info;
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
@@ -44,7 +45,7 @@ impl HeartbeatHandler for RegionFailureHandler {
 
     async fn handle(
         &self,
-        _: &HeartbeatRequest,
+        req: &HeartbeatRequest,
         _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
@@ -54,8 +55,13 @@ impl HeartbeatHandler for RegionFailureHandler {
 
         // Never blocks: the region lease has already been decided earlier in the
         // chain, so a busy supervisor must not withhold the heartbeat response.
-        self.heartbeat_acceptor
-            .accept(DatanodeHeartbeat::from(stat));
+        let mut heartbeat = DatanodeHeartbeat::from(stat);
+        heartbeat.opening_regions = req
+            .opening_regions
+            .iter()
+            .map(|region| RegionId::from_u64(region.region_id))
+            .collect();
+        self.heartbeat_acceptor.accept(heartbeat);
 
         Ok(HandleControl::Continue)
     }

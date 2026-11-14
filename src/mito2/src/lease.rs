@@ -19,7 +19,7 @@ use std::time::Instant;
 /// The instant lease deadlines count from, so that a deadline fits in an [AtomicU64].
 static LEASE_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-fn lease_nanos(instant: Instant) -> u64 {
+pub(crate) fn lease_nanos(instant: Instant) -> u64 {
     instant.saturating_duration_since(*LEASE_EPOCH).as_nanos() as u64
 }
 

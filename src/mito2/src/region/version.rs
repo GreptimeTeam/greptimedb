@@ -37,7 +37,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::options::RegionOptions;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, FileMetaRef};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::wal::EntryId;
@@ -554,7 +554,7 @@ impl VersionBuilder {
     pub(crate) fn add_files(
         mut self,
         file_purger: FilePurgerRef,
-        files: impl Iterator<Item = FileMeta>,
+        files: impl Iterator<Item = impl Into<FileMetaRef>>,
     ) -> Self {
         let mut ssts = (*self.ssts).clone();
         ssts.add_files(file_purger, files);

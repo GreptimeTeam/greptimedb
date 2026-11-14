@@ -85,6 +85,13 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
+    #[snafu(display("Failed to close the metadata kv backend"))]
+    CloseMetadataKvBackend {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to start flownode"))]
     StartFlownode {
         #[snafu(implicit)]
@@ -333,6 +340,7 @@ impl ErrorExt for Error {
             Error::StartDatanode { source, .. } => source.status_code(),
             Error::StartFrontend { source, .. } => source.status_code(),
             Error::ShutdownDatanode { source, .. } => source.status_code(),
+            Error::CloseMetadataKvBackend { source, .. } => source.status_code(),
             Error::ShutdownFrontend { source, .. } => source.status_code(),
             Error::StartMetaServer { source, .. } => source.status_code(),
             Error::ShutdownMetaServer { source, .. } => source.status_code(),

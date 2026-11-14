@@ -190,6 +190,7 @@ async fn limited_response(
             ..Default::default()
         }),
         Extension(QueryContext::with_db_name(None)),
+        None,
         Form(SqlQuery::default()),
     )
     .await;

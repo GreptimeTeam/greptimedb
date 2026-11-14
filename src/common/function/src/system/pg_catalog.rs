@@ -90,7 +90,9 @@ impl Function for CurrentSchemaFunction {
         let func_ctx = find_function_context(&args)?;
         let db = func_ctx.query_ctx.current_schema();
 
-        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(db))))
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(
+            (!db.is_empty()).then_some(db),
+        )))
     }
 }
 
@@ -158,11 +160,15 @@ impl Function for CurrentSchemasFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
+        let schema = func_ctx.query_ctx.current_schema();
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let input = as_boolean_array(&args[0]);
 
-        // Create a UTF8 array with a single value
-        let mut values = vec!["public"];
+        let mut values = Vec::new();
+        if !schema.is_empty() {
+            values.push(schema.as_str());
+        }
         // include implicit schemas
         if input.value(0) {
             values.push(INFORMATION_SCHEMA_NAME);

@@ -209,7 +209,7 @@ wrap_with_clap_prefix! {
         #[doc = "The endpoint of the object store."]
         endpoint: String = Default::default(),
         #[doc = "The SAS token of the object store."]
-        sas_token: Option<String>,
+        sas_token: Option<SecretString>,
     }
 }
 
