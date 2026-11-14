@@ -24,7 +24,7 @@ use datafusion_common::{Column, ScalarValue};
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use datatypes::data_type::DataType;
 use parquet::file::metadata::RowGroupMetaData;
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::sst::parquet::flat_format::FlatReadFormat;
@@ -110,11 +110,21 @@ impl<'a, T> RowGroupPruningStats<'a, T> {
         datatypes::arrow::compute::cast(&values, &expected_arrow_type).ok()
     }
 
-    /// Returns the default value of all row groups for `column` according to the metadata.
-    fn compat_default_value(&self, column: &str) -> Option<ArrayRef> {
+    /// Returns the metadata of `column` from the expected metadata if its default value can
+    /// stand for the rows of an SST that doesn't contain the column.
+    ///
+    /// An impure default such as `now()` returns a different value on every evaluation while
+    /// the SST holds the single value a writer produced, so it can neither bound nor count
+    /// the rows: the statistics of such a column are unknown.
+    fn compat_column(&self, column: &str) -> Option<&ColumnMetadata> {
         let metadata = self.expected_metadata.as_ref()?;
         let col_metadata = metadata.column_by_name(column)?;
-        col_metadata
+        (!col_metadata.column_schema.is_default_impure()).then_some(col_metadata)
+    }
+
+    /// Returns the default value of all row groups for `column` according to the metadata.
+    fn compat_default_value(&self, column: &str) -> Option<ArrayRef> {
+        self.compat_column(column)?
             .column_schema
             .create_default_vector(self.row_groups.len())
             .unwrap_or(None)
@@ -125,9 +135,8 @@ impl<'a, T> RowGroupPruningStats<'a, T> {
 impl<T: Borrow<RowGroupMetaData>> RowGroupPruningStats<'_, T> {
     /// Returns the null count of all row groups for `column` according to the metadata.
     fn compat_null_count(&self, column: &str) -> Option<ArrayRef> {
-        let metadata = self.expected_metadata.as_ref()?;
-        let col_metadata = metadata.column_by_name(column)?;
-        let value = col_metadata
+        let value = self
+            .compat_column(column)?
             .column_schema
             .create_default()
             .unwrap_or(None)?;
@@ -264,6 +273,49 @@ mod tests {
             }
         }
         Arc::new(expected)
+    }
+
+    /// The same region metadata plus a `zn` column with a `now()` default that the file
+    /// doesn't contain.
+    fn expected_metadata_with_impure_default(
+        file_metadata: &RegionMetadataRef,
+    ) -> RegionMetadataRef {
+        let mut expected = (**file_metadata).clone();
+        expected
+            .column_metadatas
+            .push(store_api::metadata::ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "zn".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    true,
+                )
+                .with_default_constraint(Some(
+                    datatypes::schema::ColumnDefaultConstraint::Function("now()".to_string()),
+                ))
+                .unwrap(),
+                semantic_type: api::v1::SemanticType::Field,
+                column_id: 10,
+            });
+        Arc::new(expected)
+    }
+
+    /// An impure default can't stand for the rows of an SST that lacks the column, so the
+    /// statistics of that column are unknown and no row group is pruned.
+    #[test]
+    fn test_row_group_stats_unknown_for_impure_default() {
+        let file_metadata: RegionMetadataRef =
+            Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
+        let read_format = read_format_for(&file_metadata);
+        let row_group = row_group_with_ts_stats(&read_format, 1_000, 9_000);
+        let expected_metadata = expected_metadata_with_impure_default(&file_metadata);
+        let groups = [&row_group];
+        let stats =
+            RowGroupPruningStats::new(&groups, &read_format, Some(expected_metadata), false);
+        let column = Column::new_unqualified("zn");
+
+        assert!(stats.min_values(&column).is_none());
+        assert!(stats.max_values(&column).is_none());
+        assert!(stats.null_counts(&column).is_none());
     }
 
     fn read_format_for(file_metadata: &RegionMetadataRef) -> FlatReadFormat {

@@ -1553,6 +1553,23 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let may_build_selective_row_selection = predicate.is_some();
+        // `predicate` only includes the region partition expression when the region has one and
+        // the file was not written under the same expression. Pass the predicate without it so
+        // the reader can skip the partition predicate for SSTs that can't evaluate it, i.e. a
+        // column the expression references is missing from the SST metadata (issue #10246).
+        let predicate_without_region = if may_build_selective_row_selection
+            && self.region_partition_expr.is_some()
+            && !self.should_skip_region_partition(file)
+        {
+            Some(
+                self.predicate
+                    .predicate_without_region()
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
         let postpone_time_index_filter = time_range_covers_file(self.implied_time_range(), file);
         let decode_pk_values = !self.compaction
             && self
@@ -1569,7 +1586,7 @@ impl ScanInput {
                     .filter(|_| !self.ignore_range_index),
             )
             .memory_tracker(self.scan_memory_tracker.clone())
-            .predicate(predicate)
+            .predicates(predicate, predicate_without_region)
             .projection(Some(self.read_cols.clone()))
             .json2_rewrite_targets(self.json2_rewrite_targets.clone())
             .cache(self.cache_strategy.clone())
