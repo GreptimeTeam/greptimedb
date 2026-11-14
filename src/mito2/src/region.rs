@@ -1539,16 +1539,16 @@ impl ManifestContext {
     /// region.
     pub(crate) async fn fence_for_reload_if_installed(
         &self,
+        manager: &mut RegionManifestManager,
         region_id: RegionId,
         installed: ManifestVersion,
     ) -> bool {
-        let mut manager = self.manifest_manager.write().await;
         if self.state.load() != RegionRoleState::Leader(RegionLeaderState::Writable)
             || manager.last_version() != installed
         {
             return false;
         }
-        self.fence_for_reload(&mut manager, region_id).await;
+        self.fence_for_reload(manager, region_id).await;
         true
     }
 

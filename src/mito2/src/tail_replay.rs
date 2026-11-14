@@ -107,19 +107,9 @@ impl<S: LogStore> TailReplayTask<S> {
                     // The tails may be gone from a newer manifest, e.g. after another writer
                     // committed them and their source released its WAL. The worker reloads the
                     // fenced region once this task ends.
-                    let manifest_ctx = &self.region.manifest_ctx;
-                    match self
-                        .unless_cancelled(manifest_ctx.installed_version_if_updated())
-                        .await
-                    {
-                        Ok(Some(installed))
-                            if manifest_ctx
-                                .fence_for_reload_if_installed(region_id, installed)
-                                .await =>
-                        {
-                            return;
-                        }
-                        Ok(_) => {}
+                    match self.fence_if_manifest_updated().await {
+                        Ok(true) => return,
+                        Ok(false) => {}
                         Err(_) if self.state.is_cancelled() => break,
                         Err(e) => {
                             warn!(e; "Failed to check region {region_id} for a newer manifest");
@@ -137,6 +127,24 @@ impl<S: LogStore> TailReplayTask<S> {
         );
     }
 
+    /// Fences the region for a reload if the storage holds a newer manifest. Returns whether
+    /// it fenced the region. Cancellation ends it until it holds the manifest write lock.
+    async fn fence_if_manifest_updated(&self) -> Result<bool> {
+        let manifest_ctx = &self.region.manifest_ctx;
+        let Some(installed) = self
+            .unless_cancelled(manifest_ctx.installed_version_if_updated())
+            .await?
+        else {
+            return Ok(false);
+        };
+        let mut manager = self
+            .unless_cancelled(async { Ok(manifest_ctx.manifest_manager.write().await) })
+            .await?;
+        Ok(manifest_ctx
+            .fence_for_reload_if_installed(&mut manager, self.region.region_id, installed)
+            .await)
+    }
+
     /// Replays the current tails and publishes the result. An error asks for another round.
     async fn replay_round(&self) -> Result<()> {
         // Keeps no version past this point: it would hold the region's memtables, and their
@@ -151,6 +159,12 @@ impl<S: LogStore> TailReplayTask<S> {
             Some(self.sst_writer.cache_manager.clone()),
         );
         let replayed = {
+            if self.limits.semaphore.available_permits() == 0 {
+                info!(
+                    "Region {} waits for a tail replay permit",
+                    self.region.region_id
+                );
+            }
             let _permit = self
                 .unless_cancelled(async { Ok(self.limits.semaphore.acquire().await.unwrap()) })
                 .await?;

@@ -723,7 +723,7 @@ lazy_static! {
     pub static ref FLUSH_FILE_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_flush_file_total", "mito flushed file count").unwrap();
     /// Elapsed time of replaying pending WAL tails, by stage.
-    pub static ref TAIL_REPLAY_ELAPSED: HistogramVec = register_histogram_vec!(
+    pub(crate) static ref TAIL_REPLAY_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_tail_replay_elapsed",
             "mito tail replay elapsed",
             &[TYPE_LABEL],
@@ -731,13 +731,13 @@ lazy_static! {
         )
         .unwrap();
     /// Bytes of SSTs written by tail replays.
-    pub static ref TAIL_REPLAY_BYTES_TOTAL: IntCounter =
+    pub(crate) static ref TAIL_REPLAY_BYTES_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_tail_replay_bytes_total", "mito tail replay bytes total").unwrap();
     /// Count of SSTs written by tail replays.
-    pub static ref TAIL_REPLAY_FILE_TOTAL: IntCounter =
+    pub(crate) static ref TAIL_REPLAY_FILE_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_tail_replay_file_total", "mito tail replay file count").unwrap();
     /// Count of failed tail replay rounds.
-    pub static ref TAIL_REPLAY_FAILURE_TOTAL: IntCounter =
+    pub(crate) static ref TAIL_REPLAY_FAILURE_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_tail_replay_failure_total", "mito tail replay failure total").unwrap();
 }
 
