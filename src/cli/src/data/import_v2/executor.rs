@@ -272,6 +272,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_logical_ddl_with_retention_ttl_imports() {
+        let sql = "CREATE TABLE IF NOT EXISTS legacy_ttl (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH(on_physical_table='p', ttl='7d')".to_string();
+        let (client, requests, server) = crate::database::tests::test_server(
+            200,
+            r#"{"execution_time_ms":0,"output":[{"affectedrows":0}]}"#,
+        )
+        .await;
+        DdlExecutor::new(&client)
+            .execute_strict(&[DdlStatement::new(sql.clone())], true)
+            .await
+            .unwrap();
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("POST /v1/ddl/logical-tables "));
+        }
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn oversized_ddl_uses_ordinary_sql_in_order() {
         let large = "x".repeat(MAX_LOGICAL_TABLE_DDL_BYTES);
         let statements = [

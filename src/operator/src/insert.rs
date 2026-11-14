@@ -1773,6 +1773,9 @@ impl Inserter {
         create_table_expr
             .table_options
             .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+        // Copy only a retention TTL. Instant TTL stays on the logical table,
+        // and other ingest hints must not land on the shared physical table.
+        apply_retention_ttl_hint(&mut create_table_expr.table_options, ctx);
 
         // create physical table
         let res = statement_executor
@@ -2358,6 +2361,50 @@ pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef)
     Ok(())
 }
 
+fn is_instant_ttl(ttl: &str) -> bool {
+    common_time::ttl::TimeToLive::from_humantime_or_str(ttl)
+        .map(|ttl| ttl.is_instant())
+        .unwrap_or(false)
+}
+
+pub(crate) fn is_retention_ttl(ttl: &str) -> bool {
+    !is_instant_ttl(ttl)
+}
+
+fn logical_table_options_have_retention_ttl(
+    table_options: &std::collections::HashMap<String, String>,
+) -> bool {
+    table_options
+        .get(TTL_KEY)
+        .is_some_and(|ttl| is_retention_ttl(ttl))
+}
+
+/// Strips a retention `ttl` from logical table options (legacy snapshots and
+/// database TTL fallbacks). `ttl=instant` is kept for flow forwarding.
+pub(crate) fn strip_retention_ttl_from_logical_table_options(
+    table_options: &mut std::collections::HashMap<String, String>,
+) {
+    if logical_table_options_have_retention_ttl(table_options)
+        && let Some(ttl) = table_options.remove(TTL_KEY)
+    {
+        warn!(
+            "Ignoring retention ttl='{}' on metric logical table; set ttl on the physical table instead",
+            ttl
+        );
+    }
+}
+
+/// Copies a retention TTL hint onto a physical metric table being created.
+/// `ttl=instant` ingest hints are ignored and stay on the logical table only.
+pub fn apply_retention_ttl_hint(
+    table_options: &mut std::collections::HashMap<String, String>,
+    ctx: &QueryContextRef,
+) {
+    if let Some(ttl) = ctx.extension(TTL_KEY).filter(|ttl| is_retention_ttl(ttl)) {
+        table_options.insert(TTL_KEY.to_string(), ttl.to_string());
+    }
+}
+
 /// Fill table options for a new table by create type.
 pub fn fill_table_options_for_create(
     table_options: &mut std::collections::HashMap<String, String>,
@@ -2394,6 +2441,13 @@ pub fn fill_table_options_for_create(
 
     match create_type {
         AutoCreateTableType::Logical(physical_table) => {
+            // `ttl='instant'` must stay on the logical table: the Inserter reads
+            // it from the logical table to forward rows to flows without
+            // persisting them. Only retention TTLs are reserved for the
+            // physical table.
+            if logical_table_options_have_retention_ttl(table_options) {
+                table_options.remove(TTL_KEY);
+            }
             table_options.insert(
                 LOGICAL_TABLE_METADATA_KEY.to_string(),
                 physical_table.clone(),
@@ -3961,6 +4015,86 @@ mod tests {
         );
         assert!(!table_options.contains_key(SEMANTIC_METRIC_TYPE));
         assert!(!table_options.contains_key(SEMANTIC_PER_TABLE_INDEX_KEY));
+    }
+
+    #[test]
+    fn test_logical_create_options_do_not_copy_retention_ttl() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension(TTL_KEY, "1s");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(
+            &mut table_options,
+            &AutoCreateTableType::Logical("physical".to_string()),
+            &ctx,
+        );
+
+        assert!(!table_options.contains_key(TTL_KEY));
+    }
+
+    #[test]
+    fn test_logical_create_options_keep_instant_ttl() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension(TTL_KEY, "instant");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(
+            &mut table_options,
+            &AutoCreateTableType::Logical("physical".to_string()),
+            &ctx,
+        );
+
+        assert_eq!(
+            table_options.get(TTL_KEY).map(String::as_str),
+            Some("instant")
+        );
+    }
+
+    #[test]
+    fn test_is_instant_ttl() {
+        assert!(is_instant_ttl("instant"));
+        assert!(is_instant_ttl("Instant"));
+        assert!(!is_instant_ttl("7d"));
+        assert!(!is_instant_ttl("forever"));
+        assert!(!is_instant_ttl(""));
+        assert!(!is_instant_ttl("not-a-duration"));
+    }
+
+    #[test]
+    fn test_strip_retention_ttl_from_logical_table_options() {
+        let mut options = std::collections::HashMap::new();
+        options.insert(TTL_KEY.to_string(), "instant".to_string());
+        strip_retention_ttl_from_logical_table_options(&mut options);
+        assert_eq!(options.get(TTL_KEY).map(String::as_str), Some("instant"));
+
+        options.insert(TTL_KEY.to_string(), "7d".to_string());
+        strip_retention_ttl_from_logical_table_options(&mut options);
+        assert!(!options.contains_key(TTL_KEY));
+    }
+
+    #[test]
+    fn test_apply_retention_ttl_hint_copies_only_retention_ttl() {
+        let mut instant_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        instant_ctx.set_extension(TTL_KEY, "instant");
+        instant_ctx.set_extension(APPEND_MODE_KEY, "true");
+        let instant_ctx = Arc::new(instant_ctx);
+        let mut instant_options = std::collections::HashMap::new();
+        apply_retention_ttl_hint(&mut instant_options, &instant_ctx);
+        assert!(instant_options.is_empty());
+
+        let mut retention_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        retention_ctx.set_extension(TTL_KEY, "7d");
+        retention_ctx.set_extension(APPEND_MODE_KEY, "true");
+        let retention_ctx = Arc::new(retention_ctx);
+        let mut retention_options = std::collections::HashMap::new();
+        apply_retention_ttl_hint(&mut retention_options, &retention_ctx);
+        assert_eq!(
+            retention_options.get(TTL_KEY).map(String::as_str),
+            Some("7d")
+        );
+        assert!(!retention_options.contains_key(APPEND_MODE_KEY));
     }
 
     #[test]
