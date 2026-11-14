@@ -1328,10 +1328,15 @@ impl EngineInner {
         let region = self.find_region(region_id)?;
         let was_leader = region.region_role() == RegionRole::Leader;
         let was_writable = region.is_writable();
+        let could_replay = region.can_replay_tails();
         region.set_role(role);
         if role == RegionRole::Leader && !was_leader {
             // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
             region.manifest_ctx.record_leader_lease(Instant::now());
+        }
+        // A replay may wait on I/O that never notices the role change.
+        if could_replay && !region.can_replay_tails() {
+            self.workers.notify_unwritable(&region);
         }
         self.notify_if_became_writable(&region, was_writable);
         Ok(())
