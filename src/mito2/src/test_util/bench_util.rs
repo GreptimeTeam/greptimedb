@@ -84,7 +84,6 @@ pub fn tag_filter_for_bench(
         prune_schema: metadata.schema.clone(),
         codec: mito_codec::row_converter::build_primary_key_codec(&metadata),
         compat_batch: None,
-        compaction_projection_mapper: None,
         pre_filter_mode: PreFilterMode::All,
         partition_filter: None,
     };

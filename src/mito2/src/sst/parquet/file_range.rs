@@ -46,7 +46,6 @@ use crate::error::{
     NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu, UnexpectedSnafu,
 };
 use crate::read::compat::FlatCompatBatch;
-use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::last_row::FlatRowGroupLastRowCachedReader;
 use crate::read::prune::FlatPruneReader;
 use crate::sst::file::FileHandle;
@@ -388,11 +387,6 @@ impl FileRange {
         self.context.compat_batch()
     }
 
-    /// Returns the helper to project batches.
-    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
-        self.context.compaction_projection_mapper()
-    }
-
     /// Filters a full-projection batch using this range's precise filters.
     pub(crate) fn precise_filter_flat(
         &self,
@@ -535,11 +529,6 @@ impl FileRangeContext {
         self.base.compat_batch.as_ref()
     }
 
-    /// Returns the helper to project batches.
-    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
-        self.base.compaction_projection_mapper.as_ref()
-    }
-
     /// Sets the compat helper to the context.
     pub(crate) fn set_compat_batch(&mut self, compat: Option<FlatCompatBatch>) {
         self.base.compat_batch = compat;
@@ -624,8 +613,6 @@ pub(crate) struct RangeBase {
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<FlatCompatBatch>,
-    /// Optional helper to project batches.
-    pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.
     pub(crate) pre_filter_mode: PreFilterMode,
     /// Partition filter.
@@ -1041,7 +1028,6 @@ mod tests {
             prune_schema: metadata.schema.clone(),
             codec: mito_codec::row_converter::build_primary_key_codec(metadata.as_ref()),
             compat_batch: None,
-            compaction_projection_mapper: None,
             pre_filter_mode: PreFilterMode::All,
             partition_filter: None,
         }
@@ -1176,13 +1162,9 @@ mod tests {
             )
             .unwrap();
             let batch = read_format.convert_batch(raw.clone(), None).unwrap();
-            let mapper = CompactionProjectionMapper::new(&read_format);
-            assert_eq!(mapper.is_some(), materialized);
-            let compacted = match mapper {
-                Some(mapper) => mapper.project(batch.clone()).unwrap(),
-                None => batch.clone(),
-            };
-            assert_eq!(compacted, raw);
+            if !materialized {
+                assert_eq!(batch, raw);
+            }
             let mut base = RangeBase {
                 filters: filters.clone(),
                 dyn_filters: vec![],
@@ -1191,7 +1173,6 @@ mod tests {
                 prune_schema: metadata.schema.clone(),
                 codec: Arc::new(codec.clone()),
                 compat_batch: None,
-                compaction_projection_mapper: None,
                 pre_filter_mode: PreFilterMode::All,
                 partition_filter: Some(PartitionFilterContext {
                     partition_schema: partition_schema.clone(),
@@ -1231,21 +1212,26 @@ mod tests {
                     expected.as_slice(),
                     "materialized={materialized}, skip_fields={skip_fields}, skip_tags={skip_tags}"
                 );
-                let compacted = match CompactionProjectionMapper::new(&base.read_format) {
-                    Some(mapper) => mapper.project(output).unwrap(),
-                    None => output,
-                };
                 let mask = BooleanArray::from(
                     (0..6)
                         .map(|row| expected.contains(&row))
                         .collect::<Vec<_>>(),
                 );
                 assert_eq!(
+                    output,
+                    datatypes::arrow::compute::filter_record_batch(&batch, &mask).unwrap()
+                );
+                // Query materialization stays separate from compaction. Both
+                // compaction consumers pass encoded batches directly to compat.
+                if materialized {
+                    continue;
+                }
+                let compacted = output;
+                assert_eq!(
                     compacted,
                     datatypes::arrow::compute::filter_record_batch(&raw, &mask).unwrap()
                 );
-                // Both scan consumers project before compatibility. Compose the
-                // same boundary with an added nullable field, for either layout.
+                // Exercise that boundary with an added nullable field.
                 let mut target = RegionMetadataBuilder::from_existing(metadata.as_ref().clone());
                 target.push_column_metadata(store_api::metadata::ColumnMetadata {
                     column_schema: ColumnSchema::new(

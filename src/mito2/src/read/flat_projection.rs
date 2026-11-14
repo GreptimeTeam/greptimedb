@@ -31,12 +31,12 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::cache::CacheStrategy;
-use crate::error::{InvalidRequestSnafu, NewRecordBatchSnafu, Result};
+use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
 use crate::sst::parquet::Json2RewriteTargets;
-use crate::sst::parquet::flat_format::{FlatReadFormat, sst_column_id_indices};
-use crate::sst::parquet::format::{FIXED_POS_COLUMN_NUM, FormatProjection};
+use crate::sst::parquet::flat_format::sst_column_id_indices;
+use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
     FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
     with_field_id,
@@ -49,7 +49,8 @@ use crate::sst::{
 /// Input indices address the compatible merge schema, not physical Parquet
 /// columns or temporary predicate projections. Sparse compaction uses
 /// `input_arrow_schema(true)` without expanded tags and bypasses query output
-/// conversion; `CompactionProjectionMapper` normalizes source layouts first.
+/// conversion. Sparse compaction retains encoded keys through filtering and
+/// passes batches directly to compatibility; predicate tags stay temporary.
 pub struct FlatProjectionMapper {
     /// Metadata of the region.
     metadata: RegionMetadataRef,
@@ -479,56 +480,6 @@ pub(crate) fn compute_input_arrow_schema(
     new_fields.extend_from_slice(&internal_fields());
 
     Arc::new(datatypes::arrow::datatypes::Schema::new(new_fields))
-}
-
-/// Helper to project compaction batches into flat format columns
-/// (fields + time index + __primary_key + __sequence + __op_type).
-pub(crate) struct CompactionProjectionMapper {
-    projection: Vec<usize>,
-}
-
-impl CompactionProjectionMapper {
-    /// Builds a projection from the converted source layout.
-    ///
-    /// Normal sparse writers omit physical tags, so encoded-only compaction
-    /// batches need no mapper. The reader also accepts flat SST schemas containing
-    /// physical tag columns alongside a sparse encoded key: `is_legacy_format`
-    /// selects the flat adapter from the file's column count, not its encoding.
-    /// Such inputs still need their exposed tags removed before compatibility.
-    ///
-    /// Fields absent from the read projection (for example, dropped target
-    /// columns still present in an old SST) are left to compatibility handling.
-    pub(crate) fn new(format: &FlatReadFormat) -> Option<Self> {
-        let metadata = format.metadata();
-        if !metadata
-            .primary_key
-            .iter()
-            .any(|id| format.projected_index_by_id(*id).is_some())
-        {
-            return None;
-        }
-        let projection = metadata
-            .field_columns()
-            .filter_map(|column| format.projected_index_by_id(column.column_id))
-            .collect();
-        Some(Self { projection })
-    }
-
-    /// Projects columns and appends internal columns for compaction output.
-    ///
-    /// Input uses the converted source projection, before compatibility and merge.
-    /// The trailing timestamp, encoded key, sequence and operation are preserved.
-    /// Predicate-only temporary tag arrays must never be appended to this input.
-    pub(crate) fn project(&self, batch: DfRecordBatch) -> Result<DfRecordBatch> {
-        debug_assert!(
-            batch.num_columns() >= FIXED_POS_COLUMN_NUM,
-            "Compaction input must contain timestamp, primary key, sequence and operation"
-        );
-        let mut projection = self.projection.clone();
-        projection.extend(batch.num_columns() - FIXED_POS_COLUMN_NUM..batch.num_columns());
-        // Projection must preserve the Arrow layouts already produced by compaction Rewrite.
-        batch.project(&projection).context(NewRecordBatchSnafu)
-    }
 }
 
 #[cfg(test)]

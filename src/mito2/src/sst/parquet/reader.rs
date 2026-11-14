@@ -47,7 +47,6 @@ use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use parquet::file::properties::DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT;
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
-use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -64,7 +63,6 @@ use crate::error::{
     UnexpectedSnafu,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
 use crate::series_index::SeriesIndexReadContext;
@@ -499,14 +497,6 @@ impl ParquetReaderBuilder {
             &file_path,
             skip_auto_convert,
         )?;
-        // Projection follows precise filtering and precedes compatibility. Its
-        // indices describe converted batches, not the physical Parquet projection.
-        let compaction_projection_mapper =
-            if self.compaction && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse {
-                CompactionProjectionMapper::new(&read_format)
-            } else {
-                None
-            };
         // `region_meta` comes from the Parquet/source file and must not be used as the
         // target identity. When the caller has no current metadata, the handle is the
         // only local identity available and therefore denotes a local read.
@@ -698,7 +688,6 @@ impl ParquetReaderBuilder {
                 prune_schema,
                 codec,
                 compat_batch: None,
-                compaction_projection_mapper,
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,
             },
@@ -3021,7 +3010,6 @@ mod tests {
                     reader.context.reader_builder().prefilter_builder.is_some(),
                     prefilter == Some(true),
                 );
-                assert!(reader.context.compaction_projection_mapper().is_none());
                 let mut count = 0;
                 while let Some(batch) = reader.next_record_batch().await.unwrap() {
                     assert_eq!(
