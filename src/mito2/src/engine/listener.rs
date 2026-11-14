@@ -44,6 +44,10 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener each time a tail replay checks for a Leader lease while it waits.
     fn on_tail_lease_check(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener before a tail replay that found a newer manifest waits to fence
+    /// the region.
+    fn on_tail_fence_begin(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that a round of tail replay failed and will be retried.
     fn on_tail_replay_failed(&self, _region_id: RegionId, _error: &Error) {}
 

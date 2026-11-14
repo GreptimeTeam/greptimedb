@@ -92,6 +92,7 @@ struct TailReplayListener {
     failures: Mutex<Vec<(StatusCode, String)>>,
     ended: AtomicUsize,
     lease_checks: AtomicUsize,
+    fence_begins: AtomicUsize,
     /// Index builds the worker learned stopped.
     index_builds: AtomicUsize,
 }
@@ -107,6 +108,10 @@ impl EventListener for TailReplayListener {
 
     fn on_tail_lease_check(&self, _region_id: RegionId) {
         self.lease_checks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_tail_fence_begin(&self, _region_id: RegionId) {
+        self.fence_begins.fetch_add(1, Ordering::Relaxed);
     }
 
     fn on_tail_replay_failed(&self, _region_id: RegionId, error: &Error) {
@@ -1757,7 +1762,7 @@ async fn test_replay_waiting_to_fence_ends_when_demoted() {
     wait_until(|| region.listener.failed()).await;
 
     // The next failed round finds the newer manifest and waits for the write lock behind
-    // this read guard.
+    // this read guard, unless the replay is cancelled.
     let mito_region = region.engine.get_region(region.region_id).unwrap();
     let version = next_manifest_version(&mito_region).await;
     let guard = mito_region.manifest_ctx.manifest_manager.read().await;
@@ -1768,7 +1773,7 @@ async fn test_replay_waiting_to_fence_ends_when_demoted() {
         encode_delta(nop_action()).await,
     )
     .await;
-    wait_until(|| region.listener.failures.lock().unwrap().len() >= 2).await;
+    wait_until(|| region.listener.fence_begins.load(Ordering::Relaxed) == 1).await;
     // The worker cancels the replay before the downgrade waits for the manifest lock.
     let engine = region.engine.clone();
     let region_id = region.region_id;
