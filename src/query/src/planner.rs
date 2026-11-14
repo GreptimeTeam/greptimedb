@@ -2410,6 +2410,38 @@ mod tests {
         assert!(!plan_str.contains("Distinct:"), "{plan_str}");
     }
 
+    #[test]
+    fn test_plan_sql_deep_union_all_with_tql_cte() {
+        // Regression for #9356: a query with a TQL CTE was cloned before planning, and the derived
+        // `Clone` of a left-deep `UNION ALL` recurses once per branch. Debug builds poll queries
+        // on 8 MiB worker stacks.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let sql = format!(
+                            "WITH tql AS (TQL EVAL (0, 10, '5s') some_metric) {}",
+                            vec!["SELECT 1 AS a"; 800].join(" UNION ALL ")
+                        );
+                        let query_ctx = QueryContext::arc();
+                        let stmt = QueryLanguageParser::parse_sql(&sql, &query_ctx).unwrap();
+                        let plan = create_promql_test_engine()
+                            .planner()
+                            .plan(&stmt, query_ctx)
+                            .await
+                            .unwrap();
+                        assert!(matches!(plan, LogicalPlan::Union(_)));
+                    })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_get_inferred_parameter_types_subquery() {
         let plan = parse_sql_to_plan(
