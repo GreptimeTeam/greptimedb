@@ -127,6 +127,7 @@ async fn test_admitted_sst_compaction_preserves_intermediate_memtable(
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             },
         )
         .await

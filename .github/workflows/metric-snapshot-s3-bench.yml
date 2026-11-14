@@ -18,6 +18,11 @@ on:
         description: 'Setup, 500-table smoke and full run timeout, 30..240 minutes'
         type: number
         default: 240
+      ec2_hourly_usd:
+        description: 'Positive EC2 hourly USD budget estimate; historical default, not live regional pricing'
+        required: true
+        type: string
+        default: '0.9408'
       prior_spend_usd:
         description: 'Cumulative estimated cloud spend for all earlier attempts in this $20 campaign'
         required: true
@@ -34,6 +39,7 @@ env:
   LOGICAL_TABLES_PER_GROUP: ${{ inputs.logical_tables_per_group }}
   BENCHMARK_TIMEOUT_MINUTES: ${{ inputs.benchmark_timeout_minutes }}
   PRIOR_SPEND_USD: ${{ inputs.prior_spend_usd }}
+  EC2_HOURLY_USD: ${{ inputs.ec2_hourly_usd }}
   RUN_PREFIX: metric-snapshot-bench/${{ github.run_id }}-${{ github.run_attempt }}/
   S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
   S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
@@ -125,7 +131,10 @@ jobs:
         path: greptimedb
         persist-credentials: false
     - name: Set up benchmark dependencies
-      uses: ./greptimedb/.github/actions/setup-benchmark
+      uses: ./greptimedb/.github/actions/setup-linux-runner
+      with:
+        tools: curl jq python3 rsync
+        expected-architecture: x86_64
     - uses: astral-sh/setup-uv@v6
     - name: Mount the temporary local File data disk
       run: |

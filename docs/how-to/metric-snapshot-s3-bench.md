@@ -1,14 +1,17 @@
 # Metric snapshot benchmark on AWS S3
 
 The manual `Metric Snapshot S3 Benchmark` workflow tests packed Metric export and
-restore against real S3 in `ap-southeast-1`. It must first exist on the repository's
-default branch for GitHub to register `workflow_dispatch`. It was validated on AWS
+restore against real S3 in the configured CI bucket region. It must first exist on
+the repository's default branch for GitHub to register `workflow_dispatch`. It was validated on AWS
 by run [38544464731](https://github.com/GreptimeTeam/greptimedb/actions/runs/38544464731);
 [#9573](https://github.com/GreptimeTeam/greptimedb/pull/9573) records its conditions and results.
 
 ## Run
 
 Use the repository's existing EC2 runner configuration and CI S3 credentials.
+`AWS_CI_TEST_BUCKET_REGION` and `EC2_RUNNER_REGION` must be nonempty and equal;
+for example, both can be `us-east-1`. The configured subnet, security group and
+AMI (if explicitly supplied) must also belong to the runner region.
 The workflow passes credentials only through CI; no local AWS credentials are
 needed. Source, target and CLI use the same immutable image. This image's source
 SHA and required CLI capabilities have been checked:
@@ -20,6 +23,7 @@ gh workflow run metric-snapshot-s3-bench.yml \
   -f expected_commit=f690bbb2040865c0d22b0b57d51612b60ae27cd0 \
   -f logical_tables_per_group=10000 \
   -f benchmark_timeout_minutes=240 \
+  -f ec2_hourly_usd=0.9408 \
   -f prior_spend_usd=0
 ```
 
@@ -28,9 +32,12 @@ earlier cloud attempts in the campaign, including failed setup and cleanup.
 Do not reset the estimate to zero when retrying. The workflow accepts 50–10,000
 logical tables per group and a 30–240 minute benchmark job timeout.
 
-The runner is fixed at `c6id.4xlarge` (16 vCPU, 32 GiB RAM). At the recorded
-Singapore Linux on-demand estimate of $0.9408/hour, the default attempt reserves
-$6.4392: four benchmark hours, 45 minutes of provisioning, 10 minutes for queueing,
+The runner is fixed at `c6id.4xlarge` (16 vCPU, 32 GiB RAM). Set
+`ec2_hourly_usd` to a positive, finite hourly budget estimate appropriate for the
+selected region and instance. Its default $0.9408/hour preserves the historical
+Singapore estimate; it is not a live regional price or a guaranteed upper bound.
+The same estimate is used for preflight reservation and the final cost summary.
+At that default rate, the default attempt reserves $6.4392: four benchmark hours, 45 minutes of provisioning, 10 minutes for queueing,
 20 minutes of cleanup, and $1.50 for S3, disk and IPv4 costs. Preflight rejects prior spend at or above
 $15, or an attempt whose reserve would exceed the cumulative $20 budget.
 These estimates and checks are not an AWS hard spending cap or an AWS bill.

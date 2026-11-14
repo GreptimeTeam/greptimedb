@@ -51,7 +51,7 @@ pub(crate) enum PutResult {
 }
 
 /// An object discovered by a LIST.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ListedObject {
     pub(crate) object_seq: u64,
     pub(crate) path: String,
@@ -63,6 +63,7 @@ pub(crate) struct ListedObject {
 #[derive(Clone)]
 pub(crate) struct ObjectStoreIo {
     store: ObjectStore,
+    prefix: String,
     object_prefix: String,
     /// Holds the keys of [`Self::probe_conditional_create`], outside
     /// `object_prefix` so that no listing of the objects returns one.
@@ -74,18 +75,29 @@ impl ObjectStoreIo {
     /// conditional creates, which is what keeps a retried write from
     /// overwriting a durable object.
     pub(crate) fn new(store: ObjectStore, prefix: impl AsRef<str>) -> Result<Self> {
-        let prefix = normalize_prefix(prefix.as_ref())?;
         ensure!(
             store.info().capability().write_with_if_not_exists,
             InvalidWalObjectStoreSnafu {
                 reason: "object store does not support conditional create",
             }
         );
+        Self::new_readonly(store, prefix)
+    }
+
+    /// Binds a reader without requiring or probing write capabilities.
+    pub(crate) fn new_readonly(store: ObjectStore, prefix: impl AsRef<str>) -> Result<Self> {
+        let prefix = normalize_prefix(prefix.as_ref())?;
         Ok(Self {
             store,
             object_prefix: format!("{prefix}/objects/"),
             probe_prefix: format!("{prefix}/probes/"),
+            prefix,
         })
+    }
+
+    /// The normalized source prefix, before the object-directory suffix.
+    pub(crate) fn prefix(&self) -> &str {
+        &self.prefix
     }
 
     /// Checks that the store refuses a conditional create of an object that
@@ -221,17 +233,24 @@ impl ObjectStoreIo {
     /// Lists the objects under the prefix, ordered by object sequence. Keys
     /// that do not follow the object layout are ignored.
     pub(crate) async fn list(&self) -> Result<Vec<ListedObject>> {
-        let entries = self
-            .store
-            .list(&self.object_prefix)
-            .await
-            .with_context(|_| WalObjectStoreSnafu {
-                operation: "list",
-                path: self.object_prefix.clone(),
-            })?;
+        self.list_from(0).await
+    }
+
+    /// Lists from `object_seq`, including that object if it exists.
+    pub(crate) async fn list_from(&self, object_seq: u64) -> Result<Vec<ListedObject>> {
+        let mut listing = self.store.list_with(&self.object_prefix);
+        let start_after = object_seq.checked_sub(1).map(|seq| self.object_path(seq));
+        if let Some(path) = &start_after {
+            listing = listing.start_after(path);
+        }
+        let entries = listing.await.with_context(|_| WalObjectStoreSnafu {
+            operation: "list",
+            path: self.object_prefix.clone(),
+        })?;
         let mut objects = entries
             .iter()
             .filter_map(|entry| self.listed_object(entry))
+            .filter(|object| object.object_seq >= object_seq)
             .collect::<Vec<_>>();
         objects.sort_unstable_by_key(|object| object.object_seq);
         Ok(objects)
@@ -352,7 +371,7 @@ fn reports_existing_object(error: &object_store::Error) -> bool {
     error.kind() == ErrorKind::ConditionNotMatch
 }
 
-fn normalize_prefix(prefix: &str) -> Result<String> {
+pub(crate) fn normalize_prefix(prefix: &str) -> Result<String> {
     let prefix = prefix.trim();
     ensure!(
         !prefix.is_empty() && !prefix.starts_with('/'),
@@ -370,6 +389,90 @@ fn normalize_prefix(prefix: &str) -> Result<String> {
         }
     );
     Ok(prefix.to_string())
+}
+
+/// Read-only object access shared by readers and local recovery.
+#[async_trait::async_trait]
+pub(crate) trait WalObjectRead: Send + Sync {
+    async fn get(&self, object_seq: u64) -> Result<Bytes>;
+    async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes>;
+    async fn list(&self) -> Result<Vec<ListedObject>>;
+
+    async fn list_from(&self, object_seq: u64) -> Result<Vec<ListedObject>> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|object| object.object_seq >= object_seq)
+            .collect())
+    }
+
+    fn object_path(&self, object_seq: u64) -> String;
+    /// The normalized node prefix shared with providers.
+    fn prefix(&self) -> &str;
+    /// Describes the object store the objects live in, for messages.
+    fn storage(&self) -> String;
+}
+
+/// Writable store access, including its startup listing pipeline.
+#[async_trait::async_trait]
+pub(crate) trait WalObjectIo: WalObjectRead {
+    async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult>;
+    async fn delete(&self, object_seq: u64) -> Result<()>;
+
+    /// See [`ObjectStoreIo::list_ahead`]; by default the objects
+    /// [`list`](WalObjectRead::list) returns.
+    fn list_ahead(&self) -> BoxStream<'_, Result<ListedObject>> {
+        Box::pin(try_stream! {
+            for object in self.list().await? { yield object; }
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl WalObjectRead for ObjectStoreIo {
+    async fn get(&self, object_seq: u64) -> Result<Bytes> {
+        ObjectStoreIo::get(self, object_seq).await
+    }
+
+    async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+        ObjectStoreIo::get_range(self, object_seq, offset, len).await
+    }
+
+    async fn list(&self) -> Result<Vec<ListedObject>> {
+        ObjectStoreIo::list(self).await
+    }
+
+    async fn list_from(&self, object_seq: u64) -> Result<Vec<ListedObject>> {
+        ObjectStoreIo::list_from(self, object_seq).await
+    }
+
+    fn object_path(&self, object_seq: u64) -> String {
+        ObjectStoreIo::object_path(self, object_seq)
+    }
+
+    fn storage(&self) -> String {
+        ObjectStoreIo::storage(self)
+    }
+
+    fn prefix(&self) -> &str {
+        ObjectStoreIo::prefix(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl WalObjectIo for ObjectStoreIo {
+    async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+        ObjectStoreIo::put_if_absent(self, object_seq, content).await
+    }
+
+    async fn delete(&self, object_seq: u64) -> Result<()> {
+        ObjectStoreIo::delete(self, object_seq).await
+    }
+
+    fn list_ahead(&self) -> BoxStream<'_, Result<ListedObject>> {
+        ObjectStoreIo::list_ahead(self)
+    }
 }
 
 #[cfg(test)]
@@ -390,6 +493,37 @@ mod tests {
 
     fn memory_store() -> ObjectStore {
         ObjectStore::new(Memory::default()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_list_from_passes_exclusive_predecessor_key() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let layer = MockLayerBuilder::default()
+            .lister_factory(Arc::new({
+                let seen = seen.clone();
+                move |path, args, inner| {
+                    seen.lock()
+                        .unwrap()
+                        .push((path.to_string(), args.start_after().map(str::to_string)));
+                    inner
+                }
+            }))
+            .build()
+            .unwrap();
+        let io =
+            ObjectStoreIo::new_readonly(memory_store().layer(layer), "wal/datanodes/1/epochs/0")
+                .unwrap();
+        for seq in [5, 1, 0] {
+            io.list_from(seq).await.unwrap();
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (io.object_prefix.clone(), Some(io.object_path(4))),
+                (io.object_prefix.clone(), Some(io.object_path(0))),
+                (io.object_prefix.clone(), None),
+            ]
+        );
     }
 
     /// A reader whose every read fails with a temporary error.

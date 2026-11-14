@@ -41,7 +41,7 @@ use crate::compaction::twcs::units::{ClosedMergeOptions, PickLimits};
 use crate::error::{JoinSnafu, Result};
 use crate::metrics::{TWCS_PICK_ELAPSED, TWCS_SCANNED_WINDOWS};
 use crate::region::options::MergeMode;
-use crate::sst::file::{FileHandle, Level, overlaps};
+use crate::sst::file::{self, FileHandle, Level, overlaps};
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 use crate::sst::version::LevelMeta;
 
@@ -392,7 +392,13 @@ impl TwcsPicker {
             region_sequence,
             mapper,
         } = *context;
-        let mut files: Vec<_> = window.files().cloned().collect();
+        // Shared files remain in the window map for overlap/tombstone safety,
+        // but only the table executor may rewrite them.
+        let mut files: Vec<_> = window
+            .files()
+            .filter(|file| file.level() < file::LEVEL_SHARED)
+            .cloned()
+            .collect();
         let quiet = is_quiet_window(&files, region_sequence);
 
         // Filter out large files in append mode - they won't benefit from compaction
@@ -1155,7 +1161,8 @@ impl TwcsPicker {
                 // Compute activity from the candidate files so expired or
                 // compacting files cannot identify a window absent from `windows`.
                 let active_window = find_active_window_by_sequence(
-                    windows.values().flat_map(Window::files),
+                    windows.values().flat_map(Window::files)
+                        .filter(|file| file.level() < file::LEVEL_SHARED),
                     time_window_size,
                 )
                 .or_else(|| {

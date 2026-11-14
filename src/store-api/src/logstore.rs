@@ -35,6 +35,17 @@ use crate::storage::RegionId;
 pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type Error: ErrorExt + Send + Sync + 'static;
 
+    /// Returns regions whose retained WAL is under storage pressure and may be
+    /// released by flushing. This is an advisory snapshot, not permission to
+    /// flush or delete entries. The caller checks the current region state and
+    /// uses [`Self::obsolete`] only after persisting its data.
+    ///
+    /// Implementations inspect local metadata without I/O. Backends without
+    /// pressure-driven flushing return no candidates.
+    fn flush_candidates(&self) -> Vec<RegionId> {
+        Vec::new()
+    }
+
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 
@@ -123,6 +134,23 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         Ok(())
     }
 
+    /// Queues a persistent release of a region's entries through `entry_id`.
+    ///
+    /// The caller must ensure these entries are no longer needed for recovery.
+    /// Success means the store accepted the release, not that it is durable.
+    /// A stopped store may ignore the hint successfully, retaining extra history.
+    /// Implementations may batch records and retry failed writes; a crash before
+    /// persistence may retain extra history. Later entries remain readable.
+    /// The default does nothing, preserving other stores' reclamation policies.
+    async fn release_entries(
+        &self,
+        _provider: &Provider,
+        _region_id: RegionId,
+        _entry_id: EntryId,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Checks, before an existing region is replayed from its persisted
     /// state, that the log store holds the region's WAL history through
     /// `entry_id`, the largest replay watermark the region persisted, so that
@@ -147,6 +175,39 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// The default does nothing.
     fn start_region_history(&self, _provider: &Provider) -> Result<(), Self::Error> {
         Ok(())
+    }
+
+    /// Streams the entries of `region_id` in `(after, upper]` from the WAL of node `node_id`,
+    /// which shares this log store's storage, without writing to that WAL.
+    ///
+    /// The default returns `None`: the log store cannot read the WAL of another node.
+    async fn read_node(
+        &self,
+        _node_id: u64,
+        _region_id: RegionId,
+        _after: EntryId,
+        _upper: WalReadUpperBound,
+    ) -> Result<Option<SendableEntryStream<'static, Entry, Self::Error>>, Self::Error> {
+        Ok(None)
+    }
+}
+
+/// Upper bound of a WAL range read through [`LogStore::read_node`]. A reported final entry
+/// must be present, whereas a LIST boundary need not contain entries of the region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalReadUpperBound {
+    /// The durable last entry reported by the source on downgrade.
+    LastEntry(EntryId),
+    /// A conservative bound obtained by listing the source prefix.
+    Listed(EntryId),
+}
+
+impl WalReadUpperBound {
+    /// Returns the bound.
+    pub fn entry_id(self) -> EntryId {
+        match self {
+            Self::LastEntry(id) | Self::Listed(id) => id,
+        }
     }
 }
 

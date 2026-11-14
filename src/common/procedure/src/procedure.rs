@@ -713,6 +713,9 @@ pub trait ProcedureManager: Send + Sync + 'static {
     /// Callers should ensure all loaders are registered.
     async fn start(&self) -> Result<()>;
 
+    /// Returns whether startup recovery has completed and the manager is running.
+    fn is_ready(&self) -> bool;
+
     /// Stops the background GC task.
     async fn stop(&self) -> Result<()>;
 

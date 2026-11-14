@@ -66,6 +66,7 @@ pub(crate) struct DatanodeHeartbeat {
     datanode_id: DatanodeId,
     // TODO(weny): Considers collecting the memtable size in regions.
     regions: Vec<RegionId>,
+    pub(crate) opening_regions: Vec<RegionId>,
     timestamp: i64,
 }
 
@@ -74,6 +75,7 @@ impl From<&Stat> for DatanodeHeartbeat {
         DatanodeHeartbeat {
             datanode_id: value.id,
             regions: value.region_stats.iter().map(|x| x.id).collect(),
+            opening_regions: Vec::new(),
             timestamp: value.timestamp_millis,
         }
     }
@@ -981,7 +983,18 @@ impl RegionSupervisor {
 
     /// Updates the state of corresponding failure detectors.
     fn on_heartbeat_arrived(&self, heartbeat: DatanodeHeartbeat) {
-        for region_id in heartbeat.regions {
+        let mut regions = heartbeat.regions;
+        if !heartbeat.opening_regions.is_empty() {
+            let mut reported_regions: HashSet<_> = regions.iter().copied().collect();
+            // Update each detector once, even if both snapshots contain the region.
+            regions.extend(
+                heartbeat
+                    .opening_regions
+                    .into_iter()
+                    .filter(|region_id| reported_regions.insert(*region_id)),
+            );
+        }
+        for region_id in regions {
             let detecting_region = (heartbeat.datanode_id, region_id);
             let mut detector = self
                 .failure_detector
@@ -1274,6 +1287,7 @@ pub(crate) mod tests {
 
     fn filler_heartbeat() -> DatanodeHeartbeat {
         DatanodeHeartbeat {
+            opening_regions: Vec::new(),
             datanode_id: 1,
             regions: vec![],
             timestamp: 0,
@@ -1519,12 +1533,82 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn test_opening_regions_refresh_detectors_until_serving() {
+        let (supervisor, _sender) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let other_region = RegionId::new(1, 2);
+        let new_region = RegionId::new(1, 3);
+        for region in [(1, region_id), (1, other_region), (2, region_id)] {
+            let mut detector = supervisor.failure_detector.region_failure_detector(region);
+            detector.heartbeat(1_000);
+            detector.heartbeat(2_000);
+        }
+
+        let mut expected = supervisor
+            .failure_detector
+            .region_failure_detector((1, region_id))
+            .clone();
+        for timestamp in [60_000, 120_000] {
+            expected.heartbeat(timestamp);
+            assert!(
+                !supervisor
+                    .failure_detector
+                    .region_failure_detector((1, region_id))
+                    .is_available(timestamp)
+            );
+            supervisor.on_heartbeat_arrived(DatanodeHeartbeat {
+                datanode_id: 1,
+                regions: vec![],
+                opening_regions: vec![region_id, new_region],
+                timestamp,
+            });
+            assert_eq!(
+                expected,
+                *supervisor
+                    .failure_detector
+                    .region_failure_detector((1, region_id))
+            );
+            for region in [region_id, new_region] {
+                let detector = supervisor
+                    .failure_detector
+                    .region_failure_detector((1, region));
+                assert_eq!(Some(timestamp), detector.last_heartbeat_millis());
+                assert!(detector.is_available(timestamp));
+                // Failure detection resumes when opening heartbeats stop.
+                assert!(!detector.is_available(timestamp + 60_000));
+            }
+            for region in [(1, other_region), (2, region_id)] {
+                let detector = supervisor.failure_detector.region_failure_detector(region);
+                assert_eq!(Some(2_000), detector.last_heartbeat_millis());
+            }
+        }
+
+        // Serving heartbeats retain history, even with a stale opening entry.
+        for (timestamp, opening_regions) in [(121_000, vec![]), (122_000, vec![region_id])] {
+            expected.heartbeat(timestamp);
+            supervisor.on_heartbeat_arrived(DatanodeHeartbeat {
+                datanode_id: 1,
+                regions: vec![region_id],
+                opening_regions,
+                timestamp,
+            });
+            assert_eq!(
+                expected,
+                *supervisor
+                    .failure_detector
+                    .region_failure_detector((1, region_id))
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_heartbeat() {
         let (mut supervisor, sender) = new_test_supervisor();
         tokio::spawn(async move { supervisor.run().await });
 
         sender
             .send(Event::HeartbeatArrived(DatanodeHeartbeat {
+                opening_regions: Vec::new(),
                 datanode_id: 0,
                 regions: vec![RegionId::new(1, 1)],
                 timestamp: 100,
@@ -1547,6 +1631,7 @@ pub(crate) mod tests {
             let start = current_time_millis();
             (0..2000)
                 .map(|i| DatanodeHeartbeat {
+                    opening_regions: Vec::new(),
                     timestamp: start + i * 1000 + rng.random_range(0..100),
                     datanode_id,
                     regions: region_ids

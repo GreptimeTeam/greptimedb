@@ -375,6 +375,25 @@ mod tests {
     }
 
     #[test]
+    fn test_kafka_password_serialization() {
+        for kind in ["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"] {
+            let input = format!("type = '{kind}'\nusername = 'alice'\npassword = 'kafka-secret'");
+            let config: KafkaClientSaslConfig = toml::from_str(&input).unwrap();
+            match &config {
+                KafkaClientSaslConfig::Plain { password, .. }
+                | KafkaClientSaslConfig::ScramSha256 { password, .. }
+                | KafkaClientSaslConfig::ScramSha512 { password, .. } => {
+                    assert_eq!(password, "kafka-secret")
+                }
+            }
+            let serialized = toml::to_string(&config).unwrap();
+            assert!(!serialized.contains("kafka-secret"));
+            assert!(serialized.contains("<REDACTED>"));
+            assert!(serialized.contains("alice"));
+        }
+    }
+
+    #[test]
     fn test_kafka_wal_config_debug_redacts_password() {
         let config = MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             connection: KafkaConnectionConfig {

@@ -1394,6 +1394,15 @@ mod tests {
             unimplemented!("unexpected compact_region")
         }
 
+        async fn cancel_region_compaction(
+            &self,
+            _region_id: store_api::storage::RegionId,
+            _task_id: String,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            unimplemented!("unexpected cancel_region_compaction")
+        }
+
         async fn discard_unflushed_data(
             &self,
             _region_id: store_api::storage::RegionId,

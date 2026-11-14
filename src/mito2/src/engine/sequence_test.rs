@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
@@ -27,7 +28,9 @@ use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::Provider;
 use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream};
 use store_api::region_engine::{RegionEngine, RegionRole};
-use store_api::region_request::{PathType, RegionOpenRequest, RegionPutRequest, RegionRequest};
+use store_api::region_request::{
+    PathType, RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
+};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
 
@@ -52,6 +55,7 @@ struct LogState {
     entries: HashMap<Provider, Vec<Entry>>,
     fault: Option<AppendFault>,
     append_calls: usize,
+    fail_obsolete: bool,
 }
 
 impl LogState {
@@ -78,6 +82,10 @@ impl MemoryLogStore {
     fn fail_next_append(&self, fault: AppendFault) {
         let mut state = self.state.lock().unwrap();
         assert!(state.fault.replace(fault).is_none());
+    }
+
+    fn fail_next_obsolete(&self) {
+        self.state.lock().unwrap().fail_obsolete = true;
     }
 }
 
@@ -153,6 +161,9 @@ impl LogStore for MemoryLogStore {
         _region_id: RegionId,
         _id: EntryId,
     ) -> Result<()> {
+        if std::mem::take(&mut self.state.lock().unwrap().fail_obsolete) {
+            return IllegalStateSnafu {}.fail();
+        }
         Ok(())
     }
     async fn obsolete_all(&self, _provider: &Provider, _region_id: RegionId) -> Result<()> {
@@ -406,5 +417,42 @@ async fn test_partial_region_append_preserves_all_allocations() {
         open_region(&engine, id, dir).await;
         assert!(scan_rows(&engine, id).await.contains("| b     | 2.0"));
     }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_flush_after_failed_wal_obsolete() {
+    let mut env = TestEnv::new().await;
+    let store = Arc::new(MemoryLogStore::default());
+    let engine = env
+        .create_engine_with_log_store(MitoConfig::default(), store.clone())
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let (_, schema) = create_region(&engine, region_id).await;
+    let flush = RegionRequest::Flush(RegionFlushRequest::default());
+    let put = RegionRequest::Put(put_request(&schema, &[("a", 1)]));
+    engine.handle_request(region_id, put).await.unwrap();
+    store.fail_next_obsolete();
+    engine.handle_request(region_id, flush).await.unwrap_err();
+
+    // The failed WAL release must not leave the flush registered, or every later flush waits
+    // behind it.
+    let put = RegionRequest::Put(put_request(&schema, &[("b", 2)]));
+    engine.handle_request(region_id, put).await.unwrap();
+    let flush = RegionRequest::Flush(RegionFlushRequest::default());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.handle_request(region_id, flush),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let rows = scan_rows(&engine, region_id).await;
+    assert!(
+        rows.contains("| a     | 1.0") && rows.contains("| b     | 2.0"),
+        "{rows}"
+    );
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(version.memtables.is_empty());
     engine.stop().await.unwrap();
 }

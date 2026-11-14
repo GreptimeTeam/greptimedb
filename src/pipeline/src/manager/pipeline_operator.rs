@@ -283,6 +283,11 @@ impl PipelineOperator {
             .await
     }
 
+    /// Returns the server's pipeline options.
+    pub fn options(&self) -> &PipelineOptions {
+        &self.options
+    }
+
     /// Compile a pipeline.
     pub fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline> {
         crate::parse_with_options(&crate::Content::Yaml(pipeline), &self.options)

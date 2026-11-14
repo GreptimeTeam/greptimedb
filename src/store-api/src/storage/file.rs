@@ -33,7 +33,9 @@ pub struct ParseIdError {
 }
 
 /// Unique id for [SST File].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub struct FileId(Uuid);
 
 impl FileId {

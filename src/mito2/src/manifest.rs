@@ -16,6 +16,7 @@
 
 pub mod action;
 mod checkpointer;
+mod compat;
 pub mod manager;
 pub mod storage;
 #[cfg(test)]

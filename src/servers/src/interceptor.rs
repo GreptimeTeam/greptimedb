@@ -28,7 +28,10 @@ use query::parser::PromQuery;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 use table::TableRef;
+use table::table_reference::TableReference;
 use vrl::value::Value;
+
+use crate::exemplar::query::Query as ExemplarQuery;
 
 /// SqlQueryInterceptor can track life cycle of a sql query and customize or
 /// abort its execution at given point.
@@ -232,6 +235,17 @@ pub trait PromQueryInterceptor {
         Ok(())
     }
 
+    /// Called after authorization, before each resolved exemplar table is scanned.
+    /// Returning an error aborts the query. `query_ctx` uses the table's schema.
+    fn pre_execute_exemplars(
+        &self,
+        _query: &ExemplarQuery,
+        _table: TableReference<'_>,
+        _query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Called after execution finished. The implementation can modify the
     /// output if needed.
     fn post_execute(
@@ -277,6 +291,19 @@ where
             Ok(output)
         }
     }
+
+    fn pre_execute_exemplars(
+        &self,
+        query: &ExemplarQuery,
+        table: TableReference<'_>,
+        query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_execute_exemplars(query, table, query_ctx)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl<E> PromQueryInterceptor for Option<&PromQueryInterceptorRef<E>>
@@ -308,6 +335,19 @@ where
             this.post_execute(output, query_ctx)
         } else {
             Ok(output)
+        }
+    }
+
+    fn pre_execute_exemplars(
+        &self,
+        query: &ExemplarQuery,
+        table: TableReference<'_>,
+        query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_execute_exemplars(query, table, query_ctx)
+        } else {
+            Ok(())
         }
     }
 }

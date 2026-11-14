@@ -31,6 +31,7 @@ use index::inverted_index::search::predicate::Predicate;
 use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
+use puffin::puffin_manager::file_key::PuffinFileKey;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
@@ -47,7 +48,7 @@ use crate::error::{
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
-use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
+use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::{TYPE_INVERTED_INDEX, trigger_index_background_download};
 
 /// Metrics for tracking inverted index apply operations.
@@ -129,6 +130,10 @@ pub(crate) struct InvertedIndexApplier {
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
 
+    /// Managers keep backend identity resolution out of per-blob reads.
+    remote_puffin_manager: SstPuffinManager,
+    cached_puffin_manager: Option<SstPuffinManager>,
+
     /// In-memory cache for inverted index.
     inverted_index_cache: Option<InvertedIndexCacheRef>,
 
@@ -163,6 +168,10 @@ impl InvertedIndexApplier {
         predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
         expected_predicate_target_types: BTreeMap<IndexTarget, ConcreteDataType>,
     ) -> Result<Self> {
+        let remote_puffin_manager = puffin_manager_factory.build(
+            store.clone(),
+            RegionFilePathFactory::new(table_dir.clone(), path_type),
+        );
         let default_plan = Self::build_apply_plan(&predicates)?;
         INDEX_APPLY_MEMORY_USAGE.add(default_plan.index_applier.memory_usage() as i64);
 
@@ -172,6 +181,8 @@ impl InvertedIndexApplier {
             store,
             file_cache: None,
             puffin_manager_factory,
+            remote_puffin_manager,
+            cached_puffin_manager: None,
             inverted_index_cache: None,
             puffin_metadata_cache: None,
             predicates,
@@ -182,6 +193,13 @@ impl InvertedIndexApplier {
 
     /// Sets the file cache.
     pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.cached_puffin_manager = file_cache.as_ref().map(|cache| {
+            self.puffin_manager_factory.build_cached(
+                &self.remote_puffin_manager,
+                cache.local_store(),
+                WriteCachePathProvider::new(cache.clone()),
+            )
+        });
         self.file_cache = file_cache;
         self
     }
@@ -228,7 +246,7 @@ impl InvertedIndexApplier {
         };
 
         let mut cache_miss = 0;
-        let blob = match self.cached_blob_reader(file_id, file_size_hint).await {
+        let (file_key, blob) = match self.cached_blob_reader(file_id, file_size_hint).await {
             Ok(Some(puffin_reader)) => puffin_reader,
             other => {
                 cache_miss += 1;
@@ -243,8 +261,7 @@ impl InvertedIndexApplier {
 
         let result = if let Some(index_cache) = &self.inverted_index_cache {
             let mut index_reader = CachedInvertedIndexBlobReader::new(
-                file_id.file_id(),
-                file_id.version,
+                file_key,
                 blob_size,
                 InvertedIndexBlobReader::new(blob),
                 index_cache.clone(),
@@ -293,8 +310,10 @@ impl InvertedIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
-    ) -> Result<Option<BlobReader>> {
-        let Some(file_cache) = &self.file_cache else {
+    ) -> Result<Option<(PuffinFileKey<RegionIndexId>, BlobReader)>> {
+        let (Some(file_cache), Some(puffin_manager)) =
+            (&self.file_cache, &self.cached_puffin_manager)
+        else {
             return Ok(None);
         };
 
@@ -306,11 +325,6 @@ impl InvertedIndexApplier {
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
-
-        let puffin_manager = self.puffin_manager_factory.build(
-            file_cache.local_store(),
-            WriteCachePathProvider::new(file_cache.clone()),
-        );
 
         // Adds file size hint to the puffin reader to avoid extra metadata read.
         let reader = puffin_manager
@@ -324,7 +338,7 @@ impl InvertedIndexApplier {
             .reader()
             .await
             .context(PuffinBuildReaderSnafu)?;
-        Ok(Some(reader))
+        Ok(Some((puffin_manager.file_key(&file_id), reader)))
     }
 
     /// Creates a blob reader from the remote index file.
@@ -332,7 +346,7 @@ impl InvertedIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
-    ) -> Result<BlobReader> {
+    ) -> Result<(PuffinFileKey<RegionIndexId>, BlobReader)> {
         let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
 
         // Trigger background download if file cache and file size are available
@@ -345,11 +359,11 @@ impl InvertedIndexApplier {
         );
 
         let puffin_manager = self
-            .puffin_manager_factory
-            .build(self.store.clone(), path_factory)
+            .remote_puffin_manager
+            .clone()
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        puffin_manager
+        let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
@@ -359,7 +373,8 @@ impl InvertedIndexApplier {
             .context(PuffinReadBlobSnafu)?
             .reader()
             .await
-            .context(PuffinBuildReaderSnafu)
+            .context(PuffinBuildReaderSnafu)?;
+        Ok((puffin_manager.file_key(&file_id), reader))
     }
 
     /// Builds a per-SST apply plan.

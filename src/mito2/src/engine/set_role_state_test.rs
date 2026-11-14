@@ -499,7 +499,7 @@ async fn test_retried_downgrade_waits_after_first_request_is_cancelled() {
     let first_region = region.clone();
     let first_downgrade = tokio::spawn(async move {
         first_region
-            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader)
+            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader, async {})
             .await
     });
     tokio::time::timeout(Duration::from_secs(5), first_wait_started)
@@ -536,7 +536,7 @@ async fn test_retried_downgrade_waits_after_first_request_is_cancelled() {
     let retry_region = region.clone();
     let retry_downgrade = tokio::spawn(async move {
         retry_region
-            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader)
+            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader, async {})
             .await
     });
     tokio::time::timeout(Duration::from_secs(5), second_wait_started)

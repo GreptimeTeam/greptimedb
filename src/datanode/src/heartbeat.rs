@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -379,7 +379,22 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
+                        // Read opening first so a completed open is covered by either snapshot.
+                        let opening_regions = region_server_clone.opening_regions();
                         let region_stats = Self::load_region_stats(&region_server_clone);
+                        let opening_regions = if opening_regions.is_empty() {
+                            Vec::new()
+                        } else {
+                            let reported_regions: HashSet<_> = region_stats.iter()
+                                .map(|stat| stat.region_id)
+                                .collect();
+                            opening_regions.into_iter()
+                                .filter(|region_id| !reported_regions.contains(&region_id.as_u64()))
+                                .map(|region_id| api::v1::meta::OpeningRegion {
+                                    region_id: region_id.as_u64(),
+                                })
+                                .collect()
+                        };
                         let topic_stats = region_server_clone.topic_stats();
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
@@ -389,6 +404,7 @@ impl HeartbeatTask {
                         gc_stat.into_extensions(&mut extensions);
 
                         let mut req = HeartbeatRequest {
+                            opening_regions,
                             region_stats,
                             topic_stats,
                             duration_since_epoch,

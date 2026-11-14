@@ -18,6 +18,23 @@ use common_telemetry::warn;
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::common::v1::{KeyValue, any_value};
 
+use crate::otlp::trace::KEY_SERVICE_NAME;
+
+/// Reads the resource `service.name`. It is required by the semantic conventions,
+/// but senders may omit it; unrelated attributes are never used as a fallback.
+/// <https://opentelemetry.io/docs/specs/semconv/resource/service/>
+pub(crate) fn resource_service_name(resource_attrs: &[KeyValue]) -> Option<String> {
+    resource_attrs
+        .iter()
+        .find(|kv| kv.key == KEY_SERVICE_NAME)
+        .and_then(|kv| kv.value.as_ref()?.value.as_ref())
+        .and_then(|value| match value {
+            any_value::Value::StringValue(s) => Some(s.clone()),
+            any_value::Value::BytesValue(b) => Some(String::from_utf8_lossy(b).to_string()),
+            _ => None,
+        })
+}
+
 pub fn bytes_to_hex_string(bs: &[u8]) -> String {
     hex::encode(bs)
 }

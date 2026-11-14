@@ -16,6 +16,7 @@ provided through handler traits, mostly implemented by `frontend`.
 | HTTP | `src/servers/src/http.rs`, `src/servers/src/http/` | Routes, middleware, protocol endpoints, output formats |
 | SQL protocols | `src/servers/src/mysql.rs`, `src/servers/src/mysql/`, `src/servers/src/postgres.rs`, `src/servers/src/postgres/` | MySQL/PostgreSQL servers and type conversion |
 | Observability protocols | `src/servers/src/prom_remote_write/`, `src/servers/src/prometheus.rs`, `src/servers/src/otlp/`, `src/servers/src/otel_arrow.rs` | Prometheus and OpenTelemetry conversion |
+| Exemplars | `src/servers/src/exemplar/`, `src/servers/src/exemplar.rs`, `src/servers/src/http/prom_store/exemplar.rs` | Shared row contract, millisecond query API, completion-aware metric/exemplar writes |
 | Resources / TLS | `src/servers/src/request_memory_limiter.rs`, `src/servers/src/tls.rs`, `src/servers/src/addrs.rs` | Memory admission, TLS, listener addresses |
 
 ## Change coupling
@@ -25,6 +26,11 @@ provided through handler traits, mostly implemented by `frontend`.
   after bumping it.
 - Auth or `QueryContext` changes must cover HTTP, gRPC, MySQL, and PostgreSQL
   entry points.
+- A protocol handler that changes the `QueryContext` catalog or schema after
+  authentication (HTTP `db` query/form parameters, MySQL `COM_INIT_DB`) calls
+  `UserProvider::authorize` for the new scope before mutating the context. The
+  HTTP middleware authorizes only the scope it extracts itself
+  (`extract_catalog_and_schema` in `http/authorize.rs`).
 - Internal frontend gRPC listeners set `Channel::Internal` in server-owned request
   extensions. Handlers preserve it through query execution and metering; client
   flow metadata does not grant an internal channel.

@@ -105,6 +105,7 @@ ORDER BY TABLE_NAME, TABLE_TYPE;
 |greptime|information_schema|column_privileges|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|greptime.semantic.table_scope=global||Y|
 |greptime|information_schema|column_statistics|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|greptime.semantic.table_scope=global||Y|
 |greptime|information_schema|columns|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|greptime.semantic.table_scope=catalog||Y|
+|greptime|information_schema|compaction_tasks|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|greptime.semantic.table_scope=global||Y|
 |greptime|information_schema|engines|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|greptime.semantic.table_scope=public_global||Y|
 |greptime|information_schema|events|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|greptime.semantic.table_scope=global||Y|
 |greptime|information_schema|files|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|greptime.semantic.table_scope=global||Y|

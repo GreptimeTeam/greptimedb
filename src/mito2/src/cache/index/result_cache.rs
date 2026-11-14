@@ -20,7 +20,7 @@ use index::inverted_index::search::predicate::{Predicate, RangePredicate};
 use index::target::IndexTarget;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
-use store_api::storage::{ColumnId, FileId};
+use store_api::storage::FileId;
 
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::sst::index::fulltext_index::applier::builder::{
@@ -123,7 +123,7 @@ pub enum PredicateKey {
 
 impl PredicateKey {
     /// Creates a new fulltext index key.
-    pub fn new_fulltext(predicates: Arc<BTreeMap<ColumnId, FulltextRequest>>) -> Self {
+    pub fn new_fulltext(predicates: Arc<BTreeMap<IndexTarget, FulltextRequest>>) -> Self {
         Self::Fulltext(FulltextIndexKey::new(predicates))
     }
 
@@ -156,17 +156,18 @@ impl PredicateKey {
 /// Key for fulltext index queries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct FulltextIndexKey {
-    predicates: Arc<BTreeMap<ColumnId, FulltextRequest>>,
+    predicates: Arc<BTreeMap<IndexTarget, FulltextRequest>>,
     mem_usage: usize,
 }
 
 impl FulltextIndexKey {
     /// Creates a new fulltext index key with the given predicates.
     /// Calculates memory usage based on the size of queries and terms.
-    pub fn new(predicates: Arc<BTreeMap<ColumnId, FulltextRequest>>) -> Self {
+    pub fn new(predicates: Arc<BTreeMap<IndexTarget, FulltextRequest>>) -> Self {
         let mem_usage = predicates
-            .values()
-            .map(|request| {
+            .iter()
+            .map(|(target, request)| {
+                let target_size = target.approx_mem_size();
                 let query_size = request
                     .queries
                     .iter()
@@ -182,7 +183,7 @@ impl FulltextIndexKey {
                     .iter()
                     .map(|like| like.pattern.len() + size_of::<FulltextLike>())
                     .sum::<usize>();
-                query_size + term_size + like_size
+                target_size + query_size + term_size + like_size
             })
             .sum();
         Self {
@@ -377,7 +378,7 @@ mod tests {
             terms: vec![],
             likes: vec![],
         };
-        predicates1.insert(1, request1);
+        predicates1.insert(IndexTarget::ColumnId(1), request1);
         let key1 = PredicateKey::new_fulltext(Arc::new(predicates1));
         let selection1 = Arc::new(RowGroupSelection::default());
 
@@ -392,7 +393,7 @@ mod tests {
             terms: vec![],
             likes: vec![],
         };
-        predicates2.insert(1, request2);
+        predicates2.insert(IndexTarget::ColumnId(1), request2);
         let key2 = PredicateKey::new_fulltext(Arc::new(predicates2));
         let selection2 = Arc::new(RowGroupSelection::default());
 
@@ -463,7 +464,7 @@ mod tests {
             }],
             likes: vec![],
         };
-        predicates1.insert(1, request1);
+        predicates1.insert(IndexTarget::ColumnId(1), request1);
         let key1 = PredicateKey::new_fulltext(Arc::new(predicates1));
         let selection1 = Arc::new(RowGroupSelection::new(100, 250));
         let weight1 =

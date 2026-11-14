@@ -1456,7 +1456,10 @@ impl CacheManager {
         }
 
         if let Some(cache) = &self.puffin_metadata_cache {
-            cache.remove(&file_id.to_string()).await;
+            // Evict this exact generation across all storage scopes and paths.
+            if let Err(err) = cache.invalidate_file(&file_id.to_string()) {
+                warn!(err; "Failed to invalidate Puffin metadata, file_id: {file_id}");
+            }
         }
 
         if let Some(write_cache) = &self.write_cache {
@@ -3154,18 +3157,63 @@ mod tests {
     async fn test_evict_puffin_cache_clears_all_entries() {
         use std::collections::{BTreeMap, HashMap};
 
-        let cache = CacheManager::builder()
-            .index_metadata_size(128)
-            .index_content_size(128)
-            .index_content_page_size(64)
-            .index_result_cache_size(128)
-            .puffin_metadata_size(128)
-            .build();
-        let cache = Arc::new(cache);
+        use puffin::puffin_manager::file_key::{PuffinFileKey, PuffinStorageScope};
 
         let region_id = RegionId::new(1, 1);
         let index_id = RegionIndexId::new(RegionFileId::new(region_id, FileId::random()), 0);
+        let file_key = PuffinFileKey::new(
+            Arc::new(PuffinStorageScope::new(
+                "memory".into(),
+                "cache-test".into(),
+                "/".into(),
+            )),
+            "table/index.puffin".into(),
+            index_id,
+        );
+        let metadata_key = file_key.clone().map_handle(|id| id.to_string());
+        let other_scope_key = PuffinFileKey::new(
+            Arc::new(PuffinStorageScope::new(
+                "memory".into(),
+                "other-store".into(),
+                "/".into(),
+            )),
+            "table/index.puffin".into(),
+            index_id.to_string(),
+        );
+        let newer_metadata_key = file_key.clone().map_handle(|mut id| {
+            id.version += 1;
+            id.to_string()
+        });
         let column_id: ColumnId = 1;
+
+        // Budget for the actual keys and empty values used below, including all
+        // three footer entries. Shared scopes are conservatively charged per key.
+        let index_metadata_size = file_key.estimated_size()
+            + ::index::target::IndexTarget::ColumnId(column_id).approx_mem_size()
+            + std::mem::size_of::<Tag>()
+            + std::mem::size_of::<BloomFilterMeta>()
+            + std::mem::size_of::<InvertedIndexMetas>();
+        let puffin_metadata_size: usize = [&metadata_key, &other_scope_key, &newer_metadata_key]
+            .into_iter()
+            .map(|key| {
+                key.estimated_size()
+                    + key.handle().capacity()
+                    + FileMetadata {
+                        blobs: Vec::new(),
+                        properties: HashMap::new(),
+                    }
+                    .memory_usage()
+            })
+            .sum();
+        let cache = Arc::new(
+            CacheManager::builder()
+                .index_metadata_size(index_metadata_size as u64)
+                .index_content_size(128)
+                .index_content_page_size(64)
+                .index_result_cache_size(128)
+                .puffin_metadata_size(puffin_metadata_size as u64)
+                .build(),
+        );
 
         let bloom_cache = cache.bloom_filter_index_cache().unwrap().clone();
         let inverted_cache = cache.inverted_index_cache().unwrap().clone();
@@ -3173,8 +3221,7 @@ mod tests {
         let puffin_metadata_cache = cache.puffin_metadata_cache().unwrap().clone();
 
         let bloom_key = (
-            index_id.file_id(),
-            index_id.version,
+            file_key.clone(),
             Arc::new(::index::target::IndexTarget::ColumnId(column_id)),
             Tag::Skipping,
         );
@@ -3182,51 +3229,73 @@ mod tests {
             .put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()))
             .await;
         inverted_cache
-            .put_metadata(
-                (index_id.file_id(), index_id.version),
-                Arc::new(InvertedIndexMetas::default()),
-            )
+            .put_metadata(file_key.clone(), Arc::new(InvertedIndexMetas::default()))
             .await;
         let predicate = PredicateKey::new_bloom(Arc::new(BTreeMap::new()));
         let selection = Arc::new(RowGroupSelection::default());
         result_cache.put(predicate.clone(), index_id.file_id(), selection);
-        let file_id_str = index_id.to_string();
         let metadata = Arc::new(FileMetadata {
             blobs: Vec::new(),
             properties: HashMap::new(),
         });
         puffin_metadata_cache
-            .put_metadata(file_id_str.clone(), metadata)
+            .put_metadata(metadata_key.clone(), metadata)
             .await;
 
         assert!(bloom_cache.get_metadata(bloom_key.clone()).await.is_some());
         assert!(
             inverted_cache
-                .get_metadata((index_id.file_id(), index_id.version))
+                .get_metadata(file_key.clone())
                 .await
                 .is_some()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_some());
         assert!(
             puffin_metadata_cache
-                .get_metadata(&file_id_str)
+                .get_metadata(&metadata_key)
                 .await
                 .is_some()
         );
 
+        // Retirement only has the immutable index handle, so matching scopes are
+        // all invalidated while a different generation remains available.
+        for key in [&other_scope_key, &newer_metadata_key] {
+            puffin_metadata_cache
+                .put_metadata(
+                    key.clone(),
+                    Arc::new(FileMetadata {
+                        blobs: Vec::new(),
+                        properties: HashMap::new(),
+                    }),
+                )
+                .await;
+            assert!(puffin_metadata_cache.get_metadata(key).await.is_some());
+        }
         cache.evict_puffin_cache(index_id).await;
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&other_scope_key)
+                .await
+                .is_none()
+        );
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&newer_metadata_key)
+                .await
+                .is_some()
+        );
 
         assert!(bloom_cache.get_metadata(bloom_key.clone()).await.is_none());
         assert!(
             inverted_cache
-                .get_metadata((index_id.file_id(), index_id.version))
+                .get_metadata(file_key.clone())
                 .await
                 .is_none()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
         assert!(
             puffin_metadata_cache
-                .get_metadata(&file_id_str)
+                .get_metadata(&metadata_key)
                 .await
                 .is_none()
         );
@@ -3236,10 +3305,7 @@ mod tests {
             .put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()))
             .await;
         inverted_cache
-            .put_metadata(
-                (index_id.file_id(), index_id.version),
-                Arc::new(InvertedIndexMetas::default()),
-            )
+            .put_metadata(file_key.clone(), Arc::new(InvertedIndexMetas::default()))
             .await;
         result_cache.put(
             predicate.clone(),
@@ -3248,7 +3314,7 @@ mod tests {
         );
         puffin_metadata_cache
             .put_metadata(
-                file_id_str.clone(),
+                metadata_key.clone(),
                 Arc::new(FileMetadata {
                     blobs: Vec::new(),
                     properties: HashMap::new(),
@@ -3262,14 +3328,14 @@ mod tests {
         assert!(bloom_cache.get_metadata(bloom_key.clone()).await.is_none());
         assert!(
             inverted_cache
-                .get_metadata((index_id.file_id(), index_id.version))
+                .get_metadata(file_key.clone())
                 .await
                 .is_none()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
         assert!(
             puffin_metadata_cache
-                .get_metadata(&file_id_str)
+                .get_metadata(&metadata_key)
                 .await
                 .is_none()
         );

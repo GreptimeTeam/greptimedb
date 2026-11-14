@@ -25,7 +25,7 @@ mod put;
 mod read;
 mod region_metadata;
 mod staging;
-mod state;
+pub(crate) mod state;
 mod sync;
 
 use std::any::Any;
@@ -59,8 +59,8 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::error::{
-    self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu,
-    UnsupportedRemapManifestsRequestSnafu,
+    self, Error, PhysicalRegionNotFoundSnafu, Result, StartRepeatedTaskSnafu,
+    UnsupportedRegionRequestSnafu, UnsupportedRemapManifestsRequestSnafu,
 };
 use crate::metadata_region::MetadataRegion;
 use crate::repeated_task::FlushMetadataRegionTask;
@@ -247,7 +247,7 @@ impl RegionEngine for MetricEngine {
                     .alter_regions(vec![(region_id, alter)], &mut extension_return_value)
                     .await
             }
-            RegionRequest::Compact(_) => {
+            RegionRequest::Compact(_) | RegionRequest::CancelCompaction(_) => {
                 if self.inner.is_physical_region(region_id) {
                     self.inner
                         .mito
@@ -608,7 +608,7 @@ impl MetricEngine {
 }
 
 /// Shared definitions must agree before CREATE/ALTER mutates either region.
-fn validate_shared_column(
+pub(crate) fn validate_shared_column(
     region_id: store_api::storage::RegionId,
     existing: &store_api::metadata::ColumnMetadata,
     proposed: &store_api::metadata::ColumnMetadata,
@@ -647,6 +647,42 @@ struct MetricEngineInner {
     flush_task: RepeatedTask<Error>,
 }
 
+impl MetricEngineInner {
+    /// Adds columns to the physical region while holding its column-add lock.
+    ///
+    /// Column ids are derived from the metadata of the physical region, so requests
+    /// on logical regions that share one physical region must not allocate ids at
+    /// the same time, otherwise two different columns could get one id.
+    async fn add_physical_columns(
+        &self,
+        physical_region_id: RegionId,
+        columns: Vec<store_api::metadata::ColumnMetadata>,
+        index_options: IndexOptions,
+    ) -> Result<()> {
+        if columns.is_empty() {
+            return Ok(());
+        }
+
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let column_add_lock = {
+            let state = self.state.read().unwrap();
+            state
+                .physical_region_states()
+                .get(&data_region_id)
+                .with_context(|| PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                })?
+                .column_add_lock()
+                .clone()
+        };
+
+        let _guard = column_add_lock.lock().await;
+        self.data_region
+            .add_columns(physical_region_id, columns, index_options)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::assert_matches;
@@ -661,8 +697,9 @@ mod test {
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
-        PathType, RegionCleanUpRequest, RegionCloseRequest, RegionDropRequest, RegionFlushRequest,
-        RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
+        PathType, RegionCancelCompactionRequest, RegionCleanUpRequest, RegionCloseRequest,
+        RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
+        RegionTruncateRequest,
     };
 
     use super::*;
@@ -691,6 +728,34 @@ mod test {
             .unwrap_err();
         let error = format!("{error:?}");
         assert!(error.contains("series index is disabled"), "{error}");
+        let error = env
+            .metric()
+            .handle_request(env.default_logical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_compaction_physical_and_logical_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let request = || {
+            RegionRequest::CancelCompaction(RegionCancelCompactionRequest {
+                task_id: "stale-task-id".to_string(),
+            })
+        };
+        // Mito returns zero for an absent task; reaching that result proves forwarding.
+        let response = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 0);
+
         let error = env
             .metric()
             .handle_request(env.default_logical_region_id(), request())

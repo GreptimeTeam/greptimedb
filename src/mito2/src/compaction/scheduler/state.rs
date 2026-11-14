@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet, hash_map};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use api::v1::region::compact_request;
@@ -21,15 +21,18 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
+use store_api::compaction_task::{self, CompactionTaskEntry};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::compaction::compactor::CompactionVersion;
+use crate::compaction::CompactionOutput;
+use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::compaction::picker::PickerOutput;
+use crate::compaction::scheduler::CancelCompactionResult;
 use crate::compaction::scheduler::history::PickHistory;
-use crate::compaction::scheduler::local::LocalCompaction;
+use crate::compaction::scheduler::local::{LocalCompaction, LocalCompactionState};
 use crate::compaction::scheduler::planning::CompactionRequest;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -95,13 +98,15 @@ pub(crate) enum CompactionPhase {
 
 /// Describes how the current compaction cycle was triggered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CompactionTrigger {
+pub(crate) enum CompactionTrigger {
     Automatic,
     Manual,
 }
 
 #[derive(Debug)]
 pub(super) struct ActiveCompaction {
+    /// Query metadata owned by this live cycle, dropped when it becomes idle.
+    pub(crate) task_state: Option<CompactionTaskState>,
     pub(super) phase: CompactionPhase,
     trigger: CompactionTrigger,
     /// Waiters satisfied by the current planning or execution cycle. Picking waiters move into
@@ -111,16 +116,20 @@ pub(super) struct ActiveCompaction {
     /// picking cycle after the current cycle finishes. Recorded in every phase so an external
     /// trigger always resets the continuation scope, even during local/remote execution.
     pub(super) automatic_followup_required: bool,
+    /// Records an accepted explicit cancellation of this task.
+    task_cancel_requested: bool,
 }
 
 impl ActiveCompaction {
     /// Creates an empty cycle while retaining the region's scheduling record.
     fn idle() -> Self {
         Self {
+            task_state: None,
             phase: CompactionPhase::Idle,
             trigger: CompactionTrigger::Automatic,
             waiters: Vec::new(),
             automatic_followup_required: false,
+            task_cancel_requested: false,
         }
     }
 
@@ -131,6 +140,7 @@ impl ActiveCompaction {
         trigger: CompactionTrigger,
     ) -> Self {
         Self {
+            task_state: None,
             phase: CompactionPhase::Picking {
                 plan_id,
                 cancelled: false,
@@ -138,10 +148,13 @@ impl ActiveCompaction {
             trigger,
             waiters,
             automatic_followup_required: false,
+            task_cancel_requested: false,
         }
     }
 
     pub(super) fn start_picking(&mut self, plan_id: u64, trigger: CompactionTrigger) {
+        self.task_state = None;
+        self.task_cancel_requested = false;
         self.phase = CompactionPhase::Picking {
             plan_id,
             cancelled: false,
@@ -219,6 +232,34 @@ impl ActiveCompaction {
         if let Some(waiter) = waiter.take_inner() {
             self.waiters.push(waiter);
         }
+    }
+    /// Captures worker-owned metadata while retaining live background task handles.
+    fn current_task_state(&self) -> Option<CompactionTaskState> {
+        let mut task = self.task_state.clone()?;
+        let entry = &mut task.entry;
+        match &self.phase {
+            CompactionPhase::Idle => return None,
+            CompactionPhase::Picking { cancelled, .. } => {
+                entry.state = if *cancelled {
+                    compaction_task::STATE_CANCELLING
+                } else {
+                    compaction_task::STATE_RUNNING
+                }
+                .into();
+                entry.phase = compaction_task::PHASE_PLANNING.into();
+            }
+            CompactionPhase::Remote { .. } => {
+                entry.state = compaction_task::STATE_RUNNING.into();
+                entry.phase = compaction_task::PHASE_REMOTE.into();
+            }
+            CompactionPhase::Units(local) => task.local_state = Some(local.current_state()),
+            #[cfg(test)]
+            CompactionPhase::Local { .. } => {
+                entry.state = compaction_task::STATE_RUNNING.into();
+                entry.phase = compaction_task::PHASE_EXECUTING.into();
+            }
+        }
+        Some(task)
     }
 }
 
@@ -320,6 +361,8 @@ impl DdlExecution {
 
 /// Scheduling state retained for the lifetime of a loaded region.
 pub(super) struct CompactionStatus {
+    /// Current cycles shared with queries without entering the region worker.
+    pub(crate) shared_state: CompactionStateRef,
     /// Resident automatic-pick history, retained across batches until region unload.
     pub(crate) pick_history: PickHistory,
     /// Id of the region.
@@ -335,6 +378,8 @@ pub(super) struct CompactionStatus {
     /// A manual request is rejected if the current compaction is also manual. Automatic requests
     /// are merged into the active compaction instead of using this slot.
     pub(super) pending_request: Option<PendingCompaction>,
+    /// Metadata for the pending manual request, moved to the active cycle on promotion.
+    pub(crate) pending_task_state: Option<CompactionTaskState>,
     /// Pending DDL requests that should run when compaction is done.
     ///
     /// Although [`SenderDdlRequest`] can wrap any DDL variant, production code only queues
@@ -346,6 +391,57 @@ pub(super) struct CompactionStatus {
 }
 
 impl CompactionStatus {
+    /// Cancels an exact identity, checking pending work before the active cycle.
+    pub(crate) fn cancel_task(&mut self, task_id: &str) -> CancelCompactionResult {
+        if self
+            .pending_task_state
+            .as_ref()
+            .is_some_and(|state| state.entry.task_id.as_ref() == task_id)
+        {
+            self.pending_task_state = None;
+            if let Some(pending) = self.pending_request.take() {
+                pending.waiter.send(CompactionCancelledSnafu.fail());
+            }
+            self.publish_state();
+            return CancelCompactionResult::CancelIssued;
+        }
+        if !self
+            .active
+            .task_state
+            .as_ref()
+            .is_some_and(|state| state.entry.task_id.as_ref() == task_id)
+        {
+            return CancelCompactionResult::NotFound;
+        }
+        if matches!(self.active.phase, CompactionPhase::Remote { .. }) {
+            return CancelCompactionResult::Unsupported;
+        }
+        if self.active.task_cancel_requested {
+            return CancelCompactionResult::AlreadyCancelling;
+        }
+        let result = self.request_cancel();
+        if result != RequestCancelResult::TooLateToCancel {
+            self.active.task_cancel_requested = true;
+        }
+        result.into()
+    }
+
+    /// Publishes both slots together without holding the lock while building their metadata.
+    pub(crate) fn publish_state(&self) {
+        let active = self.active.current_task_state().map(Arc::new);
+        let pending = self
+            .pending_request
+            .as_ref()
+            .and(self.pending_task_state.as_ref())
+            .cloned()
+            .map(Arc::new);
+        let previous = {
+            let mut shared = self.shared_state.write().unwrap();
+            std::mem::replace(&mut *shared, CompactionState { active, pending })
+        };
+        drop(previous);
+    }
+
     /// Registers an idle region without starting a compaction cycle.
     pub(super) fn new(
         region_id: RegionId,
@@ -353,12 +449,14 @@ impl CompactionStatus {
         access_layer: AccessLayerRef,
     ) -> CompactionStatus {
         CompactionStatus {
+            shared_state: Arc::new(RwLock::new(CompactionState::default())),
             pick_history: PickHistory::default(),
             region_id,
             version_control,
             access_layer,
             active: ActiveCompaction::idle(),
             pending_request: None,
+            pending_task_state: None,
             pending_ddl_requests: Vec::new(),
             executing_ddl: None,
         }
@@ -385,9 +483,15 @@ impl CompactionStatus {
         !self.pending_ddl_requests.is_empty() || self.executing_ddl.is_some()
     }
 
+    /// Compaction pauses while the region has WAL tails to recover.
+    pub(crate) fn has_pending_tails(&self) -> bool {
+        self.version_control.current().version.has_pending_tails()
+    }
+
     /// Ends the current cycle without losing region or DDL execution state.
     pub(crate) fn become_idle(&mut self) {
         self.active = ActiveCompaction::idle();
+        self.publish_state();
     }
 
     #[cfg(test)]
@@ -439,7 +543,9 @@ impl CompactionStatus {
     }
 
     pub(super) fn request_cancel(&mut self) -> RequestCancelResult {
-        self.active.request_cancel()
+        let result = self.active.request_cancel();
+        self.publish_state();
+        result
     }
 
     pub(super) fn mark_automatic_trigger(&mut self) {
@@ -461,10 +567,18 @@ impl CompactionStatus {
 
     pub(super) fn set_phase(&mut self, phase: CompactionPhase) {
         self.active.phase = phase;
+        self.publish_state();
     }
 
     /// Sets a pending manual compaction request, replacing an older pending request.
     pub(super) fn set_pending_request(&mut self, pending: PendingCompaction) {
+        self.pending_task_state = Some(CompactionTaskState::new(
+            self.region_id,
+            &pending.options,
+            pending.max_parallelism,
+            pending.time_range,
+            CompactionTrigger::Manual,
+        ));
         if let Some(prev) = self.pending_request.replace(pending) {
             debug!(
                 "Replace pending compaction options with new request {:?} for region: {}",
@@ -472,6 +586,7 @@ impl CompactionStatus {
             );
             prev.waiter.send(ManualCompactionOverrideSnafu.fail());
         }
+        self.publish_state();
     }
 
     pub(super) fn on_failure(&mut self, err: Arc<Error>) {
@@ -482,6 +597,7 @@ impl CompactionStatus {
             }));
         }
 
+        self.pending_task_state = None;
         if let Some(pending_compaction) = self.pending_request.take() {
             pending_compaction
                 .waiter
@@ -497,6 +613,21 @@ impl CompactionStatus {
                     region_id: self.region_id,
                 }));
         }
+        self.publish_state();
+    }
+
+    /// Ends task-specific cancellation only when no pending DDL takes precedence.
+    /// Returns whether the caller may promote a different pending compaction.
+    pub(crate) fn finish_task_cancellation(&mut self) -> bool {
+        if !self.active.task_cancel_requested || !self.pending_ddl_requests.is_empty() {
+            return false;
+        }
+        let mut active = std::mem::replace(&mut self.active, ActiveCompaction::idle());
+        for waiter in active.waiters.drain(..) {
+            waiter.send(CompactionCancelledSnafu.fail());
+        }
+        self.publish_state();
+        true
     }
 
     #[must_use]
@@ -506,6 +637,7 @@ impl CompactionStatus {
             waiter.send(CompactionCancelledSnafu.fail());
         }
 
+        self.pending_task_state = None;
         if let Some(pending_compaction) = self.pending_request.take() {
             pending_compaction.waiter.send(
                 Err(Arc::new(CompactionCancelledSnafu.build())).context(CompactRegionSnafu {
@@ -514,6 +646,7 @@ impl CompactionStatus {
             );
         }
 
+        self.publish_state();
         std::mem::take(&mut self.pending_ddl_requests)
     }
 
@@ -561,12 +694,352 @@ pub(super) struct PendingCompaction {
     pub(crate) time_range: Option<TimestampRange>,
 }
 
+/// Current cycles of one loaded region, without completed-task history.
+#[derive(Debug, Default)]
+pub(crate) struct CompactionState {
+    active: Option<Arc<CompactionTaskState>>,
+    pending: Option<Arc<CompactionTaskState>>,
+}
+
+/// Shared current cycles of a loaded region.
+pub(crate) type CompactionStateRef = Arc<RwLock<CompactionState>>;
+
+impl CompactionState {
+    /// Clones current cycle handles under a short read lock.
+    pub(crate) fn current(
+        state: &CompactionStateRef,
+    ) -> (
+        Option<Arc<CompactionTaskState>>,
+        Option<Arc<CompactionTaskState>>,
+    ) {
+        let state = state.read().unwrap();
+        (state.active.clone(), state.pending.clone())
+    }
+}
+
+/// Per-cycle request metadata and live execution handles, without retaining SSTs.
+#[derive(Debug, Clone)]
+pub(crate) struct CompactionTaskState {
+    pub(crate) entry: CompactionTaskEntry,
+    pub(crate) submitted: Instant,
+    local_state: Option<LocalCompactionState>,
+}
+
+impl CompactionTaskState {
+    /// Captures request parameters and assigns the identity of a new compaction cycle.
+    pub(crate) fn new(
+        region_id: RegionId,
+        options: &compact_request::Options,
+        max_parallelism: usize,
+        time_range: Option<TimestampRange>,
+        trigger: CompactionTrigger,
+    ) -> Self {
+        let (kind, window) = match options {
+            compact_request::Options::Regular(_) => ("regular", None),
+            compact_request::Options::StrictWindow(window) => {
+                ("strict_window", Some(window.window_seconds))
+            }
+        };
+        let request_options = serde_json::json!({
+            "type": kind,
+            "window_seconds": window,
+            "max_parallelism": max_parallelism,
+            "time_range": time_range,
+        })
+        .to_string();
+        Self {
+            submitted: Instant::now(),
+            local_state: None,
+            entry: CompactionTaskEntry {
+                task_id: uuid::Uuid::new_v4().to_string().into(),
+                region_id,
+                table_id: region_id.table_id(),
+                node_id: None,
+                trigger_type: match trigger {
+                    CompactionTrigger::Manual => compaction_task::TRIGGER_TYPE_MANUAL,
+                    CompactionTrigger::Automatic => compaction_task::TRIGGER_TYPE_AUTOMATIC,
+                }
+                .into(),
+                state: compaction_task::STATE_QUEUED.into(),
+                phase: compaction_task::PHASE_WAITING.into(),
+                submitted_at: common_time::util::current_time_millis(),
+                elapsed_millis: 0,
+                input_files: None,
+                input_bytes: None,
+                input_time_start: None,
+                input_time_end: None,
+                output_time_start: None,
+                output_time_end: None,
+                total_units: None,
+                completed_units: None,
+                request_options: request_options.into(),
+                effective_options: None,
+            },
+        }
+    }
+
+    /// Captures the resolved parameters and work selected by an accepted plan.
+    pub(crate) fn accept_plan(&mut self, region: &CompactionRegion, output: &PickerOutput) {
+        let max_parallelism = region.max_parallelism.max(1);
+        let max_picker_outputs = region
+            .engine_config
+            .max_background_compactions
+            .min(max_parallelism);
+        self.entry.effective_options = Some(
+            serde_json::json!({
+                "compaction": region.region_options.compaction,
+                "ttl": region.ttl,
+                "merge_mode": region.region_options.merge_mode(),
+                "max_picker_outputs": max_picker_outputs,
+                "max_parallelism": max_parallelism,
+                "time_window_seconds": output.time_window_size,
+                "max_output_file_size": output.max_file_size,
+            })
+            .to_string()
+            .into(),
+        );
+        self.set_plan_stats(
+            output
+                .outputs
+                .iter()
+                .flat_map(|output| &output.inputs)
+                .chain(&output.expired_ssts),
+            output.outputs.iter(),
+        );
+    }
+
+    /// Records the cycle's accepted inputs and planned output envelope, without retaining SSTs.
+    /// Called again after local memory admission to exclude rejected units. These aggregates
+    /// remain stable as individual units finish; inputs include expired SSTs and output ends
+    /// retain half-open semantics. If any output lacks a planned range, both output bounds
+    /// are None (SQL NULL). An unbounded side propagates independently across outputs.
+    pub(crate) fn set_plan_stats<'a>(
+        &mut self,
+        inputs: impl Iterator<Item = &'a FileHandle>,
+        outputs: impl Iterator<Item = &'a CompactionOutput>,
+    ) {
+        let mut seen = HashSet::new();
+        let mut bytes = 0;
+        let mut input_start = None;
+        let mut input_end = None;
+        for file in inputs {
+            if !seen.insert(file.file_id()) {
+                continue;
+            }
+            bytes += file.meta_ref().file_size;
+            let (start, end) = file.time_range();
+            input_start =
+                Some(input_start.map_or(start, |previous| std::cmp::min(previous, start)));
+            input_end = Some(input_end.map_or(end, |previous| std::cmp::max(previous, end)));
+        }
+        self.entry.input_files = Some(seen.len() as u64);
+        self.entry.input_bytes = Some(bytes);
+        self.entry.input_time_start = input_start;
+        self.entry.input_time_end = input_end;
+
+        let envelope = outputs
+            .map(|output| {
+                output
+                    .output_time_range
+                    .map(|range| (*range.start(), *range.end()))
+                    .unwrap_or((None, None))
+            })
+            .reduce(|(start, end), (next_start, next_end)| {
+                (
+                    start.zip(next_start).map(|(a, b)| a.min(b)),
+                    end.zip(next_end).map(|(a, b)| a.max(b)),
+                )
+            });
+        let (start, end) = envelope.unwrap_or((None, None));
+        self.entry.output_time_start = start;
+        self.entry.output_time_end = end;
+    }
+
+    /// Copies cycle metadata with the reporting node and current monotonic elapsed time.
+    pub(crate) fn snapshot(&self, node_id: Option<u64>) -> CompactionTaskEntry {
+        let mut entry = self.entry.clone();
+        if let Some(local) = &self.local_state {
+            local.inspect(&mut entry);
+        }
+        entry.node_id = node_id;
+        entry.elapsed_millis = self.submitted.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        entry
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use common_time::Timestamp;
     use store_api::storage::FileId;
 
     use super::*;
     use crate::compaction::test_util::new_file_handle;
+    use crate::test_util::new_noop_file_purger;
+
+    fn plan_time_range(start: Option<Timestamp>, end: Option<Timestamp>) -> TimestampRange {
+        TimestampRange::from((
+            start.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Included),
+            end.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
+        ))
+    }
+
+    fn plan_stats_fixture() -> (CompactionTaskState, [FileHandle; 3], [CompactionOutput; 2]) {
+        let file = |start, end, size| {
+            let original = new_file_handle(FileId::random(), 0, 0, 0);
+            let mut meta = original.meta_ref().clone();
+            meta.time_range = (start, end);
+            meta.file_size = size;
+            FileHandle::new(meta, new_noop_file_purger())
+        };
+        // Compare timestamps in their original units: numeric values alone have the wrong order.
+        let early = file(
+            Timestamp::new_second(1),
+            Timestamp::new_millisecond(1500),
+            10,
+        );
+        let late = file(
+            Timestamp::new_microsecond(3_000_001),
+            Timestamp::new_second(4),
+            20,
+        );
+        let expired = file(Timestamp::new_second(-2), Timestamp::new_second(-1), 30);
+        let output = |inputs, start, end| CompactionOutput {
+            output_level: 1,
+            inputs,
+            filter_deleted: false,
+            output_time_range: Some(plan_time_range(start, end)),
+        };
+        let outputs = [
+            output(
+                vec![early.clone()],
+                Some(Timestamp::new_second(0)),
+                Some(Timestamp::new_second(2)),
+            ),
+            output(
+                vec![late.clone()],
+                Some(Timestamp::new_second(3)),
+                Some(Timestamp::new_second(5)),
+            ),
+        ];
+        let info = CompactionTaskState::new(
+            RegionId::new(1, 1),
+            &compact_request::Options::Regular(Default::default()),
+            1,
+            None,
+            CompactionTrigger::Manual,
+        );
+        (info, [early, late, expired], outputs)
+    }
+
+    type PlanStats = (
+        Option<u64>,
+        Option<u64>,
+        Option<Timestamp>,
+        Option<Timestamp>,
+        Option<Timestamp>,
+        Option<Timestamp>,
+    );
+
+    fn plan_stats(info: &CompactionTaskState) -> PlanStats {
+        let entry = &info.entry;
+        (
+            entry.input_files,
+            entry.input_bytes,
+            entry.input_time_start,
+            entry.input_time_end,
+            entry.output_time_start,
+            entry.output_time_end,
+        )
+    }
+
+    #[test]
+    fn test_compaction_plan_stats_deduplication_and_admission() {
+        let (mut info, [early, late, expired], outputs) = plan_stats_fixture();
+        // Repeated inputs across logical windows count once; expired SSTs extend only inputs.
+        info.set_plan_stats(
+            [&early, &late, &early, &expired].into_iter(),
+            outputs.iter(),
+        );
+        assert_eq!(
+            plan_stats(&info),
+            (
+                Some(3),
+                Some(60),
+                Some(Timestamp::new_second(-2)),
+                Some(Timestamp::new_second(4)),
+                Some(Timestamp::new_second(0)),
+                Some(Timestamp::new_second(5))
+            )
+        );
+        // Recompute after admission excludes a unit, including its output window.
+        info.set_plan_stats([&early, &expired].into_iter(), outputs[..1].iter());
+        assert_eq!(
+            plan_stats(&info),
+            (
+                Some(2),
+                Some(40),
+                Some(Timestamp::new_second(-2)),
+                Some(Timestamp::new_millisecond(1500)),
+                Some(Timestamp::new_second(0)),
+                Some(Timestamp::new_second(2))
+            )
+        );
+    }
+
+    #[test]
+    fn test_compaction_plan_stats_expiration_and_empty_reset() {
+        let (mut info, [early, late, expired], outputs) = plan_stats_fixture();
+        info.set_plan_stats([&early, &late, &expired].into_iter(), outputs.iter());
+        // Expiration-only cycles have input coverage but no output envelope.
+        info.set_plan_stats([&expired].into_iter(), std::iter::empty());
+        assert_eq!(
+            plan_stats(&info),
+            (
+                Some(1),
+                Some(30),
+                Some(Timestamp::new_second(-2)),
+                Some(Timestamp::new_second(-1)),
+                None,
+                None
+            )
+        );
+        info.set_plan_stats(std::iter::empty(), std::iter::empty());
+        assert_eq!(
+            plan_stats(&info),
+            (Some(0), Some(0), None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn test_compaction_plan_stats_missing_and_unbounded_ranges() {
+        let (mut info, [early, late, _], outputs) = plan_stats_fixture();
+        // An unbounded side of any output remains unbounded in the cycle envelope.
+        for (range, expected_start, expected_end) in [
+            (None, None, None),
+            (
+                Some(plan_time_range(None, Some(Timestamp::new_second(5)))),
+                None,
+                Some(Timestamp::new_second(5)),
+            ),
+            (
+                Some(plan_time_range(Some(Timestamp::new_second(3)), None)),
+                Some(Timestamp::new_second(0)),
+                None,
+            ),
+        ] {
+            let mut mixed = outputs.clone();
+            mixed[1].output_time_range = range;
+            // Order must not affect propagation of unbounded ranges.
+            for reverse in [false, true] {
+                if reverse {
+                    mixed.reverse();
+                }
+                info.set_plan_stats([&early, &late].into_iter(), mixed.iter());
+                assert_eq!(info.entry.output_time_start, expected_start);
+                assert_eq!(info.entry.output_time_end, expected_end);
+            }
+        }
+    }
 
     #[test]
     fn test_compaction_unit_input_leases_release_independently() {

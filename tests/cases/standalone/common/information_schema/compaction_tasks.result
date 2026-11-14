@@ -1,0 +1,49 @@
+DESC TABLE information_schema.compaction_tasks;
+
++-------------------+----------------------+-----+------+---------+---------------+
+| Column            | Type                 | Key | Null | Default | Semantic Type |
++-------------------+----------------------+-----+------+---------+---------------+
+| task_id           | String               |     | NO   |         | FIELD         |
+| region_id         | UInt64               |     | NO   |         | FIELD         |
+| table_id          | UInt32               |     | NO   |         | FIELD         |
+| node_id           | UInt64               |     | YES  |         | FIELD         |
+| trigger_type      | String               |     | NO   |         | FIELD         |
+| state             | String               |     | NO   |         | FIELD         |
+| phase             | String               |     | NO   |         | FIELD         |
+| submitted_at      | TimestampMillisecond |     | NO   |         | FIELD         |
+| elapsed_millis    | UInt64               |     | NO   |         | FIELD         |
+| input_files       | UInt64               |     | YES  |         | FIELD         |
+| input_bytes       | UInt64               |     | YES  |         | FIELD         |
+| total_units       | UInt64               |     | YES  |         | FIELD         |
+| completed_units   | UInt64               |     | YES  |         | FIELD         |
+| request_options   | String               |     | NO   |         | FIELD         |
+| effective_options | String               |     | YES  |         | FIELD         |
+| input_time_start  | TimestampNanosecond  |     | YES  |         | FIELD         |
+| input_time_end    | TimestampNanosecond  |     | YES  |         | FIELD         |
+| output_time_start | TimestampNanosecond  |     | YES  |         | FIELD         |
+| output_time_end   | TimestampNanosecond  |     | YES  |         | FIELD         |
++-------------------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM information_schema.compaction_tasks WHERE node_id = 18446744073709551615;
+
++---------+-----------+----------+---------+--------------+-------+-------+--------------+----------------+-------------+-------------+-------------+-----------------+-----------------+-------------------+------------------+----------------+-------------------+-----------------+
+| task_id | region_id | table_id | node_id | trigger_type | state | phase | submitted_at | elapsed_millis | input_files | input_bytes | total_units | completed_units | request_options | effective_options | input_time_start | input_time_end | output_time_start | output_time_end |
++---------+-----------+----------+---------+--------------+-------+-------+--------------+----------------+-------------+-------------+-------------+-----------------+-----------------+-------------------+------------------+----------------+-------------------+-----------------+
++---------+-----------+----------+---------+--------------+-------+-------+--------------+----------------+-------------+-------------+-------------+-----------------+-----------------+-------------------+------------------+----------------+-------------------+-----------------+
+
+-- Constant projections and aggregates must preserve the empty row count.
+SELECT 1 FROM information_schema.compaction_tasks WHERE node_id = 18446744073709551615;
+
++----------+
+| Int64(1) |
++----------+
++----------+
+
+SELECT count(*) FROM information_schema.compaction_tasks WHERE node_id = 18446744073709551615;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+

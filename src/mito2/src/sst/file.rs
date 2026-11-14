@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -38,8 +39,9 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::region::options::IndexOptions;
+use crate::sst::file_metadata::MetadataRef;
 use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
@@ -74,7 +76,7 @@ where
 
 /// Custom serde functions for partition_expr field in FileMeta
 fn serialize_partition_expr<S>(
-    partition_expr: &Option<PartitionExpr>,
+    partition_expr: &Option<PartitionExprRef>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -91,7 +93,7 @@ where
     }
 }
 
-fn deserialize_partition_expr<'de, D>(deserializer: D) -> Result<Option<PartitionExpr>, D::Error>
+fn deserialize_partition_expr<'de, D>(deserializer: D) -> Result<Option<PartitionExprRef>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -106,7 +108,9 @@ where
                 Ok(None)
             } else {
                 // Parse the JSON string to PartitionExpr
-                PartitionExpr::from_json_str(&json_str).map_err(D::Error::custom)
+                PartitionExpr::from_json_str(&json_str)
+                    .map(|expr| expr.map(PartitionExprRef::from))
+                    .map_err(D::Error::custom)
             }
         }
     }
@@ -114,10 +118,40 @@ where
 
 /// Type to store SST level.
 pub type Level = u8;
-/// Maximum level of SSTs.
-pub const MAX_LEVEL: Level = 2;
+/// Shared inputs owned by table compaction, not a deeper region-compaction level.
+/// This sentinel is persisted; L0=0 and L1=1 retain their original meanings, and
+/// taking the maximum value keeps every future ordinary level below it.
+pub const LEVEL_SHARED: Level = Level::MAX;
+/// Storage slot that holds shared references inside the fixed level array.
+pub(crate) const SHARED_LEVEL_SLOT: usize = 2;
+/// Number of level storage slots: L0, L1 and the shared slot.
+pub(crate) const LEVEL_SLOT_COUNT: usize = SHARED_LEVEL_SLOT + 1;
+
+/// Maps a persisted level to its storage slot, if the level is representable.
+pub(crate) const fn level_slot(level: Level) -> Option<usize> {
+    match level {
+        0 | 1 => Some(level as usize),
+        LEVEL_SHARED => Some(SHARED_LEVEL_SLOT),
+        _ => None,
+    }
+}
+
+pub(crate) const fn is_supported_level(level: Level) -> bool {
+    level <= 1 || (cfg!(feature = "enterprise") && level == LEVEL_SHARED)
+}
+
+fn deserialize_level<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Level, D::Error> {
+    let level = Level::deserialize(deserializer)?;
+    if !is_supported_level(level) {
+        return Err(serde::de::Error::custom(format!(
+            "Unsupported SST level {level}"
+        )));
+    }
+    Ok(level)
+}
+
 /// Type to store index types for a column.
-pub type IndexTypes = SmallVec<[IndexType; 4]>;
+pub type IndexTypes = SmallVec<[IndexType; 6]>;
 
 /// Cross-region file id.
 ///
@@ -201,6 +235,12 @@ pub(crate) fn overlaps(l: &FileTimeRange, r: &FileTimeRange) -> bool {
     r_start <= l_end
 }
 
+/// Shared immutable metadata of an SST file.
+pub type FileMetaRef = MetadataRef<FileMeta>;
+
+/// Shared immutable partition expression.
+pub type PartitionExprRef = MetadataRef<PartitionExpr>;
+
 /// Metadata of a SST file.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -213,6 +253,7 @@ pub struct FileMeta {
     /// data in the SST.
     pub time_range: FileTimeRange,
     /// SST level of the file.
+    #[serde(deserialize_with = "deserialize_level")]
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
@@ -258,7 +299,7 @@ pub struct FileMeta {
     pub sequence: Option<NonZeroU64>,
     /// Partition expression from the region metadata when the file is created.
     ///
-    /// This is stored as a PartitionExpr object in memory for convenience,
+    /// Immutable expressions are shared by table and content where canonicalized,
     /// but serialized as JSON string for manifest compatibility.
     /// Compatibility behavior:
     /// - None: no partition expr was set when the file was created (legacy files).
@@ -267,7 +308,7 @@ pub struct FileMeta {
         serialize_with = "serialize_partition_expr",
         deserialize_with = "deserialize_partition_expr"
     )]
-    pub partition_expr: Option<PartitionExpr>,
+    pub partition_expr: Option<PartitionExprRef>,
     /// Number of series in the file.
     ///
     /// The number is 0 if the series number is not available.
@@ -312,6 +353,14 @@ impl<F: Fn(&mut Formatter<'_>) -> fmt::Result> std::fmt::Debug for DebugFmt<F> {
     }
 }
 
+// Hashing file identity avoids traversing indexes and expressions on every lookup.
+// Full equality still distinguishes metadata versions of the same physical file.
+impl Hash for FileMeta {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        RegionFileId::new(self.region_id, self.file_id).hash(state);
+    }
+}
+
 impl Debug for FileMeta {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("FileMeta");
@@ -335,7 +384,7 @@ impl Debug for FileMeta {
                 "max_row_group_uncompressed_size",
                 &ReadableSize(self.max_row_group_uncompressed_size),
             );
-        if !self.available_indexes.is_empty() {
+        if self.exists_index() {
             debug_struct
                 .field("available_indexes", &self.available_indexes)
                 .field("indexes", &self.indexes)
@@ -373,7 +422,7 @@ impl Debug for FileMeta {
 }
 
 /// Type of index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum IndexType {
     /// Inverted index.
     InvertedIndex,
@@ -383,6 +432,12 @@ pub enum IndexType {
     BloomFilterIndex,
     /// Retained for manifests written with the removed experimental vector index.
     VectorIndex,
+    /// HyperLogLog distinct-value estimate.
+    HllIndex,
+    /// KLL rank estimate.
+    KllIndex,
+    /// Misra–Gries frequency estimate.
+    MgIndex,
 }
 
 /// Metadata of indexes created for a specific column in an SST file.
@@ -394,7 +449,7 @@ pub enum IndexType {
 /// This is primarily used for:
 /// - Manual index building in asynchronous index construction mode
 /// - Verifying index consistency between files and region metadata
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ColumnIndexMetadata {
     /// The column ID this index metadata applies to.
@@ -413,6 +468,18 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
+    /// Returns whether this file's row sequences are trusted in the target region.
+    ///
+    /// Foreign files use their target-local sequence barrier; local files require
+    /// the preserve marker because their physical sequences belong to this region.
+    pub(crate) fn is_effective_target_sequence_trusted(&self, target_region_id: RegionId) -> bool {
+        if self.region_id != target_region_id {
+            self.sequence.is_some()
+        } else {
+            self.preserve_row_sequence
+        }
+    }
+
     /// Returns the primary key range if both min and max are present.
     pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
         match (&self.primary_key_min, &self.primary_key_max) {
@@ -423,6 +490,16 @@ impl FileMeta {
 
     pub fn exists_index(&self) -> bool {
         !self.available_indexes.is_empty()
+            || self
+                .indexes
+                .iter()
+                .any(|index| !index.created_indexes.is_empty())
+    }
+
+    /// Returns whether the index has a known readable length for cache downloads.
+    /// A zero size does not remove the descriptor or its cleanup obligations.
+    pub fn has_downloadable_index(&self) -> bool {
+        self.exists_index() && self.index_file_size > 0
     }
 
     pub fn index_version(&self) -> Option<IndexVersion> {
@@ -557,9 +634,26 @@ impl fmt::Debug for FileHandle {
     }
 }
 
+/// Folds file-level sequence bounds into the output sequence bound of a merge.
+///
+/// A bound can be a row maximum or an admission marker; compaction must
+/// preserve both for sequence-based pruning. Unknown bounds must remain
+/// unknown rather than being replaced with a partial maximum.
+pub(crate) fn known_max_input_sequence<'a>(
+    inputs: impl IntoIterator<Item = &'a FileMeta>,
+) -> Option<NonZeroU64> {
+    let mut max: Option<NonZeroU64> = None;
+    for input in inputs {
+        let sequence = input.sequence?;
+        max = Some(max.map_or(sequence, |current| current.max(sequence)));
+    }
+    max
+}
+
 impl FileHandle {
     /// Creates a new logical SST reference. Index replacements must reuse its lifetime.
-    pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
+    pub fn new(meta: impl Into<FileMetaRef>, file_purger: FilePurgerRef) -> FileHandle {
+        let meta = meta.into();
         let pk_range = meta.primary_key_range();
         FileHandle {
             inner: Arc::new(FileHandleInner::new(meta, file_purger, pk_range)),
@@ -573,18 +667,22 @@ impl FileHandle {
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> FileHandle {
         FileHandle {
-            inner: Arc::new(FileHandleInner::new(meta, file_purger, primary_key_range)),
+            inner: Arc::new(FileHandleInner::new(
+                meta.into(),
+                file_purger,
+                primary_key_range,
+            )),
         }
     }
 
     /// Replaces an index metadata view without splitting the underlying SST lifetime.
-    pub(crate) fn with_updated_index(&self, meta: FileMeta) -> Self {
+    pub(crate) fn with_updated_index(&self, meta: impl Into<FileMetaRef>) -> Self {
+        let meta = meta.into();
         debug_assert_eq!(self.file_id(), meta.file_id());
         let primary_key_range = meta
             .primary_key_range()
             .or_else(|| self.raw_primary_key_range());
         let lifetime = self.inner.lifetime.clone();
-        *lifetime.meta.lock().unwrap() = meta.clone();
         Self {
             inner: Arc::new(FileHandleInner::with_lifetime(
                 meta,
@@ -604,11 +702,8 @@ impl FileHandle {
     /// Foreign files use their target-local sequence barrier; local files require
     /// the preserve marker because their physical sequences belong to this region.
     pub(crate) fn is_effective_target_sequence_trusted(&self, target_region_id: RegionId) -> bool {
-        if self.region_id() != target_region_id {
-            self.meta_ref().sequence.is_some()
-        } else {
-            self.meta_ref().preserve_row_sequence
-        }
+        self.meta_ref()
+            .is_effective_target_sequence_trusted(target_region_id)
     }
 
     /// Returns the cross-region file id.
@@ -698,12 +793,18 @@ impl FileHandle {
             .primary_key_range
             .read()
             .unwrap()
-            .aligned(mapper.schema_version())
+            .as_deref()
+            .and_then(|range| range.aligned(mapper.schema_version()))
         {
             return range.clone();
         }
         // Recheck under the write lock: another snapshot may have replaced the cached schema.
-        let aligned = self.inner.primary_key_range.write().unwrap().align(mapper);
+        let mut cached_range = self.inner.primary_key_range.write().unwrap();
+        if cached_range.is_none() {
+            let raw = self.inner.meta.primary_key_range()?;
+            *cached_range = Some(Box::new(PrimaryKeyRange::Raw(raw)));
+        }
+        let aligned = cached_range.as_deref_mut()?.align(mapper);
         match aligned {
             Ok(range) => range,
             Err(err) => {
@@ -716,15 +817,22 @@ impl FileHandle {
 
     /// Returns original statistics for metadata hydration, never schema-aligned bounds.
     pub fn raw_primary_key_range(&self) -> Option<(Bytes, Bytes)> {
-        self.inner.primary_key_range.read().unwrap().raw().cloned()
+        self.inner
+            .primary_key_range
+            .read()
+            .unwrap()
+            .as_deref()
+            .map(PrimaryKeyRange::raw)
+            .cloned()
+            .or_else(|| self.inner.meta.primary_key_range())
     }
 
     pub(crate) fn set_primary_key_range(&self, primary_key_range: (Bytes, Bytes)) {
         // SST contents are immutable. Hydrate missing raw statistics without
         // replacing the source of already cached schema views.
         let mut range = self.inner.primary_key_range.write().unwrap();
-        if matches!(*range, PrimaryKeyRange::Missing) {
-            *range = PrimaryKeyRange::Raw(primary_key_range);
+        if range.is_none() && self.inner.meta.primary_key_range().is_none() {
+            *range = Some(Box::new(PrimaryKeyRange::Raw(primary_key_range)));
         }
     }
 }
@@ -734,7 +842,6 @@ type PrimaryKeyBounds = (Bytes, Bytes);
 /// A single-slot cache shared by file handles. Always retain the source bounds so
 /// older snapshots and changed defaults can realign without interpreting padded values as stored.
 enum PrimaryKeyRange {
-    Missing,
     Raw(PrimaryKeyBounds),
     Aligned {
         raw: PrimaryKeyBounds,
@@ -744,10 +851,9 @@ enum PrimaryKeyRange {
 }
 
 impl PrimaryKeyRange {
-    fn raw(&self) -> Option<&PrimaryKeyBounds> {
+    fn raw(&self) -> &PrimaryKeyBounds {
         match self {
-            Self::Missing => None,
-            Self::Raw(raw) | Self::Aligned { raw, .. } => Some(raw),
+            Self::Raw(raw) | Self::Aligned { raw, .. } => raw,
         }
     }
 
@@ -769,9 +875,7 @@ impl PrimaryKeyRange {
         if let Some(bounds) = self.aligned(mapper.schema_version()) {
             return Ok(bounds.clone());
         }
-        let Some(raw) = self.raw().cloned() else {
-            return Ok(None);
-        };
+        let raw = self.raw().clone();
         let aligned = mapper.map(raw.clone());
         // Failed mappings also occupy the cache, so repeated hits don't repeat the warning.
         *self = Self::Aligned {
@@ -787,9 +891,10 @@ impl PrimaryKeyRange {
 ///
 /// Contains meta of the file, and other mutable info like whether the file is compacting.
 struct FileHandleInner {
-    meta: FileMeta,
+    meta: FileMetaRef,
     compacting: AtomicBool,
-    primary_key_range: RwLock<PrimaryKeyRange>,
+    /// Allocated only for derived bounds; boxing keeps handles without a cache small.
+    primary_key_range: RwLock<Option<Box<PrimaryKeyRange>>>,
     lifetime: Arc<SstLifetime>,
 }
 
@@ -803,34 +908,56 @@ impl Drop for FileHandleInner {
 
 impl FileHandleInner {
     fn new(
-        meta: FileMeta,
+        meta: FileMetaRef,
         file_purger: FilePurgerRef,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
         let file_ref_manager = file_purger.file_ref_manager();
+        // Normalize expressions while metadata is still exclusively owned.
+        let meta = Self::register_metadata(meta, file_ref_manager.as_deref());
         let lifetime = Arc::new(SstLifetime {
             meta: Mutex::new(meta.clone()),
             deleted: AtomicBool::new(false),
             file_purger,
             file_ref_manager,
         });
-        Self::with_lifetime(meta, lifetime, primary_key_range)
+        Self::from_registered_metadata(meta, lifetime, primary_key_range)
     }
 
     fn with_lifetime(
-        meta: FileMeta,
+        meta: FileMetaRef,
         lifetime: Arc<SstLifetime>,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
-        if let Some(manager) = &lifetime.file_ref_manager {
+        let meta = Self::register_metadata(meta, lifetime.file_ref_manager.as_deref());
+        *lifetime.meta.lock().unwrap() = meta.clone();
+        Self::from_registered_metadata(meta, lifetime, primary_key_range)
+    }
+
+    /// Every runtime view is interned before it enters the reference registry.
+    fn register_metadata(meta: FileMetaRef, manager: Option<&FileReferenceManager>) -> FileMetaRef {
+        if let Some(manager) = manager {
+            let meta = manager.file_metadata_interner.intern(meta);
             manager.register_file(&meta);
+            meta
+        } else {
+            meta
         }
+    }
+
+    fn from_registered_metadata(
+        meta: FileMetaRef,
+        lifetime: Arc<SstLifetime>,
+        primary_key_range: Option<(Bytes, Bytes)>,
+    ) -> Self {
+        // Raw bounds already in metadata need no per-handle cache until alignment.
+        let primary_key_range = primary_key_range
+            .filter(|range| meta.primary_key_range().as_ref() != Some(range))
+            .map(|range| Box::new(PrimaryKeyRange::Raw(range)));
         Self {
             meta,
             compacting: AtomicBool::new(false),
-            primary_key_range: RwLock::new(
-                primary_key_range.map_or(PrimaryKeyRange::Missing, PrimaryKeyRange::Raw),
-            ),
+            primary_key_range: RwLock::new(primary_key_range),
             lifetime,
         }
     }
@@ -840,7 +967,7 @@ impl FileHandleInner {
 /// Independent logical references (for example, copied regions) do not share this guard.
 struct SstLifetime {
     /// Latest metadata ensures final purge includes indexes newer than the last reader's view.
-    meta: Mutex<FileMeta>,
+    meta: Mutex<FileMetaRef>,
     deleted: AtomicBool,
     file_purger: FilePurgerRef,
     /// Tracks each metadata view's readers independently for object-store index GC.
@@ -851,7 +978,7 @@ impl Drop for SstLifetime {
     fn drop(&mut self) {
         if self.deleted.load(Ordering::Acquire) {
             self.file_purger
-                .purge_file(self.meta.get_mut().unwrap().clone());
+                .purge_file(self.meta.get_mut().unwrap().as_ref().clone());
         }
     }
 }
@@ -1127,6 +1254,87 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn test_shared_metadata_keeps_independent_lifetimes() {
+        let meta = FileMetaRef::from(FileMeta::default());
+        let purger = Arc::new(crate::sst::file_purger::NoopFilePurger);
+        let first = FileHandle::new(meta.clone(), purger.clone());
+        let second = FileHandle::new(meta.clone(), purger);
+        assert!(FileMetaRef::ptr_eq(&meta, &first.inner.meta));
+        assert!(FileMetaRef::ptr_eq(
+            &meta,
+            &first.inner.lifetime.meta.lock().unwrap()
+        ));
+        assert!(!Arc::ptr_eq(&first.inner.lifetime, &second.inner.lifetime));
+        assert!(first.inner.primary_key_range.read().unwrap().is_none());
+        first.mark_deleted();
+        assert!(!second.is_deleted());
+
+        let mut updated = meta.as_ref().clone();
+        updated.index_version = 1;
+        let updated = FileMetaRef::from(updated);
+        let replacement = second.with_updated_index(updated.clone());
+        assert_eq!(second.meta_ref().index_version, 0);
+        assert_eq!(replacement.meta_ref().index_version, 1);
+        assert!(Arc::ptr_eq(
+            &replacement.inner.lifetime,
+            &second.inner.lifetime
+        ));
+        assert!(FileMetaRef::ptr_eq(
+            &updated,
+            &second.inner.lifetime.meta.lock().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_runtime_handles_share_partition_expressions() {
+        #[derive(Debug)]
+        struct TrackedPurger(FileReferenceManagerRef);
+
+        impl crate::sst::file_purger::FilePurger for TrackedPurger {
+            fn purge_file(&self, _: FileMeta) {}
+
+            fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
+                Some(self.0.clone())
+            }
+        }
+
+        let purger = Arc::new(TrackedPurger(Arc::new(FileReferenceManager::new(None))));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                FileHandle::new(
+                    FileMeta {
+                        region_id: RegionId::new(1, 1),
+                        file_id: FileId::random(),
+                        partition_expr: Some(col("tag").lt(Value::UInt32(10)).into()),
+                        ..Default::default()
+                    },
+                    purger.clone(),
+                )
+            })
+            .collect();
+        assert!(PartitionExprRef::ptr_eq(
+            handles[0].meta_ref().partition_expr.as_ref().unwrap(),
+            handles[1].meta_ref().partition_expr.as_ref().unwrap(),
+        ));
+    }
+
+    #[test]
+    fn test_raw_metadata_bounds_do_not_allocate_a_cache() {
+        let bounds = (Bytes::from_static(b"a"), Bytes::from_static(b"z"));
+        let meta = FileMeta {
+            primary_key_min: Some(bounds.0.clone()),
+            primary_key_max: Some(bounds.1.clone()),
+            ..Default::default()
+        };
+        let handle = FileHandle::new(meta, Arc::new(crate::sst::file_purger::NoopFilePurger));
+        assert_eq!(Some(bounds.clone()), handle.raw_primary_key_range());
+        assert!(handle.inner.primary_key_range.read().unwrap().is_none());
+        handle.set_primary_key_range((Bytes::from_static(b"b"), Bytes::from_static(b"y")));
+        assert_eq!(Some(bounds), handle.raw_primary_key_range());
+        assert!(handle.inner.primary_key_range.read().unwrap().is_none());
+    }
+
     fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
         FileMeta {
             region_id: 0.into(),
@@ -1150,6 +1358,50 @@ mod tests {
             num_series: 0,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_sketch_manifest_compatibility() {
+        let legacy = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "available_indexes": [],
+            "indexes": [],
+            "level": 0
+        }"#;
+        let legacy: FileMeta = serde_json::from_str(legacy).unwrap();
+        assert!(legacy.indexes.is_empty());
+        assert!(!legacy.exists_index());
+        let old_column = r#"{"column_id":3,"created_indexes":["InvertedIndex"]}"#;
+        let column: ColumnIndexMetadata = serde_json::from_str(old_column).unwrap();
+        assert_eq!(
+            serde_json::to_value(&column).unwrap(),
+            serde_json::from_str::<serde_json::Value>(old_column).unwrap()
+        );
+        let mut metadata = legacy.clone();
+        metadata.index_version = 7;
+        metadata.indexes = vec![ColumnIndexMetadata {
+            column_id: 3,
+            created_indexes: SmallVec::from_iter([
+                IndexType::HllIndex,
+                IndexType::KllIndex,
+                IndexType::MgIndex,
+            ]),
+            ..Default::default()
+        }];
+        let encoded = serde_json::to_string(&metadata).unwrap();
+        let decoded: FileMeta = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(metadata, decoded);
+        assert!(decoded.exists_index());
+        assert_eq!(decoded.index_version(), Some(7));
+        assert_eq!(
+            serde_json::to_value(&decoded.indexes[0].created_indexes).unwrap(),
+            serde_json::json!(["HllIndex", "KllIndex", "MgIndex"])
+        );
     }
 
     #[test]
@@ -1225,7 +1477,7 @@ mod tests {
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
-            partition_expr: Some(partition_expr.clone()),
+            partition_expr: Some(partition_expr.clone().into()),
             num_series: 0,
             ..Default::default()
         };

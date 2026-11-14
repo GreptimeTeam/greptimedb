@@ -39,6 +39,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         };
+        // Truncating releases the WAL without keeping the pending tails.
+        if let Err(e) = region.version().ensure_no_pending_tails() {
+            sender.send(Err(e));
+            return;
+        }
 
         // Fence compaction before any later flush wait so handed-off DDLs keep admission paused.
         let (sender, req) = match self.compaction_scheduler.try_cancel_and_add_ddl(

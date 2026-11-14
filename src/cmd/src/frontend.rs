@@ -27,7 +27,6 @@ use catalog::kvbackend::{
     CachedKvBackendBuilder, CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder,
     new_read_only_meta_kv_backend,
 };
-use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -53,7 +52,6 @@ use plugins::frontend::context::{
     CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
 };
 use plugins::options::PluginOptionsDeserializerImpl;
-use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
 use snafu::{OptionExt, ResultExt};
@@ -489,10 +487,7 @@ impl StartCommand {
         ));
         plugins.insert::<InformationExtensionRef>(information_extension.clone());
 
-        let process_manager = Arc::new(ProcessManager::new(
-            addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
-            Some(meta_client.clone()),
-        ));
+        let process_manager = opts.create_process_manager(Some(meta_client.clone()));
 
         let builder = KvBackendCatalogManagerBuilder::new(
             information_extension,

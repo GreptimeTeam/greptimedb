@@ -3189,6 +3189,46 @@ async fn ignoring_absent_label_keeps_tsid_binary_join() {
 }
 
 #[tokio::test]
+async fn or_on_operand_with_matching_modifier_keeps_resolvable_time_index() {
+    // An operand of `or` derives its result labels from a matching modifier (`on(...)`,
+    // `ignoring(...)`, `group_left`/`group_right`), so the projected plan mixes qualifiers: the
+    // labels are `lhs.<label>` while the time index keeps the right operand's qualifier
+    // (`rhs.<time index>`). `or` must resolve that time index against the operand schema instead
+    // of reusing the qualifier of its first field.
+    for expr in [
+        "sum by (tag_0) (some_metric) or on (tag_0) \
+         sum by (tag_0) (some_metric) / ignoring(tag_1) group_left() sum by (tag_0) (some_metric)",
+        "sum by (tag_0) (some_metric) or on (tag_0) \
+         sum by (tag_0) (some_metric) / ignoring(tag_2) sum by (tag_0) (some_metric)",
+    ] {
+        let eval_stmt = build_eval_stmt(expr);
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            3,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap_or_else(|err| panic!("{expr}: {err}"));
+
+        let schema = plan.schema();
+        // The test table's time index column; the plan must carry it exactly once.
+        let time_index_columns = schema
+            .fields()
+            .iter()
+            .filter(|field| field.name() == "timestamp")
+            .count();
+        assert_eq!(1, time_index_columns, "{expr}: {schema:?}");
+        assert!(
+            schema.fields().iter().any(|field| field.name() == "tag_0"),
+            "{expr}: {schema:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn range_function_keeps_tsid_for_absent_ignoring_binary_join() {
     let eval_stmt = build_eval_stmt("rate(some_metric[5m]) / ignoring(missing) some_alt_metric");
 
@@ -6411,6 +6451,29 @@ async fn only_equals_is_supported_for_special_matcher() {
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await;
         assert!(plan.is_err(), "query: {:?}", query);
+    }
+}
+
+#[tokio::test]
+async fn scatter_time_filter_many_evaluation_points() {
+    for function in ["increase", "sum_over_time"] {
+        for window in ["1h", "2h", "3h"] {
+            let query = format!("sum({function}(some_metric[{window}]))");
+            let eval_stmt = EvalStmt {
+                expr: parser::parse(&query).unwrap(),
+                start: UNIX_EPOCH,
+                end: UNIX_EPOCH + Duration::from_secs(30 * 24 * 3600 + 1800),
+                interval: Duration::from_secs(2 * 3600),
+                lookback_delta: Duration::from_secs(300),
+            };
+            let provider = build_test_table_provider(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                1,
+                1,
+            )
+            .await;
+            build_optimized_promql_plan(provider, &eval_stmt).await;
+        }
     }
 }
 

@@ -32,6 +32,8 @@ use crate::error::{
 use crate::extension::json::Json2ExtensionType;
 use crate::schema::TYPE_KEY;
 use crate::schema::constraint::ColumnDefaultConstraint;
+#[cfg(feature = "enterprise")]
+use crate::schema::sketch::{HllOptions, KllOptions, MgOptions};
 use crate::value::Value;
 use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::{MutableVector, VectorRef};
@@ -51,6 +53,12 @@ pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
 pub const SKIPPING_INDEX_KEY: &str = "greptime:skipping_index";
 /// Key used to store SST compression options in arrow field's metadata.
 pub const COMPRESSION_KEY: &str = "greptime:compression";
+/// Key used to store HLL options in arrow field's metadata.
+pub const HLL_KEY: &str = "greptime:hll";
+/// Key used to store KLL options in arrow field's metadata.
+pub const KLL_KEY: &str = "greptime:kll";
+/// Key used to store MG options in arrow field's metadata.
+pub const MG_KEY: &str = "greptime:mg";
 
 /// Keys used in fulltext options
 pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
@@ -434,6 +442,99 @@ impl ColumnSchema {
     pub fn unset_skipping_options(&mut self) -> Result<()> {
         self.metadata.remove(SKIPPING_INDEX_KEY);
         Ok(())
+    }
+
+    /// Retrieves independently enabled HLL options, validating stored parameters.
+    #[cfg(feature = "enterprise")]
+    pub fn hll_options(&self) -> Result<Option<HllOptions>> {
+        self.metadata
+            .get(HLL_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    /// Enables HLL with validated options.
+    #[cfg(feature = "enterprise")]
+    pub fn with_hll_options(mut self, options: HllOptions) -> Result<Self> {
+        self.set_hll_options(&options)?;
+        Ok(self)
+    }
+
+    /// Sets HLL options without modifying other algorithm metadata.
+    #[cfg(feature = "enterprise")]
+    pub fn set_hll_options(&mut self, options: &HllOptions) -> Result<()> {
+        options.validate()?;
+        let json = serde_json::to_string(options).context(error::SerializeSnafu)?;
+        self.metadata.insert(HLL_KEY.to_string(), json);
+        Ok(())
+    }
+
+    /// Removes only HLL options.
+    #[cfg(feature = "enterprise")]
+    pub fn unset_hll_options(&mut self) {
+        self.metadata.remove(HLL_KEY);
+    }
+
+    /// Retrieves independently enabled KLL options, validating stored parameters.
+    #[cfg(feature = "enterprise")]
+    pub fn kll_options(&self) -> Result<Option<KllOptions>> {
+        self.metadata
+            .get(KLL_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    /// Enables KLL with validated options.
+    #[cfg(feature = "enterprise")]
+    pub fn with_kll_options(mut self, options: KllOptions) -> Result<Self> {
+        self.set_kll_options(&options)?;
+        Ok(self)
+    }
+
+    /// Sets KLL options without modifying other algorithm metadata.
+    #[cfg(feature = "enterprise")]
+    pub fn set_kll_options(&mut self, options: &KllOptions) -> Result<()> {
+        options.validate()?;
+        let json = serde_json::to_string(options).context(error::SerializeSnafu)?;
+        self.metadata.insert(KLL_KEY.to_string(), json);
+        Ok(())
+    }
+
+    /// Removes only KLL options.
+    #[cfg(feature = "enterprise")]
+    pub fn unset_kll_options(&mut self) {
+        self.metadata.remove(KLL_KEY);
+    }
+
+    /// Retrieves independently enabled MG options, validating stored parameters.
+    #[cfg(feature = "enterprise")]
+    pub fn mg_options(&self) -> Result<Option<MgOptions>> {
+        self.metadata
+            .get(MG_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    /// Enables MG with validated options.
+    #[cfg(feature = "enterprise")]
+    pub fn with_mg_options(mut self, options: MgOptions) -> Result<Self> {
+        self.set_mg_options(&options)?;
+        Ok(self)
+    }
+
+    /// Sets MG options without modifying other algorithm metadata.
+    #[cfg(feature = "enterprise")]
+    pub fn set_mg_options(&mut self, options: &MgOptions) -> Result<()> {
+        options.validate()?;
+        let json = serde_json::to_string(options).context(error::SerializeSnafu)?;
+        self.metadata.insert(MG_KEY.to_string(), json);
+        Ok(())
+    }
+
+    /// Removes only MG options.
+    #[cfg(feature = "enterprise")]
+    pub fn unset_mg_options(&mut self) {
+        self.metadata.remove(MG_KEY);
     }
 
     /// Retrieves the SST compression options for the column.
@@ -1348,6 +1449,30 @@ mod tests {
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, new_column_schema);
+    }
+
+    #[test]
+    fn test_column_schema_preserves_sketch_metadata() {
+        let metadata = Metadata::from([
+            (
+                "greptime:hll".to_string(),
+                r#"{"precision":10}"#.to_string(),
+            ),
+            ("greptime:kll".to_string(), r#"{"capacity":64}"#.to_string()),
+            (
+                "greptime:mg".to_string(),
+                r#"{"max-counters":64}"#.to_string(),
+            ),
+        ]);
+        let column = ColumnSchema::new("v", ConcreteDataType::int64_datatype(), true)
+            .with_metadata(metadata.clone());
+        let field = Field::try_from(&column).unwrap();
+        assert_eq!(&metadata, field.metadata());
+        assert_eq!(column, ColumnSchema::try_from(&field).unwrap());
+        assert_eq!(
+            column,
+            serde_json::from_str::<ColumnSchema>(&serde_json::to_string(&column).unwrap()).unwrap()
+        );
     }
 
     #[test]
