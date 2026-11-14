@@ -175,6 +175,9 @@ pub(crate) struct WorkerGroup {
     intermediate_manager: IntermediateManager,
     /// Schema metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
+    /// Limits of the tail replays of every worker.
+    #[cfg(test)]
+    tail_replay_limits: TailReplayLimits,
 }
 
 impl WorkerGroup {
@@ -321,6 +324,8 @@ impl WorkerGroup {
             puffin_manager_factory,
             intermediate_manager,
             schema_metadata_manager,
+            #[cfg(test)]
+            tail_replay_limits,
         })
     }
 
@@ -601,12 +606,20 @@ impl WorkerGroup {
             puffin_manager_factory,
             intermediate_manager,
             schema_metadata_manager,
+            #[cfg(test)]
+            tail_replay_limits,
         })
     }
 
     /// Returns the purge scheduler.
     pub(crate) fn purge_scheduler(&self) -> &SchedulerRef {
         &self.purge_scheduler
+    }
+
+    /// Returns the bytes the tail replays reserve from their memory pool.
+    #[cfg(test)]
+    pub(crate) fn tail_replay_reserved(&self) -> usize {
+        self.tail_replay_limits.reserved()
     }
 }
 
@@ -1778,7 +1791,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if should_dispatch_pending {
             self.dispatch_pending_region_requests(region_id).await;
         }
-        // A commit that found a newer manifest fenced the region before its job reported here.
+        // A commit or a tail replay that found a newer manifest fenced the region before its job
+        // reported here.
         if !is_reload_result {
             self.maybe_reload_region(region_id);
         }
@@ -2141,17 +2155,17 @@ impl WorkerListener {
         }
     }
 
-    pub(crate) fn on_index_build_stopped(&self, _region_id: RegionId) {
-        #[cfg(any(test, feature = "test"))]
-        if let Some(listener) = &self.listener {
-            listener.on_index_build_stopped(_region_id);
-        }
-    }
-
     pub(crate) async fn on_index_build_abort(&self, _region_file_id: RegionFileId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_index_build_abort(_region_file_id).await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_stopped(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_stopped(_region_file_id).await;
         }
     }
 

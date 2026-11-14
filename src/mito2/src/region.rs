@@ -1530,22 +1530,33 @@ impl ManifestContext {
 
     /// Returns the installed manifest version if the storage holds a newer one.
     pub(crate) async fn installed_version_if_updated(&self) -> Result<Option<ManifestVersion>> {
-        let manager = self.manifest_manager.read().await;
-        Ok(manager.has_update().await?.then(|| manager.last_version()))
+        let (store, installed) = {
+            let manager = self.manifest_manager.read().await;
+            (manager.store(), manager.last_version())
+        };
+        // Lists without the lock, which a queued writer would hold back other readers behind.
+        Ok(store
+            .has_version_after(installed)
+            .await?
+            .then_some(installed))
     }
 
-    /// Fences a Writable leader for a reload, see [Self::fence_for_reload], unless a version
-    /// other than `installed` was installed or committed since. Returns whether it fenced the
-    /// region.
-    pub(crate) async fn fence_for_reload_if_installed(
+    /// Fences the region for a reload, see [Self::fence_for_reload], if it is still a Writable
+    /// leader at `expected_version`. Returns whether it fenced the region.
+    pub(crate) async fn fence_for_reload_if_unchanged(
         &self,
         manager: &mut RegionManifestManager,
         region_id: RegionId,
-        installed: ManifestVersion,
+        expected_version: ManifestVersion,
     ) -> bool {
-        if self.state.load() != RegionRoleState::Leader(RegionLeaderState::Writable)
-            || manager.last_version() != installed
+        let state = self.state.load();
+        let version = manager.last_version();
+        if state != RegionRoleState::Leader(RegionLeaderState::Writable)
+            || version != expected_version
         {
+            info!(
+                "Region {region_id} is {state:?} at manifest version {version}, not a writable leader at version {expected_version}, not fencing it"
+            );
             return false;
         }
         self.fence_for_reload(manager, region_id).await;

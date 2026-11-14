@@ -41,6 +41,7 @@ use crate::access_layer::{
 use crate::cache::CacheManagerRef;
 use crate::compaction::{collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema};
 use crate::config::{IndexBuildMode, MitoConfig};
+use crate::engine::region_hook::RegionHookRef;
 use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
     Error, FlushCancelledSnafu, FlushRegionSnafu, JoinSnafu, RegionBusySnafu, RegionClosedSnafu,
@@ -273,6 +274,7 @@ pub(crate) struct RegionFlushTask {
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
     pub(crate) listener: WorkerListener,
+    pub(crate) manifest_ctx: ManifestContextRef,
     /// Writes the immutable memtables to SSTs.
     pub(crate) sst_writer: MemtableSstWriter,
     /// Waits until the WAL is durable through the entry id the flush records.
@@ -282,13 +284,14 @@ pub(crate) struct RegionFlushTask {
 /// Writes the immutable memtables of a version to level 0 SSTs, for a flush or a tail replay.
 pub(crate) struct MemtableSstWriter {
     pub(crate) region_id: RegionId,
-    /// Kind of the writes, which selects their metrics.
+    /// Kind of the writes, which selects their metrics. Never `Compaction`.
     pub(crate) write_type: WriteType,
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
     pub(crate) cache_manager: CacheManagerRef,
-    pub(crate) manifest_ctx: ManifestContextRef,
+    /// Hook told of the written SSTs.
+    pub(crate) hook: Option<RegionHookRef>,
 
     /// Index options for the region.
     pub(crate) index_options: IndexOptions,
@@ -509,7 +512,6 @@ impl RegionFlushTask {
             RegionLeaderState::Writable
         };
         let manifest_version = match self
-            .sst_writer
             .manifest_ctx
             .update_manifest(expected_state, action_list, false)
             .await
@@ -594,8 +596,7 @@ impl MemtableSstWriter {
         uncommitted: &UncommittedSsts,
         reason: &str,
     ) -> Result<Vec<FileMeta>> {
-        let (elapsed, bytes_total, _) = self.write_metrics();
-        let timer = elapsed.start_timer();
+        let timer = self.elapsed().start_timer();
 
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
@@ -618,7 +619,7 @@ impl MemtableSstWriter {
             .await?;
 
         if !file_metas.is_empty() {
-            bytes_total.inc_by(flushed_bytes);
+            self.bytes_total().inc_by(flushed_bytes);
         }
 
         let mut file_ids = Vec::with_capacity(file_metas.len());
@@ -643,8 +644,7 @@ impl MemtableSstWriter {
         );
         flush_metrics.observe();
 
-        let hook = self.manifest_ctx.hook();
-        if let Some(hook) = &hook {
+        if let Some(hook) = &self.hook {
             let files: Vec<SstFileInfo<'_>> = sst_infos
                 .iter()
                 .zip(file_metas.iter())
@@ -674,7 +674,7 @@ impl MemtableSstWriter {
         let mut encoded_part_count = 0;
         let mut flush_metrics = Metrics::new(self.write_type);
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
-        let hook = self.manifest_ctx.hook();
+        let hook = self.hook.clone();
         let mut all_sst_infos = Vec::new();
         for mem in memtables {
             if mem.is_empty() {
@@ -799,7 +799,7 @@ impl MemtableSstWriter {
             &version.options,
             field_column_start,
         )?;
-        let (_, _, file_total) = self.write_metrics();
+        let file_total = self.file_total();
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
         for (source, max_sequence) in flat_sources.sources {
@@ -957,19 +957,29 @@ impl MemtableSstWriter {
         }
     }
 
-    /// Returns the elapsed time, SST bytes and SST file metrics of this writer's write type.
-    fn write_metrics(&self) -> (Histogram, &'static IntCounter, &'static IntCounter) {
+    /// Returns the timer of [Self::write_ssts] for this writer's write type.
+    fn elapsed(&self) -> Histogram {
         match self.write_type {
-            WriteType::TailReplay => (
-                TAIL_REPLAY_ELAPSED.with_label_values(&["write_chunks"]),
-                &TAIL_REPLAY_BYTES_TOTAL,
-                &TAIL_REPLAY_FILE_TOTAL,
-            ),
-            WriteType::Flush | WriteType::Compaction => (
-                FLUSH_ELAPSED.with_label_values(&["flush_memtables"]),
-                &FLUSH_BYTES_TOTAL,
-                &FLUSH_FILE_TOTAL,
-            ),
+            WriteType::TailReplay => TAIL_REPLAY_ELAPSED.with_label_values(&["write_chunk"]),
+            WriteType::Flush | WriteType::Compaction => {
+                FLUSH_ELAPSED.with_label_values(&["flush_memtables"])
+            }
+        }
+    }
+
+    /// Returns the counter of SST bytes this writer writes.
+    fn bytes_total(&self) -> &'static IntCounter {
+        match self.write_type {
+            WriteType::TailReplay => &TAIL_REPLAY_BYTES_TOTAL,
+            WriteType::Flush | WriteType::Compaction => &FLUSH_BYTES_TOTAL,
+        }
+    }
+
+    /// Returns the counter of SST files this writer writes.
+    fn file_total(&self) -> &'static IntCounter {
+        match self.write_type {
+            WriteType::TailReplay => &TAIL_REPLAY_FILE_TOTAL,
+            WriteType::Flush | WriteType::Compaction => &FLUSH_FILE_TOTAL,
         }
     }
 }
@@ -1767,6 +1777,7 @@ mod tests {
             senders: Vec::new(),
             request_sender,
             listener: WorkerListener::default(),
+            manifest_ctx,
             sst_writer: MemtableSstWriter {
                 region_id,
                 write_type: WriteType::Flush,
@@ -1774,7 +1785,7 @@ mod tests {
                 engine_config: Arc::new(MitoConfig::default()),
                 row_group_size: None,
                 cache_manager: Arc::new(CacheManager::default()),
-                manifest_ctx,
+                hook: None,
                 index_options: IndexOptions::default(),
                 write_semaphore: Arc::new(Semaphore::new(2)),
                 partition_expr: None,

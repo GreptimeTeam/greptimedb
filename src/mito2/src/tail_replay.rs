@@ -50,6 +50,9 @@ use crate::worker::WorkerListener;
 const CHUNK_MEMTABLE_USAGE: usize = 64 * 1024 * 1024;
 /// Replays that read and write at once on a node.
 const MAX_CONCURRENT_TAIL_REPLAYS: usize = 16;
+/// The replay chunks of a node may use `1 / TAIL_REPLAY_MEMORY_FACTOR` of the global write
+/// buffer size.
+const TAIL_REPLAY_MEMORY_FACTOR: usize = 8;
 /// Delay before the first retry of a failed round or an unfinished commit.
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 /// Longest delay between retries.
@@ -68,13 +71,15 @@ pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
 /// Each round reads the tails in order and writes each into its own SSTs: an SST can give all its
 /// rows its largest sequence, so in an SST shared with a later tail, an earlier tail's rows would
 /// take the later tail's sequence and outrank rows that a leader between the two tails flushed. A
-/// tail's chunks only bound memory: writes accepted during the replay already take sequences above
-/// every tail's. A chunk is written at 64 MiB, or earlier once it would exceed its share of the
-/// node's [TailReplayMemory]. The edit adds the SSTs, clears the tails and advances the flushed entry id
-/// and sequence. Another node's listed tail is only a bound, so until the region receives a Leader
-/// lease after a catchup made it writable, the edit keeps its unread part, which a second edit
-/// clears once a lease arrives. A failed round is retried after a back-off while
-/// [should_replay_tails] holds. The task always reports its end to the worker.
+/// tail's chunks only bound memory: writes accepted during the replay already take sequences
+/// above every tail's. A chunk is written once it reaches 64 MiB, or once it grows above its floor
+/// and the node's [TailReplayMemory] pool cannot cover the growth. The edit adds the SSTs, clears
+/// the tails and advances the flushed entry id and sequence. Another node's listed tail is only a
+/// bound, so until the region receives a Leader lease after a catchup made it writable, the edit
+/// keeps its unread part, which a second edit clears once a lease arrives. A failed round is
+/// retried after a back-off while [should_replay_tails] holds, unless the storage holds a newer
+/// manifest: then the task fences the region for a reload and ends. The task always reports its
+/// end to the worker.
 pub(crate) struct TailReplayTask<S> {
     pub(crate) region: MitoRegionRef,
     /// Id of this node, whose tails are read from `wal`.
@@ -84,6 +89,7 @@ pub(crate) struct TailReplayTask<S> {
     pub(crate) sst_writer: MemtableSstWriter,
     pub(crate) listener: WorkerListener,
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
+    /// Limits of the node's replays. Its write semaphore is the one `sst_writer` holds.
     pub(crate) limits: TailReplayLimits,
     pub(crate) state: CancellableTaskState,
 }
@@ -137,17 +143,31 @@ impl<S: LogStore> TailReplayTask<S> {
         else {
             return Ok(false);
         };
-        self.listener.on_tail_fence_begin(self.region.region_id);
+        let region_id = self.region.region_id;
+        info!(
+            "Region {region_id} found a manifest newer than its version {installed} after a failed replay round, fencing it"
+        );
+        self.listener.on_tail_fence_begin(region_id);
         let mut manager = self
             .unless_cancelled(async { Ok(manifest_ctx.manifest_manager.write().await) })
             .await?;
         Ok(manifest_ctx
-            .fence_for_reload_if_installed(&mut manager, self.region.region_id, installed)
+            .fence_for_reload_if_unchanged(&mut manager, region_id, installed)
             .await)
     }
 
     /// Replays the current tails and publishes the result. An error asks for another round.
     async fn replay_round(&self) -> Result<()> {
+        let region_id = self.region.region_id;
+        let replay_semaphore = &self.limits.replay_semaphore;
+        let permit = match replay_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                info!("Region {region_id} waits for a tail replay permit");
+                self.unless_cancelled(async { Ok(replay_semaphore.acquire().await.unwrap()) })
+                    .await?
+            }
+        };
         // Keeps no version past this point: it would hold the region's memtables, and their
         // write buffer memory, after a flush released them.
         let (tails, flushed_entry_id) = {
@@ -155,22 +175,12 @@ impl<S: LogStore> TailReplayTask<S> {
             (version.pending_tails.clone(), version.flushed_entry_id)
         };
         let uncommitted = UncommittedSsts::new(
-            self.region.region_id,
+            region_id,
             self.region.access_layer.clone(),
             Some(self.sst_writer.cache_manager.clone()),
         );
-        let replayed = {
-            if self.limits.semaphore.available_permits() == 0 {
-                info!(
-                    "Region {} waits for a tail replay permit",
-                    self.region.region_id
-                );
-            }
-            let _permit = self
-                .unless_cancelled(async { Ok(self.limits.semaphore.acquire().await.unwrap()) })
-                .await?;
-            self.replay_tails(&tails, &uncommitted).await
-        };
+        let replayed = self.replay_tails(&tails, &uncommitted).await;
+        drop(permit);
         let (files, last_entry_ids) = match replayed {
             Ok(replayed) => replayed,
             Err(e) => {
@@ -359,7 +369,7 @@ impl<S: LogStore> TailReplayTask<S> {
             return Ok(Vec::new());
         }
         self.sst_writer
-            .write_ssts(&version, &self.state, uncommitted, "tail_replay")
+            .write_ssts(&version, &self.state, uncommitted, "TailReplay")
             .await
     }
 
@@ -513,39 +523,49 @@ impl Drop for TailReplayEndGuard {
     }
 }
 
-/// Bounds the tail replays of a node, which run beside its flushes and share none of their limits.
+/// Bounds the tail replays of a node. They take none of the flush permits, while their chunk
+/// memtables still count in the global write buffer.
 #[derive(Clone)]
 pub(crate) struct TailReplayLimits {
     /// Replays that read and write at once.
-    pub(crate) semaphore: Arc<Semaphore>,
-    /// SST writes of the replays, as many as the flushes may run.
+    replay_semaphore: Arc<Semaphore>,
+    /// SST writes of the replays, as many as the flushes may run, so a node may write up to
+    /// `2 * max_background_flushes` level 0 SSTs at once. Writer buffers are not part of the
+    /// replay memory budget.
     pub(crate) write_semaphore: Arc<Semaphore>,
     /// Memtable memory of the replay chunks.
-    pub(crate) memory: Arc<TailReplayMemory>,
+    memory: Arc<TailReplayMemory>,
 }
 
 impl TailReplayLimits {
     pub(crate) fn new(config: &MitoConfig) -> Self {
         Self {
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TAIL_REPLAYS)),
+            replay_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TAIL_REPLAYS)),
             write_semaphore: Arc::new(Semaphore::new(config.max_background_flushes)),
             memory: Arc::new(TailReplayMemory::new(
-                config.global_write_buffer_size.as_bytes() as usize / 8,
+                config.global_write_buffer_size.as_bytes() as usize / TAIL_REPLAY_MEMORY_FACTOR,
             )),
         }
     }
+
+    /// Returns the bytes the replays reserve from their memory pool.
+    #[cfg(test)]
+    pub(crate) fn reserved(&self) -> usize {
+        self.memory.reserved.load(Ordering::Relaxed)
+    }
 }
 
-/// Memtable memory of the replay chunks on a node, out of a `budget`. Each replay may always use
-/// a floor of `budget / 32`; the chunks share a pool of `budget / 2` above their floors.
-pub(crate) struct TailReplayMemory {
+/// Memtable memory of the replay chunks on a node, out of a `budget`. The chunks share a pool of
+/// half the budget above their floors, and each of the [MAX_CONCURRENT_TAIL_REPLAYS] replays may
+/// always use a floor of an equal share of the other half.
+struct TailReplayMemory {
     floor: usize,
     pool: usize,
     reserved: AtomicUsize,
 }
 
 impl TailReplayMemory {
-    pub(crate) fn new(budget: usize) -> Self {
+    fn new(budget: usize) -> Self {
         Self {
             floor: budget / (2 * MAX_CONCURRENT_TAIL_REPLAYS),
             pool: budget / 2,
@@ -614,7 +634,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_chunk_reservation_keeps_floor_when_pool_is_used() {
+    fn test_chunk_reservation_keeps_floor_when_pool_is_exhausted() {
         // Floor 1 KiB, pool 16 KiB.
         let memory = TailReplayMemory::new(32 * 1024);
         let mut first = memory.chunk_reservation();
