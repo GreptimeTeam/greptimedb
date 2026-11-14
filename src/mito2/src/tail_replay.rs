@@ -137,6 +137,7 @@ impl<S: LogStore> TailReplayTask<S> {
         else {
             return Ok(false);
         };
+        self.listener.on_tail_fence_begin(self.region.region_id);
         let mut manager = self
             .unless_cancelled(async { Ok(manifest_ctx.manifest_manager.write().await) })
             .await?;

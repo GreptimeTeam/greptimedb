@@ -1929,6 +1929,14 @@ impl WorkerListener {
         }
     }
 
+    /// A tail replay that found a newer manifest is about to wait to fence the region.
+    pub(crate) fn on_tail_fence_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_fence_begin(_region_id);
+        }
+    }
+
     /// A round of tail replay failed.
     pub(crate) fn on_tail_replay_failed(&self, _region_id: RegionId, _error: &crate::error::Error) {
         #[cfg(any(test, feature = "test"))]
