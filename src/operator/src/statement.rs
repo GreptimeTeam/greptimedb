@@ -522,9 +522,46 @@ impl StatementExecutor {
             SchemaNotFoundSnafu { schema_info: &db }
         );
 
+        let previous_schema = query_ctx.current_schema();
         query_ctx.set_current_schema(&db);
+        debug!(user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+            catalog, schema = %db, previous_schema, process_id = query_ctx.process_id(),
+            "Database selected");
 
         Ok(Output::new_with_record_batches(RecordBatches::empty()))
+    }
+
+    /// Selects the first existing schema from candidates authorized by the caller.
+    pub async fn set_search_path(
+        &self,
+        schemas: Vec<String>,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let mut selected = String::new();
+        for schema in schemas {
+            if !schema.is_empty()
+                && self
+                    .catalog_manager
+                    .schema_exists(query_ctx.current_catalog(), &schema, Some(&query_ctx))
+                    .await
+                    .context(CatalogSnafu)?
+            {
+                selected = schema;
+                break;
+            }
+            debug!(user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+                catalog = query_ctx.current_catalog(), schema = %schema,
+                process_id = query_ctx.process_id(), reason = "schema_not_found",
+                "Skipping unavailable search_path candidate");
+        }
+        // An empty effective path must not retain access to the previous schema.
+        let previous_schema = query_ctx.current_schema();
+        query_ctx.set_current_schema(&selected);
+        debug!(user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+            catalog = query_ctx.current_catalog(), schema = %selected, previous_schema,
+            process_id = query_ctx.process_id(), empty_path = selected.is_empty(),
+            "Search path schema selected");
+        Ok(Output::new_with_affected_rows(0))
     }
 
     fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
@@ -594,17 +631,10 @@ impl StatementExecutor {
                 }
             },
             "SEARCH_PATH" => {
-                if query_ctx.channel() == Channel::Postgres {
-                    let search_path = set_var.search_path().context(NotSupportedSnafu {
-                        feat: "Unsupported search path in set variable statement",
-                    })?;
-                    query_ctx.set_current_schema(search_path);
-                } else {
-                    return NotSupportedSnafu {
-                        feat: format!("Unsupported set variable {}", var_name),
-                    }
-                    .fail();
+                return NotSupportedSnafu {
+                    feat: "Unsupported search_path assignment",
                 }
+                .fail();
             }
             _ => {
                 if query_ctx.channel() == Channel::Postgres || query_ctx.channel() == Channel::Mysql

@@ -48,6 +48,8 @@ pub type KvBackendRef<E = Error> = Arc<dyn KvBackend<Error = E> + Send + Sync>;
 #[async_trait]
 pub trait ClosableKvBackend: KvBackend<Error = Error> {
     /// Releases the backend's resources; any later use fails.
+    /// May wait for in-flight operations to release their resources, so callers must
+    /// stop consumers first. Closing is terminal, not a pause for role transitions.
     async fn close(&self) -> Result<(), Error>;
 }
 

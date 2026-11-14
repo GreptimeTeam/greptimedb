@@ -240,6 +240,8 @@ pub enum FlushReason {
     RemoteWalPrune,
     /// Flush before closing a region.
     Closing,
+    /// Writes a chunk of pending WAL tails replayed in the background.
+    TailReplay,
 }
 
 impl FlushReason {
@@ -442,17 +444,14 @@ impl RegionFlushTask {
         self.send_worker_request(worker_request).await;
     }
 
-    /// Flushes memtables to level 0 SSTs and updates the manifest.
-    /// Returns the [RegionEdit] to apply.
-    async fn flush_memtables(
+    /// Writes the immutable memtables of `version` to level 0 SSTs, which `uncommitted`
+    /// tracks until a manifest edit references them, and returns their file metas.
+    pub(crate) async fn write_ssts(
         &self,
-        version_data: &VersionControlData,
+        version: &VersionRef,
         state: &CancellableTaskState,
         uncommitted: &UncommittedSsts,
-    ) -> Result<RegionEdit> {
-        // We must use the immutable memtables list and entry ids from the `version_data`
-        // for consistency as others might already modify the version in the `version_control`.
-        let version = &version_data.version;
+    ) -> Result<Vec<FileMeta>> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["flush_memtables"])
             .start_timer();
@@ -516,6 +515,23 @@ impl RegionFlushTask {
             hook.on_sst_files_written(self.region_id, &version.metadata, &files)
                 .await;
         }
+
+        Ok(file_metas)
+    }
+
+    /// Flushes memtables to level 0 SSTs and updates the manifest.
+    /// Returns the [RegionEdit] to apply.
+    async fn flush_memtables(
+        &self,
+        version_data: &VersionControlData,
+        state: &CancellableTaskState,
+        uncommitted: &UncommittedSsts,
+    ) -> Result<RegionEdit> {
+        // We must use the immutable memtables list and entry ids from the `version_data`
+        // for consistency as others might already modify the version in the `version_control`.
+        let file_metas = self
+            .write_ssts(&version_data.version, state, uncommitted)
+            .await?;
 
         // The manifest may name only a durable entry as flushed. A log store
         // that acknowledges appends before their entries are durable can have
@@ -835,7 +851,7 @@ impl RegionFlushTask {
             num_rows: sst_info.num_rows as u64,
             num_row_groups: sst_info.num_row_groups,
             sequence: NonZeroU64::new(max_sequence),
-            partition_expr,
+            partition_expr: partition_expr.map(Into::into),
             num_series: sst_info.num_series,
             primary_key_min,
             primary_key_max,
@@ -1300,13 +1316,13 @@ impl FlushScheduler {
             return Ok(());
         }
 
-        let closing = task.reason == FlushReason::Closing;
+        let reason = task.reason;
         let state = self.schedule_flush_task(version_control, task)?;
 
         // Add this region to status map.
         let _ = self.region_status.insert(
             region_id,
-            FlushStatus::new(region_id, version_control.clone(), state, closing),
+            FlushStatus::new(region_id, version_control.clone(), state, reason),
         );
 
         Ok(())
@@ -1498,13 +1514,13 @@ impl FlushScheduler {
         status.pending_bulk_writes.push(request);
     }
 
-    /// Whether an ALTER owns a turn while waiting for its memtables to flush.
-    pub(crate) fn has_pending_alter(&self, region_id: RegionId) -> bool {
+    /// Whether staging is waiting for its memtables to flush.
+    pub(crate) fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
         self.region_status.get(&region_id).is_some_and(|status| {
             status
                 .pending_ddls
                 .iter()
-                .any(|ddl| matches!(ddl.request, DdlRequest::Alter(_)))
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
         })
     }
 
@@ -1560,14 +1576,14 @@ impl FlushStatus {
         region_id: RegionId,
         version_control: VersionControlRef,
         state: CancellableTaskState,
-        closing: bool,
+        reason: FlushReason,
     ) -> FlushStatus {
         FlushStatus {
             region_id,
             version_control,
             state,
             pending_task: None,
-            closing,
+            closing: reason == FlushReason::Closing,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
             pending_bulk_writes: Vec::new(),
