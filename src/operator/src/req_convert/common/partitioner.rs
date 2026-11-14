@@ -571,6 +571,9 @@ impl TablePartitioner {
         if !table_info.is_physical_table() || meta.column_ids.len() != meta.schema.num_columns() {
             return Ok(None);
         }
+        // `partition_columns()` is an allow list that may be wider than the schema this
+        // function resolves against, so each name-based lookup below stays optional
+        // (see `PartitionRule::partition_columns`).
         let missing = self
             .rule
             .partition_columns()
