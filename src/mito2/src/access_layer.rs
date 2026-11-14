@@ -40,7 +40,7 @@ use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, Inverte
 use crate::error::{
     CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
 };
-use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
+use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED, TAIL_REPLAY_ELAPSED};
 use crate::read::FlatSource;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
@@ -60,12 +60,14 @@ pub type AccessLayerRef = Arc<AccessLayer>;
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
 
 /// Write operation type.
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone, Copy)]
 pub enum WriteType {
     /// Writes from flush
     Flush,
     /// Writes from compaction.
     Compaction,
+    /// Writes from the replay of pending WAL tails.
+    TailReplay,
 }
 
 #[derive(Debug)]
@@ -143,6 +145,28 @@ impl Metrics {
                 COMPACTION_STAGE_ELAPSED
                     .with_label_values(&["upload_puffin"])
                     .observe(self.upload_puffin.as_secs_f64());
+            }
+            WriteType::TailReplay => {
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["iter_source"])
+                    .observe(self.iter_source.as_secs_f64());
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["write_batch"])
+                    .observe(self.write_batch.as_secs_f64());
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["update_index"])
+                    .observe(self.update_index.as_secs_f64());
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["upload_parquet"])
+                    .observe(self.upload_parquet.as_secs_f64());
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["upload_puffin"])
+                    .observe(self.upload_puffin.as_secs_f64());
+                if !self.compact_memtable.is_zero() {
+                    TAIL_REPLAY_ELAPSED
+                        .with_label_values(&["compact_memtable"])
+                        .observe(self.compact_memtable.as_secs_f64());
+                }
             }
         };
     }
@@ -553,6 +577,7 @@ impl AccessLayer {
     ///
     /// Builds the SST's indexes from `data` into `sst_info.index_metadata` when
     /// `index_build_params` is set.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn put_sst(
         &self,
         data: &bytes::Bytes,
@@ -561,6 +586,7 @@ impl AccessLayer {
         cache_manager: &CacheManagerRef,
         write_buffer_size: ReadableSize,
         index_build_params: Option<EncodedSstIndexBuildParams>,
+        write_type: WriteType,
     ) -> Result<Metrics> {
         let region_file_id = RegionFileId::new(region_id, sst_info.file_id);
         if let Some(write_cache) = cache_manager.write_cache() {
@@ -580,6 +606,7 @@ impl AccessLayer {
                     upload_request,
                     write_buffer_size,
                     index_build_params,
+                    write_type,
                 )
                 .await
         } else {
@@ -603,7 +630,7 @@ impl AccessLayer {
                 cleaner.clean_by_file_id(region_file_id.file_id()).await;
                 return Err(err);
             }
-            let mut metrics = Metrics::new(WriteType::Flush);
+            let mut metrics = Metrics::new(write_type);
             metrics.write_batch = start.elapsed();
 
             if let Some(params) = index_build_params {
@@ -972,6 +999,7 @@ mod tests {
                 &cache_manager,
                 ReadableSize(chunk_size as u64),
                 None,
+                WriteType::Flush,
             )
             .await
             .unwrap();

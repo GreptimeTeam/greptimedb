@@ -1528,6 +1528,44 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
+    /// Returns the installed manifest version if the storage holds a newer one. The version is
+    /// read under the manifest read lock, which is not held across the listing, so a caller
+    /// rechecks it under the write lock before acting on it.
+    pub(crate) async fn installed_version_if_updated(&self) -> Result<Option<ManifestVersion>> {
+        let (store, installed) = {
+            let manager = self.manifest_manager.read().await;
+            (manager.store(), manager.last_version())
+        };
+        // Lists without the read lock: held across the listing, it would let a queued writer
+        // block every later reader.
+        Ok(store
+            .has_version_after(installed)
+            .await?
+            .then_some(installed))
+    }
+
+    /// Fences the region for a reload, see [Self::fence_for_reload], if it is still a Writable
+    /// leader at `expected_version`. Returns whether it fenced the region.
+    pub(crate) async fn fence_for_reload_if_unchanged(
+        &self,
+        manager: &mut RegionManifestManager,
+        region_id: RegionId,
+        expected_version: ManifestVersion,
+    ) -> bool {
+        let state = self.state.load();
+        let version = manager.last_version();
+        if state != RegionRoleState::Leader(RegionLeaderState::Writable)
+            || version != expected_version
+        {
+            info!(
+                "Region {region_id} is {state:?} at manifest version {version}, not a writable leader at version {expected_version}, not fencing it"
+            );
+            return false;
+        }
+        self.fence_for_reload(manager, region_id).await;
+        true
+    }
+
     /// Returns the current region role state.
     pub(crate) fn current_state(&self) -> RegionRoleState {
         self.state.load()

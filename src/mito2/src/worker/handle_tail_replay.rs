@@ -21,8 +21,8 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
+use crate::access_layer::WriteType;
 use crate::config::IndexBuildMode;
-use crate::flush::FlushReason;
 use crate::manifest::action::{PendingTail, RegionEdit};
 use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
@@ -43,15 +43,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         info!("Replaying the pending WAL tails of region {region_id}");
         let state = CancellableTaskState::new();
         let task = TailReplayTask {
-            flush_task: self.new_flush_task(
+            sst_writer: self.new_sst_writer(
                 &region,
-                FlushReason::TailReplay,
+                WriteType::TailReplay,
                 None,
                 self.config.clone(),
+                self.tail_replay_limits.write_semaphore.clone(),
             ),
             region,
             node_id: self.file_ref_manager.node_id(),
             wal: self.wal.clone(),
+            listener: self.listener.clone(),
+            request_sender: self.sender.clone(),
+            limits: self.tail_replay_limits.clone(),
             state: state.clone(),
         };
         self.tail_replays.insert(region_id, state);
@@ -109,6 +113,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.schedule_compaction(&region).await;
     }
 
+    /// Cancels the tail replay of the region unless `region`, the instance a role change made
+    /// unable to replay, was replaced since.
+    pub(crate) fn handle_region_became_unwritable(
+        &self,
+        region_id: RegionId,
+        region: MitoRegionRef,
+    ) {
+        let registered = self.regions.get_region(region_id);
+        if registered.is_some_and(|registered| Arc::ptr_eq(&registered, &region)) {
+            self.cancel_tail_replay(region_id);
+        }
+    }
+
     /// Forgets the ended tail replay of the region and starts another if it still has tails.
     pub(crate) fn handle_tail_replay_ended(&mut self, region_id: RegionId) {
         self.tail_replays.remove(&region_id);
@@ -127,5 +144,22 @@ pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &M
     let region_id = region.region_id;
     common_runtime::spawn_global(async move {
         notify_worker(&sender, region_id, BackgroundNotify::RegionBecameWritable).await;
+    });
+}
+
+/// Asks the worker to cancel the tail replay of a region that a role change outside the worker
+/// made unable to replay, if it has pending tails, without waiting. A replay the cancel reaches
+/// after the region became writable again ends and the worker starts another.
+pub(crate) fn notify_unwritable(sender: &Sender<WorkerRequestWithTime>, region: &MitoRegionRef) {
+    if !region.version().has_pending_tails() {
+        return;
+    }
+    let sender = sender.clone();
+    let region_id = region.region_id;
+    let notify = BackgroundNotify::RegionBecameUnwritable {
+        region: region.clone(),
+    };
+    common_runtime::spawn_global(async move {
+        notify_worker(&sender, region_id, notify).await;
     });
 }

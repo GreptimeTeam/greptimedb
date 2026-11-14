@@ -178,6 +178,7 @@ impl WriteCache {
     ///
     /// Builds the SST's indexes from `data` when `index_build_params` is set and uploads them
     /// with the SST.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn put_and_upload_sst(
         &self,
         data: &bytes::Bytes,
@@ -186,10 +187,11 @@ impl WriteCache {
         upload_request: SstUploadRequest,
         write_buffer_size: ReadableSize,
         index_build_params: Option<EncodedSstIndexBuildParams>,
+        write_type: WriteType,
     ) -> Result<Metrics> {
         let file_id = sst_info.file_id;
         let region_file_id = RegionFileId::new(region_id, file_id);
-        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut metrics = Metrics::new(write_type);
 
         // Create index key for the SST file
         let parquet_key = IndexKey::new(region_id, file_id, FileType::Parquet);
