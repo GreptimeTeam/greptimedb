@@ -320,6 +320,45 @@ def load_plan(fixture_generator: Path, case_path: Path) -> dict[str, Any]:
     return json.loads(result.stdout)
 
 
+def direct_query_parallelism(plan: dict[str, Any]) -> int | None:
+    """Return the case's frontend `[query] parallelism`, if the case pins one."""
+    scenario = plan.get("scenario")
+    if not isinstance(scenario, dict):
+        return None
+    value = scenario.get("query_parallelism")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"scenario.query_parallelism must be a positive integer, got {value!r}"
+        )
+    return value
+
+
+def direct_frontend_config(
+    work_dir: Path, name: str, query_parallelism: int | None
+) -> Path | None:
+    """Per-target frontend config path for a direct-SST case.
+
+    The file is written after the target work dir is created, because the
+    work-dir emptiness check above must still see an empty directory.
+    """
+    if query_parallelism is None:
+        return None
+    return work_dir / name / "frontend-query.toml"
+
+
+def write_direct_frontend_config(target: RunTarget, query_parallelism: int | None) -> None:
+    if query_parallelism is None:
+        return
+    if target.frontend_config is None:
+        raise RuntimeError(f"direct target has no frontend config path: {target.name}")
+    target.frontend_config.parent.mkdir(parents=True, exist_ok=True)
+    target.frontend_config.write_text(
+        f"[query]\nparallelism = {query_parallelism}\n", encoding="utf-8"
+    )
+
+
 def run_direct_case(
     args: argparse.Namespace,
     case_path: Path,
@@ -328,16 +367,27 @@ def run_direct_case(
     candidate_bin: Path,
     fixture_generator: Path,
     runner: Path,
+    plan: dict[str, Any],
 ) -> int:
     ports = allocate_ports(16)
+    query_parallelism = direct_query_parallelism(plan)
     targets = [
-        make_target("base", base_bin, work_dir, ports[:8], containerized=bool(getattr(args, "base_image", ""))),
-        make_target("candidate", candidate_bin, work_dir, ports[8:], containerized=bool(getattr(args, "candidate_image", ""))),
+        make_target(
+            "base", base_bin, work_dir, ports[:8],
+            frontend_config=direct_frontend_config(work_dir, "base", query_parallelism),
+            containerized=bool(getattr(args, "base_image", "")),
+        ),
+        make_target(
+            "candidate", candidate_bin, work_dir, ports[8:],
+            frontend_config=direct_frontend_config(work_dir, "candidate", query_parallelism),
+            containerized=bool(getattr(args, "candidate_image", "")),
+        ),
     ]
     for target in targets:
         if target.work_dir.exists() and any(target.work_dir.iterdir()):
             raise RuntimeError(f"target work_dir exists and is non-empty: {target.work_dir}")
         target.work_dir.mkdir(parents=True, exist_ok=True)
+        write_direct_frontend_config(target, query_parallelism)
 
     procs: dict[tuple[str, str], subprocess.Popen[bytes]] = {}
     try:
@@ -583,6 +633,7 @@ def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
                 candidate_bin,
                 fixture_generator,
                 runner,
+                plan,
             )
         if kind == "prom_remote_write_then_query":
             return run_remote_case(

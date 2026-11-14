@@ -22,8 +22,9 @@ use std::sync::Arc;
 use api::v1::{OpType, SemanticType};
 use async_trait::async_trait;
 use datatypes::arrow::array::{
-    ArrayRef, BinaryDictionaryBuilder, Float64Array, RecordBatch, StringDictionaryBuilder,
-    TimestampMillisecondArray, TimestampNanosecondArray, UInt8Array, UInt64Array,
+    ArrayRef, BinaryDictionaryBuilder, Float64Array, RecordBatch, StringBuilder,
+    StringDictionaryBuilder, TimestampMillisecondArray, TimestampNanosecondArray, UInt8Array,
+    UInt64Array,
 };
 use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::prelude::ConcreteDataType;
@@ -189,6 +190,37 @@ fn tag_value(col: &ColumnConfig, series: usize) -> String {
     }
 }
 
+/// Resolves a STRING field value for one logical row.
+///
+/// `dense_string` is the only supported STRING field distribution: the first
+/// `matching_rows` logical rows cycle through `values` keys so a JOIN can be
+/// bounded by a small membership set, and every later row is a unique noise
+/// value that never matches.
+fn string_field_value(col: &ColumnConfig, logical_row: usize) -> String {
+    match col
+        .distribution
+        .as_ref()
+        .expect("field distribution is required")
+    {
+        Distribution::DenseString {
+            values,
+            matching_rows,
+            prefix,
+            noise_prefix,
+        } => {
+            if logical_row < matching_rows.get() {
+                format!("{}{}", prefix, logical_row % values.get())
+            } else {
+                format!("{}{}", noise_prefix, logical_row)
+            }
+        }
+        other => panic!(
+            "STRING field column {} requires dense_string distribution, got {other:?}",
+            col.name
+        ),
+    }
+}
+
 fn series_for_row(layout: &LayoutConfig, sst_idx: usize, base_row: usize, row: usize) -> usize {
     match layout.series_layout.as_str() {
         "round_robin" | "timestamp_major" => (base_row + row) % layout.series_count.get(),
@@ -234,6 +266,13 @@ fn generate_record_batch(
                     let series = series_for_row(layout, sst_idx, base_row, row);
                     let value = tag_value(col, series);
                     b.append_value(value);
+                }
+                columns.push(Arc::new(b.finish()) as ArrayRef);
+            }
+            ("field", "STRING") => {
+                let mut b = StringBuilder::new();
+                for row in 0..rows {
+                    b.append_value(string_field_value(col, base_row + row));
                 }
                 columns.push(Arc::new(b.finish()) as ArrayRef);
             }
@@ -549,6 +588,93 @@ mod tests {
     use super::*;
 
     type LogicalRow = (Vec<u8>, i64, u64, String, String, f64);
+
+    const DENSE_STRING_CASE: &str = r#"
+[scenario]
+kind = "direct_readable_sst"
+seed = 7
+
+[[scenario.tables]]
+database = "public"
+name = "dense"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["scope"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "scope"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 1, prefix = "scope" }
+
+[[scenario.tables.columns]]
+name = "trace_id"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "dense_string", values = 3, matching_rows = 5, prefix = "trace", noise_prefix = "noise" }
+
+[[scenario.tables.columns]]
+name = "f1"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 1.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 1
+rows_per_sst = 6
+row_group_size = 3
+series_count = 1
+start_unix_nanos = 1704067200000000000
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+"#;
+
+    #[test]
+    fn dense_string_field_cycles_matching_rows_then_noise() {
+        let case: CaseFile = toml::from_str(DENSE_STRING_CASE).expect("dense_string case parses");
+        let scenario = match &case.scenario {
+            Scenario::DirectReadableSst(scenario) => scenario,
+            _ => unreachable!("case is a direct SST case"),
+        };
+        let table = &scenario.tables[0];
+        let metadata = Arc::new(build_region_metadata(table, RegionId::from(42)));
+        let batch = generate_record_batch(table, &metadata, &scenario.layout, 0, 1010);
+        assert_eq!(6, batch.num_rows());
+
+        // Flat-SST layout: primary key columns, field columns, time index.
+        let trace_ids = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("STRING field must be generated as a plain string array");
+        assert_eq!(
+            vec!["trace0", "trace1", "trace2", "trace0", "trace1", "noise5"],
+            (0..batch.num_rows())
+                .map(|row| trace_ids.value(row))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires dense_string distribution")]
+    fn dense_string_rejects_other_distributions() {
+        let case: CaseFile = toml::from_str(&DENSE_STRING_CASE.replace(
+            r#"distribution = { kind = "dense_string", values = 3, matching_rows = 5, prefix = "trace", noise_prefix = "noise" }"#,
+            r#"distribution = { kind = "deterministic_wave", min = 0.0, max = 1.0 }"#,
+        ))
+        .expect("case parses with a non-dense_string STRING field");
+        let table = &case.scenario.direct_readable_sst().tables[0];
+        string_field_value(&table.columns[1], 0);
+    }
 
     fn string_values(batch: &RecordBatch, column: usize) -> Vec<String> {
         let dictionary = batch

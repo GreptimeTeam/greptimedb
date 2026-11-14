@@ -13,13 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Coverage for query-regression case group selection."""
+"""Coverage for query-regression case group selection and case gate structure."""
 
 import importlib.util
 import re
 import sys
 import unittest
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib
 
 
 RUNNER_PATH = Path(__file__).parents[2] / ".github/scripts/query-regression-run.py"
@@ -64,6 +69,53 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
     def test_explicit_paths_remain_selectable(self) -> None:
         case = "tests/perf/query_cases/sql_topk_order_by/case.toml"
         self.assertEqual(runner.split_cases([case]), [case])
+
+    def test_dyn_filter_join_gates_membership_instead_of_latency_only(self) -> None:
+        case = tomllib.loads(
+            (Path(__file__).parent / "query_cases/dyn_filter_join/case.toml").read_text()
+        )
+        scenario = case["scenario"]
+        query = scenario["queries"][0]
+        checks = query["plan_checks"]
+        thresholds = query["thresholds"]
+
+        # Plan shapes are only available from an analyzed, verbose plan.
+        self.assertIn("EXPLAIN ANALYZE VERBOSE", query["query"])
+
+        require = checks["require"]
+        self.assertTrue(any("DynamicFilter" in pattern for pattern in require), require)
+        self.assertTrue(
+            any("trace_id" in pattern and "IN" in pattern for pattern in require), require
+        )
+
+        forbid = checks["forbid"]
+        self.assertTrue(any("empty" in pattern for pattern in forbid), forbid)
+        self.assertTrue(any("true" in pattern for pattern in forbid), forbid)
+
+        # The store-work gates must be strictly narrower than a full probe scan,
+        # and the row gate must also fail a bounds-only scan that decodes one
+        # whole probe row group (the shape a candidate without the wire recovery
+        # produces). Otherwise the gate would pass for a candidate whose
+        # membership list was degraded to bounds.
+        rows_per_sst = scenario["layout"]["rows_per_sst"]
+        row_group_size = scenario["layout"]["row_group_size"]
+        self.assertGreater(rows_per_sst, 0)
+        self.assertLess(thresholds["max_candidate_num_sst_rows"], rows_per_sst)
+        self.assertLess(thresholds["max_candidate_num_sst_rows"], row_group_size)
+        self.assertGreater(thresholds["max_candidate_page_size_to_fetch_store_bytes"], 0)
+        self.assertLessEqual(
+            thresholds["max_candidate_page_size_to_fetch_store_bytes"], 16 * 1024 * 1024
+        )
+
+        # The 1M-row probe table must be the right operand: this DataFusion
+        # version builds the left hash-join input, so the other order would
+        # build 1M rows and leave nothing for the membership filter to prune.
+        self.assertIn(
+            "FROM dyn_filter_traces b JOIN dyn_filter_logs p", query["query"]
+        )
+
+        # The latency gate still exists, so the case keeps its non-regression role.
+        self.assertIn("max_candidate_latency_regression_pct", thresholds)
 
     def test_sst_float_bss_omits_base_encoding_for_older_binaries(self) -> None:
         case_path = Path(__file__).parent / "query_cases/sst_float_bss/case.toml"

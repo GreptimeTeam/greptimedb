@@ -226,6 +226,27 @@ pub(super) struct Query {
     pub(super) iterations: usize,
     #[serde(default)]
     pub(super) thresholds: Map<String, Value>,
+    /// Optional plan-text assertions for `EXPLAIN ANALYZE VERBOSE` queries.
+    ///
+    /// Patterns are regular expressions matched against the plan rows of the
+    /// candidate's analyze response. They are candidate-only gates: the base
+    /// target is the control and is not required to show the optimization.
+    #[serde(default)]
+    pub(super) plan_checks: PlanChecks,
+}
+
+/// Declarative plan-text assertions for one query.
+///
+/// `require` patterns must match at least once and `forbid` patterns must not
+/// match at all. Both are unanchored regular expressions, so a plain substring
+/// works when the surrounding formatting is stable.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PlanChecks {
+    #[serde(default)]
+    pub(super) require: Vec<String>,
+    #[serde(default)]
+    pub(super) forbid: Vec<String>,
 }
 
 const fn one() -> usize {
@@ -237,10 +258,17 @@ pub(super) struct QueryResult {
     pub(super) validation: Vec<Value>,
     pub(super) validation_errors: Vec<Value>,
     pub(super) measurements: Vec<Measurement>,
+    /// First execution of the first configured query, before any warmup.
+    ///
+    /// Cache-dependent scan counters (for example
+    /// `page_size_to_fetch_store`) only show real store reads on this cold
+    /// execution, so plan/store assertions include it. `None` for queries
+    /// other than the first one.
+    pub(super) first_execution: Option<Value>,
     pub(super) status: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(super) struct Measurement {
     pub(super) name: Option<String>,
     pub(super) kind: Option<String>,
