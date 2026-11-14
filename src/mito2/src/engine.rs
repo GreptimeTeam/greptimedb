@@ -1334,14 +1334,14 @@ impl EngineInner {
             // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
             region.manifest_ctx.record_leader_lease(Instant::now());
         }
-        self.notify_if_stopped_replaying(&region, could_replay);
+        self.notify_if_became_unwritable(&region, could_replay);
         self.notify_if_became_writable(&region, was_writable);
         Ok(())
     }
 
     /// Asks the worker to cancel the tail replay of `region` if a role change left it unable to
     /// replay. A replay may wait on I/O that never notices the role change.
-    fn notify_if_stopped_replaying(&self, region: &MitoRegionRef, could_replay: bool) {
+    fn notify_if_became_unwritable(&self, region: &MitoRegionRef, could_replay: bool) {
         if could_replay && !region.can_replay_tails() {
             self.workers.notify_unwritable(region);
         }
@@ -1710,7 +1710,7 @@ impl RegionEngine for MitoEngine {
         let could_replay = region.can_replay_tails();
         region.set_role(role);
         self.inner
-            .notify_if_stopped_replaying(&region, could_replay);
+            .notify_if_became_unwritable(&region, could_replay);
         Ok(true)
     }
 

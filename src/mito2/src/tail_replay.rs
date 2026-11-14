@@ -645,4 +645,23 @@ mod tests {
         drop(second);
         assert_eq!(0, memory.reserved.load(Ordering::Relaxed));
     }
+
+    #[test]
+    fn test_chunk_reservation_grows_by_increments_and_reuses_after_clear() {
+        // Floor 1 KiB, pool 16 KiB.
+        let memory = TailReplayMemory::new(32 * 1024);
+        let reserved = || memory.reserved.load(Ordering::Relaxed);
+        let mut chunk = memory.chunk_reservation();
+        assert!(chunk.grow_to(5 * 1024));
+        assert_eq!(4 * 1024, reserved());
+        assert!(chunk.grow_to(9 * 1024));
+        assert_eq!(8 * 1024, reserved());
+
+        chunk.clear();
+        assert_eq!(0, reserved());
+        assert!(chunk.grow_to(3 * 1024));
+        assert_eq!(2 * 1024, reserved());
+        drop(chunk);
+        assert_eq!(0, reserved());
+    }
 }

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Reloading a region that a manifest version conflict, or a failed tail replay round that
-//! found a newer manifest, fenced.
+//! Reloading a region fenced by a manifest version conflict, or by a failed tail replay round
+//! that found a newer manifest.
 
 use std::sync::Arc;
 
