@@ -315,15 +315,17 @@ pub struct Hint {
     pub prefix: String,
 }
 
-impl TryFrom<&Statement> for DfStatement {
+impl TryFrom<Statement> for DfStatement {
     type Error = Error;
 
-    fn try_from(s: &Statement) -> Result<Self, Self::Error> {
+    fn try_from(s: Statement) -> Result<Self, Self::Error> {
         let s = match s {
-            Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
-            Statement::Insert(insert) => insert.inner.clone(),
-            Statement::Delete(delete) => delete.inner.clone(),
-            _ => {
+            // Moved, not cloned: the derived `Clone` of a left-deep `SetExpr` recurses once per
+            // `UNION ALL` branch and overflows the stack on long chains (#9356).
+            Statement::Query(query) => SpStatement::Query(Box::new(query.inner)),
+            Statement::Insert(insert) => insert.inner,
+            Statement::Delete(delete) => delete.inner,
+            s => {
                 return ConvertToDfStatementSnafu {
                     statement: format!("{s:?}"),
                 }

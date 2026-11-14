@@ -146,7 +146,7 @@ async fn count_values_generated_label_is_reported_as_a_prometheus_label() {
     let statement = QueryLanguageParser::parse_promql(&prom_query, &query_ctx).unwrap();
     let plan = query_engine
         .planner()
-        .plan(&statement, query_ctx.clone())
+        .plan(statement, query_ctx.clone())
         .await
         .unwrap();
     let output = query_engine.execute(plan, query_ctx).await.unwrap();

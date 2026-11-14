@@ -130,7 +130,7 @@ impl SqlQueryHandler for DummyInstance {
         .map(|x| x.into_iter().map(QueryStatement::Sql).collect::<Vec<_>>())
         .unwrap();
 
-        for statement in &statements {
+        for statement in statements {
             let result = self
                 .query_engine
                 .planner()
@@ -193,7 +193,7 @@ impl SqlQueryHandler for DummyInstance {
 
         self.query_engine
             .planner()
-            .plan(&QueryStatement::Sql(statement), query_ctx.clone())
+            .plan(QueryStatement::Sql(statement), query_ctx.clone())
             .and_then(|plan| self.query_engine.execute(plan, query_ctx.clone()))
             .await
             .map_err(BoxedError::new)
@@ -222,7 +222,7 @@ impl SqlQueryHandler for DummyInstance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(&QueryStatement::Sql(stmt), query_ctx.clone())
+                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .unwrap();
             let schema = self.query_engine.describe(plan, query_ctx).await.unwrap();

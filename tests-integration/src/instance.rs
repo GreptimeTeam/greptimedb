@@ -238,7 +238,7 @@ mod tests {
         let plan = instance
             .frontend()
             .statement_executor()
-            .plan(&stmt, QueryContext::arc())
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
         let plan = DFLogicalSubstraitConvertor
@@ -568,7 +568,7 @@ mod tests {
         let stmt = QueryLanguageParser::parse_sql("SELECT * FROM demo", &query_ctx).unwrap();
         let plan = instance
             .statement_executor()
-            .plan(&stmt, query_ctx.clone())
+            .plan(stmt.clone(), query_ctx.clone())
             .await
             .unwrap();
         let QueryStatement::Sql(sql_stmt) = stmt else {

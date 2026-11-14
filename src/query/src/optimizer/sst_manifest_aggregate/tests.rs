@@ -390,7 +390,7 @@ async fn test_manifest_aggregate_real_catalog_timestamp_cast() {
     let statement = crate::parser::QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
     let original = engine
         .planner()
-        .plan(&statement, query_ctx.clone())
+        .plan(statement, query_ctx.clone())
         .await
         .unwrap();
     let state = engine.engine_state().session_state();

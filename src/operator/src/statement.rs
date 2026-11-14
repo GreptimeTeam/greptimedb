@@ -662,7 +662,7 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn plan(
         &self,
-        stmt: &QueryStatement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
         self.query_engine
@@ -690,7 +690,7 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
-        let plan = self.plan(&stmt, query_ctx.clone()).await?;
+        let plan = self.plan(stmt, query_ctx.clone()).await?;
         self.exec_plan(plan, query_ctx).await
     }
 

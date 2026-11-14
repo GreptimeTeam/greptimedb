@@ -466,7 +466,7 @@ mod tests {
         let engine = create_test_engine();
         let logical_plan = engine
             .planner()
-            .plan(&stmt, query_ctx.clone())
+            .plan(stmt, query_ctx.clone())
             .await
             .unwrap();
 

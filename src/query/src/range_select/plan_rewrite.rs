@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow_schema::DataType;
-use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use chrono::{DateTime, Utc};
 use common_function::aggrs::aggr_wrapper::get_aggr_func;
@@ -406,13 +405,35 @@ impl RangePlanRewriter {
         }
     }
 
-    #[async_recursion]
+    /// Rewrites `plan` bottom-up and returns `None` if nothing changed.
+    ///
+    /// The walk uses explicit stacks rather than recursion because plans such as long
+    /// `UNION ALL` chains can be deep enough to overflow the thread stack.
     async fn rewrite_logical_plan(&mut self, plan: &LogicalPlan) -> Result<Option<LogicalPlan>> {
-        let inputs = plan.inputs();
-        let mut new_inputs = Vec::with_capacity(inputs.len());
-        for input in &inputs {
-            new_inputs.push(self.rewrite_logical_plan(input).await?)
+        let mut pending = vec![plan];
+        let mut nodes = vec![];
+        while let Some(node) = pending.pop() {
+            let inputs = node.inputs();
+            pending.extend(inputs.iter().copied());
+            nodes.push((node, inputs));
         }
+        // In reverse, `nodes` lists every node after all of its inputs, which come in order,
+        // so the results of a node's inputs are the last entries of `rewritten`.
+        let mut rewritten = vec![];
+        for (node, inputs) in nodes.into_iter().rev() {
+            let new_inputs = rewritten.split_off(rewritten.len() - inputs.len());
+            rewritten.push(self.rewrite_plan_node(node, inputs, new_inputs).await?);
+        }
+        Ok(rewritten.pop().flatten())
+    }
+
+    /// Rewrites a single node, given the rewrite results of its `inputs`.
+    async fn rewrite_plan_node(
+        &mut self,
+        plan: &LogicalPlan,
+        inputs: Vec<&LogicalPlan>,
+        new_inputs: Vec<Option<LogicalPlan>>,
+    ) -> Result<Option<LogicalPlan>> {
         match plan {
             LogicalPlan::Projection(Projection { expr, input, .. })
                 if have_range_in_exprs(expr) =>
@@ -776,8 +797,13 @@ mod test {
     use catalog::RegisterTableRequest;
     use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_function::function::FunctionContext;
+    use common_function::function_registry::FUNCTION_REGISTRY;
+    use common_query::test_util::DummyDecoder;
     use common_time::IntervalYearMonth;
-    use datafusion_expr::{BinaryExpr, Literal, Operator, UserDefinedLogicalNodeCore};
+    use datafusion::functions_aggregate::expr_fn::avg;
+    use datafusion_common::TableReference;
+    use datafusion_expr::{BinaryExpr, Literal, Operator, UserDefinedLogicalNodeCore, col};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use session::context::{QueryContext, QueryContextBuilder};
@@ -883,19 +909,19 @@ mod test {
     async fn do_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
-        engine.planner().plan(&stmt, QueryContext::arc()).await
+        engine.planner().plan(stmt, QueryContext::arc()).await
     }
 
     async fn do_query_with_ctx(sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
         let engine = create_test_engine().await;
-        engine.planner().plan(&stmt, query_ctx).await
+        engine.planner().plan(stmt, query_ctx).await
     }
 
     async fn do_union_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_union_test_engine().await;
-        engine.planner().plan(&stmt, QueryContext::arc()).await
+        engine.planner().plan(stmt, QueryContext::arc()).await
     }
 
     async fn query_plan_compare(sql: &str, expected: String) {
@@ -1100,7 +1126,7 @@ mod test {
         let engine = create_test_engine().await;
         let plan = engine
             .planner()
-            .plan(&stmt, query_ctx.clone())
+            .plan(stmt, query_ctx.clone())
             .await
             .unwrap();
         let LogicalPlan::Extension(extension) = plan else {
@@ -1307,6 +1333,132 @@ mod test {
                 "Range Query: Cannot infer default BY columns from derived range query input"
             );
         }
+    }
+
+    #[test]
+    fn range_rewrite_deep_union_all() {
+        // Regression for #9356: release builds poll queries on 2 MiB worker stacks.
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let engine = create_test_engine().await;
+                        let table_provider = || {
+                            DfTableSourceProvider::new(
+                                engine.engine_state().catalog_manager().clone(),
+                                false,
+                                QueryContext::arc(),
+                                DummyDecoder::arc(),
+                                false,
+                            )
+                        };
+                        // Construct the plans of 400 branches joined by `UNION ALL` directly
+                        // to isolate this rewrite from other planner passes.
+                        let union_all = |select: LogicalPlan| {
+                            let mut builder = LogicalPlanBuilder::from(select.clone());
+                            for _ in 1..400 {
+                                builder = builder.union(select.clone()).unwrap();
+                            }
+                            builder
+                        };
+
+                        // `SELECT 1 AS a UNION ALL ...`
+                        let select = LogicalPlanBuilder::empty(true)
+                            .project(vec![1.lit().alias("a")])
+                            .unwrap()
+                            .build()
+                            .unwrap();
+                        let plan = RangePlanRewriter::new(table_provider(), QueryContext::arc())
+                            .rewrite(union_all(select).build().unwrap())
+                            .await
+                            .unwrap();
+                        assert!(matches!(plan, LogicalPlan::Union(_)));
+
+                        // `SELECT timestamp, tag_0, avg(field_0) RANGE '5m' FROM
+                        // (SELECT timestamp, tag_0, field_0 FROM test UNION ALL ...) ALIGN '1h' BY (tag_0)`
+                        let source = table_provider()
+                            .resolve_table(TableReference::bare("test"))
+                            .await
+                            .unwrap();
+                        let select = LogicalPlanBuilder::scan("test", source, None)
+                            .unwrap()
+                            .project(vec![col("timestamp"), col("tag_0"), col("field_0")])
+                            .unwrap()
+                            .build()
+                            .unwrap();
+                        let range_fn = FUNCTION_REGISTRY
+                            .get_function("range_fn")
+                            .unwrap()
+                            .provide(FunctionContext::default())
+                            .call(vec![
+                                Expr::Column(Column::from_name("avg(field_0)")),
+                                "5m".lit(),
+                                "".lit(),
+                                "1".lit(),
+                                col("tag_0"),
+                                "1h".lit(),
+                                "".lit(),
+                            ]);
+                        let plan = union_all(select)
+                            .aggregate(
+                                vec![col("tag_0"), col("timestamp")],
+                                vec![avg(col("field_0"))],
+                            )
+                            .unwrap()
+                            .project(vec![col("timestamp"), col("tag_0"), range_fn])
+                            .unwrap()
+                            .build()
+                            .unwrap();
+                        let plan = RangePlanRewriter::new(table_provider(), QueryContext::arc())
+                            .rewrite(plan)
+                            .await
+                            .unwrap();
+                        let LogicalPlan::Extension(extension) = plan else {
+                            panic!("expected RangeSelect rewrite output");
+                        };
+                        assert!(extension.node.as_any().is::<RangeSelect>());
+                    })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn range_deep_union_all_sql() {
+        // Regression for #9356 through the SQL planner: debug builds poll queries on 8 MiB worker
+        // stacks.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let union_all = |select: &str| vec![select; 400].join(" UNION ALL ");
+
+                        let plan = do_query(&union_all("SELECT 1 AS a")).await.unwrap();
+                        assert!(matches!(plan, LogicalPlan::Union(_)));
+
+                        let query = format!(
+                            "SELECT timestamp, tag_0, avg(field_0) RANGE '5m' FROM ({}) ALIGN '1h' BY (tag_0)",
+                            union_all("SELECT timestamp, tag_0, field_0 FROM test")
+                        );
+                        let plan = do_query(&query).await.unwrap();
+                        let LogicalPlan::Extension(extension) = plan else {
+                            panic!("expected RangeSelect rewrite output");
+                        };
+                        assert!(extension.node.as_any().is::<RangeSelect>());
+                    })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[tokio::test]
