@@ -1737,3 +1737,79 @@ async fn test_flush_runs_while_replay_writes_are_saturated() {
     assert_eq!(1, region.stored_ssts().await);
     assert!(region.has_pending_tails());
 }
+
+#[tokio::test]
+async fn test_replay_waiting_to_fence_ends_when_demoted() {
+    let region = TestRegion::new("tail-replay-fence-wait", false, None).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    let objects = region
+        .wal_store
+        .list(&format!("{}/objects/", remote_prefix()))
+        .await
+        .unwrap();
+    for object in objects {
+        region.wal_store.delete(object.path()).await.unwrap();
+    }
+    region.catchup().await;
+    wait_until(|| region.listener.failed()).await;
+
+    // The next failed round finds the newer manifest and waits for the write lock behind
+    // this read guard.
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = next_manifest_version(&mito_region).await;
+    let guard = mito_region.manifest_ctx.manifest_manager.read().await;
+    publish_delta(
+        &region.env.get_object_store().unwrap(),
+        &region.region_dir(),
+        version,
+        encode_delta(nop_action()).await,
+    )
+    .await;
+    wait_until(|| region.listener.failures.lock().unwrap().len() >= 2).await;
+    // The worker cancels the replay before the downgrade waits for the manifest lock.
+    let engine = region.engine.clone();
+    let region_id = region.region_id;
+    let downgrade = tokio::spawn(async move {
+        engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+            .await
+    });
+
+    wait_until(|| region.listener.ended() == 1).await;
+    assert!(!mito_region.manifest_ctx.is_reload_pending());
+    drop(guard);
+    downgrade.await.unwrap().unwrap();
+}
+
+#[rstest]
+#[case::fences(false, false)]
+#[case::version_changed(true, false)]
+#[case::not_writable(false, true)]
+#[tokio::test]
+async fn test_fence_for_reload_rechecks_version_and_role(
+    #[case] version_changed: bool,
+    #[case] demoted: bool,
+) {
+    let region = TestRegion::new("tail-replay-fence-recheck", false, None).await;
+    if demoted {
+        region
+            .engine
+            .set_region_role(region.region_id, RegionRole::Follower)
+            .unwrap();
+    }
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let manifest_ctx = &mito_region.manifest_ctx;
+    let mut manager = manifest_ctx.manifest_manager.write().await;
+    let installed = manager.last_version() + u64::from(version_changed);
+
+    let fenced = manifest_ctx
+        .fence_for_reload_if_installed(&mut manager, region.region_id, installed)
+        .await;
+
+    let expected = !version_changed && !demoted;
+    assert_eq!(expected, fenced);
+    assert_eq!(expected, manifest_ctx.is_reload_pending());
+}
