@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="${SCRIPT_DIR}/run-fuzz-targets.sh"
 COLLECTOR="${SCRIPT_DIR}/collect-fuzz-target-artifacts.sh"
 PREPARE_CORPUS="${SCRIPT_DIR}/prepare-fuzz-corpus.sh"
+SELECT_TARGETS="${SCRIPT_DIR}/select-fuzz-targets.py"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -66,6 +67,7 @@ run_fixture() {
   local unstable="$3"
   local fail_targets="$4"
   local artifact_root="${fixture}/artifacts"
+  local corpus_root="${5:-${fixture}/corpus with spaces}"
   local -a runner_env=(
     "PATH=${fixture}/bin:${PATH}"
     "MOCK_CARGO_LOG=${fixture}/cargo.log"
@@ -80,7 +82,7 @@ run_fixture() {
     "FUZZ_UNSTABLE=${unstable}"
     "FUZZ_COLLECT_CLUSTER_ARTIFACTS=true"
     "FUZZ_ARTIFACT_ROOT=${artifact_root}"
-    "FUZZ_CORPUS_ROOT=${fixture}/corpus with spaces"
+    "FUZZ_CORPUS_ROOT=${corpus_root}"
     "FUZZ_ARTIFACT_COLLECTOR=${fixture}/collector"
     "GT_FUZZ_BINARY_PATH=${GT_FUZZ_BINARY_PATH:-}"
     "GT_FUZZ_INSTANCE_ROOT_DIR=${GT_FUZZ_INSTANCE_ROOT_DIR:-}"
@@ -491,6 +493,31 @@ EOF
   cleanup_fixture
 }
 
+test_subset_keeps_unselected_corpus_inputs() {
+  new_fixture
+  local full_group=$'fuzz_create_table\nfuzz_insert'
+  prepare_corpus_fixture "${full_group}" "${fixture}/cache-before"
+  assert_eq 0 "${prepare_status}" "full group corpus status"
+  local corpus_root="${fixture}/workspace with spaces/tests-fuzz/corpus"
+  printf 'unselected seed\n' >"${corpus_root}/fuzz_insert/seed"
+  FUZZ_TARGETS="${full_group}" \
+    FUZZ_AFFECTED_TARGETS='{"targets":["fuzz_create_table"]}' \
+    GITHUB_OUTPUT="${fixture}/selection" \
+    python3 "${SELECT_TARGETS}" group >"${fixture}/selection.log"
+  local selected
+  selected="$(sed '1d; $d' "${fixture}/selection")"
+  assert_eq fuzz_create_table "${selected}" "selected group subset"
+  run_fixture "${selected}" true false "" "${corpus_root}"
+  assert_eq 0 "${fixture_status}" "subset run status"
+  assert_eq 1 "$(wc -l <"${fixture}/cargo.log" | tr -d ' ')" "subset invocation count"
+  assert_file "${corpus_root}/fuzz_create_table/learned"
+  assert_eq 'unselected seed' "$(cat "${corpus_root}/fuzz_insert/seed")" "unselected corpus retained"
+  [[ ! -e "${corpus_root}/fuzz_insert/learned" ]] || fail "unselected target ran"
+  prepare_corpus_fixture "${full_group}" "${fixture}/cache-after"
+  cmp -s "${fixture}/cache-before" "${fixture}/cache-after" || fail "subset changed corpus cache identity"
+  cleanup_fixture
+}
+
 test_successful_targets_run_in_order
 test_prebuilt_binary_runs_without_cargo
 test_cargo_reuses_separate_target_corpora
@@ -506,5 +533,6 @@ test_cluster_collector_honors_target_scope_and_namespace
 test_setup_failure_writes_artifact_contract
 test_setup_failure_keeps_manifest_when_collection_fails
 test_rustup_toolchain_env_is_honored
+test_subset_keeps_unselected_corpus_inputs
 
 printf 'All fuzz orchestration script tests passed.\n'

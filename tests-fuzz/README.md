@@ -123,6 +123,55 @@ done
 printf 'Comparison logs and corpora: %s\n' "${comparison_dir}"
 ```
 
+## CI Target Selection
+
+PR runs select targets inside the existing job groups using the PR base's
+`.github/scripts/select-fuzz-targets.py` and `fuzz-target-rules.toml`. Direct
+target edits map through `tests-fuzz/Cargo.toml`; the rules also cover the
+alter and repartition generators and MySQL translators. Metric-engine source
+changes select all metric targets (logical tables, repartition, migration,
+failover, and WAL pruning). Matching rules are combined. Other shared
+application code, unmapped paths, changed target declarations,
+an incomplete or stale API diff, and selection errors run the complete set.
+Renames consider both old and new paths. The first target in each existing
+group always runs as a smoke test, including groups unaffected by the diff.
+
+This is target selection, not job admission. Job names, service modes, binary
+builds, time budgets, and diagnostics stay the same. The existing full binary
+archive is still built. Selection can reduce target executions, but does not
+claim to reduce build or cluster startup time. Suite-level admission remains
+separate from this selector. The scope classifier admits jobs first; target
+selection only narrows the executions inside admitted groups. A selector result
+cannot start a job excluded by scope, event policy, or a failed script preflight.
+
+The complete group still identifies the corpus cache, even when only some
+targets execute. Unselected restored inputs are retained. The optional
+`affected-targets` action input carries the selection decision; empty or
+invalid decisions run the complete group. The first PR introducing the policy
+also runs everything because the script does not yet exist on its base.
+
+Manual fuzz runs use the complete requested profile, and scheduled fuzz runs
+use all targets. The upstream event policy runs PR fuzzing on opening a ready
+PR or marking it ready for review, skips ordinary pushes/reopening and merge
+groups, and keeps core integration checks on updates. On PRs, the `ci:full`
+label or `CI_SCOPE_FORCE_ALL` repository variable disables target narrowing;
+these overrides do not change job admission. See [Heavy CI scheduling](../.github/heavy-ci.md)
+for the event policy. Logs show the decision, matched paths, and each group's
+final target list and smoke target. The shared script-test action runs the
+selector tests before expensive jobs in Checks, Rust CI, and Integration CI.
+
+Test the selector with Python 3.11 or newer, without building Rust or starting
+services:
+
+```bash
+python3 -m unittest discover -s .github/scripts/tests -p 'test_select_fuzz_targets.py'
+bash .github/scripts/run-fuzz-targets-test.sh
+```
+
+Before narrowing another shared helper, trace all target consumers and update
+the mapping and tests together. New or unknown paths deliberately run the full
+set until they have an explicit safe mapping.
+
 ## Crash Reproduction
 If you want to reproduce a crash, you first need to obtain the Base64 encoded code, which usually appears at the end of a crash report, and store it in a file.
 
