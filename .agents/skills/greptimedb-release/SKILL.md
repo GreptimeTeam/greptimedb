@@ -62,11 +62,12 @@ publishing.
 
 **Do NOT pre-create the tag.** Creating the release creates the tag and fires the
 tag-push CI (`.github/workflows/release.yml`) that builds all binaries (**~hours**).
+Use the exact commit SHA verified for the changelog as `<verified-release-sha>`.
 Confirm with the user, then:
 ```
 gh release create vX.Y.Z \
   --repo GreptimeTeam/greptimedb \
-  --target release/vX.Y \
+  --target <verified-release-sha> \
   --title "Release vX.Y.Z" \
   --notes-file CHANGELOG-vX.Y.Z.md \
   --prerelease
@@ -78,7 +79,8 @@ gh release create vX.Y.Z \
 
 ## 4. Open the docs release-note PR (do not wait for CI)
 
-Right after triggering the release, open the docs draft PR (see the docs section of the
+Verify that the remote tag resolves to the verified release SHA (peel annotated tags);
+stop if it differs. Then open the docs draft PR (see the docs section of the
 `greptimedb-release-note` skill). It only needs the finalized changelog.
 
 Then **delete the local `CHANGELOG-vX.Y.Z.md`** (its content now lives in the release body
