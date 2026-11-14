@@ -1341,7 +1341,7 @@ impl EngineInner {
 
     /// Asks the worker to cancel the tail replay of `region` if a role change left it unable to
     /// replay. A replay may wait on I/O that never notices the role change.
-    fn notify_if_stopped_replaying(&self, region: &MitoRegion, could_replay: bool) {
+    fn notify_if_stopped_replaying(&self, region: &MitoRegionRef, could_replay: bool) {
         if could_replay && !region.can_replay_tails() {
             self.workers.notify_unwritable(region);
         }
