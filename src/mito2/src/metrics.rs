@@ -730,7 +730,8 @@ lazy_static! {
             exponential_buckets(1.0, 5.0, 6).unwrap(),
         )
         .unwrap();
-    /// Bytes of SSTs written by tail replays, including SSTs of failed rounds that were deleted.
+    /// Bytes of SSTs from completed chunk writes of tail replays, including chunks of rounds
+    /// that fail later.
     pub static ref TAIL_REPLAY_BYTES_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_tail_replay_bytes_total", "mito tail replay bytes total").unwrap();
     /// Count of SSTs written by tail replays, including SSTs of failed rounds that were deleted.
