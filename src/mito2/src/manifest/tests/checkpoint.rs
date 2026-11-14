@@ -507,11 +507,13 @@ async fn manifest_install_manifest_to_with_checkpoint() {
 async fn test_checkpoint_bypass_in_staging_mode() {
     common_telemetry::init_default_ut_logging();
     let (_env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
+    let version = manager.last_version();
 
     // Apply actions in staging mode - checkpoint should be bypassed
     for _ in 0..15 {
         manager.update(nop_action(), true).await.unwrap();
     }
+    assert_eq!(manager.last_version(), version);
     assert!(!manager.checkpointer().is_doing_checkpoint());
 
     // Verify no checkpoint was created in staging mode
@@ -524,8 +526,9 @@ async fn test_checkpoint_bypass_in_staging_mode() {
             .is_none()
     );
 
-    // Now switch to normal mode and apply one more action
-    manager.update(nop_action(), false).await.unwrap();
+    // The end of staging commits all of them as the next version.
+    let (committed_version, _) = manager.commit_staged(|| false).await.unwrap();
+    assert_eq!(committed_version, version + 1);
 
     // Wait for potential checkpoint
     while manager.checkpointer().is_doing_checkpoint() {
@@ -541,8 +544,8 @@ async fn test_checkpoint_bypass_in_staging_mode() {
     );
     let (last_version, _checkpoint_data) = checkpoint_result.unwrap();
 
-    // Checkpoint should include all 16 actions (15 from staging + 1 from writable)
-    assert_eq!(last_version, 16);
+    // Checkpoint should include the staged actions, which took one version
+    assert_eq!(last_version, version + 1);
 }
 
 /// Simulates both a rejected delete and a close failure after eager deletion.
@@ -705,7 +708,7 @@ async fn install_preserves_listed_delta_not_found_retry_hint() {
         .unwrap();
     let mut store = manager.store();
     store
-        .save(1, &nop_action().encode().unwrap(), false)
+        .save(1, &nop_action().encode().unwrap())
         .await
         .unwrap();
 
@@ -1008,6 +1011,7 @@ async fn manifest_size_warm_cache_matches_recovery_bytes(
                 .unwrap();
         let cache = ManifestCache::new(local_store, ReadableSize::mb(10), None, true).await;
         let options = RegionManifestOptions {
+            file_metadata_interner: Default::default(),
             manifest_dir: "/".to_string(),
             object_store,
             compress_type,
@@ -1110,6 +1114,7 @@ async fn manifest_cache_write_through_survives_reopen(#[case] compression: Compr
     let cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
     // Use a relative prefix, matching production keys and the recovered index.
     let mut options = RegionManifestOptions {
+        file_metadata_interner: Default::default(),
         manifest_dir: "region/".to_string(),
         object_store: remote,
         compress_type: compression,

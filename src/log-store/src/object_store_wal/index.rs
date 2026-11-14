@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use bytes::Bytes;
-use futures::{Stream, TryStreamExt};
+use futures::{FutureExt, Stream, TryStreamExt};
 use snafu::{IntoError, OptionExt, ensure};
 
 use crate::error::{CorruptedWalObjectSnafu, Error, InvalidWalObjectSnafu, Result};
@@ -124,22 +124,42 @@ pub(crate) fn chain_from(
 
 /// Fetches and verifies the headers and footers of `objects` as they are
 /// listed, up to `concurrency` objects at a time, and returns them ordered by
-/// object sequence whatever the order the fetches complete in. An object the
-/// object store no longer has is returned as vanished; a failed listing or
-/// any other failure abandons the remaining fetches.
+/// object sequence whatever the order the fetches complete in, see
+/// [`fetch_listed`].
 pub(crate) async fn fetch_footers(
     io: &dyn WalObjectRead,
     objects: impl Stream<Item = Result<ListedObject>>,
     concurrency: usize,
 ) -> Result<FetchedObjects> {
+    let (mut objects, vanished) = fetch_listed(objects, concurrency, |object| {
+        fetch_footer_with_releases(io, object)
+    })
+    .await?;
+    objects.sort_unstable_by_key(|fetched| fetched.object.object_seq);
+    Ok(FetchedObjects { objects, vanished })
+}
+
+/// Fetches `objects` as they are listed with `fetch`, up to `concurrency`
+/// objects at a time, and returns what the fetches returned, in the order
+/// they complete, and the listed objects the object store no longer had, with
+/// the error the fetch met. A failed listing or any other failure abandons the
+/// remaining fetches.
+pub(crate) async fn fetch_listed<T, F>(
+    objects: impl Stream<Item = Result<ListedObject>>,
+    concurrency: usize,
+    fetch: impl Fn(ListedObject) -> F,
+) -> Result<(Vec<T>, Vec<(u64, Error)>)>
+where
+    F: Future<Output = Result<T>>,
+{
     let outcomes = objects
-        .map_ok(|object| async move {
+        .map_ok(|object| {
             let object_seq = object.object_seq;
-            match fetch_footer_with_releases(io, object).await {
+            fetch(object).map(move |fetched| match fetched {
                 Ok(fetched) => Ok(Ok(fetched)),
                 Err(error) if is_not_found(&error) => Ok(Err((object_seq, error))),
                 Err(error) => Err(error),
-            }
+            })
         })
         .try_buffer_unordered(concurrency)
         .try_collect::<Vec<_>>()
@@ -152,12 +172,33 @@ pub(crate) async fn fetch_footers(
             Err(gone) => vanished.push(gone),
         }
     }
-    objects.sort_unstable_by_key(|fetched| fetched.object.object_seq);
-    Ok(FetchedObjects { objects, vanished })
+    Ok((objects, vanished))
 }
 
+/// Fails with the error its fetch met if an object vanished at or above
+/// `boundary`, below which a caller follows no link to a predecessor. A
+/// vanished object below it is left out: the only object there a chain can
+/// hold is its tip, whose absence the caller reports. An object at or above
+/// it, on the chain or off it, may belong to the chain or decide which chain
+/// is read or where it stops.
+pub(crate) fn ensure_vanished_below(vanished: Vec<(u64, Error)>, boundary: u64) -> Result<()> {
+    match vanished
+        .into_iter()
+        .find(|(object_seq, _)| *object_seq >= boundary)
+    {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Returns whether `error` reports an object the object store does not have,
+/// also when a load shared by several callers wraps the error.
 pub(crate) fn is_not_found(error: &Error) -> bool {
-    matches!(error, Error::WalObjectStore { error, .. } if error.kind() == object_store::ErrorKind::NotFound)
+    match error {
+        Error::WalObjectStore { error, .. } => error.kind() == object_store::ErrorKind::NotFound,
+        Error::ObjectStoreWal { source, .. } => is_not_found(source),
+        _ => false,
+    }
 }
 
 /// Reads and verifies the header and footer without copying release records.
