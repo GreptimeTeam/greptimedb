@@ -145,6 +145,7 @@ impl PermissionAction {
     }
 }
 
+pub const COPY_TO: PermissionAction = PermissionAction::read("copy.to");
 pub const PROMQL_QUERY: PermissionAction = PermissionAction::read("promql.query");
 pub const LOG_QUERY: PermissionAction = PermissionAction::read("log.query");
 pub const OPENTSDB_WRITE: PermissionAction = PermissionAction::write("opentsdb.write");
@@ -170,6 +171,7 @@ pub const SEMANTIC_GRAPH_QUERY: PermissionAction = PermissionAction::read("seman
 /// Downstream crates may define additional actions with [`PermissionAction::read`] and
 /// [`PermissionAction::write`].
 pub const ALL_ACTIONS: &[PermissionAction] = &[
+    COPY_TO,
     PROMQL_QUERY,
     LOG_QUERY,
     OPENTSDB_WRITE,

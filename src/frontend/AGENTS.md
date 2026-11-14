@@ -47,6 +47,11 @@ including caches owned by pipeline and protocol handlers.
   MySQL sessions without a selected database validate explicit scopes before
   planning or executing SQL, including prepared statements; unqualified targets
   fail without falling back to `public`.
+- **COPY DATABASE** (`instance.rs`, `instance/export_database.rs`): capture export
+  tables or prepare import requests, authorize the complete resolved target set,
+  then execute that same set. Export checks both SQL write permission and
+  `COPY_TO` read permission; import permission failures must not be swallowed by
+  `continue_on_error`.
 - **Exemplar query** (`instance/exemplar.rs`): authorize all selector branches
   before calling `PromQueryInterceptor::pre_execute_exemplars` for each resolved
   exemplar table, with that table's schema context, before scanning it.
