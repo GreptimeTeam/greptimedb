@@ -30,6 +30,22 @@ pub const FLOW_INCREMENTAL_AFTER_SEQS: &str = "flow.incremental_after_seqs";
 pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
 pub const FLOW_RETURN_REGION_SEQ: &str = "flow.return_region_seq";
 pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
+/// Memory budget a Flow declares for a query it is about to run, as a decimal
+/// byte count.
+///
+/// The process that executes the query turns this into a process-local memory
+/// pool (see `query::datafusion::DatafusionQueryEngine::flow_memory_scope` for
+/// the payload format and the trust boundary). The pool is nested under the
+/// node-wide `query.memory_pool_size` pool, so a Flow can only use memory the
+/// process could have reserved anyway, and a single over-budget Flow fails its
+/// own query instead of taking the process down.
+///
+/// `0`, an empty value and a value that is not a decimal byte count all mean
+/// "no budget declared": the query then runs against the engine memory pool.
+pub const FLOW_MAX_MEMORY_BYTES: &str = "flow.max_memory_bytes";
+/// Id of the Flow that issued the query, used to tie memory-pool logs (and
+/// therefore exhaustion errors) to the Flow that caused them.
+pub const FLOW_ID: &str = "flow.flow_id";
 /// Flow scheduler binding for the logical time of one scheduled attempt.
 /// Query planning, SQL/TQL parsing, range-select rewrite and DataFusion
 /// execution read this extension so `now()` is stable for the whole attempt.

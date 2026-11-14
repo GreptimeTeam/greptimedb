@@ -760,6 +760,26 @@ impl Instance {
             return vec![error::SuspendedSnafu {}.fail()];
         }
 
+        // Record the Flow memory scope before parsing, planning and table lookup
+        // capture the context, so every nested execution of this request shares
+        // one budget (see `QueryEngine::with_flow_memory_scope_fallible`). This is
+        // the same attachment as the gRPC entry and is a no-op for a request that
+        // declares no budget or whose context already carries a scope.
+        //
+        // The resolution is fallible and rejects a budget this build does not
+        // support *before* the statement is dispatched: not every statement
+        // reaches `engine_context` (a literal `INSERT ... VALUES` is written
+        // through the statement executor's fast path), so relying on the engine
+        // to refuse it later would let such a statement run unbudgeted.
+        let query_ctx = match self
+            .query_engine()
+            .with_flow_memory_scope_fallible(query_ctx)
+            .context(ExecLogicalPlanSnafu)
+        {
+            Ok(query_ctx) => query_ctx,
+            Err(e) => return vec![Err(e)],
+        };
+
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -3500,6 +3520,305 @@ mod tests {
         assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
 
         Ok(())
+    }
+
+    /// Captures the context SQL execution receives, i.e. the context planning,
+    /// table lookup and every nested engine execution run under.
+    struct CapturingQueryContextInterceptor {
+        captured: std::sync::Mutex<Option<QueryContextRef>>,
+    }
+
+    impl CapturingQueryContextInterceptor {
+        fn new() -> Self {
+            Self {
+                captured: std::sync::Mutex::new(None),
+            }
+        }
+
+        /// The context SQL execution received, or `None` when the request never
+        /// got past the entry (it is refused before parsing).
+        fn take(&self) -> Option<QueryContextRef> {
+            self.captured.lock().unwrap().take()
+        }
+
+        /// Like [`Self::take`], for a request that must have reached execution.
+        fn take_captured(&self) -> QueryContextRef {
+            self.take().expect("the query reached execution")
+        }
+    }
+
+    impl SqlQueryInterceptor for CapturingQueryContextInterceptor {
+        type Error = Error;
+
+        fn pre_parsing<'a>(
+            &self,
+            query: &'a str,
+            query_ctx: QueryContextRef,
+        ) -> Result<std::borrow::Cow<'a, str>> {
+            *self.captured.lock().unwrap() = Some(query_ctx);
+            Ok(std::borrow::Cow::Borrowed(query))
+        }
+    }
+
+    /// A Flow's declared memory budget must be resolved at the request entry: the
+    /// context is captured during table lookup - before `engine_context` runs -
+    /// and re-entered later, so a scope attached only there would never reach it.
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_grpc_do_query_attaches_flow_memory_scope_before_execution() -> TestResult<()> {
+        let interceptor = Arc::new(CapturingQueryContextInterceptor::new());
+        let instance = test_instance_with_insert_select_interceptor(interceptor.clone()).await?;
+
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    query::options::FLOW_MAX_MEMORY_BYTES.to_string(),
+                    "4096".to_string(),
+                )
+                .set_extension(query::options::FLOW_ID.to_string(), "42".to_string())
+                .build(),
+        );
+        let request = Request::Query(api::v1::QueryRequest {
+            query: Some(Query::Sql("SELECT 1".to_string())),
+        });
+        servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+
+        // The captured context - the one planning and table lookup see - carries
+        // the scope the entry resolved, on a fork of the incoming context.
+        let captured = interceptor.take_captured();
+        assert!(!Arc::ptr_eq(&captured, &query_ctx));
+        let scope = captured
+            .memory_scope()
+            .expect("scope is recorded before planning");
+        assert_eq!("flow:42", scope.label());
+        assert!(matches!(
+            scope.pool().memory_limit(),
+            datafusion::execution::memory_pool::MemoryLimit::Finite(4096)
+        ));
+        // The caller's context is not mutated: a live pool never leaks out of the
+        // request.
+        assert!(query_ctx.memory_scope().is_none());
+
+        // Entering the engine again with that captured context - what a nested
+        // execution does - reuses one and the same pool.
+        let first = instance
+            .query_engine()
+            .engine_context(captured.clone())
+            .unwrap();
+        let nested = instance
+            .query_engine()
+            .engine_context(first.query_ctx().clone())
+            .unwrap();
+        let first_pool = first.query_ctx().memory_scope().expect("scope").pool();
+        let nested_pool = nested.query_ctx().memory_scope().expect("scope").pool();
+        assert!(Arc::ptr_eq(&first_pool, &nested_pool));
+        assert!(Arc::ptr_eq(&first_pool, &scope.pool()));
+
+        // Shared budget: what the first entry reserved is gone from the second.
+        let reservation = datafusion::execution::memory_pool::MemoryConsumer::new("flow_42")
+            .register(&first_pool);
+        reservation.try_grow(4096).unwrap();
+        assert_eq!(4096, nested_pool.reserved());
+
+        Ok(())
+    }
+
+    /// `max_memory` is an enterprise flow option: a default build must fail a
+    /// request that declares a budget instead of running it on the node pool,
+    /// where the missing limit would be invisible.
+    #[cfg(not(feature = "enterprise"))]
+    #[tokio::test]
+    async fn test_grpc_do_query_rejects_flow_memory_budget_on_default_build() -> TestResult<()> {
+        let interceptor = Arc::new(CapturingQueryContextInterceptor::new());
+        let instance = test_instance_with_insert_select_interceptor(interceptor.clone()).await?;
+
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    query::options::FLOW_MAX_MEMORY_BYTES.to_string(),
+                    "4096".to_string(),
+                )
+                .set_extension(query::options::FLOW_ID.to_string(), "42".to_string())
+                .build(),
+        );
+        let request = Request::Query(api::v1::QueryRequest {
+            query: Some(Query::Sql("SELECT 1".to_string())),
+        });
+        let err = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(StatusCode::Unsupported, err.status_code());
+        assert!(
+            err.output_msg()
+                .contains("flow option `max_memory` requires the enterprise edition"),
+            "unexpected error: {}",
+            err.output_msg()
+        );
+        // The request entry never mutates the caller's context...
+        assert!(query_ctx.memory_scope().is_none());
+        // ...and the request is refused by the entry: SQL execution never starts,
+        // so no statement can run under the budget the build cannot enforce.
+        assert!(interceptor.take().is_none());
+
+        Ok(())
+    }
+
+    /// A literal `INSERT ... VALUES` is served by the statement executor's fast
+    /// path, which never builds an engine context: the request entry is the only
+    /// place a budget this build cannot enforce can refuse it.
+    #[cfg(not(feature = "enterprise"))]
+    #[tokio::test]
+    async fn test_literal_insert_with_flow_memory_budget_is_rejected_at_entry() -> TestResult<()> {
+        let interceptor = Arc::new(CapturingQueryContextInterceptor::new());
+        let instance = test_instance_with_insert_select_interceptor(interceptor.clone()).await?;
+
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    query::options::FLOW_MAX_MEMORY_BYTES.to_string(),
+                    "1024".to_string(),
+                )
+                .build(),
+        );
+        let err = match insert_literal_into_target(&instance, query_ctx.clone()).await {
+            Ok(_) => panic!("a budget this build cannot enforce must refuse the insert"),
+            Err(TestError::ExecuteSql { source, .. }) => source,
+            Err(e) => return Err(e),
+        };
+
+        // The refusal is the engine's `UnsupportedFlowMemoryBudget`, surfaced by
+        // the entry before the statement was even parsed.
+        assert_eq!(StatusCode::Unsupported, err.status_code());
+        assert!(
+            matches!(
+                &err,
+                Error::ExecLogicalPlan {
+                    source: query::error::Error::UnsupportedFlowMemoryBudget { .. },
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            err.output_msg()
+                .contains("flow option `max_memory` requires the enterprise edition"),
+            "unexpected error: {}",
+            err.output_msg()
+        );
+        // The statement never reached parsing - let alone the write path - so no
+        // row could have been written.
+        assert!(interceptor.take().is_none());
+        assert_eq!(0, count_target_rows(&instance).await?);
+        // The caller's context is left alone.
+        assert!(query_ctx.memory_scope().is_none());
+
+        Ok(())
+    }
+
+    /// The same literal insert without a declared budget is unaffected: the entry
+    /// resolution is a no-op, so the statement is dispatched exactly as before.
+    #[tokio::test]
+    async fn test_literal_insert_without_flow_memory_budget_is_dispatched() -> TestResult<()> {
+        let interceptor = Arc::new(CapturingQueryContextInterceptor::new());
+        let instance = test_instance_with_insert_select_interceptor(interceptor.clone()).await?;
+
+        let outcome = insert_literal_into_target(&instance, test_query_ctx(1)).await;
+
+        // The statement ran: parsing saw the context, so the entry did not refuse
+        // a request that declares no budget.
+        let captured = interceptor.take_captured();
+        assert!(captured.memory_scope().is_none());
+        // The test instance has no datanode to route the write to, so the insert
+        // itself cannot complete here; what matters for this test is that it is
+        // not refused with the enterprise-only error.
+        match outcome {
+            Ok(output) => assert!(matches!(output.data, OutputData::AffectedRows(_))),
+            Err(TestError::ExecuteSql { source, .. }) => assert_ne!(
+                StatusCode::Unsupported,
+                source.status_code(),
+                "a request that declares no budget must not be rejected: {source}"
+            ),
+            Err(e) => return Err(e),
+        }
+        assert_eq!(0, count_target_rows(&instance).await?);
+
+        Ok(())
+    }
+
+    /// On an enterprise build the declared budget is accepted, so the same
+    /// literal insert is dispatched instead of being refused.
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_literal_insert_with_flow_memory_budget_is_dispatched_on_enterprise()
+    -> TestResult<()> {
+        let interceptor = Arc::new(CapturingQueryContextInterceptor::new());
+        let instance = test_instance_with_insert_select_interceptor(interceptor.clone()).await?;
+
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    query::options::FLOW_MAX_MEMORY_BYTES.to_string(),
+                    "1024".to_string(),
+                )
+                .set_extension(query::options::FLOW_ID.to_string(), "42".to_string())
+                .build(),
+        );
+        let outcome = insert_literal_into_target(&instance, query_ctx).await;
+
+        // Accepted at the entry: the statement is executed under the Flow's pool.
+        let captured = interceptor.take_captured();
+        assert_eq!("flow:42", captured.memory_scope().expect("scope").label());
+        match outcome {
+            Ok(output) => assert!(matches!(output.data, OutputData::AffectedRows(_))),
+            Err(TestError::ExecuteSql { source, .. }) => assert_ne!(
+                StatusCode::Unsupported,
+                source.status_code(),
+                "an enterprise build accepts the budget, so it must not be rejected: {source}"
+            ),
+            Err(e) => return Err(e),
+        }
+
+        Ok(())
+    }
+
+    /// The literal `INSERT ... VALUES` the entry-level budget check must cover: it
+    /// takes the statement executor's fast path and never builds an engine
+    /// context.
+    async fn insert_literal_into_target(
+        instance: &Instance,
+        query_ctx: QueryContextRef,
+    ) -> TestResult<Output> {
+        execute_one_sql(
+            instance,
+            "INSERT INTO target(id, ts) VALUES (1, '2026-01-01 00:00:00')",
+            query_ctx,
+        )
+        .await
+    }
+
+    /// Counts the rows of the `target` table through the ordinary SQL path, so a
+    /// test can assert that a refused insert wrote nothing.
+    async fn count_target_rows(instance: &Instance) -> TestResult<u64> {
+        let output =
+            execute_one_sql(instance, "SELECT count(*) FROM target", test_query_ctx(7)).await?;
+        let pretty = output.data.pretty_print().await;
+        // The single value row is the only line that parses as a number; the
+        // header and the table borders do not.
+        let count = pretty
+            .lines()
+            .find_map(|line| line.trim().trim_matches('|').trim().parse::<u64>().ok());
+        Ok(count.unwrap_or_else(|| panic!("unexpected count output:\n{pretty}")))
     }
 
     #[tokio::test]

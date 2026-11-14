@@ -39,6 +39,7 @@ use datafusion::execution::memory_pool::{
     FairSpillPool, GreedyMemoryPool, MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation,
     TrackConsumersPool,
 };
+use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
@@ -98,6 +99,10 @@ use crate::region_query::RegionQueryHandlerRef;
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: SessionContext,
+    /// Runtime environment the engine was built with. Kept so a single logical
+    /// unit of work can run against the same disk/cache/object-store resources
+    /// with a different memory pool. See [`QueryEngineState::runtime_env_with_memory_pool`].
+    runtime_env: Arc<RuntimeEnv>,
     catalog_manager: CatalogManagerRef,
     dyn_filter_registry_manager: Arc<DynFilterRegistryManager>,
     function_state: Arc<FunctionState>,
@@ -291,7 +296,7 @@ impl QueryEngineState {
 
         let session_state = SessionStateBuilder::new()
             .with_config(session_config)
-            .with_runtime_env(runtime_env)
+            .with_runtime_env(runtime_env.clone())
             .with_default_features()
             .with_analyzer_rules(analyzer.rules)
             .with_serializer_registry(Arc::new(DefaultSerializer))
@@ -310,6 +315,7 @@ impl QueryEngineState {
 
         Ok(Self {
             df_context,
+            runtime_env,
             catalog_manager: catalog_list,
             dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
             function_state: Arc::new(FunctionState {
@@ -567,6 +573,29 @@ impl QueryEngineState {
         self.df_context.state()
     }
 
+    /// Returns the engine's runtime environment with `flow_pool` nested on top
+    /// of the engine-configured memory pool.
+    ///
+    /// The scope never replaces the node-wide pool: every tracked reservation a
+    /// scoped query makes is charged to both `flow_pool` and the pool built from
+    /// `query.memory_pool_size`. Under the default `Greedy` policy that keeps the
+    /// node's total within its limit; the experimental `Fair` policy keeps its own
+    /// pre-existing fair-share semantics, so it does not bound the node's absolute
+    /// total. See [`NestedMemoryPool`].
+    ///
+    /// All other runtime components (disk manager, cache manager, object store
+    /// registry) are shared with the engine-configured environment instead of
+    /// being rebuilt, so a scoped runtime neither acquires a second spill budget
+    /// nor loses the engine's registered object stores.
+    pub fn runtime_env_with_memory_pool(&self, flow_pool: Arc<dyn MemoryPool>) -> Arc<RuntimeEnv> {
+        let mut runtime_env = (*self.runtime_env).clone();
+        runtime_env.memory_pool = Arc::new(NestedMemoryPool::new(
+            self.runtime_env.memory_pool.clone(),
+            flow_pool,
+        ));
+        Arc::new(runtime_env)
+    }
+
     /// Create a DataFrame for a table
     pub fn read_table(&self, table: TableRef) -> DfResult<DataFrame> {
         self.df_context
@@ -685,6 +714,157 @@ impl DfQueryPlanner {
         Self {
             physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),
         }
+    }
+}
+
+/// Number of top memory consumers reported in OOM errors of scoped pools.
+const SCOPED_POOL_TOP_CONSUMERS: usize = 5;
+
+/// Builds the bounded memory pool that a single logical unit of work (for
+/// example one Flow) runs its plan against, honoring the same allocation policy
+/// as `query.memory_pool_size`.
+///
+/// The pool tracks its top consumers so OOM errors keep the same "top
+/// consumers" context the query engine reports. It is deliberately not
+/// metric-wrapped: [`MetricsMemoryPool`] publishes process-global gauges, so
+/// several scoped pools would overwrite each other's usage metric.
+///
+/// `limit` is a hard byte budget: `0` yields a zero-byte pool, not an unbounded
+/// one. Callers that want the engine-wide pool should leave the query context's
+/// memory scope unset instead of building a pool with `0`.
+///
+/// The bound is only as strict as the policy's `try_grow`: `Greedy` rejects any
+/// growth that would push the tracked total past `limit`, `Fair` rejects a
+/// spillable growth past the consumer's fair share (so the total can exceed
+/// `limit`), and the infallible `grow` is never rejected by either. The budget
+/// therefore bounds tracked, spill-checkable reservations rather than RSS. See
+/// [`NestedMemoryPool`].
+pub fn new_flow_memory_pool(limit: usize, policy: QueryMemoryPoolPolicy) -> Arc<dyn MemoryPool> {
+    // `SCOPED_POOL_TOP_CONSUMERS` is non-zero; `MIN` keeps this panic-free.
+    let top_n = NonZeroUsize::new(SCOPED_POOL_TOP_CONSUMERS).unwrap_or(NonZeroUsize::MIN);
+    match policy {
+        QueryMemoryPoolPolicy::Greedy => {
+            Arc::new(TrackConsumersPool::new(GreedyMemoryPool::new(limit), top_n))
+        }
+        QueryMemoryPoolPolicy::Fair => {
+            Arc::new(TrackConsumersPool::new(FairSpillPool::new(limit), top_n))
+        }
+    }
+}
+
+/// A [`MemoryPool`] charging every tracked reservation to a node-wide pool and
+/// to a narrower per-flow budget at the same time.
+///
+/// A scoped query must not bypass the node-wide pool built from
+/// `query.memory_pool_size`: if the flow budget replaced it, N flows could each
+/// reserve their whole budget while ordinary queries kept reserving from the
+/// node pool, and the process could exceed the node limit. Charging both pools
+/// keeps these bounds:
+///
+/// ```text
+/// each scoped query <= its flow budget
+/// Greedy (default): sum of flow reserves + ordinary reserves <= node limit
+/// ```
+///
+/// The node-wide bound is a property of the *Greedy* policy (the default), where
+/// `try_grow` is checked against the pool total: every tracked reservation is
+/// charged to both pools, so their sum stays within the node limit. The
+/// experimental *Fair* policy (DataFusion's `FairSpillPool`) keeps its own
+/// pre-existing semantics - a spillable consumer's growth is checked against its
+/// current fair share, `(pool_size - unspillable) / num_spill`, not against the
+/// pool total - so a spillable consumer can exceed the node's total when that
+/// share grows or shrinks. This wrapper only forwards to that policy; it neither
+/// introduces nor tightens the behaviour, so the node's absolute total is not
+/// guaranteed under `Fair`.
+///
+/// In both policies only [`MemoryPool::try_grow`] is enforced, because that is
+/// the only place DataFusion consults the pool before allocating. The infallible
+/// [`MemoryPool::grow`] is forwarded to both pools without any check or rollback
+/// (`GreedyMemoryPool::grow` and `FairSpillPool::grow` both add unconditionally),
+/// so it is charged but never rejected: the budget bounds tracked,
+/// spill-checkable reservations, not process RSS.
+///
+/// The flow pool is the reporting side: [`MemoryPool::name`],
+/// [`MemoryPool::memory_limit`] and [`MemoryPool::reserved`] report the flow
+/// scope, because that is the tighter bound a single scoped query runs under.
+/// Note that [`MemoryPool::reserved`] is the flow's reservation, which is
+/// *also* counted in the node pool's `reserved()`.
+#[derive(Debug)]
+pub(super) struct NestedMemoryPool {
+    /// Node-wide pool of the engine (`query.memory_pool_size`), shared by every
+    /// query of this process.
+    node: Arc<dyn MemoryPool>,
+    /// Budget of the single flow the scoped query belongs to.
+    flow: Arc<dyn MemoryPool>,
+}
+
+impl NestedMemoryPool {
+    /// Nests `flow` inside `node`.
+    pub(super) fn new(node: Arc<dyn MemoryPool>, flow: Arc<dyn MemoryPool>) -> Self {
+        Self { node, flow }
+    }
+}
+
+impl fmt::Display for NestedMemoryPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}(node: {}, flow: {})",
+            self.name(),
+            self.node,
+            self.flow
+        )
+    }
+}
+
+impl MemoryPool for NestedMemoryPool {
+    fn name(&self) -> &str {
+        "flow-scoped"
+    }
+
+    fn register(&self, consumer: &MemoryConsumer) {
+        // A consumer must be known to both pools, otherwise the pool that
+        // misses the registration cannot account for its reservations (or, for
+        // `FairSpillPool`, cannot compute a fair share).
+        self.node.register(consumer);
+        self.flow.register(consumer);
+    }
+
+    fn unregister(&self, consumer: &MemoryConsumer) {
+        self.flow.unregister(consumer);
+        self.node.unregister(consumer);
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.node.grow(reservation, additional);
+        self.flow.grow(reservation, additional);
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        self.flow.shrink(reservation, shrink);
+        self.node.shrink(reservation, shrink);
+    }
+
+    fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> DfResult<()> {
+        // Node first: when the node is out of budget no flow gets the memory,
+        // and the node's own error (with its top consumers) is reported.
+        self.node.try_grow(reservation, additional)?;
+        if let Err(error) = self.flow.try_grow(reservation, additional) {
+            // The node charge was already taken but the flow refused, so give
+            // the node reservation back before reporting the flow error, which
+            // names the (tighter) limit the caller actually hit.
+            self.node.shrink(reservation, additional);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn reserved(&self) -> usize {
+        self.flow.reserved()
+    }
+
+    fn memory_limit(&self) -> MemoryLimit {
+        self.flow.memory_limit()
     }
 }
 
@@ -883,6 +1063,176 @@ mod tests {
                 .memory_limit(),
             DfMemoryLimit::Finite(1024)
         ));
+    }
+
+    #[test]
+    fn runtime_env_with_memory_pool_swaps_only_the_pool() {
+        let state = new_query_engine_state_with(
+            Plugins::default(),
+            QueryOptions {
+                memory_pool_size: MemoryLimit::Size(ReadableSize(1024)),
+                ..Default::default()
+            },
+        );
+
+        let pool = new_flow_memory_pool(4096, QueryMemoryPoolPolicy::Fair);
+        // A scoped pool must not publish the node-wide query memory metrics.
+        assert!(!pool.is::<MetricsMemoryPool>());
+        let scoped = state.runtime_env_with_memory_pool(pool.clone());
+
+        // The scoped runtime reports the flow bound... The pool is no longer
+        // the flow pool itself: it is a `NestedMemoryPool` wrapping it, so the
+        // reporting assertions replace the previous `Arc::ptr_eq`.
+        assert!(matches!(
+            scoped.memory_pool.memory_limit(),
+            DfMemoryLimit::Finite(4096)
+        ));
+        assert_eq!("flow-scoped", scoped.memory_pool.name());
+        assert_eq!(0, pool.reserved());
+        assert_eq!(0, scoped.memory_pool.reserved());
+        // ...while every other runtime component stays shared with the engine
+        // instead of being rebuilt (no second spill budget, same object stores).
+        assert!(Arc::ptr_eq(
+            &scoped.disk_manager,
+            &state.runtime_env.disk_manager
+        ));
+        assert!(Arc::ptr_eq(
+            &scoped.cache_manager,
+            &state.runtime_env.cache_manager
+        ));
+        assert!(Arc::ptr_eq(
+            &scoped.object_store_registry,
+            &state.runtime_env.object_store_registry
+        ));
+        // The engine-configured state keeps its own pool.
+        assert!(matches!(
+            state
+                .session_state()
+                .runtime_env()
+                .memory_pool
+                .memory_limit(),
+            DfMemoryLimit::Finite(1024)
+        ));
+    }
+
+    #[test]
+    fn nested_memory_pool_rejects_scoped_reservation_over_the_node_limit() {
+        // Node pool of 100B and a looser 4KB flow budget: only the node pool can
+        // reject, so a scoped query cannot spend more than the node allows.
+        let node: Arc<dyn MemoryPool> =
+            Arc::new(MetricsMemoryPool::new(100, QueryMemoryPoolPolicy::Greedy));
+        let flow = new_flow_memory_pool(4096, QueryMemoryPoolPolicy::Fair);
+        let pool: Arc<dyn MemoryPool> = Arc::new(NestedMemoryPool::new(node.clone(), flow.clone()));
+
+        // Name and limit report the scope, which is the tighter bound a scoped
+        // query runs under.
+        assert_eq!("flow-scoped", pool.name());
+        assert!(matches!(pool.memory_limit(), DfMemoryLimit::Finite(4096)));
+        assert!(format!("{pool}").starts_with("flow-scoped(node: "));
+
+        let reservation = MemoryConsumer::new("scoped").register(&pool);
+        let error = reservation.try_grow(101).unwrap_err();
+        assert!(matches!(error, DataFusionError::ResourcesExhausted(_)));
+        // The node pool rejected and its error is reported unchanged (the flow
+        // budget was never reached).
+        assert!(format!("{error}").contains("100.0 B"));
+        assert!(!format!("{error}").contains("4.0 KB"));
+        // Neither pool keeps a charge and the reservation did not grow.
+        assert_eq!(0, node.reserved());
+        assert_eq!(0, flow.reserved());
+        assert_eq!(0, reservation.size());
+
+        // Exactly at the node limit both pools are charged.
+        reservation.try_grow(100).unwrap();
+        assert_eq!(100, node.reserved());
+        assert_eq!(100, flow.reserved());
+        assert_eq!(100, pool.reserved());
+        assert_eq!(100, reservation.size());
+    }
+
+    #[test]
+    fn nested_memory_pools_share_the_node_budget_across_flows() {
+        // One 100B node pool, two independent flows with 4KB budgets each.
+        let node: Arc<dyn MemoryPool> =
+            Arc::new(MetricsMemoryPool::new(100, QueryMemoryPoolPolicy::Greedy));
+        let flow_a = new_flow_memory_pool(4096, QueryMemoryPoolPolicy::Fair);
+        let flow_b = new_flow_memory_pool(4096, QueryMemoryPoolPolicy::Fair);
+        let scope_a: Arc<dyn MemoryPool> =
+            Arc::new(NestedMemoryPool::new(node.clone(), flow_a.clone()));
+        let scope_b: Arc<dyn MemoryPool> =
+            Arc::new(NestedMemoryPool::new(node.clone(), flow_b.clone()));
+
+        let a = MemoryConsumer::new("flow_a").register(&scope_a);
+        let b = MemoryConsumer::new("flow_b").register(&scope_b);
+
+        // Flow A takes 60 of the node's 100 bytes...
+        a.try_grow(60).unwrap();
+        // ...so flow B only gets the remaining 40 even though its own budget is
+        // 4KB. Without nesting, both flows could take 4KB each.
+        b.try_grow(41).unwrap_err();
+        assert_eq!(0, b.size());
+        b.try_grow(40).unwrap();
+
+        assert_eq!(100, node.reserved());
+        assert_eq!(60, flow_a.reserved());
+        assert_eq!(40, flow_b.reserved());
+        assert_eq!(60, scope_a.reserved());
+        assert_eq!(40, scope_b.reserved());
+
+        // With the node pool full, even one more byte of flow A is refused.
+        let error = a.try_grow(1).unwrap_err();
+        assert!(matches!(error, DataFusionError::ResourcesExhausted(_)));
+        assert_eq!(100, node.reserved());
+        assert_eq!(60, flow_a.reserved());
+    }
+
+    #[test]
+    fn nested_memory_pool_rolls_back_the_node_charge_when_the_flow_refuses() {
+        // Node pool of 1KB and a tight 100B flow budget: the flow is the
+        // binding limit, so the node charge must be undone on rejection.
+        let node: Arc<dyn MemoryPool> =
+            Arc::new(MetricsMemoryPool::new(1024, QueryMemoryPoolPolicy::Greedy));
+        let flow = new_flow_memory_pool(100, QueryMemoryPoolPolicy::Fair);
+        let pool: Arc<dyn MemoryPool> = Arc::new(NestedMemoryPool::new(node.clone(), flow.clone()));
+
+        let reservation = MemoryConsumer::new("scoped").register(&pool);
+        reservation.try_grow(60).unwrap();
+        assert_eq!(60, node.reserved());
+        assert_eq!(60, flow.reserved());
+
+        // The node would accept 41 more bytes, the flow refuses them.
+        let error = reservation.try_grow(41).unwrap_err();
+        assert!(matches!(error, DataFusionError::ResourcesExhausted(_)));
+        // The flow's error (and its limit) is reported, not the node's.
+        assert!(format!("{error}").contains("100.0 B"));
+        assert!(!format!("{error}").contains("1.0 KB"));
+
+        // Rollback: the node keeps only what both pools granted.
+        assert_eq!(60, node.reserved());
+        assert_eq!(60, flow.reserved());
+        assert_eq!(60, pool.reserved());
+        assert_eq!(60, reservation.size());
+    }
+
+    #[test]
+    fn nested_memory_pool_with_unbounded_node_pool_enforces_only_the_flow_budget() {
+        // `query.memory_pool_size = 0` leaves the engine on DataFusion's
+        // unbounded pool; the wrapper must then enforce nothing at node level
+        // while still accounting every byte there.
+        let node: Arc<dyn MemoryPool> =
+            Arc::new(datafusion::execution::memory_pool::UnboundedMemoryPool::default());
+        let flow = new_flow_memory_pool(100, QueryMemoryPoolPolicy::Greedy);
+        let pool: Arc<dyn MemoryPool> = Arc::new(NestedMemoryPool::new(node.clone(), flow.clone()));
+        assert!(matches!(pool.memory_limit(), DfMemoryLimit::Finite(100)));
+
+        let reservation = MemoryConsumer::new("scoped").register(&pool);
+        reservation.try_grow(101).unwrap_err();
+        assert_eq!(0, node.reserved());
+        assert_eq!(0, flow.reserved());
+
+        reservation.try_grow(100).unwrap();
+        assert_eq!(100, node.reserved());
+        assert_eq!(100, flow.reserved());
     }
 
     #[test]

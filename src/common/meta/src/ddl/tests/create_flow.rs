@@ -25,6 +25,8 @@ use common_procedure_test::execute_procedure_until_done;
 use table::table_name::TableName;
 
 use crate::ddl::DdlContext;
+#[cfg(feature = "enterprise")]
+use crate::ddl::create_flow::FLOW_MAX_MEMORY_OPTION_KEY;
 use crate::ddl::create_flow::{
     CreateFlowData, CreateFlowProcedure, CreateFlowState, DEFER_ON_MISSING_SOURCE_KEY,
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, ceil_to_whole_sec,
@@ -341,11 +343,131 @@ fn test_validate_flow_options_unknown_option_matches_invalid_sql_error() {
 
     let err = validate_flow_options(&task).unwrap_err();
     assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    // `max_memory` is an enterprise-only flow option, so the supported list (and
+    // therefore the whole message) depends on the build.
+    let supported = if cfg!(feature = "enterprise") {
+        "defer_on_missing_source, experimental_enable_incremental_read, max_memory"
+    } else {
+        "defer_on_missing_source, experimental_enable_incremental_read"
+    };
     assert_eq!(
-        "Invalid SQL, error: unknown flow option 'foo', supported options: defer_on_missing_source, experimental_enable_incremental_read",
+        format!("Invalid SQL, error: unknown flow option 'foo', supported options: {supported}"),
         err.output_msg()
     );
     assert!(!err.output_msg().contains("sensitive-value"));
+}
+
+/// A default build does not support the `max_memory` flow option: it must be
+/// rejected as an unknown option, and the error must not advertise it.
+#[cfg(not(feature = "enterprise"))]
+#[test]
+fn test_validate_flow_options_rejects_max_memory_on_default_build() {
+    // The key is spelled out on purpose: the constant is only exported as a
+    // supported option by the enterprise build.
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options
+        .insert("max_memory".to_string(), "512MB".to_string());
+
+    let err = validate_flow_options(&task).unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    assert_eq!(
+        "Invalid SQL, error: unknown flow option 'max_memory', supported options: defer_on_missing_source, experimental_enable_incremental_read",
+        err.output_msg()
+    );
+    assert!(!err.output_msg().contains("max_memory, "));
+}
+
+#[cfg(feature = "enterprise")]
+#[test]
+fn test_validate_flow_options_accepts_max_memory() {
+    for value in ["512MB", "1073741824", "1GiB"] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.flow_options
+            .insert(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), value.to_string());
+
+        validate_flow_options(&task).unwrap();
+    }
+}
+
+#[cfg(feature = "enterprise")]
+#[test]
+fn test_validate_flow_options_rejects_invalid_max_memory() {
+    for value in ["not-a-size", "0", "0B"] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.flow_options
+            .insert(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), value.to_string());
+
+        let err = validate_flow_options(&task).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert!(
+            err.output_msg()
+                .contains(&format!("Invalid flow option 'max_memory': {value}")),
+            "unexpected error for {value}: {err}"
+        );
+    }
+}
+
+#[cfg(feature = "enterprise")]
+#[test]
+fn test_validate_flow_options_rejects_max_memory_for_streaming_flows() {
+    let mut streaming = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    streaming.flow_options.insert(
+        FlowType::FLOW_TYPE_KEY.to_string(),
+        FlowType::STREAMING.to_string(),
+    );
+    streaming
+        .flow_options
+        .insert(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), "512MB".to_string());
+
+    let err = validate_flow_options(&streaming).unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    assert!(
+        err.output_msg()
+            .contains("flow option 'max_memory' is only supported for batching flows"),
+        "unexpected error: {err}"
+    );
+
+    // The same option on a batching flow (explicit or default) stays accepted,
+    // with or without the `max_memory` option itself.
+    for flow_type in [Some(FlowType::BATCHING), None] {
+        let mut batching = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        if let Some(flow_type) = flow_type {
+            batching
+                .flow_options
+                .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type.to_string());
+        }
+        validate_flow_options(&batching).unwrap();
+
+        batching
+            .flow_options
+            .insert(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), "512MB".to_string());
+        validate_flow_options(&batching).unwrap();
+    }
 }
 
 #[test]
