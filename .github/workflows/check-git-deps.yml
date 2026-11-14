@@ -3,15 +3,33 @@ name: Check Git Dependencies on Main Branch
 on:
     pull_request:
         types: [opened, synchronize, reopened, ready_for_review]
-        branches: [main]
+        branches: [main, 'release/v*']
         paths:
             - 'Cargo.toml'
+            - 'scripts/check-datafusion-pin.sh'
     push:
-        branches: [main]
+        branches: [main, 'release/v*']
         paths:
             - 'Cargo.toml'
+            - 'scripts/check-datafusion-pin.sh'
 
 jobs:
+    check-datafusion-pin:
+        if: ${{ github.event.pull_request.draft == false }}
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v6
+
+            - name: Check the DataFusion pin is on an allowed fork branch
+              env:
+                  # A pin to an unmerged PR branch silently drops that branch's
+                  # content on the next bump; keep every pin on a merged branch.
+                  DATAFUSION_ALLOWED_BRANCHES: 'greptimedb-55.1-thin-fork'
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: ./scripts/check-datafusion-pin.sh Cargo.toml
+
     check-git-deps:
         if: ${{ github.event.pull_request.draft == false }}
         runs-on: ubuntu-latest
