@@ -437,6 +437,11 @@ impl WorkerGroup {
         handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
     }
 
+    /// Asks the worker of `region` to cancel its tail replay, if one runs, without waiting.
+    pub(crate) fn notify_unwritable(&self, region: &MitoRegion) {
+        handle_tail_replay::notify_unwritable(&self.worker(region.region_id).sender, region);
+    }
+
     /// Get worker for specific `region_id`.
     pub(crate) fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let index = region_id_to_index(region_id, self.workers.len());
@@ -1795,6 +1800,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_region_reloaded(region_id, old, result).await
             }
             BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::RegionBecameUnwritable => self.cancel_tail_replay(region_id),
             BackgroundNotify::TailReplayCommitted {
                 region,
                 edit,

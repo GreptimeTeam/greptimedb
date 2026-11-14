@@ -1159,6 +1159,8 @@ pub(crate) enum BackgroundNotify {
     },
     /// The region became writable and may have pending tails to replay.
     RegionBecameWritable,
+    /// A role change outside the worker made the region stop replaying its tails.
+    RegionBecameUnwritable,
     /// A tail replay published its result in the manifest.
     TailReplayCommitted {
         /// The instance the replay ran for.
@@ -1204,6 +1206,7 @@ impl BackgroundNotify {
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
             | Self::RegionBecameWritable
+            | Self::RegionBecameUnwritable
             | Self::TailReplayCommitted { .. }
             | Self::TailReplayEnded => false,
         }

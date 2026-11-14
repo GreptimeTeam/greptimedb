@@ -133,3 +133,14 @@ pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &M
         notify_worker(&sender, region_id, BackgroundNotify::RegionBecameWritable).await;
     });
 }
+
+/// Asks the worker to cancel the tail replay of a region that a role change outside the worker
+/// made unable to replay, without waiting. A replay the cancel reaches after the region became
+/// writable again ends and the worker starts another.
+pub(crate) fn notify_unwritable(sender: &Sender<WorkerRequestWithTime>, region: &MitoRegion) {
+    let sender = sender.clone();
+    let region_id = region.region_id;
+    common_runtime::spawn_global(async move {
+        notify_worker(&sender, region_id, BackgroundNotify::RegionBecameUnwritable).await;
+    });
+}

@@ -680,7 +680,12 @@ async fn test_missing_reported_object_fails_until_restored() {
 
 #[tokio::test]
 async fn test_failed_round_deletes_chunks_of_earlier_tails() {
-    let region = TestRegion::new("tail-replay-failed-round", false, None).await;
+    // A 64 KiB write buffer gives a 256 B floor, so the own tail's chunk reserves from the pool.
+    let config = MitoConfig {
+        global_write_buffer_size: ReadableSize::kb(64),
+        ..Default::default()
+    };
+    let region = TestRegion::with_config("tail-replay-failed-round", None, config).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;
     region
         .reopen_with_tails(vec![
@@ -1849,4 +1854,32 @@ async fn test_fence_for_reload_rechecks_version_and_role(
     let expected = !version_changed && !demoted;
     assert_eq!(expected, fenced);
     assert_eq!(expected, manifest_ctx.is_reload_pending());
+}
+
+#[tokio::test]
+async fn test_direct_demotion_ends_stalled_replay() {
+    let stall = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(AtomicUsize::new(0));
+    let layer = stall_remote_listings(stall.clone(), stalled.clone());
+    let region =
+        TestRegion::with_wal_layer("tail-replay-direct-demotion", false, None, Some(layer)).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    stall.store(true, Ordering::Relaxed);
+    region.catchup().await;
+    wait_until(|| stalled.load(Ordering::Relaxed) > 0).await;
+
+    region
+        .engine
+        .set_region_role(region.region_id, RegionRole::Follower)
+        .unwrap();
+    wait_until(|| region.listener.ended() == 1).await;
+
+    // A later promotion replays the tails again.
+    stall.store(false, Ordering::Relaxed);
+    region.promote();
+    region.wait_until_replayed().await;
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
 }
