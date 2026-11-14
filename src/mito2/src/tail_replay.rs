@@ -107,14 +107,20 @@ impl<S: LogStore> TailReplayTask<S> {
                     // The tails may be gone from a newer manifest, e.g. after another writer
                     // committed them and their source released its WAL. The worker reloads the
                     // fenced region once this task ends.
+                    let manifest_ctx = &self.region.manifest_ctx;
                     match self
-                        .region
-                        .manifest_ctx
-                        .fence_for_reload_if_updated(region_id)
+                        .unless_cancelled(manifest_ctx.installed_version_if_updated())
                         .await
                     {
-                        Ok(true) => return,
-                        Ok(false) => {}
+                        Ok(Some(installed))
+                            if manifest_ctx
+                                .fence_for_reload_if_installed(region_id, installed)
+                                .await =>
+                        {
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(_) if self.state.is_cancelled() => break,
                         Err(e) => {
                             warn!(e; "Failed to check region {region_id} for a newer manifest");
                         }
@@ -338,7 +344,7 @@ impl<S: LogStore> TailReplayTask<S> {
             return Ok(Vec::new());
         }
         self.sst_writer
-            .write_ssts(&version, &self.state, uncommitted)
+            .write_ssts(&version, &self.state, uncommitted, "tail_replay")
             .await
     }
 

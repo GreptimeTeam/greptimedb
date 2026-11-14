@@ -2133,6 +2133,13 @@ impl WorkerListener {
         }
     }
 
+    pub(crate) fn on_index_build_stopped(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_stopped(_region_id);
+        }
+    }
+
     pub(crate) async fn on_index_build_abort(&self, _region_file_id: RegionFileId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {

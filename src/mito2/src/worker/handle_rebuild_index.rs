@@ -449,5 +449,6 @@ impl<S> RegionWorkerLoop<S> {
     ) {
         self.index_build_scheduler
             .on_task_stopped(region_id, request.file_id);
+        self.listener.on_index_build_stopped(region_id);
     }
 }

@@ -146,7 +146,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   tails must raise the committed sequence to theirs, or writes accepted during the replay
   lose to replayed rows. This node's later entry ids must be above every tail's `upto`, and
   its unflushed entries at or below one must be in its own tails, or the tail commit's
-  flushed entry id skips them. Replays have no admission or concurrency limit. Their SSTs
+  flushed entry id skips them. A node bounds its replays' concurrency, SST writes and chunk
+  memory apart from flushes (`TailReplayLimits`). Their SSTs
   build indexes as flushed ones (`IndexBuildType::Flush`), under `create_on_flush`.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.

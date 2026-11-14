@@ -70,7 +70,6 @@ use crate::manifest::storage::delta_file;
 use crate::region::version::VersionRef;
 use crate::region::{MitoRegion, RegionLeaderState};
 use crate::request::{BackgroundNotify, WorkerRequest};
-use crate::sst::file::RegionFileId;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, nop_action,
@@ -93,6 +92,7 @@ struct TailReplayListener {
     failures: Mutex<Vec<(StatusCode, String)>>,
     ended: AtomicUsize,
     lease_checks: AtomicUsize,
+    /// Index builds the worker learned stopped.
     index_builds: AtomicUsize,
 }
 
@@ -118,7 +118,7 @@ impl EventListener for TailReplayListener {
         self.ended.fetch_add(1, Ordering::Relaxed);
     }
 
-    async fn on_index_build_begin(&self, _region_file_id: RegionFileId) {
+    fn on_index_build_stopped(&self, _region_id: RegionId) {
         self.index_builds.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -1620,10 +1620,120 @@ async fn test_replayed_ssts_build_index_as_flushed(#[case] create_on_flush: bool
         let files = &version.ssts.levels()[0].files;
         files.values().any(|file| file.meta_ref().exists_index())
     };
-    if create_on_flush {
-        wait_until(has_index).await;
-    } else {
-        wait_until(|| region.listener.index_builds() == 1).await;
-        assert!(!has_index());
+    wait_until(|| region.listener.index_builds() == 1).await;
+    assert_eq!(create_on_flush, has_index());
+}
+
+/// Parks every listing of a manifest directory once `stall` is set, and counts them.
+fn stall_manifest_listings(stall: Arc<AtomicBool>, stalled: Arc<AtomicUsize>) -> MockLayer {
+    MockLayerBuilder::default()
+        .lister_factory(Arc::new(move |path, _args, inner| {
+            if path.contains("/manifest/") && stall.load(Ordering::Relaxed) {
+                stalled.fetch_add(1, Ordering::Relaxed);
+                Box::new(StalledLister)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_stalled_manifest_check_ends_when_region_closes() {
+    let stall = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(AtomicUsize::new(0));
+    let layer = stall_manifest_listings(stall.clone(), stalled.clone());
+    let region = TestRegion::new("tail-replay-stalled-check", false, Some(layer)).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    let objects = region
+        .wal_store
+        .list(&format!("{}/objects/", remote_prefix()))
+        .await
+        .unwrap();
+    for object in objects {
+        region.wal_store.delete(object.path()).await.unwrap();
     }
+    region.catchup().await;
+    // A failed round checks the manifest for an update, which stalls.
+    stall.store(true, Ordering::Relaxed);
+    wait_until(|| stalled.load(Ordering::Relaxed) > 0).await;
+    let replaying = Arc::downgrade(&region.engine.get_region(region.region_id).unwrap());
+
+    let close = RegionRequest::Close(RegionCloseRequest::default());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        region.engine.handle_request(region.region_id, close),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    wait_until(|| replaying.strong_count() == 0).await;
+}
+
+/// Parks the first SST write once `stall` is set, and counts the parked writes.
+fn stall_first_sst_write(stall: Arc<AtomicBool>, stalled: Arc<AtomicUsize>) -> MockLayer {
+    MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _args, inner| {
+            if path.ends_with(".parquet") && stall.swap(false, Ordering::Relaxed) {
+                stalled.fetch_add(1, Ordering::Relaxed);
+                Box::new(StalledWriter)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap()
+}
+
+struct StalledWriter;
+
+impl Write for StalledWriter {
+    async fn write(&mut self, _bs: Buffer) -> MockResult<()> {
+        std::future::pending().await
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        std::future::pending().await
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_flush_runs_while_replay_writes_are_saturated() {
+    let stall = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(AtomicUsize::new(0));
+    let layer = stall_first_sst_write(stall.clone(), stalled.clone());
+    // One replay SST write takes every replay write permit.
+    let config = MitoConfig {
+        max_background_flushes: 1,
+        ..Default::default()
+    };
+    let region =
+        TestRegion::with_wal_layer("tail-replay-saturated", false, Some(layer), None, config).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    stall.store(true, Ordering::Relaxed);
+    region.catchup().await;
+    wait_until(|| stalled.load(Ordering::Relaxed) == 1).await;
+
+    // The memtable holds rows `[0, 6)`, which the reopen replayed from this node's WAL.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        flush_region(&region.engine, region.region_id, None),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(1, region.stored_ssts().await);
+    assert!(region.has_pending_tails());
 }

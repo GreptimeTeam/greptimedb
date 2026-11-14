@@ -158,6 +158,11 @@ impl Metrics {
                         .with_label_values(&[stage])
                         .observe(elapsed.as_secs_f64());
                 }
+                if !self.compact_memtable.is_zero() {
+                    TAIL_REPLAY_ELAPSED
+                        .with_label_values(&["compact_memtable"])
+                        .observe(self.compact_memtable.as_secs_f64());
+                }
             }
         };
     }
