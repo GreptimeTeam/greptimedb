@@ -4391,6 +4391,85 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_deep_union_all_through_do_query() -> TestResult<()> {
+        // Regression for #9356: the statement must not be cloned on its way to the planner. The
+        // derived `Clone` of a left-deep `UNION ALL` recurses once per branch, and debug builds
+        // poll queries on 8 MiB worker stacks.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let instance = test_instance_with_tables(
+                            test_table(1024, "source")?,
+                            test_table(1025, "target")?,
+                        )
+                        .await?;
+                        let sql = vec!["SELECT 1 AS a"; 550].join(" UNION ALL ");
+                        let output = execute_one_sql(&instance, &sql, test_query_ctx(42)).await?;
+                        let OutputData::Stream(stream) = output.data else {
+                            panic!("expected a query stream");
+                        };
+                        let batches = common_recordbatch::util::collect(stream).await.unwrap();
+                        assert_eq!(550, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+                        Ok(())
+                    })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_failed_query_log_masks_credentials() -> TestResult<()> {
+        #[derive(Clone, Default)]
+        struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for LogBuffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let logs = LogBuffer::default();
+        let subscriber = common_telemetry::tracing_subscriber::fmt()
+            .with_max_level(common_telemetry::tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer({
+                let logs = logs.clone();
+                move || logs.clone()
+            })
+            .finish();
+        let _guard = common_telemetry::tracing::subscriber::set_default(subscriber);
+
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+        let sql = "COPY source TO 's3://bucket/out.parquet' WITH (format = 'unknown') \
+            CONNECTION (access_key_id = 'AKID9356', secret_access_key = 'Secret9356')";
+        let results = instance.do_query_inner(sql, test_query_ctx(42)).await;
+        assert!(results[0].is_err());
+
+        let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logs.contains("Failed to execute query: COPY source TO"),
+            "{logs}"
+        );
+        assert!(logs.contains("secret_access_key = '******'"), "{logs}");
+        assert!(!logs.contains("AKID9356"), "{logs}");
+        assert!(!logs.contains("Secret9356"), "{logs}");
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_insert_select_is_visible_in_show_processlist() -> TestResult<()> {
         let insert_sql = "INSERT INTO target SELECT * FROM source";
