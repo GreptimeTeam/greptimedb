@@ -722,6 +722,8 @@ struct Candidate {
     /// Files in the interval that overlap another interval file from a different
     /// sorted run. Resolving these overlaps is what reduces sorted runs.
     overlap_participants: usize,
+    /// Latest end among files added through overlap accounting.
+    latest_end: Option<Timestamp>,
     /// Number of rows contributed by uncompacted files.
     l0_rows: usize,
     /// Number of rows contributed by compacted files.
@@ -743,17 +745,31 @@ impl Candidate {
         participations: &mut Vec<bool>,
     ) {
         self.absorb_file(file.file);
+        let (start, end) = file.file.range();
+        let may_overlap = self.latest_end.is_some_and(|latest| start <= latest);
+        self.latest_end = Some(self.latest_end.map_or(end, |latest| latest.max(end)));
 
-        let mut participates = false;
-        for (offset, other) in preceding.iter().enumerate() {
-            if file.run_id != other.run_id && file.overlaps_inclusive(other) {
-                if !participations[offset] {
-                    participations[offset] = true;
-                    self.overlap_participants += 1;
+        // Existing participants need no further marking. Only establish whether
+        // the new file joins them; otherwise retain the full accounting loop.
+        let participates = if !may_overlap {
+            false
+        } else if self.overlap_participants == preceding.len() {
+            preceding
+                .iter()
+                .any(|other| file.run_id != other.run_id && file.overlaps_inclusive(other))
+        } else {
+            let mut participates = false;
+            for (offset, other) in preceding.iter().enumerate() {
+                if file.run_id != other.run_id && file.overlaps_inclusive(other) {
+                    if !participations[offset] {
+                        participations[offset] = true;
+                        self.overlap_participants += 1;
+                    }
+                    participates = true;
                 }
-                participates = true;
             }
-        }
+            participates
+        };
         participations.push(participates);
         if participates {
             self.overlap_participants += 1;
@@ -3776,6 +3792,192 @@ mod tests {
                 (start.value(), end.value())
             })
             .collect()
+    }
+
+    fn pick_interval_for_ablation<const OPTIMIZED: bool>(
+        files: &[OrderedFile<'_>],
+    ) -> Option<(usize, usize)> {
+        let mut best: Option<(CandidateScore, (usize, usize))> = None;
+        for left in 0..files.len() {
+            let mut candidate = Candidate::default();
+            let mut participants = Vec::with_capacity(128);
+            for right in left..(left + 128).min(files.len()) {
+                if OPTIMIZED {
+                    candidate.absorb(&files[right], &files[left..right], &mut participants);
+                } else {
+                    candidate.absorb_file(files[right].file);
+                    let mut participates = false;
+                    for (offset, other) in files[left..right].iter().enumerate() {
+                        if files[right].run_id != other.run_id
+                            && files[right].overlaps_inclusive(other)
+                        {
+                            if !participants[offset] {
+                                participants[offset] = true;
+                                candidate.overlap_participants += 1;
+                            }
+                            participates = true;
+                        }
+                    }
+                    participants.push(participates);
+                    candidate.overlap_participants += usize::from(participates);
+                }
+                if candidate.num_files < 2
+                    || !is_balanced_candidate(&candidate)
+                    || !candidate.makes_progress(Some(512 * 1024 * 1024))
+                {
+                    continue;
+                }
+                let score = candidate.score(Some(512 * 1024 * 1024));
+                if best
+                    .as_ref()
+                    .is_none_or(|(previous, _)| score.is_better_than(previous))
+                {
+                    best = Some((score, (left, right)));
+                }
+            }
+        }
+        best.map(|(_, interval)| interval)
+    }
+
+    #[test]
+    #[ignore = "local picker ablation; excludes sorting and file construction"]
+    fn benchmark_picker_participation_ablation() {
+        common_telemetry::init_default_ut_logging();
+        let count = std::env::var("PICKER_BENCH_FILES")
+            .map(|value| value.parse::<usize>().unwrap())
+            .unwrap_or(146_293);
+        for scenario in [
+            "overlap_missing_pk",
+            "overlap_full_pk",
+            "disjoint_pk",
+            "disjoint_time",
+            "same_run",
+        ] {
+            let handles: Vec<_> = (0..count)
+                .map(|index| {
+                    let start = index as i64;
+                    let end = start
+                        + if scenario == "disjoint_time" {
+                            0
+                        } else {
+                            10_000
+                        };
+                    new_file(
+                        start,
+                        end,
+                        index as u64,
+                        8 * 1024 * 1024 + (index % 31) as u64,
+                    )
+                })
+                .collect();
+            let files: Vec<_> = handles
+                .iter()
+                .enumerate()
+                .map(|(index, file)| OrderedFile {
+                    file,
+                    run_id: if scenario == "same_run" {
+                        0
+                    } else {
+                        index % 1009
+                    },
+                    position_in_run: index,
+                    primary_key_range: match scenario {
+                        "overlap_missing_pk" => None,
+                        "disjoint_pk" => {
+                            let key = bytes::Bytes::copy_from_slice(&(index as u64).to_be_bytes());
+                            Some((key.clone(), key))
+                        }
+                        _ => Some((
+                            bytes::Bytes::from_static(b"a"),
+                            bytes::Bytes::from_static(b"z"),
+                        )),
+                    },
+                })
+                .collect();
+            for trial in 0..3 {
+                let mut picks = [None; 2];
+                for optimized in if trial % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                } {
+                    let start = Instant::now();
+                    let picked = if optimized {
+                        pick_interval_for_ablation::<true>(std::hint::black_box(&files))
+                    } else {
+                        pick_interval_for_ablation::<false>(std::hint::black_box(&files))
+                    };
+                    let elapsed = start.elapsed();
+                    picks[usize::from(optimized)] = picked;
+                    info!(
+                        "scenario={scenario} files={count} trial={trial} optimized={optimized} elapsed_ns={} picked={picked:?}",
+                        elapsed.as_nanos()
+                    );
+                }
+                assert_eq!(picks[0], picks[1], "{scenario}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_candidate_participation_matches_pairwise_oracle() {
+        let mut seed = 42_u64;
+        for case in 0..64 {
+            let handles: Vec<_> = (0..64)
+                .map(|index| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let start = index * 10;
+                    let duration = match case % 4 {
+                        0 => 1000,
+                        1 => 0,
+                        _ => (seed % 200) as i64,
+                    };
+                    new_file(start, start + duration, index as u64, 100)
+                })
+                .collect();
+            let files: Vec<_> = handles
+                .iter()
+                .enumerate()
+                .map(|(index, file)| OrderedFile {
+                    file,
+                    run_id: match case % 3 {
+                        0 => 0,
+                        1 => index,
+                        _ => index % 5,
+                    },
+                    position_in_run: index,
+                    primary_key_range: match case % 4 {
+                        0 => None,
+                        1 => Some((vec![index as u8].into(), vec![index as u8].into())),
+                        _ => Some((vec![(index % 8) as u8].into(), vec![12].into())),
+                    },
+                })
+                .collect();
+            for left in 0..files.len() {
+                let mut candidate = Candidate::default();
+                let mut participants = Vec::new();
+                for right in left..files.len() {
+                    candidate.absorb(&files[right], &files[left..right], &mut participants);
+                    // Independent all-pairs oracle for each complete interval.
+                    let expected: Vec<_> = (left..=right)
+                        .map(|i| {
+                            (left..=right).any(|j| {
+                                files[i].run_id != files[j].run_id
+                                    && files[i].overlaps_inclusive(&files[j])
+                            })
+                        })
+                        .collect();
+                    assert_eq!(
+                        participants, expected,
+                        "case={case}, interval={left}..={right}"
+                    );
+                    assert_eq!(
+                        candidate.overlap_participants,
+                        expected.iter().filter(|&&value| value).count()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
