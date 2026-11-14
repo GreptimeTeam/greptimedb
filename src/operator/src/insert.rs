@@ -16,7 +16,7 @@ mod otlp;
 
 pub use otlp::MetricInsertPreflight;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -55,7 +55,7 @@ use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{
-    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, greptime_timestamp, greptime_value,
+    EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels, greptime_timestamp, greptime_value,
 };
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
@@ -105,7 +105,7 @@ use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
     ColumnToRow, ImpureDefaultFiller, RowToRegion, StatementToRegion, TableToRegion,
-    fill_reqs_with_impure_default, rows_to_record_batch,
+    fill_reqs_with_impure_default, rows_to_record_batch, value_matches_type,
 };
 use crate::statement::StatementExecutor;
 use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
@@ -411,9 +411,10 @@ impl Inserter {
                 reason: "invalid exemplar destination"
             }
         );
-        self.bind_exemplar_table_ids(&mut requests, &ctx, sources)
-            .await?;
+        validate_column_count_match(&requests)?;
         preprocess_row_insert_requests(&mut requests.inserts)?;
+        self.bind_exemplar_table_ids(&mut requests, &ctx, sources, statement_executor)
+            .await?;
         self.handle_row_inserts_with_create_type(
             requests,
             ctx,
@@ -430,9 +431,10 @@ impl Inserter {
         requests: &mut RowInsertRequests,
         ctx: &QueryContextRef,
         sources: &[TableInfoRef],
+        statement_executor: &StatementExecutor,
     ) -> Result<()> {
-        validate_column_count_match(requests)?;
         let mut tables = HashMap::new();
+        let mut required_tags = BTreeMap::<String, BTreeSet<String>>::new();
         for info in sources.iter().filter(|info| {
             info.catalog_name == ctx.current_catalog() && info.schema_name == ctx.current_schema()
         }) {
@@ -452,6 +454,7 @@ impl Inserter {
             let Some(rows) = request.rows.as_mut() else {
                 continue;
             };
+            validate_exemplar_rows(rows)?;
             ensure!(
                 !rows
                     .schema
@@ -497,12 +500,99 @@ impl Inserter {
                         ),
                     }
                 );
+                let tags = required_tags.entry(name.clone()).or_default();
+                for (column, value) in rows.schema.iter().zip(&row.values) {
+                    if column.semantic_type == SemanticType::Tag as i32
+                        && column.column_name != EXEMPLAR_METRIC_COLUMN
+                        && column.column_name != DATA_SCHEMA_TSID_COLUMN_NAME
+                        && value.value_data.is_some()
+                    {
+                        tags.insert(column.column_name.clone());
+                    }
+                }
                 row.values.push(ValueData::U32Value(info.table_id()).into());
             }
             rows.schema.push(api::v1::helper::tag_column_schema(
                 DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
                 ColumnDataType::Uint32,
             ));
+        }
+
+        let mut alters = Vec::new();
+        let mut refresh = Vec::new();
+        for (name, tags) in required_tags {
+            let info = &tables[&name];
+            let tags = tags
+                .into_iter()
+                .map(|name| api::v1::helper::tag_column_schema(&name, ColumnDataType::String))
+                .collect::<Vec<_>>();
+            if let Some(add_columns) = exemplar_source_add_columns(info, &tags)? {
+                ensure!(
+                    self.auto_create_disabled_reason(ctx)?.is_none(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {name} requires new tags, but automatic DDL is disabled"
+                        ),
+                    }
+                );
+                alters.push((
+                    info.table_id(),
+                    AlterTableExpr {
+                        catalog_name: info.catalog_name.clone(),
+                        schema_name: info.schema_name.clone(),
+                        table_name: name,
+                        kind: Some(Kind::AddColumns(add_columns)),
+                    },
+                ));
+                refresh.push((info, tags));
+            }
+        }
+        if !alters.is_empty() {
+            if let Some(table) = self
+                .get_table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    METRICS_EXEMPLARS_TABLE,
+                )
+                .await?
+            {
+                // Reject an incompatible destination before changing any source schema.
+                validate_exemplar_table(&table.table_info())?;
+            }
+            statement_executor
+                .alter_logical_tables_with_ids(alters, ctx.clone(), TriggerReason::AutoAlter)
+                .await?;
+            for (pinned, tags) in refresh {
+                let table = self
+                    .get_table(&pinned.catalog_name, &pinned.schema_name, &pinned.name)
+                    .await?
+                    .with_context(|| InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} disappeared during reconciliation",
+                            pinned.name
+                        ),
+                    })?;
+                let info = table.table_info();
+                ensure!(
+                    info.table_id() == pinned.table_id(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} changed during reconciliation",
+                            pinned.name
+                        ),
+                    }
+                );
+                // Concurrent ADD IF NOT EXISTS can succeed on names alone; verify their definitions.
+                ensure!(
+                    exemplar_source_add_columns(&info, &tags)?.is_none(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} is still missing inherited tags",
+                            pinned.name
+                        ),
+                    }
+                );
+            }
         }
         Ok(())
     }
@@ -654,7 +744,7 @@ impl Inserter {
             .values()
             .map(|info| (info.name.as_str(), info))
             .collect::<HashMap<_, _>>();
-        let mut prepared = Vec::with_capacity(requests.inserts.len());
+        let mut estimated_bytes = Some(0usize);
         for request in &mut requests.inserts {
             let table_info =
                 by_name
@@ -666,8 +756,34 @@ impl Inserter {
                 continue;
             };
             ImpureDefaultFiller::new((*table_info).clone())?.fill_rows(rows);
-            let batch = rows_to_record_batch(rows, table_info)?;
-            prepared.push(((*table_info).clone(), batch));
+            if batcher.memory_limit_bytes() != 0 {
+                estimated_bytes = estimated_bytes.and_then(|bytes| {
+                    bytes.checked_add(crate::req_convert::insert::estimated_record_batch_bytes(
+                        rows, table_info,
+                    )?)
+                });
+            }
+        }
+        // Reserve once for the whole request before constructing any Arrow arrays.
+        // PB rows and the converted batches coexist, so this is additional memory.
+        let permit = if requests.inserts.is_empty() {
+            None
+        } else {
+            Some(
+                batcher
+                    .acquire(
+                        estimated_bytes.unwrap_or(usize::MAX),
+                        ctx.held_memory_bytes(),
+                    )
+                    .await?,
+            )
+        };
+        let mut prepared = Vec::with_capacity(requests.inserts.len());
+        for request in &requests.inserts {
+            let table_info = by_name[request.table_name.as_str()];
+            if let Some(rows) = &request.rows {
+                prepared.push((table_info.clone(), rows_to_record_batch(rows, table_info)?));
+            }
         }
         // Preserve the existing meter input and original request boundary. These
         // envelopes are only for accounting; routing happens after batching.
@@ -698,11 +814,8 @@ impl Inserter {
         .await
         .context(WriteRejectedSnafu)?;
         prepared.retain(|(_, batch)| batch.num_rows() != 0);
-        let results = if prepared.is_empty() {
-            Vec::new()
-        } else {
+        let results = if let Some(permit) = permit {
             // One original request shares admission across all table submissions.
-            let permit = batcher.acquire().await?;
             let submissions = prepared.into_iter().map(|(info, batch)| {
                 // Route to the same target database used for admission above.
                 let mut target_ctx = ctx.fork();
@@ -712,6 +825,8 @@ impl Inserter {
             });
             // Observe every table completion even when another table fails.
             future::join_all(submissions).await
+        } else {
+            Vec::new()
         };
         let mut affected_rows = 0;
         let mut meta = OutputMeta::new_with_cost(write_cost as _);
@@ -2195,6 +2310,95 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     Ok(())
 }
 
+fn validate_exemplar_rows(rows: &Rows) -> Result<()> {
+    let mut names = HashSet::new();
+    for (index, column) in rows.schema.iter().enumerate() {
+        let data_type: datatypes::prelude::ConcreteDataType =
+            api::helper::ColumnDataTypeWrapper::try_new(
+                column.datatype,
+                column.datatype_extension.clone(),
+            )
+            .context(crate::error::ColumnDataTypeSnafu)?
+            .into();
+        let valid = match column.column_name.as_str() {
+            DATA_SCHEMA_TSID_COLUMN_NAME => {
+                data_type == datatypes::prelude::ConcreteDataType::uint64_datatype()
+                    && column.semantic_type == SemanticType::Tag as i32
+            }
+            EXEMPLAR_METRIC_COLUMN => {
+                data_type.is_string() && column.semantic_type == SemanticType::Tag as i32
+            }
+            name if name == greptime_timestamp() => {
+                data_type.is_timestamp() && column.semantic_type == SemanticType::Timestamp as i32
+            }
+            name if name == greptime_value() => {
+                data_type == datatypes::prelude::ConcreteDataType::float64_datatype()
+                    && column.semantic_type == SemanticType::Field as i32
+            }
+            name if name == greptime_exemplar_labels() => {
+                data_type.is_json2() && column.semantic_type == SemanticType::Field as i32
+            }
+            _ => data_type.is_string() && column.semantic_type == SemanticType::Tag as i32,
+        };
+        ensure!(
+            valid && names.insert(column.column_name.as_str()),
+            InvalidInsertRequestSnafu {
+                reason: format!(
+                    "invalid or duplicate exemplar column {}",
+                    column.column_name
+                ),
+            }
+        );
+        ensure!(
+            rows.rows.iter().all(|row| value_matches_type(
+                &row.values[index],
+                column.datatype,
+                column.datatype_extension.as_ref(),
+            )),
+            InvalidInsertRequestSnafu {
+                reason: format!("invalid value for exemplar column {}", column.column_name),
+            }
+        );
+    }
+    ensure!(
+        [
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+            EXEMPLAR_METRIC_COLUMN,
+            greptime_timestamp(),
+            greptime_value(),
+            greptime_exemplar_labels(),
+        ]
+        .iter()
+        .all(|name| names.contains(name)),
+        InvalidInsertRequestSnafu {
+            reason: "missing required exemplar columns",
+        }
+    );
+    Ok(())
+}
+
+fn exemplar_source_add_columns(
+    info: &TableInfo,
+    tags: &[ColumnSchema],
+) -> Result<Option<api::v1::AddColumns>> {
+    for tag in tags {
+        if let Some(index) = info.meta.schema.column_index_by_name(&tag.column_name) {
+            let column = &info.meta.schema.column_schemas()[index];
+            // Existing source defaults may already be part of the normalized series identity.
+            ensure!(
+                info.meta.primary_key_indices.contains(&index) && column.data_type.is_string(),
+                InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "exemplar source {} column {} must be a string tag",
+                        info.name, tag.column_name
+                    ),
+                }
+            );
+        }
+    }
+    expr_helper::extract_add_columns_expr(&info.meta.schema, ColumnExpr::from_column_schemas(tags))
+}
+
 /// Validates the fixed exemplar contract before writing or scanning a shared table.
 pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
     let meta = &table.meta;
@@ -2271,11 +2475,11 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
             reason: "exemplar value must be a DOUBLE field"
         }
     );
-    let (labels_index, labels) = lookup(EXEMPLAR_LABELS_COLUMN)?;
+    let (labels_index, labels) = lookup(greptime_exemplar_labels())?;
     ensure!(
         labels.data_type.is_json2() && !meta.primary_key_indices.contains(&labels_index),
         InvalidInsertRequestSnafu {
-            reason: "exemplar_labels must be a JSON2 field"
+            reason: format!("{} must be a JSON2 field", greptime_exemplar_labels())
         }
     );
     if let Some(extension) = labels
@@ -2304,7 +2508,7 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
             greptime_timestamp(),
             greptime_value(),
             EXEMPLAR_METRIC_COLUMN,
-            EXEMPLAR_LABELS_COLUMN,
+            greptime_exemplar_labels(),
             DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
             DATA_SCHEMA_TSID_COLUMN_NAME,
         ]
@@ -4103,7 +4307,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PendingRowsBatcher for UnexpectedBatcher {
-        async fn acquire(&self) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>> {
+        async fn acquire(&self, _: usize, _: u64) -> Result<crate::batcher::PendingRowsPermit> {
             panic!("empty writes must not acquire batch admission")
         }
 
@@ -4112,7 +4316,7 @@ mod tests {
             _table_info: TableInfoRef,
             _batch: arrow::record_batch::RecordBatch,
             _ctx: QueryContextRef,
-            _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+            _permit: crate::batcher::PendingRowsPermit,
         ) -> Result<Output> {
             panic!("empty writes must not submit a batch")
         }

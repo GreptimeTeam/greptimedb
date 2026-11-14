@@ -137,6 +137,7 @@ fn resolve(selector: &VectorSelector, default_schema: &str) -> Result<Vec<Select
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Series {
+    /// Metric name, projected series tags, and stored `__table_id` / `__tsid` as decimal strings.
     #[serde(rename = "seriesLabels")]
     pub series_labels: BTreeMap<String, String>,
     pub exemplars: Vec<Observation>,

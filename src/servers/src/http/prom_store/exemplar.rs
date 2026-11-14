@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
 use common_error::ext::BoxedError;
+use common_query::Output;
 use futures::future::ready;
 use operator::insert::PreparedMetricInserts;
 use session::context::QueryContextRef;
@@ -35,6 +36,24 @@ pub(super) struct Outcome {
     /// Accepted rows on success; confirmed storage writes on error.
     pub written: [u64; 3],
     pub error: Option<error::Error>,
+}
+
+impl Outcome {
+    async fn record(&mut self, kind: usize, output: Result<Output>) {
+        match output {
+            Ok(output) => {
+                self.cost += output.meta.cost;
+                let progress = output.write_progress().await;
+                self.written[kind] += progress.affected_rows as u64;
+                if let Err(error) = progress.into_result().context(error::ExecuteGrpcQuerySnafu) {
+                    self.error.get_or_insert(error);
+                }
+            }
+            Err(error) => {
+                self.error.get_or_insert(error);
+            }
+        }
+    }
 }
 
 enum PreparedWrite {
@@ -56,7 +75,7 @@ pub(super) async fn write(
         Ok((writes, targets)) => {
             let mut sources = Vec::new();
             let mut prepared = Vec::new();
-            let mut source_preparation_failed = false;
+            let mut source_failed = false;
             for (kind, ctx, request) in writes {
                 if kind != 2 && metric_engine {
                     let (pinned, other): (Vec<_>, Vec<_>) =
@@ -84,7 +103,7 @@ pub(super) async fn write(
                         if let Ok(request) = &result {
                             sources.extend(request.source_tables().cloned());
                         } else {
-                            source_preparation_failed = true;
+                            source_failed = true;
                         }
                         prepared.push((kind, ctx, result.map(PreparedWrite::Metric)));
                     }
@@ -93,7 +112,7 @@ pub(super) async fn write(
                 }
             }
             // A failed source preparation must not fall back to a newer table with the same name.
-            if source_preparation_failed {
+            if source_failed {
                 prepared.retain(|(kind, _, _)| *kind != 2);
             }
             let sample_batches = prepared.iter().filter_map(|(kind, ctx, request)| {
@@ -113,9 +132,11 @@ pub(super) async fn write(
             } else {
                 None
             };
-            let mut outputs = Vec::with_capacity(prepared.len());
-            // Serialize schema preparation across batches that resolve to the same table.
-            for (kind, ctx, request) in prepared {
+            let (related, other): (Vec<_>, Vec<_>) =
+                prepared.into_iter().partition(|(kind, _, request)| {
+                    *kind == 2 || !matches!(request, Ok(PreparedWrite::Rows(_)))
+                });
+            let submit = async |(kind, ctx, request)| {
                 let mut deferred = false;
                 let output = match request {
                     Err(error) => Err(error),
@@ -145,29 +166,41 @@ pub(super) async fn write(
                         }
                     }
                 };
-                outputs.push((kind, output, deferred));
-            }
+                (output, deferred)
+            };
             let mut outcome = Outcome::default();
+            let ((), outputs) = tokio::join!(
+                async {
+                    for write in related {
+                        let kind = write.0;
+                        if kind == 2 && source_failed {
+                            continue;
+                        }
+                        let (output, _) = submit(write).await;
+                        // Successful submissions can still carry source storage failures.
+                        outcome.record(kind, output).await;
+                        source_failed |= kind != 2 && outcome.error.is_some();
+                    }
+                },
+                async {
+                    let mut outputs = Vec::with_capacity(other.len());
+                    // Serialize schema preparation for batches resolving to the same table.
+                    for write in other {
+                        let kind = write.0;
+                        let (output, deferred) = submit(write).await;
+                        outputs.push((kind, output, deferred));
+                    }
+                    outputs
+                },
+            );
             let mut pending_samples = Vec::new();
             for (kind, output, deferred) in outputs {
                 match output {
-                    Ok(output) => {
+                    Ok(output) if deferred && !output.meta.write_completions.is_empty() => {
                         outcome.cost += output.meta.cost;
-                        if deferred && !output.meta.write_completions.is_empty() {
-                            pending_samples.push(output);
-                            continue;
-                        }
-                        let progress = output.write_progress().await;
-                        outcome.written[kind] += progress.affected_rows as u64;
-                        if let Err(error) =
-                            progress.into_result().context(error::ExecuteGrpcQuerySnafu)
-                        {
-                            outcome.error.get_or_insert(error);
-                        }
+                        pending_samples.push(output);
                     }
-                    Err(error) => {
-                        outcome.error.get_or_insert(error);
-                    }
+                    output => outcome.record(kind, output).await,
                 }
             }
             if outcome.error.is_none() {
@@ -265,15 +298,83 @@ mod tests {
     use crate::exemplar::Exemplar;
     use crate::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 
+    #[derive(Clone, Copy, Default)]
+    enum WriteResult {
+        #[default]
+        Success,
+        ImmediateFailure,
+        CompletionFailure,
+    }
+
     #[derive(Default)]
     struct Handler {
         events: Mutex<Vec<String>>,
-        exemplar_done: Arc<Notify>,
+        source_result: WriteResult,
+        other_result: WriteResult,
+        source_completion: Option<Arc<Notify>>,
+        other_submission: Option<Arc<Notify>>,
         deny_schema: bool,
         fail_preparation: bool,
-        successful_writes: bool,
         check_serial: bool,
         writing: AtomicBool,
+    }
+
+    impl Handler {
+        async fn write_metric(&self, ctx: QueryContextRef, source: bool) -> Result<Output> {
+            if self.check_serial && !source {
+                assert!(!self.writing.swap(true, Ordering::SeqCst));
+                tokio::task::yield_now().await;
+                self.writing.store(false, Ordering::SeqCst);
+            }
+            assert!(ctx.confirmed_writes());
+            assert_eq!(
+                ctx.write_rows_to_admit(ctx.current_catalog(), &ctx.current_schema(), 3),
+                0
+            );
+            self.events.lock().unwrap().push("metric".into());
+            let result = if source {
+                self.source_result
+            } else {
+                self.other_result
+            };
+            if matches!(result, WriteResult::ImmediateFailure) {
+                return error::InternalSnafu {
+                    err_msg: "immediate metric failure",
+                }
+                .fail();
+            }
+            let gate = source.then(|| self.source_completion.clone()).flatten();
+            let counter = ctx.write_progress().cloned();
+            let completion = WriteCompletion::with_progress(async move {
+                if let Some(gate) = gate {
+                    gate.notified().await;
+                }
+                let failed = matches!(result, WriteResult::CompletionFailure);
+                let affected_rows = if failed { 1 } else { 2 };
+                if let Some(counter) = counter {
+                    counter.add_written(affected_rows);
+                }
+                WriteProgress {
+                    affected_rows,
+                    error: failed.then(|| {
+                        Arc::new(BoxedError::new(
+                            error::InternalSnafu {
+                                err_msg: "late metric failure",
+                            }
+                            .build(),
+                        ))
+                    }),
+                }
+            });
+            Ok(Output::new(
+                OutputData::AffectedRows(2),
+                OutputMeta {
+                    cost: 2,
+                    write_completions: vec![completion],
+                    ..Default::default()
+                },
+            ))
+        }
     }
 
     #[async_trait]
@@ -297,8 +398,7 @@ mod tests {
             _: PreparedMetricInserts,
             ctx: QueryContextRef,
         ) -> Result<Output> {
-            self.write_prepared(RowInsertRequests::default(), ctx, true)
-                .await
+            self.write_metric(ctx, true).await
         }
 
         async fn pre_write(&self, request: &RowInsertRequests, ctx: QueryContextRef) -> Result<()> {
@@ -338,48 +438,10 @@ mod tests {
             ctx: QueryContextRef,
             _: bool,
         ) -> Result<Output> {
-            if self.check_serial {
-                assert!(!self.writing.swap(true, Ordering::SeqCst));
-                tokio::task::yield_now().await;
-                self.writing.store(false, Ordering::SeqCst);
+            if let Some(gate) = &self.other_submission {
+                gate.notified().await;
             }
-            assert!(ctx.confirmed_writes());
-            assert_eq!(
-                ctx.write_rows_to_admit(ctx.current_catalog(), &ctx.current_schema(), 3),
-                0
-            );
-            self.events.lock().unwrap().push("metric".into());
-            if self.successful_writes {
-                if let Some(counter) = ctx.write_progress() {
-                    counter.add_written(2);
-                }
-                return Ok(Output::new_with_affected_rows(2));
-            }
-            let done = self.exemplar_done.clone();
-            let counter = ctx.write_progress().cloned();
-            let completion = WriteCompletion::with_progress(async move {
-                done.notified().await;
-                if let Some(counter) = counter {
-                    counter.add_written(1);
-                }
-                WriteProgress {
-                    affected_rows: 1,
-                    error: Some(Arc::new(BoxedError::new(
-                        error::InternalSnafu {
-                            err_msg: "late metric failure",
-                        }
-                        .build(),
-                    ))),
-                }
-            });
-            Ok(Output::new(
-                OutputData::AffectedRows(2),
-                OutputMeta {
-                    cost: 2,
-                    write_completions: vec![completion],
-                    ..Default::default()
-                },
-            ))
+            self.write_metric(ctx, false).await
         }
 
         async fn write_exemplars_prepared(
@@ -396,7 +458,6 @@ mod tests {
             if let Some(counter) = ctx.write_progress() {
                 counter.add_written(1);
             }
-            self.exemplar_done.notify_one();
             Ok(Output::new(
                 OutputData::AffectedRows(1),
                 OutputMeta::new_with_cost(1),
@@ -547,9 +608,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exemplar_submits_metric_batches_sequentially() {
+    async fn exemplar_submits_unrelated_metric_batches_sequentially() {
         let handler = Arc::new(Handler {
-            successful_writes: true,
             check_serial: true,
             ..Default::default()
         });
@@ -584,6 +644,170 @@ mod tests {
         let outcome = write(handler, None, true, samples, vec![], exemplars, ctx).await;
         assert!(outcome.error.is_none());
         assert_eq!(outcome.written, [6, 0, 1]);
+    }
+
+    #[tokio::test]
+    async fn exemplar_waits_for_source_completion() {
+        for histogram in [false, true] {
+            for failed in [false, true] {
+                for block_source in [false, true] {
+                    let gate = Arc::new(Notify::new());
+                    let handler = Arc::new(Handler {
+                        source_result: if failed {
+                            WriteResult::CompletionFailure
+                        } else {
+                            WriteResult::Success
+                        },
+                        source_completion: block_source.then(|| gate.clone()),
+                        other_submission: (!block_source).then(|| gate.clone()),
+                        ..Default::default()
+                    });
+                    let ctx = QueryContext::arc();
+                    let batch = |name: &str| {
+                        (
+                            ctx.clone(),
+                            RowInsertRequests {
+                                inserts: vec![RowInsertRequest {
+                                    table_name: name.into(),
+                                    rows: Some(Rows {
+                                        schema: vec![],
+                                        rows: vec![Row { values: vec![] }; 2],
+                                    }),
+                                }],
+                            },
+                        )
+                    };
+                    let (samples, histograms) = if histogram {
+                        (vec![batch("other")], vec![batch("metric")])
+                    } else {
+                        (vec![batch("metric"), batch("other")], vec![])
+                    };
+                    let exemplars = ExemplarRequests::from([(
+                        None,
+                        vec![Exemplar {
+                            metric: "metric".into(),
+                            series_labels: BTreeMap::new().into(),
+                            labels: BTreeMap::new(),
+                            timestamp: 1,
+                            value: 1.0,
+                        }],
+                    )]);
+                    let response = write(
+                        handler.clone(),
+                        None,
+                        true,
+                        samples,
+                        histograms,
+                        exemplars,
+                        ctx,
+                    );
+                    tokio::pin!(response);
+                    assert!(futures::poll!(&mut response).is_pending());
+                    {
+                        let events = handler.events.lock().unwrap();
+                        assert_eq!(
+                            events.iter().filter(|event| *event == "metric").count(),
+                            1 + usize::from(block_source)
+                        );
+                        assert_eq!(
+                            events.iter().any(|event| event == "exemplar"),
+                            !block_source && !failed
+                        );
+                    }
+                    gate.notify_one();
+                    let outcome = response.await;
+                    let source_rows = if failed { 1 } else { 2 };
+                    let exemplars = u64::from(!failed);
+                    assert_eq!(outcome.error.is_some(), failed);
+                    assert_eq!(
+                        outcome.written,
+                        if histogram {
+                            [2, source_rows, exemplars]
+                        } else {
+                            [2 + source_rows, 0, exemplars]
+                        }
+                    );
+                    assert_eq!(outcome.cost, 4 + exemplars as usize);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exemplar_only_depends_on_its_source_writes() {
+        for (source_result, other_result, source_rows, other_rows, exemplars) in [
+            (
+                WriteResult::ImmediateFailure,
+                WriteResult::Success,
+                Some(0),
+                2,
+                0,
+            ),
+            (
+                WriteResult::Success,
+                WriteResult::ImmediateFailure,
+                Some(2),
+                0,
+                1,
+            ),
+            (
+                WriteResult::Success,
+                WriteResult::CompletionFailure,
+                Some(2),
+                1,
+                1,
+            ),
+            (
+                WriteResult::Success,
+                WriteResult::CompletionFailure,
+                None,
+                1,
+                1,
+            ),
+        ] {
+            let handler = Arc::new(Handler {
+                source_result,
+                other_result,
+                ..Default::default()
+            });
+            let ctx = QueryContext::arc();
+            let inserts = [Some("other"), source_rows.map(|_| "metric")]
+                .into_iter()
+                .flatten()
+                .map(|name| RowInsertRequest {
+                    table_name: name.into(),
+                    rows: Some(Rows {
+                        schema: vec![],
+                        rows: vec![Row { values: vec![] }; 2],
+                    }),
+                })
+                .collect();
+            let request = ExemplarRequests::from([(
+                None,
+                vec![Exemplar {
+                    metric: "metric".into(),
+                    series_labels: BTreeMap::new().into(),
+                    labels: BTreeMap::new(),
+                    timestamp: 1,
+                    value: 1.0,
+                }],
+            )]);
+            let outcome = write(
+                handler,
+                None,
+                true,
+                vec![(ctx.clone(), RowInsertRequests { inserts })],
+                vec![],
+                request,
+                ctx,
+            )
+            .await;
+            assert!(outcome.error.is_some());
+            assert_eq!(
+                outcome.written,
+                [source_rows.unwrap_or(0) + other_rows, 0, exemplars]
+            );
+        }
     }
 
     #[tokio::test]
@@ -650,12 +874,17 @@ mod tests {
                     },
                 ],
             };
+            let handler = Arc::new(Handler {
+                source_result: if successful_writes {
+                    WriteResult::Success
+                } else {
+                    WriteResult::CompletionFailure
+                },
+                ..Default::default()
+            });
             let response = remote_write_v2(
                 PromStoreState {
-                    prom_store_handler: Arc::new(Handler {
-                        successful_writes,
-                        ..Default::default()
-                    }),
+                    prom_store_handler: handler.clone(),
                     pipeline_handler: None,
                     prom_store_with_metric_engine: true,
                     prom_validation_mode: PromValidationMode::Strict,
@@ -689,6 +918,15 @@ mod tests {
                 command = receiver.recv() => command.unwrap(),
             };
             assert_eq!(early_response.is_some(), !sync && successful_writes);
+            assert_eq!(
+                handler
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event == "exemplar"),
+                successful_writes
+            );
             assert!(limiter.used_bytes() > 0);
             let WorkerCommand::Submit {
                 ctx,
@@ -730,18 +968,17 @@ mod tests {
             for (kind, count) in [
                 ("samples", samples),
                 ("histograms", "0"),
-                ("exemplars", "1"),
+                ("exemplars", if successful_writes { "1" } else { "0" }),
             ] {
                 assert_eq!(
                     response.headers()[format!("x-prometheus-remote-write-{kind}-written")],
                     count
                 );
             }
-            for ((counter, before), count) in counters
-                .into_iter()
-                .zip(before)
-                .zip([if successful_writes { 4 } else { 2 }, 1])
-            {
+            for ((counter, before), count) in counters.into_iter().zip(before).zip([
+                if successful_writes { 4 } else { 2 },
+                u64::from(successful_writes),
+            ]) {
                 assert_eq!(counter.get() - before, count);
             }
             drop(ctx);
@@ -754,6 +991,7 @@ mod tests {
         for denied in [false, true] {
             let handler = Arc::new(Handler {
                 deny_schema: denied,
+                source_result: WriteResult::CompletionFailure,
                 ..Default::default()
             });
             let mut exemplars = ExemplarRequests::new();
@@ -793,17 +1031,11 @@ mod tests {
                 assert_eq!(outcome.written, [0, 0, 0]);
                 assert!(!events.iter().any(|e| e == "metric" || e == "exemplar"));
             } else {
-                assert_eq!(outcome.written, [1, 0, 1]);
-                assert_eq!(outcome.cost, 3);
+                assert_eq!(outcome.written, [1, 0, 0]);
+                assert_eq!(outcome.cost, 2);
                 assert_eq!(
                     *events,
-                    [
-                        "pre:public",
-                        "pre:public",
-                        "source:public",
-                        "metric",
-                        "exemplar"
-                    ]
+                    ["pre:public", "pre:public", "source:public", "metric"]
                 );
             }
         }

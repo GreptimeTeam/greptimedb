@@ -48,8 +48,12 @@ including caches owned by pipeline and protocol handlers.
   planning or executing SQL, including prepared statements; unqualified targets
   fail without falling back to `public`.
 - **Exemplar query** (`instance/exemplar.rs`): authorize all selector branches
-  before calling `PromQueryInterceptor::pre_execute_exemplars` for each resolved
-  exemplar table, with that table's schema context, before scanning it.
+  before resolving logical schemas or calling
+  `PromQueryInterceptor::pre_execute_exemplars`. Exact metric selectors project
+  the union of current logical-table tags; broad or unresolved selectors retain
+  all tags. Responses include the stored `__table_id` and `__tsid` as string labels.
+  The process ticket retains the configured slow-query timer through collection;
+  its query text includes the expression and inclusive nanosecond scan bounds.
 - **Logical-table batch DDL** (`instance.rs`): dedicated SQL handler → bounded
   parse/interception → all-member permissions → operator CREATE preparation →
   one logical-table batch procedure. Keep pre-submission validation side-effect free.
@@ -90,6 +94,8 @@ including caches owned by pipeline and protocol handlers.
   Reserve exemplar expansion with the transport's memory limiter before building
   rows; retain the permit through `WriteProgress` until writes complete.
   Expansion must not wait while the request holds transport memory permits.
+  Confirm source metric writes before inserting their exemplars; unrelated
+  metric writes remain concurrent and their completions must still be observed.
 
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
   one shared batcher for opted-in HTTP Prom and OTLP metric-engine
@@ -103,6 +109,10 @@ including caches owned by pipeline and protocol handlers.
   for `servers::batcher::table::TablePendingRowsBatcher`. A separate execution-only
   inserter, with no batcher attached, sends the prepared bulk writes to datanodes,
   avoiding recursive batching. The batcher handles successful-write Flow notifications.
+  `FrontendBuilder` creates the write memory limiter shared by conversion admission
+  and the protocol servers wired by `Services`. Conversion admission includes the
+  request's live transport and retained decoder reservations in its fit check;
+  previously queued Arrow batches remain transient contention.
 
 ## Public surface
 

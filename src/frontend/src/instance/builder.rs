@@ -53,6 +53,7 @@ use query::QueryEngineFactory;
 use query::region_query::RegionQueryHandlerFactoryRef;
 use servers::batcher::table::TablePendingRowsBatcher;
 use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
@@ -256,6 +257,10 @@ impl FrontendBuilder {
         };
         // The execution-only inserter owns no batchers, avoiding an Arc cycle.
         let bulk_inserter = Arc::new(create_inserter());
+        let server_memory_limiter = ServerMemoryLimiter::new(
+            self.options.max_in_flight_write_bytes.as_bytes(),
+            self.options.write_bytes_exhausted_policy,
+        );
         let build_batcher = |options: &BatcherOptions| -> Option<Arc<dyn PendingRowsBatcher>> {
             if !options.pending_rows_batching_enabled()
                 || (self.options.prom_store.with_metric_engine
@@ -273,6 +278,7 @@ impl FrontendBuilder {
                 options.worker_channel_capacity,
                 options.max_inflight_requests,
                 options.flow_notification_queue_capacity,
+                server_memory_limiter.clone(),
                 bulk_inserter.clone(),
             )
             .map(|batcher| batcher as Arc<dyn PendingRowsBatcher>)
@@ -417,6 +423,7 @@ impl FrontendBuilder {
         };
 
         Ok(Instance {
+            server_memory_limiter,
             logical_batcher: Default::default(),
             frontend_peer_addr,
             catalog_manager: self.catalog_manager,
