@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use common_base::readable_size::ReadableSize;
+use common_error::ext::BoxedError;
 use common_telemetry::tracing::{Span, info_span};
 use common_time::util::format_nanoseconds_human_readable;
 use datafusion::arrow::compute::cast;
@@ -41,7 +42,7 @@ use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::{DataFusionError, ToDFSchema};
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
-use datatypes::schema::{ColumnExtType, Schema, SchemaRef};
+use datatypes::schema::{ColumnExtType, Schema, SchemaRef, TYPE_KEY};
 use futures::ready;
 use jsonb;
 use pin_project::pin_project;
@@ -67,6 +68,10 @@ pub struct RecordBatchStreamTypeAdapter<T, E> {
     projected_schema: DfSchemaRef,
     projection: Vec<usize>,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// Positions in `projected_schema` of the JSON columns that are part of the
+    /// primary key; see
+    /// [`RecordBatchStreamTypeAdapter::with_primary_key_columns`].
+    json_key_positions: Arc<[usize]>,
     phantom: PhantomData<E>,
 }
 
@@ -87,8 +92,38 @@ where
             projected_schema,
             projection,
             predicate: None,
+            json_key_positions: Arc::from(Vec::new()),
             phantom: Default::default(),
         }
+    }
+
+    /// Keeps the payloads of the given primary-key columns byte-identical.
+    ///
+    /// A JSON column can be part of the primary key, and the bytes of a key column
+    /// are the storage key of a row. A `COPY TO` → `COPY FROM` round trip of a table
+    /// holding a legacy text-encoded JSON key must not rewrite that key, otherwise
+    /// the imported row lands under a different key instead of overwriting the
+    /// original row. Only JSON columns are affected; the names may include
+    /// non-JSON key columns.
+    ///
+    /// The matching positions are resolved once here, so casting a batch does no
+    /// per-column name lookup.
+    pub fn with_primary_key_columns(mut self, columns: Vec<String>) -> Self {
+        self.json_key_positions = self
+            .projected_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| {
+                let extype = field
+                    .metadata()
+                    .get("greptime:type")
+                    .and_then(|ext_type| ColumnExtType::from_str(ext_type).ok());
+                extype == Some(ColumnExtType::Json) && columns.iter().any(|key| key == field.name())
+            })
+            .map(|(position, _)| position)
+            .collect();
+        self
     }
 
     pub fn with_filter(mut self, filters: Vec<Expr>) -> Result<Self> {
@@ -141,6 +176,7 @@ where
         let projected_schema = this.projected_schema.clone();
         let projection = this.projection.clone();
         let predicate = this.predicate.clone();
+        let json_key_positions = Arc::clone(this.json_key_positions);
 
         let batch = batch.map(|b| {
             b.and_then(|b| {
@@ -156,8 +192,15 @@ where
                 let mut columns = Vec::with_capacity(projected_schema.fields.len());
                 for (idx,field) in projected_schema.fields.iter().enumerate() {
                     let column = projected_column.column(idx);
-                    let extype = field.metadata().get("greptime:type").and_then(|s| ColumnExtType::from_str(s).ok());
-                    let output = custom_cast(&column, field.data_type(), extype)?;
+                    let extype = field.metadata().get(TYPE_KEY).and_then(|s| ColumnExtType::from_str(s).ok());
+                    // A JSON column that is part of the primary key keeps its bytes:
+                    // they are the storage key of the row.
+                    let output = custom_cast(
+                        &column,
+                        field.data_type(),
+                        extype,
+                        !json_key_positions.contains(&idx),
+                    )?;
                     columns.push(output)
                 }
                 let record_batch = DfRecordBatch::try_new(projected_schema, columns)?;
@@ -812,19 +855,49 @@ impl Stream for AsyncRecordBatchStreamAdapter {
     }
 }
 
-/// Custom cast function that handles Map -> Binary (JSON) conversion
+/// Custom cast function that handles conversions into a JSON column.
+///
+/// A JSON column is exposed as `Binary` in Arrow, but it stores canonical binary
+/// jsonb. A plain arrow cast would copy a text payload into the column verbatim,
+/// so every payload destined for a jsonb column is normalized: JSON text is
+/// encoded, canonical jsonb is kept byte-identical, and anything else is
+/// rejected. See [`crate::jsonb_payload`].
 fn custom_cast(
     array: &dyn Array,
     target_type: &ArrowDataType,
     extype: Option<ColumnExtType>,
-) -> std::result::Result<Arc<dyn Array>, ArrowError> {
+    normalize_json: bool,
+) -> DfResult<Arc<dyn Array>> {
     if let ArrowDataType::Map(_, _) = array.data_type()
         && let ArrowDataType::Binary = target_type
     {
-        return convert_map_to_json_binary(array, extype);
+        return convert_map_to_json_binary(array, extype).map_err(Into::into);
     }
 
-    cast(array, target_type)
+    // `Json2` columns use a struct arrow type, so they never reach this branch.
+    if normalize_json
+        && let ArrowDataType::Binary = target_type
+        && extype == Some(ColumnExtType::Json)
+    {
+        return normalize_jsonb_column(array);
+    }
+
+    cast(array, target_type).map_err(Into::into)
+}
+
+/// Normalize the payloads of an array that is cast into a jsonb column.
+///
+/// Text-like sources (utf8, utf8 view, dictionary-encoded strings) are cast to
+/// binary first; a binary source may hold either JSON text or native jsonb, which
+/// the shared normalizer tells apart.
+fn normalize_jsonb_column(array: &dyn Array) -> DfResult<Arc<dyn Array>> {
+    let binary = cast(array, &ArrowDataType::Binary)?;
+    crate::jsonb_payload::normalize_jsonb_array(&binary).map_err(|e| {
+        // Keep the error typed and its status code reachable: an invalid payload is
+        // a user error, and the COPY path reports it as one instead of wrapping it
+        // in an opaque arrow cast error.
+        DataFusionError::External(Box::new(BoxedError::new(e)))
+    })
 }
 
 /// Convert a Map array to a Binary array containing JSON data
@@ -1384,6 +1457,240 @@ mod test {
                 assert!(binary_array_json.is_null(i));
             }
         }
+    }
+
+    /// A `COPY TO` → `COPY FROM` round trip of a table whose primary key is a JSON
+    /// column must keep the key bytes: a row exported with a legacy text-encoded key
+    /// has to be imported under the same storage key.
+    #[tokio::test]
+    async fn test_adapter_keeps_json_primary_key_bytes() {
+        use std::collections::HashMap;
+
+        use datatypes::arrow::array::{BinaryArray, StringArray};
+        use datatypes::arrow::datatypes::Schema as ArrowSchema;
+        use datatypes::types::{jsonb_to_string, parse_string_to_jsonb};
+
+        fn json_field(name: &str, nullable: bool) -> Field {
+            Field::new(name, ArrowDataType::Binary, nullable).with_metadata(HashMap::from([(
+                "greptime:type".to_string(),
+                "Json".to_string(),
+            )]))
+        }
+
+        // The target schema COPY casts the file batch into: `k` is a JSON primary
+        // key, `v` is an ordinary JSON column.
+        let target_schema = Arc::new(ArrowSchema::new(vec![
+            json_field("k", false),
+            json_field("v", true),
+        ]));
+        let source_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("k", ArrowDataType::Binary, true),
+            Field::new("v", ArrowDataType::Utf8, true),
+        ]));
+
+        // The exported file holds a legacy text-encoded key in the first row and a
+        // canonical jsonb key in the second; both keys must come back unchanged.
+        let legacy_key = br#"{"a":"x"}"#;
+        let canonical_key = parse_string_to_jsonb(r#"{"a":"y"}"#).unwrap();
+        let input = DfRecordBatch::try_new(
+            source_schema,
+            vec![
+                Arc::new(BinaryArray::from_iter([
+                    Some(legacy_key.as_slice()),
+                    Some(canonical_key.as_slice()),
+                ])),
+                Arc::new(StringArray::from(vec![r#"{"b":"z"}"#, r#"{"b":"w"}"#])),
+            ],
+        )
+        .unwrap();
+
+        let stream = futures::stream::iter(vec![Ok::<_, ArrowError>(input)]);
+        let mut adapter = Box::pin(
+            RecordBatchStreamTypeAdapter::new(target_schema, stream, None)
+                .with_primary_key_columns(vec!["k".to_string()]),
+        );
+
+        let batch = adapter.next().await.unwrap().unwrap();
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(legacy_key, keys.value(0), "a legacy text key was rewritten");
+        assert_eq!(canonical_key, keys.value(1).to_vec());
+
+        // The non-key JSON column is still encoded from text.
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(r#"{"b":"z"}"#, jsonb_to_string(values.value(0)).unwrap());
+        assert_ne!(
+            br#"{"b":"z"}"#.as_slice(),
+            values.value(0),
+            "a non-key JSON column must be encoded"
+        );
+    }
+
+    #[test]
+    fn test_custom_cast_json_text_to_jsonb() {
+        use datatypes::arrow::array::BinaryArray;
+        use datatypes::types::jsonb_to_string;
+
+        let payloads = StringArray::from(vec![Some(r#"{"a":"x"}"#), Some("12345678"), None]);
+        let result = custom_cast(
+            &payloads,
+            &ArrowDataType::Binary,
+            Some(ColumnExtType::Json),
+            true,
+        )
+        .expect("json text must be re-encoded");
+        let binary_array = result
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("cast output must be binary");
+
+        assert_eq!(3, binary_array.len());
+        assert!(binary_array.is_null(2));
+
+        // The stored bytes must decode as jsonb; `jsonb::from_slice` otherwise
+        // falls back to parsing the bytes as text, which hides text payloads.
+        let object = jsonb::from_slice(binary_array.value(0)).expect("must decode as jsonb");
+        assert!(object.is_object());
+        assert_eq!(
+            Some("x".to_string()),
+            object
+                .get_by_name_ignore_case("a")
+                .and_then(|value| value.as_str().map(|s| s.to_string()))
+        );
+        // Same result as the `json_to_string` function.
+        assert_eq!(
+            r#"{"a":"x"}"#,
+            jsonb_to_string(binary_array.value(0)).unwrap()
+        );
+
+        // `12345678` used to be stored as text and decode as a bogus value.
+        let number = jsonb::from_slice(binary_array.value(1)).expect("must decode as jsonb");
+        assert_eq!(Some(12345678.0), number.as_f64());
+        assert_eq!("12345678", jsonb_to_string(binary_array.value(1)).unwrap());
+    }
+
+    #[test]
+    fn test_custom_cast_keeps_non_json_binary() {
+        use datatypes::arrow::array::BinaryArray;
+
+        let payloads: Vec<Option<&[u8]>> = vec![Some(b"\x01\x02"), Some(b"not json"), None];
+        let array = BinaryArray::from_iter(payloads);
+
+        // A binary column keeps its bytes.
+        let result = custom_cast(&array, &ArrowDataType::Binary, None, true).unwrap();
+        let binary_array = result.as_any().downcast_ref::<BinaryArray>().unwrap();
+        assert_eq!(b"\x01\x02", binary_array.value(0));
+        assert_eq!(b"not json", binary_array.value(1));
+        assert!(binary_array.is_null(2));
+
+        // A vector column is a binary column in Arrow too and must not be
+        // re-encoded either.
+        let result = custom_cast(
+            &array,
+            &ArrowDataType::Binary,
+            Some(ColumnExtType::Vector(3)),
+            true,
+        )
+        .unwrap();
+        let binary_array = result.as_any().downcast_ref::<BinaryArray>().unwrap();
+        assert_eq!(b"\x01\x02", binary_array.value(0));
+        assert_eq!(b"not json", binary_array.value(1));
+    }
+
+    #[test]
+    fn test_custom_cast_keeps_native_jsonb() {
+        use datatypes::arrow::array::BinaryArray;
+        use datatypes::types::{jsonb_to_string, parse_string_to_jsonb};
+
+        // A Parquet/ORC file can hold a binary column that already is native
+        // jsonb; it must be written back byte-identical.
+        let native = vec![
+            Some(parse_string_to_jsonb(r#"{"a":"x"}"#).unwrap()),
+            Some(parse_string_to_jsonb("12345678").unwrap()),
+            Some(parse_string_to_jsonb("null").unwrap()),
+            None,
+        ];
+        let expected = native.clone();
+        let array = BinaryArray::from_iter(native);
+
+        let result = custom_cast(
+            &array,
+            &ArrowDataType::Binary,
+            Some(ColumnExtType::Json),
+            true,
+        )
+        .expect("native jsonb must pass through");
+        let binary_array = result.as_any().downcast_ref::<BinaryArray>().unwrap();
+
+        assert_eq!(4, binary_array.len());
+        for (i, expected) in expected.iter().enumerate() {
+            match expected {
+                Some(expected) => assert_eq!(expected.as_slice(), binary_array.value(i)),
+                None => assert!(binary_array.is_null(i)),
+            }
+        }
+        assert_eq!(
+            r#"{"a":"x"}"#,
+            jsonb_to_string(binary_array.value(0)).unwrap()
+        );
+        assert_eq!("12345678", jsonb_to_string(binary_array.value(1)).unwrap());
+    }
+
+    #[test]
+    fn test_custom_cast_rejects_invalid_json_text() {
+        use datatypes::arrow::array::BinaryArray;
+
+        let payloads = StringArray::from(vec![r#"{"a":}"#]);
+        let err = custom_cast(
+            &payloads,
+            &ArrowDataType::Binary,
+            Some(ColumnExtType::Json),
+            true,
+        )
+        .expect_err("invalid json text must be rejected");
+        assert!(
+            err.to_string().contains("Invalid value for a JSON column"),
+            "unexpected error: {err}"
+        );
+
+        // Bytes that are neither JSON text nor canonical jsonb are rejected too.
+        let payloads: Vec<Option<&[u8]>> = vec![Some(b"\xff\xfe")];
+        let array = BinaryArray::from_iter(payloads);
+        let err = custom_cast(
+            &array,
+            &ArrowDataType::Binary,
+            Some(ColumnExtType::Json),
+            true,
+        )
+        .expect_err("invalid bytes must be rejected");
+        assert!(
+            err.to_string().contains("Invalid value for a JSON column"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_custom_cast_json_text_keeps_empty_payload() {
+        use datatypes::arrow::array::BinaryArray;
+
+        // An empty CSV field is how a NULL JSON value is exported.
+        let payloads = StringArray::from(vec![Some("")]);
+        let result = custom_cast(
+            &payloads,
+            &ArrowDataType::Binary,
+            Some(ColumnExtType::Json),
+            true,
+        )
+        .expect("empty payload must be accepted");
+        let binary_array = result.as_any().downcast_ref::<BinaryArray>().unwrap();
+        assert_eq!(b"", binary_array.value(0));
     }
 
     #[test]

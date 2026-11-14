@@ -42,6 +42,11 @@ Copy with_json FROM '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet';
 
 select host, cpu, memory, json_to_string(jsons), ts from with_json order by ts;
 
+-- `json_is_object` and `json_get_string` decode the stored value with the strict
+-- jsonb decoder, so they only succeed when COPY FROM stored jsonb instead of the
+-- JSON text itself (issue #10195).
+select host, json_is_object(jsons), json_get_string(jsons, 'foo') from with_json order by ts;
+
 -- SQLNESS PROTOCOL MYSQL
 select host, cpu, memory, jsons, ts from demo where host != 'host3';
 

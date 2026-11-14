@@ -1305,6 +1305,189 @@ mod tests {
         assert!(!all_params_have_types(&param_types, 3));
     }
 
+    /// A prepared statement can hand a JSON text payload to a JSON column through
+    /// an expression instead of a bare placeholder. Both shapes below infer a
+    /// plain `Binary`/`Utf8` parameter type, so the value only becomes jsonb at
+    /// the insert boundary; it must never be stored as text.
+    #[tokio::test]
+    async fn test_json_parameter_shapes_are_stored_as_jsonb() {
+        use common_query::prelude::ScalarValue;
+        use common_recordbatch::RecordBatch;
+        use datafusion::catalog::TableProvider;
+        use datafusion::datasource::TableType;
+        use datafusion::physical_plan::ExecutionPlan;
+        use datafusion::prelude::SessionContext;
+        use datatypes::arrow::datatypes::{
+            DataType as ArrowDataType, Field, Schema as ArrowSchema,
+        };
+        use datatypes::schema::{ColumnSchema, Schema, TYPE_KEY};
+        use datatypes::types::jsonb_to_string;
+
+        #[derive(Debug)]
+        struct JsonTable {
+            schema: Arc<ArrowSchema>,
+        }
+
+        #[async_trait]
+        impl TableProvider for JsonTable {
+            fn schema(&self) -> Arc<ArrowSchema> {
+                self.schema.clone()
+            }
+
+            fn table_type(&self) -> TableType {
+                TableType::Base
+            }
+
+            async fn scan(
+                &self,
+                _state: &dyn datafusion::catalog::Session,
+                _projection: Option<&Vec<usize>>,
+                _filters: &[datafusion_expr::Expr],
+                _limit: Option<usize>,
+            ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+                unreachable!("the test only plans the insert")
+            }
+        }
+
+        fn json_table_arrow_schema() -> Arc<ArrowSchema> {
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("j", ArrowDataType::Binary, true)
+                    .with_metadata(HashMap::from([(TYPE_KEY.to_string(), "Json".to_string())])),
+                Field::new(
+                    "ts",
+                    ArrowDataType::Timestamp(
+                        datatypes::arrow::datatypes::TimeUnit::Millisecond,
+                        None,
+                    ),
+                    false,
+                ),
+            ]))
+        }
+
+        /// Runs the value through the insert boundary (`column_vectors`) and
+        /// returns the bytes that would be written into the JSON column.
+        fn stored_jsonb(value: ScalarValue) -> Vec<u8> {
+            let table_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                "j",
+                ConcreteDataType::json_datatype(),
+                true,
+            )]));
+            let array = value.to_array().unwrap();
+            let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+                "j",
+                array.data_type().clone(),
+                true,
+            )]));
+            let batch = RecordBatch::from_df_record_batch(
+                Arc::new(Schema::try_from(Arc::clone(&arrow_schema)).unwrap()),
+                datafusion::arrow::record_batch::RecordBatch::try_new(arrow_schema, vec![array])
+                    .unwrap(),
+            );
+            let mut vectors = batch
+                .column_vectors(
+                    "t",
+                    table_schema,
+                    common_recordbatch::JsonPayloadPolicy::NormalizeExceptKeys { key_columns: &[] },
+                )
+                .unwrap();
+            match vectors.remove("j").unwrap().get(0) {
+                datatypes::value::Value::Binary(bytes) => bytes.to_vec(),
+                other => panic!("unexpected value: {other:?}"),
+            }
+        }
+
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "t",
+            Arc::new(JsonTable {
+                schema: json_table_arrow_schema(),
+            }),
+        )
+        .unwrap();
+
+        // One shape per protocol: the text protocol through a cast to TEXT, the
+        // binary protocol through `arrow_cast`. Both land in the JSON column as
+        // text, which only the insert boundary turns into jsonb.
+        for (sql, payload, expected) in [
+            (
+                "INSERT INTO t(j, ts) VALUES (CAST($1 AS TEXT), 0)",
+                r#"{"a":"x"}"#,
+                r#"{"a":"x"}"#,
+            ),
+            (
+                "INSERT INTO t(j, ts) VALUES (CAST($1 AS TEXT), 0)",
+                "12345678",
+                "12345678",
+            ),
+        ] {
+            let plan = ctx.state().create_logical_plan(sql).await.unwrap();
+
+            // The type the server infers for the parameter drives the conversion.
+            // What that type is is not this test's concern: a future inference that
+            // already yields jsonb would be an improvement, not a regression.
+            let param_types: HashMap<_, _> = DfLogicalPlanner::get_inferred_parameter_types(&plan)
+                .unwrap()
+                .into_iter()
+                .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+                .collect();
+            let inferred = param_types
+                .get(&format_placeholder(1))
+                .and_then(|t| t.as_ref());
+
+            // Text protocol: `EXECUTE ... USING '<payload>'`.
+            let expr = sql::ast::Expr::Value(
+                sql::ast::Value::SingleQuotedString(payload.to_string()).into(),
+            );
+            let value = match inferred {
+                Some(inferred) => helper::convert_expr_to_scalar_value(
+                    &expr,
+                    inferred,
+                    &Timezone::from_tz_string("UTC").unwrap(),
+                ),
+                None => panic!("no inferred type for {sql}"),
+            }
+            .unwrap();
+            assert_eq!(
+                expected,
+                jsonb_to_string(&stored_jsonb(value)).unwrap(),
+                "{sql}"
+            );
+        }
+
+        // Binary protocol: the parameter arrives as bytes.
+        for (sql, payload, expected) in [
+            (
+                "INSERT INTO t(j, ts) VALUES (arrow_cast($1, 'Binary'), 0)",
+                r#"{"a":"x"}"#,
+                r#"{"a":"x"}"#,
+            ),
+            (
+                "INSERT INTO t(j, ts) VALUES (arrow_cast($1, 'Binary'), 0)",
+                "12345678",
+                "12345678",
+            ),
+        ] {
+            let plan = ctx.state().create_logical_plan(sql).await.unwrap();
+            let param_types: HashMap<_, _> = DfLogicalPlanner::get_inferred_parameter_types(&plan)
+                .unwrap()
+                .into_iter()
+                .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+                .collect();
+            // The parameter is still typed as binary text at this point, so the
+            // payload reaches the boundary as its raw bytes.
+            let value = ScalarValue::Binary(Some(payload.as_bytes().to_vec()));
+            assert!(
+                param_types.contains_key(&format_placeholder(1)),
+                "no inferred type for {sql}"
+            );
+            assert_eq!(
+                expected,
+                jsonb_to_string(&stored_jsonb(value)).unwrap(),
+                "{sql}"
+            );
+        }
+    }
+
     #[test]
     fn test_replace_params_by_placeholder_span() {
         let query = "SELECT ?, ?".to_string();

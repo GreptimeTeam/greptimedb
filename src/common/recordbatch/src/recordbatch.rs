@@ -34,6 +34,37 @@ use crate::error::{
     Result,
 };
 
+/// What [`RecordBatch::column_vectors`] does with the payloads of JSON columns.
+///
+/// A jsonb column is exposed as `Binary` in Arrow, so a value written into it can
+/// still be JSON text; this policy decides whether the write boundary encodes such
+/// payloads (see [`crate::jsonb_payload`]). The bytes of a *key* column are not just
+/// a value though: they are what a row is stored and looked up under, so they must
+/// not be rewritten.
+///
+/// This is the canonical explanation of the rule; the call sites reference it
+/// instead of repeating it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonPayloadPolicy<'a> {
+    /// Encode JSON text payloads, except in the given key columns.
+    ///
+    /// The columns are named rather than indexed because the COPY adapter applies
+    /// the same policy to a projected schema, where table-schema indices do not
+    /// survive. A key column keeps whatever bytes the statement provides - rows
+    /// written by an older version can hold a text-encoded JSON key, and rewriting
+    /// it would move them to a different key - but those bytes are still validated,
+    /// so a key column rejects exactly the payloads a non-key column rejects.
+    NormalizeExceptKeys { key_columns: &'a [String] },
+
+    /// Keep every payload byte-identical and do not validate it either.
+    ///
+    /// Used by DELETE: it is planned from the scanned key columns and storage looks
+    /// rows up by exactly those bytes, so re-encoding a legacy text-encoded JSON key
+    /// would miss the row (or match a canonical sibling). The payloads are values
+    /// read back from storage, so they are not re-validated.
+    Preserve,
+}
+
 /// A two-dimensional batch of column-oriented data with a defined schema.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatch {
@@ -190,10 +221,18 @@ impl RecordBatch {
         self.df_record_batch.num_rows()
     }
 
+    /// Converts this batch into the column vectors of the table it is written to.
+    ///
+    /// This is the insert boundary: every value is converted against the target
+    /// column type here, which includes normalizing the payloads of a JSON column
+    /// (a jsonb column is exposed as `Binary`, so a value can still be JSON text
+    /// when it reaches this point). `json_policy` decides which payloads may be
+    /// rewritten; see [`JsonPayloadPolicy`].
     pub fn column_vectors(
         &self,
         table_name: &str,
         table_schema: SchemaRef,
+        json_policy: JsonPayloadPolicy<'_>,
     ) -> Result<HashMap<String, VectorRef>> {
         let mut vectors = HashMap::with_capacity(self.num_columns());
 
@@ -213,14 +252,32 @@ impl RecordBatch {
                         table_name,
                         column_name,
                     })?;
-            let vector = if field.data_type() != &column_schema.data_type.as_arrow_type() {
-                let array = compute::cast(array, &column_schema.data_type.as_arrow_type())
-                    .context(ArrowComputeSnafu)?;
-                Helper::try_into_vector(array).context(DataTypesSnafu)?
+            let target_type = column_schema.data_type.as_arrow_type();
+            let array = if field.data_type() != &target_type {
+                compute::cast(array, &target_type).context(ArrowComputeSnafu)?
             } else {
-                Helper::try_into_vector(array).context(DataTypesSnafu)?
+                Arc::clone(array)
+            };
+            // `Json2` columns use a struct arrow type and never reach this branch.
+            let array = if column_schema.data_type.is_json()
+                && matches!(array.data_type(), ArrowDataType::Binary)
+            {
+                match json_policy {
+                    JsonPayloadPolicy::NormalizeExceptKeys { key_columns } => {
+                        if key_columns.iter().any(|key| key == column_name) {
+                            crate::jsonb_payload::validate_jsonb_array(&array)?;
+                            array
+                        } else {
+                            crate::jsonb_payload::normalize_jsonb_array(&array)?
+                        }
+                    }
+                    JsonPayloadPolicy::Preserve => array,
+                }
+            } else {
+                array
             };
 
+            let vector = Helper::try_into_vector(array).context(DataTypesSnafu)?;
             let _ = vectors.insert(column_name.clone(), vector);
         }
 
@@ -380,6 +437,7 @@ mod tests {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::JsonExtensionType;
     use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::value::Value;
     use datatypes::vectors::{BinaryVector, StringVector, UInt32Vector};
 
     use super::*;
@@ -413,6 +471,368 @@ mod tests {
         let converted = RecordBatch::from_df_record_batch(schema, batch.df_record_batch().clone());
         assert_eq!(batch, converted);
         assert_eq!(*batch.df_record_batch(), converted.into_df_record_batch());
+    }
+
+    fn json_table_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new("j", ConcreteDataType::json_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::binary_datatype(), true),
+            ColumnSchema::new("v", ConcreteDataType::vector_datatype(3), true),
+        ]))
+    }
+
+    fn binary_column(payloads: Vec<Option<&[u8]>>) -> ArrayRef {
+        Arc::new(datatypes::arrow::array::BinaryArray::from_iter(payloads))
+    }
+
+    fn binary_payloads(vector: &VectorRef) -> Vec<Option<Vec<u8>>> {
+        (0..vector.len())
+            .map(|index| match vector.get(index) {
+                Value::Binary(bytes) => Some(bytes.to_vec()),
+                Value::Null => None,
+                other => panic!("unexpected value: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// JSON text written through the plan-based insert path (MySQL/Postgres
+    /// prepared statements and every other SQL insert) must be encoded as jsonb
+    /// when it reaches the JSON column.
+    #[test]
+    fn test_column_vectors_encodes_json_text() {
+        use datatypes::types::jsonb_to_string;
+
+        let schema = json_table_schema();
+        let json_text = binary_column(vec![
+            Some(br#"{"a":"x"}"#),
+            Some(b"12345678"),
+            Some(b""),
+            None,
+        ]);
+        let blob = binary_column(vec![
+            Some(b"12345678"),
+            Some(b"12345678"),
+            Some(b"12345678"),
+            Some(b"12345678"),
+        ]);
+        let vector_column = binary_column(vec![
+            Some(b"12345678"),
+            Some(b"12345678"),
+            Some(b"12345678"),
+            Some(b"12345678"),
+        ]);
+
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("j", DataType::Binary, true),
+            Field::new("b", DataType::Binary, true),
+            Field::new("v", DataType::Binary, true),
+        ]));
+        let batch = RecordBatch::from_df_record_batch(
+            Arc::new(Schema::try_from(Arc::clone(&arrow_schema)).unwrap()),
+            DfRecordBatch::try_new(
+                arrow_schema,
+                vec![json_text, blob.clone(), vector_column.clone()],
+            )
+            .unwrap(),
+        );
+
+        let vectors = batch
+            .column_vectors(
+                "t",
+                schema,
+                JsonPayloadPolicy::NormalizeExceptKeys { key_columns: &[] },
+            )
+            .unwrap();
+
+        let json = binary_payloads(&vectors["j"]);
+        assert_eq!(
+            r#"{"a":"x"}"#,
+            jsonb_to_string(&json[0].clone().unwrap()).unwrap()
+        );
+        assert_eq!(
+            "12345678",
+            jsonb_to_string(&json[1].clone().unwrap()).unwrap()
+        );
+        // An empty payload (how a NULL JSON value is exported to CSV) stays empty.
+        assert_eq!(Some(Vec::new()), json[2]);
+        assert_eq!(None, json[3]);
+
+        // Non-JSON binary columns are untouched.
+        let expected_binary = vec![Some(b"12345678".to_vec()); 4];
+        assert_eq!(expected_binary, binary_payloads(&vectors["b"]));
+        assert_eq!(expected_binary, binary_payloads(&vectors["v"]));
+    }
+
+    /// A batch can mix native jsonb, JSON text and nulls; normalizing the text must
+    /// not disturb the payloads that are already canonical jsonb.
+    #[test]
+    fn test_column_vectors_normalizes_mixed_json_payloads() {
+        use datatypes::types::{jsonb_to_string, parse_string_to_jsonb};
+
+        let schema = json_table_schema();
+        let canonical = parse_string_to_jsonb(r#"{"a":"x"}"#).unwrap();
+        let canonical_number = parse_string_to_jsonb("12345678").unwrap();
+        let json_column = binary_column(vec![
+            Some(&canonical),
+            Some(br#"{"b":"y"}"#),
+            None,
+            Some(b"12345678"),
+            Some(&canonical_number),
+        ]);
+
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("j", DataType::Binary, true),
+            Field::new("b", DataType::Binary, true),
+            Field::new("v", DataType::Binary, true),
+        ]));
+        let batch = RecordBatch::from_df_record_batch(
+            Arc::new(Schema::try_from(Arc::clone(&arrow_schema)).unwrap()),
+            DfRecordBatch::try_new(
+                arrow_schema,
+                vec![
+                    json_column,
+                    binary_column(vec![None; 5]),
+                    binary_column(vec![None; 5]),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let vectors = batch
+            .column_vectors(
+                "t",
+                schema,
+                JsonPayloadPolicy::NormalizeExceptKeys { key_columns: &[] },
+            )
+            .unwrap();
+        let json = binary_payloads(&vectors["j"]);
+
+        // The payloads that were already jsonb stay byte-identical.
+        assert_eq!(Some(canonical), json[0]);
+        assert_eq!(Some(canonical_number), json[4]);
+        // The text payloads are encoded.
+        assert_eq!(
+            r#"{"b":"y"}"#,
+            jsonb_to_string(&json[1].clone().unwrap()).unwrap()
+        );
+        assert_eq!(
+            "12345678",
+            jsonb_to_string(&json[3].clone().unwrap()).unwrap()
+        );
+        // Nulls stay null.
+        assert_eq!(None, json[2]);
+    }
+
+    fn json_key_table_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            // A JSON1 column that is part of the primary key.
+            ColumnSchema::new("k", ConcreteDataType::json_datatype(), false),
+            ColumnSchema::new("v", ConcreteDataType::json_datatype(), true),
+        ]))
+    }
+
+    fn json_key_batch(columns: Vec<ArrayRef>) -> RecordBatch {
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("k", DataType::Binary, true),
+            Field::new("v", DataType::Binary, true),
+        ]));
+        RecordBatch::from_df_record_batch(
+            Arc::new(Schema::try_from(Arc::clone(&arrow_schema)).unwrap()),
+            DfRecordBatch::try_new(arrow_schema, columns).unwrap(),
+        )
+    }
+
+    /// A JSON primary key keeps its bytes: a row written with a text-encoded key
+    /// must stay findable by that key, and a DELETE looks rows up by exactly the
+    /// scanned bytes.
+    #[test]
+    fn test_column_vectors_keeps_json_primary_key_bytes() {
+        use datatypes::types::parse_string_to_jsonb;
+
+        let schema = json_key_table_schema();
+        let text_key = br#"{"a":"x"}"#;
+        let canonical_key = parse_string_to_jsonb(r#"{"a":"y"}"#).unwrap();
+        let batch = json_key_batch(vec![
+            binary_column(vec![Some(text_key), Some(&canonical_key)]),
+            binary_column(vec![Some(b"12345678"), Some(b"12345678")]),
+        ]);
+
+        // INSERT: the key column is a primary key, so it is left alone; the value
+        // column is still normalized.
+        let vectors = batch
+            .column_vectors(
+                "t",
+                Arc::clone(&schema),
+                JsonPayloadPolicy::NormalizeExceptKeys {
+                    key_columns: &["k".to_string()],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            vec![Some(text_key.to_vec()), Some(canonical_key.clone())],
+            binary_payloads(&vectors["k"])
+        );
+        assert_eq!(
+            "12345678",
+            datatypes::types::jsonb_to_string(&binary_payloads(&vectors["v"])[0].clone().unwrap())
+                .unwrap()
+        );
+
+        // DELETE: nothing is normalized, not even a non-key column.
+        let vectors = batch
+            .column_vectors("t", schema, JsonPayloadPolicy::Preserve)
+            .unwrap();
+        assert_eq!(
+            vec![Some(text_key.to_vec()), Some(canonical_key.clone())],
+            binary_payloads(&vectors["k"])
+        );
+        assert_eq!(
+            vec![Some(b"12345678".to_vec()), Some(b"12345678".to_vec())],
+            binary_payloads(&vectors["v"])
+        );
+    }
+
+    /// A JSON key column keeps its bytes, but it still rejects a payload the read
+    /// side cannot decode - with the same error a non-key JSON column produces.
+    #[test]
+    fn test_column_vectors_validates_json_primary_key_bytes() {
+        let schema = json_key_table_schema();
+        let garbage = br#"{"a":}"#;
+
+        // Garbage in the key column.
+        let key_batch = json_key_batch(vec![
+            binary_column(vec![Some(garbage)]),
+            binary_column(vec![Some(b"12345678")]),
+        ]);
+        let key_err = key_batch
+            .column_vectors(
+                "t",
+                Arc::clone(&schema),
+                JsonPayloadPolicy::NormalizeExceptKeys {
+                    key_columns: &["k".to_string()],
+                },
+            )
+            .expect_err("garbage in a JSON key column must be rejected");
+
+        // The same payload in the non-key column.
+        let value_batch = json_key_batch(vec![
+            binary_column(vec![Some(br#"{"a":"x"}"#)]),
+            binary_column(vec![Some(garbage)]),
+        ]);
+        let value_err = value_batch
+            .column_vectors(
+                "t",
+                Arc::clone(&schema),
+                JsonPayloadPolicy::NormalizeExceptKeys {
+                    key_columns: &["k".to_string()],
+                },
+            )
+            .expect_err("garbage in a JSON column must be rejected");
+
+        assert!(
+            key_err
+                .to_string()
+                .contains("Invalid value for a JSON column"),
+            "unexpected error: {key_err}"
+        );
+        assert_eq!(
+            key_err.to_string(),
+            value_err.to_string(),
+            "a key column must reject a payload exactly like a non-key column"
+        );
+
+        // A legacy text key and a canonical key are both accepted unchanged.
+        let text_key = br#"{"a":"x"}"#;
+        let canonical_key = datatypes::types::parse_string_to_jsonb(r#"{"a":"y"}"#).unwrap();
+        let batch = json_key_batch(vec![
+            binary_column(vec![Some(text_key), Some(&canonical_key)]),
+            binary_column(vec![Some(b"1"), Some(b"2")]),
+        ]);
+        let vectors = batch
+            .column_vectors(
+                "t",
+                schema,
+                JsonPayloadPolicy::NormalizeExceptKeys {
+                    key_columns: &["k".to_string()],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            vec![Some(text_key.to_vec()), Some(canonical_key)],
+            binary_payloads(&vectors["k"])
+        );
+    }
+
+    /// Native jsonb reaching the insert boundary is not re-encoded.
+    #[test]
+    fn test_column_vectors_keeps_native_jsonb() {
+        use datatypes::types::parse_string_to_jsonb;
+
+        let schema = json_table_schema();
+        let native = parse_string_to_jsonb(r#"{"a":"x"}"#).unwrap();
+        let json_column = binary_column(vec![Some(&native)]);
+
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("j", DataType::Binary, true),
+            Field::new("b", DataType::Binary, true),
+            Field::new("v", DataType::Binary, true),
+        ]));
+        let batch = RecordBatch::from_df_record_batch(
+            Arc::new(Schema::try_from(Arc::clone(&arrow_schema)).unwrap()),
+            DfRecordBatch::try_new(
+                arrow_schema,
+                vec![
+                    json_column,
+                    binary_column(vec![None]),
+                    binary_column(vec![None]),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let vectors = batch
+            .column_vectors(
+                "t",
+                schema,
+                JsonPayloadPolicy::NormalizeExceptKeys { key_columns: &[] },
+            )
+            .unwrap();
+        assert_eq!(vec![Some(native)], binary_payloads(&vectors["j"]));
+    }
+
+    /// A payload that is neither JSON text nor canonical jsonb fails the write.
+    #[test]
+    fn test_column_vectors_rejects_invalid_json() {
+        let schema = json_table_schema();
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("j", DataType::Binary, true),
+            Field::new("b", DataType::Binary, true),
+            Field::new("v", DataType::Binary, true),
+        ]));
+        let batch = RecordBatch::from_df_record_batch(
+            Arc::new(Schema::try_from(Arc::clone(&arrow_schema)).unwrap()),
+            DfRecordBatch::try_new(
+                arrow_schema,
+                vec![
+                    binary_column(vec![Some(b"{\"a\":}")]),
+                    binary_column(vec![None]),
+                    binary_column(vec![None]),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let err = batch
+            .column_vectors(
+                "t",
+                schema,
+                JsonPayloadPolicy::NormalizeExceptKeys { key_columns: &[] },
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid value for a JSON column"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -1060,10 +1060,19 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::FlowNotFound { .. } => StatusCode::FlowNotFound,
             Error::JoinTask { .. } => StatusCode::Internal,
+            // A COPY stream wraps its own errors (for example an invalid JSON
+            // payload) in `DataFusionError::External`; keep their status code so a
+            // bad value in the input is reported as a user error instead of an
+            // internal one.
+            Error::ReadDfRecordBatch { error, .. } => {
+                common_query::error::datafusion_status_code::<Error>(
+                    error,
+                    Some(StatusCode::Unexpected),
+                )
+            }
             Error::BuildParquetRecordBatchStream { .. }
             | Error::BuildFileStream { .. }
             | Error::WriteStreamToFile { .. }
-            | Error::ReadDfRecordBatch { .. }
             | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::Catalog { source, .. } => source.status_code(),
             Error::BuildCreateExprOnInsertion { source, .. }
