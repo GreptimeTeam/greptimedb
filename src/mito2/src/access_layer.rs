@@ -147,17 +147,21 @@ impl Metrics {
                     .observe(self.upload_puffin.as_secs_f64());
             }
             WriteType::TailReplay => {
-                for (stage, elapsed) in [
-                    ("iter_source", self.iter_source),
-                    ("write_batch", self.write_batch),
-                    ("update_index", self.update_index),
-                    ("upload_parquet", self.upload_parquet),
-                    ("upload_puffin", self.upload_puffin),
-                ] {
-                    TAIL_REPLAY_ELAPSED
-                        .with_label_values(&[stage])
-                        .observe(elapsed.as_secs_f64());
-                }
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["iter_source"])
+                    .observe(self.iter_source.as_secs_f64());
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["write_batch"])
+                    .observe(self.write_batch.as_secs_f64());
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["update_index"])
+                    .observe(self.update_index.as_secs_f64());
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["upload_parquet"])
+                    .observe(self.upload_parquet.as_secs_f64());
+                TAIL_REPLAY_ELAPSED
+                    .with_label_values(&["upload_puffin"])
+                    .observe(self.upload_puffin.as_secs_f64());
                 if !self.compact_memtable.is_zero() {
                     TAIL_REPLAY_ELAPSED
                         .with_label_values(&["compact_memtable"])

@@ -41,8 +41,7 @@ use crate::access_layer::{
 use crate::cache::CacheManagerRef;
 use crate::compaction::{collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema};
 use crate::config::{IndexBuildMode, MitoConfig};
-use crate::engine::region_hook::RegionHookRef;
-use crate::engine::region_hook::SstFileInfo;
+use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
 use crate::error::{
     Error, FlushCancelledSnafu, FlushRegionSnafu, JoinSnafu, RegionBusySnafu, RegionClosedSnafu,
     RegionDroppedSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu,
@@ -596,7 +595,7 @@ impl MemtableSstWriter {
         uncommitted: &UncommittedSsts,
         reason: &str,
     ) -> Result<Vec<FileMeta>> {
-        let timer = self.elapsed().start_timer();
+        let timer = self.write_elapsed().start_timer();
 
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
@@ -674,7 +673,6 @@ impl MemtableSstWriter {
         let mut encoded_part_count = 0;
         let mut flush_metrics = Metrics::new(self.write_type);
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
-        let hook = self.hook.clone();
         let mut all_sst_infos = Vec::new();
         for mem in memtables {
             if mem.is_empty() {
@@ -750,7 +748,7 @@ impl MemtableSstWriter {
                         version.options.preserve_row_sequence,
                     )?);
                 }
-                if hook.is_some() {
+                if self.hook.is_some() {
                     all_sst_infos.extend(ssts_written);
                 }
             }
@@ -825,7 +823,7 @@ impl MemtableSstWriter {
         for (mut encoded, max_sequence) in flat_sources.encoded {
             let access_layer = self.access_layer.clone();
             let cache_manager = self.cache_manager.clone();
-            let region_id = version.metadata.region_id;
+            let region_id = self.region_id;
             let write_buffer_size = write_opts.write_buffer_size;
             let semaphore = self.write_semaphore.clone();
             let uncommitted = uncommitted.clone();
@@ -957,8 +955,8 @@ impl MemtableSstWriter {
         }
     }
 
-    /// Returns the timer of [Self::write_ssts] for this writer's write type.
-    fn elapsed(&self) -> Histogram {
+    /// Returns the histogram that times [Self::write_ssts] for this writer's write type.
+    fn write_elapsed(&self) -> Histogram {
         match self.write_type {
             WriteType::TailReplay => TAIL_REPLAY_ELAPSED.with_label_values(&["write_chunk"]),
             WriteType::Flush | WriteType::Compaction => {

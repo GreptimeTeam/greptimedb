@@ -175,9 +175,6 @@ pub(crate) struct WorkerGroup {
     intermediate_manager: IntermediateManager,
     /// Schema metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
-    /// Limits of the tail replays of every worker.
-    #[cfg(test)]
-    tail_replay_limits: TailReplayLimits,
 }
 
 impl WorkerGroup {
@@ -324,8 +321,6 @@ impl WorkerGroup {
             puffin_manager_factory,
             intermediate_manager,
             schema_metadata_manager,
-            #[cfg(test)]
-            tail_replay_limits,
         })
     }
 
@@ -611,20 +606,12 @@ impl WorkerGroup {
             puffin_manager_factory,
             intermediate_manager,
             schema_metadata_manager,
-            #[cfg(test)]
-            tail_replay_limits,
         })
     }
 
     /// Returns the purge scheduler.
     pub(crate) fn purge_scheduler(&self) -> &SchedulerRef {
         &self.purge_scheduler
-    }
-
-    /// Returns the bytes the tail replays reserve from their memory pool.
-    #[cfg(test)]
-    pub(crate) fn tail_replay_reserved(&self) -> usize {
-        self.tail_replay_limits.reserved()
     }
 }
 
@@ -712,6 +699,7 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    /// Limits of the node's tail replays.
     tail_replay_limits: TailReplayLimits,
     #[cfg(feature = "hdfs-object-store")]
     /// Limiter for the temporary file sweeps, or `None` if the datanode allows

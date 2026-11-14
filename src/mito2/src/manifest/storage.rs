@@ -173,37 +173,6 @@ pub struct ManifestObjectStore {
 }
 
 impl ManifestObjectStore {
-    /// Returns whether the directory holds a delta or checkpoint of a version after
-    /// `last_version`. It reads the directory without locking it.
-    pub(crate) async fn has_version_after(&self, last_version: ManifestVersion) -> Result<bool> {
-        // Skip older files at the object-store layer. Files for `v == last_version`
-        // may still appear (`{path}{v:020}` sorts before `{path}{v:020}.json`) but
-        // they are filtered out below by the `version > last_version` check.
-        let start_after = list_start_after(self.manifest_dir(), last_version);
-        let streamer =
-            self.manifest_lister(Some(&start_after))
-                .await?
-                .context(EmptyManifestDirSnafu {
-                    manifest_dir: self.manifest_dir(),
-                })?;
-
-        let need_update = streamer
-            .try_any(|entry| async move {
-                let file_name = entry.name();
-                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
-                    let version = file_version(file_name);
-                    if version > last_version {
-                        return true;
-                    }
-                }
-                false
-            })
-            .await
-            .context(OpenDalSnafu)?;
-
-        Ok(need_update)
-    }
-
     pub fn new(
         path: &str,
         object_store: ObjectStore,
@@ -291,6 +260,35 @@ impl ManifestObjectStore {
     /// Returns the manifest dir
     pub(crate) fn manifest_dir(&self) -> &str {
         &self.path
+    }
+
+    /// Returns whether the directory holds a delta or checkpoint of a version after
+    /// `last_version`. It reads the directory without locking it.
+    pub(crate) async fn has_version_after(&self, last_version: ManifestVersion) -> Result<bool> {
+        // Skip older files at the object-store layer. Files for `v == last_version`
+        // may still appear (`{path}{v:020}` sorts before `{path}{v:020}.json`) but
+        // they are filtered out below by the `version > last_version` check.
+        let start_after = list_start_after(self.manifest_dir(), last_version);
+        let streamer =
+            self.manifest_lister(Some(&start_after))
+                .await?
+                .context(EmptyManifestDirSnafu {
+                    manifest_dir: self.manifest_dir(),
+                })?;
+
+        streamer
+            .try_any(|entry| async move {
+                let file_name = entry.name();
+                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
+                    let version = file_version(file_name);
+                    if version > last_version {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .context(OpenDalSnafu)
     }
 
     /// Returns an iterator of manifests.

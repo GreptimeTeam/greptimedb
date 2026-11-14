@@ -875,7 +875,8 @@ impl RegionManifestManager {
     ///
     /// It is typically used in read-only regions to catch up with manifest.
     /// It doesn't lock the manifest directory in the object store so the result
-    /// may be inaccurate if there are concurrent writes.
+    /// may be inaccurate if there are concurrent writes. The caller's manifest lock stays held
+    /// across the listing; `ManifestContext::installed_version_if_updated` lists without it.
     pub async fn has_update(&self) -> Result<bool> {
         self.store.has_version_after(self.last_version()).await
     }

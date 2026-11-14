@@ -1528,13 +1528,16 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
-    /// Returns the installed manifest version if the storage holds a newer one.
+    /// Returns the installed manifest version if the storage holds a newer one. The version is
+    /// read under the manifest read lock, which is not held across the listing, so a caller
+    /// rechecks it under the write lock before acting on it.
     pub(crate) async fn installed_version_if_updated(&self) -> Result<Option<ManifestVersion>> {
         let (store, installed) = {
             let manager = self.manifest_manager.read().await;
             (manager.store(), manager.last_version())
         };
-        // Lists without the lock, which a queued writer would hold back other readers behind.
+        // Lists without the read lock: held across the listing, it would let a queued writer
+        // block every later reader.
         Ok(store
             .has_version_after(installed)
             .await?

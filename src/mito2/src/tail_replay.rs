@@ -46,7 +46,7 @@ use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::wal::{EntryId, Wal, WalEntryStream};
 use crate::worker::WorkerListener;
 
-/// Memtable usage at which replayed rows are written to SSTs.
+/// Memtable usage at which replayed rows are written to SSTs at the latest.
 const CHUNK_MEMTABLE_USAGE: usize = 64 * 1024 * 1024;
 /// Replays that read and write at once on a node.
 const MAX_CONCURRENT_TAIL_REPLAYS: usize = 16;
@@ -78,8 +78,8 @@ pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
 /// bound, so until the region receives a Leader lease after a catchup made it writable, the edit
 /// keeps its unread part, which a second edit clears once a lease arrives. A failed round is
 /// retried after a back-off while [should_replay_tails] holds, unless the storage holds a newer
-/// manifest: then the task fences the region for a reload and ends. The task always reports its
-/// end to the worker.
+/// manifest and the region is still a Writable leader at its installed version: then the task
+/// fences the region for a reload and ends. The task always reports its end to the worker.
 pub(crate) struct TailReplayTask<S> {
     pub(crate) region: MitoRegionRef,
     /// Id of this node, whose tails are read from `wal`.
@@ -89,7 +89,7 @@ pub(crate) struct TailReplayTask<S> {
     pub(crate) sst_writer: MemtableSstWriter,
     pub(crate) listener: WorkerListener,
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
-    /// Limits of the node's replays. Its write semaphore is the one `sst_writer` holds.
+    /// Limits of the node's tail replays. Its write semaphore is the one `sst_writer` holds.
     pub(crate) limits: TailReplayLimits,
     pub(crate) state: CancellableTaskState,
 }
@@ -114,7 +114,7 @@ impl<S: LogStore> TailReplayTask<S> {
                     // committed them and their source released its WAL. The worker reloads the
                     // fenced region once this task ends.
                     match self.fence_if_manifest_updated().await {
-                        Ok(true) => return,
+                        Ok(true) => break,
                         Ok(false) => {}
                         Err(_) if self.state.is_cancelled() => break,
                         Err(e) => {
@@ -133,8 +133,9 @@ impl<S: LogStore> TailReplayTask<S> {
         );
     }
 
-    /// Fences the region for a reload if the storage holds a newer manifest. Returns whether
-    /// it fenced the region. Cancellation ends it until it holds the manifest write lock.
+    /// Fences the region for a reload if the storage holds a newer manifest and the region is
+    /// still a Writable leader at its installed version. Returns whether it fenced the region.
+    /// Cancellation ends it until it holds the manifest write lock.
     async fn fence_if_manifest_updated(&self) -> Result<bool> {
         let manifest_ctx = &self.region.manifest_ctx;
         let Some(installed) = self
@@ -145,7 +146,7 @@ impl<S: LogStore> TailReplayTask<S> {
         };
         let region_id = self.region.region_id;
         info!(
-            "Region {region_id} found a manifest newer than its version {installed} after a failed replay round, fencing it"
+            "Region {region_id} found a manifest newer than its version {installed} after a failed replay round"
         );
         self.listener.on_tail_fence_begin(region_id);
         let mut manager = self
@@ -546,12 +547,6 @@ impl TailReplayLimits {
                 config.global_write_buffer_size.as_bytes() as usize / TAIL_REPLAY_MEMORY_FACTOR,
             )),
         }
-    }
-
-    /// Returns the bytes the replays reserve from their memory pool.
-    #[cfg(test)]
-    pub(crate) fn reserved(&self) -> usize {
-        self.memory.reserved.load(Ordering::Relaxed)
     }
 }
 
