@@ -48,7 +48,7 @@ pub trait EventListener: Send + Sync {
     /// the region.
     fn on_tail_fence_begin(&self, _region_id: RegionId) {}
 
-    /// Notifies the listener that a round of tail replay failed and will be retried.
+    /// Notifies the listener that a round of tail replay failed.
     fn on_tail_replay_failed(&self, _region_id: RegionId, _error: &Error) {}
 
     /// Notifies the listener after the worker learns that a tail replay ended.

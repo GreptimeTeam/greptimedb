@@ -135,9 +135,12 @@ pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &M
 }
 
 /// Asks the worker to cancel the tail replay of a region that a role change outside the worker
-/// made unable to replay, without waiting. A replay the cancel reaches after the region became
-/// writable again ends and the worker starts another.
+/// made unable to replay, if it has pending tails, without waiting. A replay the cancel reaches
+/// after the region became writable again ends and the worker starts another.
 pub(crate) fn notify_unwritable(sender: &Sender<WorkerRequestWithTime>, region: &MitoRegion) {
+    if !region.version().has_pending_tails() {
+        return;
+    }
     let sender = sender.clone();
     let region_id = region.region_id;
     common_runtime::spawn_global(async move {
