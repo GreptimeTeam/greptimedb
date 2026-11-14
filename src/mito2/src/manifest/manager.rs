@@ -849,6 +849,12 @@ impl RegionManifestManager {
         self.checkpointer.wait_for_pending_checkpoint().await;
     }
 
+    /// Returns a future that resolves once the in-flight checkpoint has finished, including its
+    /// cleanup. The future does not borrow the manager.
+    pub(crate) fn pending_checkpoint_done(&self) -> impl Future<Output = ()> + Send + use<> {
+        self.checkpointer.pending_checkpoint_done()
+    }
+
     /// Clear deleted files from manifest's `removed_files` field without update version. Notice if datanode exit before checkpoint then new manifest by open region may still contain these deleted files, which is acceptable for gc process.
     pub fn clear_deleted_files(&mut self, deleted_files: Vec<RemovedFile>) {
         let mut manifest = (*self.manifest()).clone();

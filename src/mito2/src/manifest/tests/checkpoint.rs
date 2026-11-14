@@ -14,7 +14,7 @@
 
 use std::assert_matches;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common_datasource::compression::CompressionType;
@@ -25,6 +25,7 @@ use object_store::layers::mock::{
 };
 use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
+use tokio::sync::Notify;
 
 use crate::error::Error::{ChecksumMismatch, ManifestDeltaNotFound};
 use crate::manifest::action::{
@@ -826,6 +827,132 @@ async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
     manager.wait_for_pending_checkpoint().await;
 
     assert_eq!(2, manager.checkpointer().last_checkpoint_version());
+}
+
+#[rstest::rstest]
+#[case::cleanup_finished(false)]
+#[case::task_aborted(true)]
+#[tokio::test]
+async fn pending_checkpoint_done_waits_until_the_task_ends(#[case] abort: bool) {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
+    let env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+
+    manager.update(nop_action(), false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
+        .await
+        .expect("checkpoint cleanup did not start");
+
+    // Two waiters stay on their own tasks until the checkpoint ends; a third is cancelled.
+    let waiters = [
+        manager.pending_checkpoint_done(),
+        manager.pending_checkpoint_done(),
+    ]
+    .map(tokio::spawn);
+    let mut cancelled = Box::pin(manager.pending_checkpoint_done());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut cancelled)
+            .await
+            .is_err(),
+        "the cancelled wait ended before the checkpoint cleanup"
+    );
+    drop(cancelled);
+    assert!(
+        waiters.iter().all(|waiter| !waiter.is_finished()),
+        "a spawned wait ended before the checkpoint cleanup"
+    );
+    // The cleanup stays blocked in the abort case, so only the abort can end the task.
+    if abort {
+        manager.checkpointer().abort_checkpoint_task();
+    } else {
+        blocker.release();
+    }
+    for waiter in waiters {
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("the wait did not end with the checkpoint task")
+            .unwrap();
+    }
+    let wait_started = manager.checkpointer().pending_checkpoint_wait_started();
+    // Consumes the permit the waiters above left.
+    let _ = tokio::time::timeout(Duration::ZERO, wait_started.notified()).await;
+    tokio::time::timeout(Duration::ZERO, manager.pending_checkpoint_done())
+        .await
+        .expect("a wait after the checkpoint task ended did not return at once");
+    assert!(
+        tokio::time::timeout(Duration::ZERO, wait_started.notified())
+            .await
+            .is_err(),
+        "a wait after the checkpoint task ended started waiting"
+    );
+}
+
+/// Panics on the first delete, which a checkpoint issues in its cleanup, once released.
+struct PanickingDeleter {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    panicked: Arc<AtomicBool>,
+}
+
+impl oio::Delete for PanickingDeleter {
+    async fn delete(&mut self, _path: &str, _args: OpDelete) -> MockResult<()> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.panicked.store(true, Ordering::Relaxed);
+        panic!("mock manifest delete panic");
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn pending_checkpoint_done_ends_when_the_task_panics() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let panicked = Arc::new(AtomicBool::new(false));
+    let (factory_entered, factory_release, factory_panicked) =
+        (entered.clone(), release.clone(), panicked.clone());
+    let mock_layer = MockLayerBuilder::default()
+        .deleter_factory(Arc::new(move |_inner| {
+            Box::new(PanickingDeleter {
+                entered: factory_entered.clone(),
+                release: factory_release.clone(),
+                panicked: factory_panicked.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+
+    manager.update(nop_action(), false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("checkpoint cleanup did not start");
+    let mut done = Box::pin(manager.pending_checkpoint_done());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut done)
+            .await
+            .is_err(),
+        "the wait ended before the checkpoint task panicked"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), done)
+        .await
+        .expect("the wait did not end after the checkpoint task panicked");
+    assert!(panicked.load(Ordering::Relaxed));
 }
 
 /// Retention runs inside the checkpoint task, so waiting for task completion also

@@ -22,6 +22,7 @@ use store_api::storage::RegionId;
 use store_api::{MIN_VERSION, ManifestVersion};
 #[cfg(test)]
 use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use crate::error::Result;
 use crate::manifest::action::{RegionCheckpoint, RegionManifest};
@@ -35,6 +36,9 @@ pub(crate) struct Checkpointer {
     manifest_options: RegionManifestOptions,
     inner: Arc<Inner>,
     checkpoint_task: Option<JoinHandle<()>>,
+    /// Closes when the task in `checkpoint_task` ends, so that it can be awaited without
+    /// borrowing the checkpointer.
+    checkpoint_done: Option<watch::Receiver<()>>,
     #[cfg(test)]
     pending_checkpoint_wait_started: Arc<Notify>,
 }
@@ -111,6 +115,7 @@ impl Checkpointer {
                 last_checkpoint_version: AtomicU64::new(last_checkpoint_version),
             }),
             checkpoint_task: None,
+            checkpoint_done: None,
             #[cfg(test)]
             pending_checkpoint_wait_started: Arc::new(Notify::new()),
         }
@@ -187,9 +192,35 @@ impl Checkpointer {
 
     fn do_checkpoint(&mut self, checkpoint: RegionCheckpoint) {
         let inner = self.inner.clone();
+        let (done_sender, done_receiver) = watch::channel(());
+        self.checkpoint_done = Some(done_receiver);
         self.checkpoint_task = Some(common_runtime::spawn_global(async move {
+            // The sender is dropped however the task ends, which closes the channel.
+            let _done_sender = done_sender;
             inner.do_checkpoint(checkpoint).await;
         }));
+    }
+
+    /// Returns a future that resolves once the checkpoint task running now has ended.
+    ///
+    /// Unlike [Self::wait_for_pending_checkpoint], the future does not borrow the checkpointer,
+    /// so the caller can await it without holding the manifest lock.
+    pub(crate) fn pending_checkpoint_done(&self) -> impl Future<Output = ()> + Send + use<> {
+        let done = self.checkpoint_done.clone();
+        let region_id = self.inner.region_id();
+        #[cfg(test)]
+        let wait_started = self.pending_checkpoint_wait_started.clone();
+        async move {
+            // The channel is closed once the task has ended.
+            let Some(mut done) = done.filter(|receiver| receiver.has_changed().is_ok()) else {
+                return;
+            };
+            #[cfg(test)]
+            wait_started.notify_one();
+            info!("Waiting for the pending checkpoint of region {}", region_id);
+            // Nothing is ever sent, so this returns once the task drops the sender.
+            let _ = done.changed().await;
+        }
     }
 
     /// Waits for the current checkpoint task without removing its handle first.
@@ -219,6 +250,14 @@ impl Checkpointer {
         self.checkpoint_task
             .as_ref()
             .is_some_and(|handle| !handle.is_finished())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abort_checkpoint_task(&self) {
+        self.checkpoint_task
+            .as_ref()
+            .expect("checkpoint task must exist")
+            .abort();
     }
 
     #[cfg(test)]
