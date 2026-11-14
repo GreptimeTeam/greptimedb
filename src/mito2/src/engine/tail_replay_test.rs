@@ -1893,3 +1893,35 @@ async fn test_direct_demotion_ends_stalled_replay(#[case] with_lease: bool) {
     region.wait_until_replayed().await;
     assert_eq!(9, count_rows(&region.engine, region.region_id).await);
 }
+
+#[tokio::test]
+async fn test_unwritable_notice_of_replaced_instance_keeps_replay() {
+    let region = TestRegion::new("tail-replay-stale-unwritable", false, None).await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    let old = region.engine.get_region(region.region_id).unwrap();
+    region.replace_follower().await;
+    region.listener.hold_from(1);
+    region.promote();
+    wait_until(|| region.listener.commits() == 1).await;
+
+    // A demotion notice of the replaced instance arrives late.
+    let request = WorkerRequest::Background {
+        region_id: region.region_id,
+        notify: BackgroundNotify::RegionBecameUnwritable { region: old },
+    };
+    region
+        .engine
+        .inner
+        .workers
+        .submit_to_worker(region.region_id, request)
+        .await
+        .unwrap();
+    // The worker handles the notice before this write.
+    region.overwrite_remote_row().await;
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+
+    assert_eq!(1, region.listener.commits());
+}
