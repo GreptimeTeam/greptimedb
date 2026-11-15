@@ -18,7 +18,7 @@ use std::str::FromStr;
 use common_error::ext::BoxedError;
 use common_meta::election::ElectionRef;
 use common_meta::election::rds::postgres::{ElectionPgClient, PgElection};
-use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::ClosableKvBackendRef;
 use common_meta::kv_backend::rds::PgStore;
 use common_meta::kv_backend::rds::postgres::{
     TlsMode as PgTlsMode, TlsOption as PgTlsOption, create_postgres_tls_connector,
@@ -117,7 +117,7 @@ fn is_unix_socket_url(_: &str) -> bool {
     false
 }
 
-/// Builds a Postgres-backed metadata [`KvBackendRef`].
+/// Builds a Postgres-backed metadata [`ClosableKvBackendRef`].
 ///
 /// * `store_addrs` - Postgres connection URLs; only the first address is used.
 /// * `cfg` - optional deadpool config to customize pool/session behavior.
@@ -135,7 +135,7 @@ pub async fn build_postgres_kv_backend(
     table_name: &str,
     max_txn_ops: usize,
     auto_create_schema: bool,
-) -> Result<KvBackendRef> {
+) -> Result<ClosableKvBackendRef> {
     let pool = create_postgres_pool(store_addrs, cfg, tls_config).await?;
     PgStore::with_pg_pool(
         pool,

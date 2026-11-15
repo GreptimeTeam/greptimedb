@@ -115,7 +115,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region.manifest_ctx.ignore_earlier_promotions();
         // Requests waiting for the old instance are rejected as a close rejects them.
         self.fail_region_stalled_requests_as_not_found(&region_id);
-        self.reject_region_edit_queue_as_not_found(region_id);
+        self.reject_region_requests_as_not_found(region_id);
         self.register_region(region);
         if let Some(state) = &self.series_index_task_state {
             state.wake();

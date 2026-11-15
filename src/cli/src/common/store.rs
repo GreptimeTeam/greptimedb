@@ -151,7 +151,7 @@ impl StoreConfig {
                 &self.sanitize_store_addrs(),
                 self.backend
             );
-            let kvbackend = match self.backend {
+            let kvbackend: Result<KvBackendRef, BoxedError> = match self.backend {
                 BackendImpl::EtcdStore => {
                     let tls_config = self.tls_config();
                     let etcd_client = create_etcd_client_with_tls(

@@ -14,11 +14,14 @@
 
 //! Handling close request.
 
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use store_api::logstore::LogStore;
 use store_api::region_request::{RegionCloseRequest, RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
+use crate::manifest::action::cap_wal_release;
+use crate::metrics::WAL_RELEASE_ADMISSION_FAILURE_TOTAL;
+use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
@@ -50,17 +53,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let _manager = region.manifest_ctx.manifest_manager.write().await;
             region.abort_staging();
             // Edits queued behind a staged edit belong to the staging that has just ended.
-            self.reject_region_edit_queue_as_not_found(region_id);
+            self.reject_region_edits_as_not_found(region_id);
         }
 
         // Memtables containing skip-WAL writes must be flushed before closing.
         // Followers cannot flush; explicit flush-on-close and region WAL options
         // retain their existing behavior.
-        let version = region.version();
-        if (request.flush_on_close || region.skip_wal() || version.memtables.has_skip_wal_writes())
-            && !version.memtables.is_empty()
-            && region.is_flushable()
-        {
+        if close_needs_flush(&region, &request) && region.is_flushable() {
             info!("Region {} has pending data, waiting for flush", region_id);
             if self.flush_scheduler.is_flush_requested(region_id) {
                 self.flush_scheduler
@@ -69,6 +68,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         sender,
                         request: DdlRequest::Close(request),
                     });
+                self.attach_pending_closes_to_flush(region_id);
                 return;
             }
             self.handle_flush_request(
@@ -79,13 +79,46 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 },
                 sender,
             );
+            if self.flush_scheduler.is_flush_requested(region_id) {
+                self.attach_pending_closes_to_flush(region_id);
+            }
             return;
         }
 
         // No close-time flush is required, or the region cannot flush.
-        self.remove_region(region_id).await;
+        let pending_closes = self.take_pending_closes(region_id);
+        self.close_region(region_id).await;
+        for ddl in pending_closes {
+            ddl.sender.send(Ok(0));
+        }
         info!("Region {} closed, worker: {}", region_id, self.id);
         sender.send(Ok(0))
+    }
+
+    /// Closes a region and queues a release of its persisted WAL history.
+    /// Pending tails cap the release, as they do after a flush.
+    /// The stopped manifest makes the watermark stable, and the worker awaits
+    /// admission before it can process a reopen. Upload failures are retried by
+    /// the store; failure to admit a release retains extra WAL history.
+    pub(crate) async fn close_region(&mut self, region_id: RegionId) {
+        let Some(region) = self.regions.get_region(region_id) else {
+            return;
+        };
+        self.remove_region(region_id).await;
+        let version = region.version();
+        let release_entry_id = cap_wal_release(
+            &version.pending_tails,
+            self.file_ref_manager.node_id(),
+            version.flushed_entry_id,
+        );
+        if let Err(error) = self
+            .wal
+            .release_entries(region_id, release_entry_id, &region.provider)
+            .await
+        {
+            WAL_RELEASE_ADMISSION_FAILURE_TOTAL.inc();
+            warn!(error; "Failed to queue WAL release for closed region {}", region_id);
+        }
     }
 
     /// Remove a region and stop all related tasks.
@@ -94,9 +127,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
         region.deactivate_region_manifest_size_metric();
+        self.cancel_tail_replay(region_id);
         region.stop().await;
         self.fail_region_stalled_requests_as_not_found(&region_id);
-        self.reject_region_edit_queue_as_not_found(region_id);
+        self.reject_region_requests_as_not_found(region_id);
         // Clean flush status.
         self.flush_scheduler.on_region_closed(region_id);
         // Clean compaction status.
@@ -113,4 +147,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             hook.on_region_closed(region_id, &metadata).await;
         }
     }
+
+    /// Gives closes accepted during an edit the same terminal flush result.
+    fn attach_pending_closes_to_flush(&mut self, region_id: RegionId) {
+        for ddl in self.take_pending_closes(region_id) {
+            self.flush_scheduler.add_ddl_request_to_pending(ddl);
+        }
+    }
+
+    fn take_pending_closes(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
+        self.pending_ddls.take_closes(region_id)
+    }
+}
+
+/// Whether closing requires flushing data, independent of temporary region state.
+pub(crate) fn close_needs_flush(region: &MitoRegionRef, request: &RegionCloseRequest) -> bool {
+    let version = region.version();
+    !version.memtables.is_empty()
+        && (request.flush_on_close || region.skip_wal() || version.memtables.has_skip_wal_writes())
 }

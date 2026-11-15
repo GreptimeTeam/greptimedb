@@ -30,7 +30,8 @@ use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snaf
 use crate::manifest::manager::RemoveFileOptions;
 use crate::region::ManifestStats;
 use crate::sst::FormatType;
-use crate::sst::file::{self, FileMeta};
+use crate::sst::file::{self, FileMeta, FileMetaRef};
+use crate::sst::file_metadata::FileMetadataInternerRef;
 use crate::wal::EntryId;
 
 /// Actions that can be applied to region manifest.
@@ -217,7 +218,7 @@ pub struct RegionManifest {
     /// Metadata of the region.
     pub metadata: RegionMetadataRef,
     /// SST files.
-    pub files: HashMap<FileId, FileMeta>,
+    pub files: HashMap<FileId, FileMetaRef>,
     /// Removed files, which are not in the current manifest but may still be kept for a while.
     /// This is a list of (set of files, timestamp) pairs, where the timestamp is the time when
     /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
@@ -308,8 +309,9 @@ impl RegionManifest {
 
 #[derive(Debug, Default)]
 pub struct RegionManifestBuilder {
+    file_metadata_interner: FileMetadataInternerRef,
     metadata: Option<RegionMetadataRef>,
-    files: HashMap<FileId, FileMeta>,
+    files: HashMap<FileId, FileMetaRef>,
     pub removed_files: RemovedFilesRecord,
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
@@ -324,19 +326,43 @@ pub struct RegionManifestBuilder {
 }
 
 impl RegionManifestBuilder {
+    /// Creates an empty builder with the owner's metadata interner.
+    pub(crate) fn new(file_metadata_interner: FileMetadataInternerRef) -> Self {
+        Self {
+            file_metadata_interner,
+            ..Default::default()
+        }
+    }
+
+    /// Canonicalizes independently decoded checkpoint entries before publication.
+    pub(crate) fn with_checkpoint(
+        checkpoint: Option<RegionManifest>,
+        file_metadata_interner: FileMetadataInternerRef,
+    ) -> Self {
+        let mut builder = Self::from_shared_manifest(checkpoint, file_metadata_interner);
+        for meta in builder.files.values_mut() {
+            builder.file_metadata_interner.intern_in_place(meta);
+        }
+        builder
+    }
+
     fn removed_file(&self, file: &FileMeta) -> RemovedFile {
         let index_version = self
             .files
             .get(&file.file_id)
-            .and_then(FileMeta::index_version)
+            .and_then(|meta| meta.index_version())
             .or_else(|| file.index_version());
         RemovedFile::File(file.file_id, index_version)
     }
 
-    /// Start with a checkpoint.
-    pub fn with_checkpoint(checkpoint: Option<RegionManifest>) -> Self {
+    /// Reuses entries from a snapshot already canonicalized by the same owner.
+    pub(crate) fn from_shared_manifest(
+        checkpoint: Option<RegionManifest>,
+        file_metadata_interner: FileMetadataInternerRef,
+    ) -> Self {
         if let Some(s) = checkpoint {
             Self {
+                file_metadata_interner,
                 metadata: Some(s.metadata),
                 files: s.files,
                 removed_files: s.removed_files,
@@ -352,7 +378,7 @@ impl RegionManifestBuilder {
                 handoff_floors: s.handoff_floors,
             }
         } else {
-            Default::default()
+            Self::new(file_metadata_interner)
         }
     }
 
@@ -392,6 +418,8 @@ impl RegionManifestBuilder {
 
         let mut removed_files = vec![];
         for file in edit.files_to_add {
+            let file = FileMetaRef::from(file);
+            let file = self.file_metadata_interner.intern(file);
             if let Some(old_file) = self.files.insert(file.file_id, file.clone())
                 && let Some(old_index) = old_file.index_version()
                 && !old_file.is_index_up_to_date(&file)
@@ -480,7 +508,7 @@ impl RegionManifestBuilder {
         }
     }
 
-    pub fn files(&self) -> &HashMap<FileId, FileMeta> {
+    pub fn files(&self) -> &HashMap<FileId, FileMetaRef> {
         &self.files
     }
 
@@ -764,6 +792,8 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::Timestamp;
+
+    use crate::sst::file_metadata::MetadataRef;
 
     use super::*;
 
@@ -1558,6 +1588,56 @@ mod tests {
             },
         );
         builder
+    }
+
+    #[test]
+    fn test_checkpoint_sharing_preserves_owned_allocations() {
+        let mut checkpoint = manifest_builder().try_build().unwrap();
+        let expr = partition::expr::col("tag").lt(datatypes::value::Value::UInt32(10));
+        let mut allocations = HashMap::new();
+        for _ in 0..4 {
+            let meta = FileMetaRef::from(FileMeta {
+                region_id: RegionId::new(1, 1),
+                file_id: FileId::random(),
+                indexes: vec![crate::sst::file::ColumnIndexMetadata::default()],
+                partition_expr: Some(expr.clone().into()),
+                ..Default::default()
+            });
+            allocations.insert(
+                meta.file_id,
+                (std::ptr::from_ref(meta.as_ref()), meta.indexes.as_ptr()),
+            );
+            checkpoint.files.insert(meta.file_id, meta);
+        }
+        let interner = Arc::new(crate::sst::file_metadata::FileMetadataInterner::default());
+        let manifest = RegionManifestBuilder::with_checkpoint(Some(checkpoint), interner.clone())
+            .try_build()
+            .unwrap();
+        let expression = manifest
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .partition_expr
+            .as_ref()
+            .unwrap();
+        for meta in manifest.files.values() {
+            assert_eq!(
+                allocations[&meta.file_id],
+                (std::ptr::from_ref(meta.as_ref()), meta.indexes.as_ptr())
+            );
+            assert!(MetadataRef::ptr_eq(
+                expression,
+                meta.partition_expr.as_ref().unwrap()
+            ));
+        }
+        let decoded = serde_json::from_slice(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let recovered = RegionManifestBuilder::with_checkpoint(Some(decoded), interner)
+            .try_build()
+            .unwrap();
+        for (id, meta) in &manifest.files {
+            assert!(MetadataRef::ptr_eq(meta, &recovered.files[id]));
+        }
     }
 
     #[test]

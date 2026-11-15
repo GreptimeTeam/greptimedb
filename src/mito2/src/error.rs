@@ -516,6 +516,15 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to read the WAL of node {} for region {}", node_id, region_id))]
+    ReadNodeWal {
+        region_id: RegionId,
+        node_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to decode WAL entry, region_id: {}", region_id))]
     DecodeWal {
         region_id: RegionId,
@@ -739,6 +748,32 @@ pub enum Error {
     #[snafu(display("Region {} still has WAL tails to recover", region_id))]
     RegionPendingTails {
         region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} cannot read pending WAL tails of node {}",
+        region_id,
+        node_id
+    ))]
+    RemoteWalUnsupported {
+        region_id: RegionId,
+        node_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} cannot read entry {} of the WAL of node {}, where its pending tail ends",
+        region_id,
+        entry_id,
+        node_id
+    ))]
+    TailEntryMissing {
+        region_id: RegionId,
+        node_id: u64,
+        entry_id: u64,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1622,6 +1657,7 @@ impl ErrorExt for Error {
             | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. }
             | ReadWal { source, .. }
+            | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | CheckWalHistory { source, .. } => source.status_code(),
@@ -1728,6 +1764,8 @@ impl ErrorExt for Error {
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
             RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
             RegionPendingTails { .. } => StatusCode::RegionNotReady,
+            RemoteWalUnsupported { .. } => StatusCode::Unsupported,
+            TailEntryMissing { .. } => StatusCode::StorageUnavailable,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1856,6 +1894,7 @@ impl ErrorExt for Error {
 
             WriteWal { source, .. }
             | ReadWal { source, .. }
+            | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | CheckWalHistory { source, .. }

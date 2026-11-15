@@ -36,6 +36,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `schedule` | `src/mito2/src/schedule/` | Local/remote background job scheduling |
 | `remap_manifest` | `src/mito2/src/remap_manifest.rs` | Manifest path remapping for region copy/migration |
 | `config` | `src/mito2/src/config.rs` | `MitoConfig` tuning knobs |
+| `tail_replay` | `src/mito2/src/tail_replay.rs`, `src/mito2/src/worker/handle_tail_replay.rs` | Background replay of pending WAL tails into SSTs, published with one manifest edit |
 | `temp_file_sweeper` | `src/mito2/src/temp_file_sweeper.rs` | Reclaims temporary files a crashed writer left in a region, triggered when the region becomes a writable leader or a create opens an existing region (under the `hdfs-object-store` feature) |
 | `test_util` | `src/mito2/src/test_util.rs` | `TestEnv` and builders (under the `test` feature) |
 
@@ -124,16 +125,29 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   (`worker/handle_reload.rs`). Never await a worker sender while holding a manifest guard.
 - Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
   to recover; the flushed entry id never prunes them. Opening a region replays its
-  WAL after `RegionManifest::wal_replay_start`. The WAL releases at open and after
-  a flush stay below this node's tails (`cap_wal_release`); truncate, drop, offline
-  cleanup and catchup release without that cap. Handoff floors are dropped once the
-  flushed entry id reaches them, in `RegionManifestBuilder::try_build`. While a
+  WAL after `RegionManifest::wal_replay_start`. The WAL releases at open, after
+  a flush, and on close stay below this node's tails (`cap_wal_release`); truncate,
+  drop, offline cleanup and catchup release without that cap. Handoff floors are
+  dropped once the flushed entry id reaches them, in
+  `RegionManifestBuilder::try_build`. While a
   region has pending tails, scans and memtable/SST stats fail with
   `RegionPendingTails`, and so do truncate, entering staging, a repartition flush,
   a close with `flush_on_close`, and every ALTER other than adding nullable columns
   without a default or changing options; compaction pauses. These checks run
   before any region state changes. Full-listing GC skips a region that has pending
   tails or whose manifest `has_update()` reports newer, or fails to check.
+- A leader that is writable, altering or editing replays its pending tails in one
+  background task (`tail_replay.rs`), started by the worker when a lease, catchup or
+  role change makes the region writable, or when it registers a region created or opened
+  as a writable leader. Each tail goes into its own SSTs, since an
+  SST can give all its rows its largest sequence. The task commits outside the edit queue
+  (`ManifestContext::update_manifest_for_tails`) and always reports its end, which
+  lets the worker start the next replay or reload a fenced region. The edit that records
+  tails must raise the committed sequence to theirs, or writes accepted during the replay
+  lose to replayed rows. This node's later entry ids must be above every tail's `upto`, and
+  its unflushed entries at or below one must be in its own tails, or the tail commit's
+  flushed entry id skips them. Replays have no admission or concurrency limit. Their SSTs
+  build indexes as flushed ones (`IndexBuildType::Flush`), under `create_on_flush`.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
@@ -144,6 +158,16 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   `All` removes all data; `ByTimeRanges` removes fully contained files. Other
   regions/readers still protect the shared objects. Stale compaction results must
   not reinstate truncated inputs.
+- Manifest and runtime file views share immutable `FileMetaRef` values. The engine-local
+  metadata interner compares complete metadata before sharing; file identity alone is insufficient.
+  Partition expressions are shared by table and complete expression content, so historical
+  SST partition rules remain distinct after repartition.
+  Interned references reclaim entries on final release, including delayed readers,
+  without a maintenance task or new writes. Hash table capacity remains allocated
+  until the interner is dropped.
+  Manifest consumers receive the interner directly. Scrape-time entry counts use weak
+  references and do not add maintenance tasks or retain engine storage.
+  Index replacement preserves old readers and updates the lifetime guard to the newest metadata.
 - Local compaction units use the snapshot-free `CompactionContext`. Retaining a
   full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.
 - Candidate waiting history is owned by the region scheduler (`scheduler/history.rs`).
@@ -163,6 +187,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   trigger in `worker/handle_flush.rs` must skip them: background triggers test `is_writable()`
   and `is_staging()`, a flush request `is_flushable()` and `is_staging()` (`is_writable()` and
   `is_flushable()` are false while ending staging). `handle_close` leaves staging first.
+  Tail replays never run for them: entering staging fails while tails are pending.
+- Direct SST imports without a staging binding cannot publish into staging.
+  `worker/handle_manifest.rs` seals edit admission while EnterStaging drains accepted
+  edits. Scheduler-owned DDLs resume through execution, bypassing initial admission.
 
 ## Maintenance contract
 

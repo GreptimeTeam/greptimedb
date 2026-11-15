@@ -115,6 +115,7 @@ where
         // Removes this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
         region.deactivate_region_manifest_size_metric();
+        self.cancel_tail_replay(region_id);
         self.dropping_regions.insert_region(region.clone());
         // The region is no longer served once it leaves the map, so unregister its
         // runtime state before the fallible WAL cleanup below. Otherwise a WAL
@@ -225,7 +226,7 @@ where
     pub(crate) async fn cleanup_dropped_region_runtime_state(&mut self, region_id: RegionId) {
         // A successful flush may hand off DROP before queued ALTERs and edits resume.
         // Reject their waiters here because the removed region has no next turn.
-        self.reject_region_edit_queue_as_not_found(region_id);
+        self.reject_region_requests_as_not_found(region_id);
         // Notifies flush scheduler.
         self.flush_scheduler.on_region_dropped(region_id);
         // Notifies compaction scheduler.
