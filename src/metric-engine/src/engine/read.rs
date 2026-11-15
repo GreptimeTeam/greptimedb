@@ -763,13 +763,15 @@ mod test {
     async fn test_metadata_aggr_split_keeps_logical_scan_properties() {
         let logical = RegionId::new(3, 2);
         let env = logical_count_env("test_metadata_aggr_split", &[logical]).await;
-        // Newer rows stay in the memtable, so only the compacted file is exact.
+        // Newer rows stay in the memtable, in a partition two days after the
+        // compacted file, so that file is exact.
         let mut rows = build_rows(1, 5);
         for row in &mut rows {
             let Some(ValueData::TimestampMillisecondValue(ts)) = row.values[0].value_data else {
                 unreachable!()
             };
-            row.values[0].value_data = Some(ValueData::TimestampMillisecondValue(ts + 1000));
+            row.values[0].value_data =
+                Some(ValueData::TimestampMillisecondValue(ts + 2 * 86_400_000));
         }
         env.metric()
             .handle_request(
@@ -800,15 +802,13 @@ mod test {
             .unwrap();
         assert_eq!(scanner.properties().exact_num_rows(), None);
         let split = scanner.take_statistics_split().unwrap();
-        assert_eq!(split.exact.properties().exact_num_rows(), Some(10));
+        assert_eq!(split.exact_rows, 10);
         let data_region_id = utils::to_data_region_id(env.default_physical_region_id());
-        for part in [&split.exact, &split.inexact] {
-            assert!(part.properties().is_logical_region());
-            assert_eq!(
-                part.properties().query_load_region_id(),
-                Some(data_region_id)
-            );
-        }
+        assert!(split.residual.properties().is_logical_region());
+        assert_eq!(
+            split.residual.properties().query_load_region_id(),
+            Some(data_region_id)
+        );
     }
 
     #[tokio::test]
