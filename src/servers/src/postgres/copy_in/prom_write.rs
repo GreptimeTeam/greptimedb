@@ -41,8 +41,9 @@
 //!
 //! One COPY statement is one bounded ingestion request (see
 //! [`crate::postgres::copy_in::COPY_IN_MAX_PAYLOAD_BYTES`]); the row
-//! count reports written rows (v1) or written samples plus histograms
-//! (v2).
+//! count includes samples, histograms and exemplars. With asynchronous v2
+//! batching it reports accepted counts; COPY cannot distinguish HTTP 202
+//! acceptance from completed writes or return partial counts on an error.
 
 use pgwire::error::PgWireResult;
 

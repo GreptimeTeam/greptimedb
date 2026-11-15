@@ -1174,8 +1174,8 @@ async fn test_postgres_copy_in_otlp_all_rejected() {
     server.shutdown().await.unwrap();
 }
 
-/// `COPY FROM STDIN WITH (FORMAT promwrite)` ingests one snappy-
-/// compressed Prometheus Remote Write v1 body through the same
+/// `COPY FROM STDIN WITH (FORMAT promwrite)` ingests snappy- and zstd-
+/// compressed Prometheus Remote Write v1 bodies through the same
 /// ingestion core as `/v1/prometheus/write`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_postgres_copy_in_prom_write_v1() {
@@ -1191,17 +1191,27 @@ async fn test_postgres_copy_in_prom_write_v1() {
         timeseries: servers::prom_store::mock_timeseries(),
         ..Default::default()
     };
-    let body = servers::prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
-
-    // Split the compressed body across CopyData chunks.
-    let rows = feed_copy_in(
-        &client,
-        "COPY FROM STDIN WITH (FORMAT promwrite)",
-        body.chunks(16).map(Bytes::copy_from_slice).collect(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(rows, 7);
+    let payload = request.encode_to_vec();
+    for (sql, body) in [
+        (
+            "COPY FROM STDIN WITH (FORMAT promwrite)",
+            servers::prom_store::snappy_compress(&payload).unwrap(),
+        ),
+        (
+            "COPY FROM STDIN WITH (FORMAT promwrite, zstd)",
+            zstd::stream::encode_all(payload.as_slice(), 0).unwrap(),
+        ),
+    ] {
+        // Split either compression format across CopyData boundaries.
+        let rows = feed_copy_in(
+            &client,
+            sql,
+            body.chunks(16).map(Bytes::copy_from_slice).collect(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows, 7);
+    }
 
     // mock_timeseries writes metric1..metric3; verify one of them.
     let messages = client
@@ -1225,6 +1235,8 @@ async fn test_postgres_copy_in_prom_write_v1() {
 /// direct-write fallback even when the logical batcher is enabled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_postgres_copy_in_prom_write_batching_parity() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
 
     use api::greptime_proto::io::prometheus::write::v2::Sample;
@@ -1235,10 +1247,53 @@ async fn test_postgres_copy_in_prom_write_batching_parity() {
     use servers::batcher::BatchingProtocol;
     use servers::prom_remote_write::v2::test_util as remote_write_v2;
 
+    // Exercise both permission gates through the real COPY/session and batching
+    // wiring: 0 allows writes, 1 denies the action, 2 denies table access.
+    #[derive(Default)]
+    struct WritePermission(AtomicU8);
+    impl auth::PermissionChecker for WritePermission {
+        fn check_permission(
+            &self,
+            _: auth::UserInfoRef,
+            req: auth::PermissionReq,
+        ) -> auth::error::Result<auth::PermissionResp> {
+            Ok(
+                if matches!(req, auth::PermissionReq::Action(auth::PROM_STORE_WRITE))
+                    && self.0.load(Ordering::Relaxed) == 1
+                {
+                    auth::PermissionResp::Reject
+                } else {
+                    auth::PermissionResp::Allow
+                },
+            )
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            _: auth::UserInfoRef,
+            req: auth::PermissionReq,
+            targets: auth::PermissionTableTargets,
+        ) -> auth::error::Result<auth::PermissionResp> {
+            if matches!(req, auth::PermissionReq::Action(auth::PROM_STORE_WRITE)) {
+                assert!(
+                    matches!(targets, auth::PermissionTableTargets::Resolved(ref t) if !t.is_empty())
+                );
+                if self.0.load(Ordering::Relaxed) == 2 {
+                    return Ok(auth::PermissionResp::Reject);
+                }
+            }
+            Ok(auth::PermissionResp::Allow)
+        }
+    }
+
     init_default_ut_logging();
     for (prom_batching, http_prom_enabled) in [(false, true), (true, true), (true, false)] {
+        let checker = Arc::new(WritePermission::default());
+        let plugins = common_base::Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(checker.clone());
         let mut instance =
             crate::standalone::GreptimeDbStandaloneBuilder::new("pg_copy_prom_batch")
+                .with_plugin(plugins.clone())
                 .build()
                 .await;
         let mut opts = instance.opts.clone();
@@ -1266,7 +1321,7 @@ async fn test_postgres_copy_in_prom_write_batching_parity() {
         } else {
             opts.pending_rows_batcher.logical_table = Some(batcher_options);
         }
-        let mut servers = Services::new(opts, instance.fe_instance().clone(), Default::default())
+        let mut servers = Services::new(opts, instance.fe_instance().clone(), plugins)
             .build()
             .unwrap();
         servers.start_all().await.unwrap();
@@ -1310,14 +1365,21 @@ async fn test_postgres_copy_in_prom_write_batching_parity() {
                     .encode_to_vec()
                 };
                 let body = servers::prom_store::snappy_compress(&payload).unwrap();
+                let sql = format!("COPY FROM STDIN WITH (FORMAT promwrite, version {version})");
+                for denied_gate in [1, 2] {
+                    checker.0.store(denied_gate, Ordering::Relaxed);
+                    let before = servers::metrics::FLUSH_TOTAL.get();
+                    let error = feed_copy_in(&client, &sql, vec![Bytes::from(body.clone())])
+                        .await
+                        .unwrap_err();
+                    assert_eq!(error.as_db_error().unwrap().code().code(), "42501");
+                    assert_eq!(servers::metrics::FLUSH_TOTAL.get(), before);
+                }
+                checker.0.store(0, Ordering::Relaxed);
                 let before = servers::metrics::FLUSH_TOTAL.get();
-                let rows = feed_copy_in(
-                    &client,
-                    &format!("COPY FROM STDIN WITH (FORMAT promwrite, version {version})"),
-                    vec![Bytes::from(body)],
-                )
-                .await
-                .unwrap();
+                let rows = feed_copy_in(&client, &sql, vec![Bytes::from(body)])
+                    .await
+                    .unwrap();
                 assert_eq!(rows, 1);
                 assert_eq!(
                     servers::metrics::FLUSH_TOTAL.get() - before,
@@ -1351,9 +1413,8 @@ async fn test_postgres_copy_in_prom_write_batching_parity() {
     }
 }
 
-/// `COPY FROM STDIN WITH (FORMAT promwrite, version 2)` ingests a
-/// remote-write v2 body (samples and histograms) through the shared v2
-/// core; the row count reports written samples plus histograms.
+/// `COPY FROM STDIN WITH (FORMAT promwrite, version 2)` ingests samples
+/// through the shared v2 core and reports their written count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_postgres_copy_in_prom_write_v2() {
     use api::greptime_proto::io::prometheus::write::v2::Sample;
@@ -1888,79 +1949,6 @@ async fn test_postgres_copy_in_prom_write_held_body_quota() {
     assert!(body.len() + decoded.len() > 64 * 1024);
 
     assert_copy_rejects_held_body(&client, "COPY FROM STDIN WITH (FORMAT promwrite)", body).await;
-    server.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_postgres_copy_in_otlp_held_body_quota() {
-    use std::time::Duration;
-
-    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
-    use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
-    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
-        Exemplar, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, exemplar, metric,
-        number_data_point,
-    };
-    use prost::Message;
-
-    init_default_ut_logging();
-    let server = quota_test_server(
-        "pg_copy_in_otlp_held_body",
-        common_memory_manager::OnExhaustedPolicy::Wait {
-            timeout: Duration::from_secs(30),
-        },
-    )
-    .await;
-    let client = connect(server.bind_addr().unwrap().port()).await;
-    let request = ExportMetricsServiceRequest {
-        resource_metrics: vec![ResourceMetrics {
-            scope_metrics: vec![ScopeMetrics {
-                metrics: vec![Metric {
-                    name: "copy_otlp_held_body".into(),
-                    data: Some(metric::Data::Gauge(Gauge {
-                        data_points: vec![NumberDataPoint {
-                            time_unix_nano: 1_700_000_000_000_000_000,
-                            value: Some(number_data_point::Value::AsDouble(1.0)),
-                            attributes: vec![KeyValue {
-                                key: "host".into(),
-                                value: Some(AnyValue {
-                                    value: Some(any_value::Value::StringValue(
-                                        "x".repeat(13 * 1024),
-                                    )),
-                                }),
-                            }],
-                            exemplars: vec![Exemplar {
-                                time_unix_nano: 1_700_000_000_000_000_000,
-                                value: Some(exemplar::Value::AsDouble(1.0)),
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        }],
-                    })),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        }],
-    };
-    let body = request.encode_to_vec();
-    let conversion = servers::otlp::metrics::to_grpc_insert_requests(
-        request,
-        &mut session::protocol_ctx::OtlpMetricCtx {
-            with_metric_engine: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(conversion.exemplars.len(), 1);
-    let expansion =
-        servers::exemplar::estimated_row_bytes([conversion.exemplars.as_slice()]).unwrap();
-    assert!(body.len() < 64 * 1024);
-    assert!(expansion < 64 * 1024);
-    assert!(body.len() + expansion > 64 * 1024);
-
-    assert_copy_rejects_held_body(&client, "COPY FROM STDIN WITH (FORMAT otlp)", body).await;
     server.shutdown().await.unwrap();
 }
 

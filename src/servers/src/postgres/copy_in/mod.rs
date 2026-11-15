@@ -112,7 +112,6 @@ const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("otlp", otlp::build_otlp_codec),
     ("otlp_metrics", otlp::build_otlp_codec),
     ("promwrite", prom_write::build_prom_write_codec),
-    ("prom_remote_write", prom_write::build_prom_write_codec),
     ("text", build_unimplemented_text_codec),
     ("txt", build_unimplemented_text_codec),
     ("binary", build_unimplemented_binary_codec),
@@ -252,7 +251,7 @@ pub(crate) struct CopyInState {
     query_ctx: QueryContextRef,
     payload: Payload,
     /// Reservations against the shared request-memory limiter for the
-    /// bytes buffered by a table-less payload, acquired per CopyData
+    /// bytes buffered by a Prometheus payload, acquired per CopyData
     /// chunk as it arrives and held until the buffer is flushed or the
     /// copy ends — the receive-stage counterpart of HTTP's
     /// body-accounting middleware, so concurrent unfinished COPY
@@ -431,14 +430,10 @@ impl CopyInState {
         self.codec_format_code
     }
 
-    /// Whether the payload buffers raw CopyData bytes until `CopyDone`
-    /// (the table-less formats); such bytes are charged against the
-    /// shared request-memory limiter as they arrive.
+    /// Prometheus bodies are charged against the shared request-memory limiter
+    /// as they arrive, before decode and conversion acquire additional memory.
     fn buffers_payload(&self) -> bool {
-        matches!(
-            self.payload,
-            Payload::Influxdb { .. } | Payload::Otlp { .. } | Payload::PromWrite { .. }
-        )
+        matches!(self.payload, Payload::PromWrite { .. })
     }
 
     /// The payload bytes currently buffered (charged or not).
@@ -547,18 +542,14 @@ impl CopyInState {
     }
 
     /// Takes the buffered OTLP payload and its options, if any.
-    fn take_otlp(&mut self) -> Option<(OtlpOptions, Vec<u8>, BufferedReservation)> {
+    fn take_otlp(&mut self) -> Option<(OtlpOptions, Vec<u8>)> {
         let Payload::Otlp { options, data } = &mut self.payload else {
             return None;
         };
         if data.is_empty() {
             return None;
         }
-        Some((
-            options.clone(),
-            std::mem::take(data),
-            self.take_reservation(),
-        ))
+        Some((options.clone(), std::mem::take(data)))
     }
 
     /// Takes the buffered remote-write body and its options, if any.
@@ -579,20 +570,19 @@ impl CopyInState {
     /// Takes the buffered payload as one line-protocol request body, if
     /// any — the same bytes an HTTP write of the same records would
     /// carry.
-    fn take_lines(&mut self) -> PgWireResult<Option<(InfluxdbRequest, BufferedReservation)>> {
+    fn take_lines(&mut self) -> PgWireResult<Option<InfluxdbRequest>> {
         let Payload::Influxdb { data, precision } = &mut self.payload else {
             return Ok(None);
         };
         if data.is_empty() {
             return Ok(None);
         }
-        let request = InfluxdbRequest {
+        let lines = String::from_utf8(std::mem::take(data))
+            .map_err(|e| bad_copy_data(format!("COPY FROM STDIN data is not valid UTF-8: {e}")))?;
+        Ok(Some(InfluxdbRequest {
             precision: *precision,
-            lines: String::from_utf8(std::mem::take(data)).map_err(|e| {
-                bad_copy_data(format!("COPY FROM STDIN data is not valid UTF-8: {e}"))
-            })?,
-        };
-        Ok(Some((request, self.take_reservation())))
+            lines,
+        }))
     }
 }
 
@@ -800,23 +790,13 @@ impl PostgresServerHandlerInner {
         // timestamp alignment and inserts are identical to an HTTP
         // write of the same bytes. The context stays this connection's
         // postgres context.
-        if let Some((options, bytes, reservation)) = state.take_otlp() {
+        if let Some((options, bytes)) = state.take_otlp() {
             let Some(otlp_handler) = &self.otlp_handler else {
                 return Err(unsupported("this server is not wired for the otlp format"));
             };
-            // The reservation outlives the payload: it is dropped when
-            // the payload's bytes are consumed below.
-            let rows = self
-                .flush_otlp(
-                    otlp_handler,
-                    options,
-                    bytes,
-                    reservation.charged_bytes(),
-                    query_ctx,
-                )
-                .await?;
-            drop(reservation);
-            return Ok(rows);
+            return self
+                .flush_otlp(otlp_handler, options, bytes, query_ctx)
+                .await;
         }
         if let Some((options, bytes, reservation)) = state.take_prom_write() {
             let Some(prom_write_state) = &self.prom_write_state else {
@@ -828,7 +808,7 @@ impl PostgresServerHandlerInner {
                 .flush_prom_write(prom_write_state, options, bytes, reservation, query_ctx)
                 .await;
         }
-        if let Some((request, reservation)) = state.take_lines()? {
+        if let Some(request) = state.take_lines()? {
             let Some(influxdb_handler) = &self.influxdb_handler else {
                 return Err(unsupported(
                     "this server is not wired for the influxdb line protocol format",
@@ -838,7 +818,6 @@ impl PostgresServerHandlerInner {
                 .exec(request, query_ctx)
                 .await
                 .map_err(convert_err)?;
-            drop(reservation);
             return match output.data {
                 OutputData::AffectedRows(rows) => Ok(rows as u64),
                 OutputData::RecordBatches(_) | OutputData::Stream(_) => Ok(0),
@@ -872,7 +851,6 @@ impl PostgresServerHandlerInner {
         otlp_handler: &crate::query_handler::OpenTelemetryProtocolHandlerRef,
         options: OtlpOptions,
         bytes: Vec<u8>,
-        body_reserved_bytes: u64,
         query_ctx: QueryContextRef,
     ) -> PgWireResult<u64> {
         use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -908,7 +886,7 @@ impl PostgresServerHandlerInner {
                     .metrics(
                         request,
                         Arc::new(ctx),
-                        Some((self.memory_limiter.clone(), body_reserved_bytes)),
+                        Some((self.memory_limiter.clone(), 0)),
                     )
                     .await
                     .map_err(convert_err)?;
@@ -1058,6 +1036,7 @@ impl PostgresServerHandlerInner {
             PromWriteVersion::V1 => {
                 let result = ingest_remote_write_v1(
                     prom_write_state,
+                    &db,
                     pipeline_info,
                     options.zstd,
                     Arc::new(ctx),
@@ -1066,14 +1045,7 @@ impl PostgresServerHandlerInner {
                 )
                 .await
                 .map_err(|error| convert_err(error.error))?;
-                Ok(match result {
-                    crate::http::prom_store::PromWriteV1Result::Rows { outcome } => {
-                        outcome.rows_written
-                    }
-                    crate::http::prom_store::PromWriteV1Result::Exemplars { written, .. } => {
-                        written[0] + written[2]
-                    }
-                })
+                Ok(result.written.iter().sum())
             }
             PromWriteVersion::V2 => {
                 let result = ingest_remote_write_v2(
@@ -1087,14 +1059,7 @@ impl PostgresServerHandlerInner {
                 )
                 .await
                 .map_err(|error| convert_err(error.error))?;
-                Ok(match result {
-                    crate::http::prom_store::PromWriteV2Result::Samples { outcome, .. } => {
-                        outcome.samples_written + outcome.histograms_written
-                    }
-                    crate::http::prom_store::PromWriteV2Result::Exemplars { written, .. } => {
-                        written[0] + written[1] + written[2]
-                    }
-                })
+                Ok(result.written.iter().sum())
             }
         }
     }
@@ -1143,7 +1108,7 @@ impl CopyHandler for PostgresServerHandlerInner {
         // otherwise a pooled connection would retain failed-import
         // buffers until its next COPY. On success it is put back.
         //
-        // Buffered table-less payloads charge their bytes against the
+        // Buffered Prometheus payloads charge their bytes against the
         // shared request-memory limiter as they arrive (the
         // receive-stage counterpart of HTTP's body accounting); the
         // reservation is held until the buffer is flushed or the state
