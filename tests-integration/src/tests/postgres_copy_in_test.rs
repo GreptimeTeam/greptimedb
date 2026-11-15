@@ -880,6 +880,21 @@ async fn test_postgres_copy_in_otlp_binary() {
     };
     let body = request.encode_to_vec();
 
+    // Metrics must remain table-less, both with the default signal and
+    // with an explicitly selected metrics signal.
+    for sql in [
+        "COPY forbidden_metrics FROM STDIN WITH (FORMAT otlp)",
+        "COPY forbidden_metrics FROM STDIN WITH (FORMAT otlp, signal 'metrics')",
+    ] {
+        let error = client.simple_query(sql).await.unwrap_err();
+        assert!(
+            error
+                .as_db_error()
+                .is_some_and(|e| e.message().contains("must not name one")),
+            "unexpected error: {error}"
+        );
+    }
+
     // Feed the binary payload in small chunks: the message spans CopyData
     // boundaries exactly like a large text payload would.
     let rows = feed_copy_in(
@@ -986,6 +1001,52 @@ async fn test_postgres_copy_in_otlp_traces() {
         .collect();
     assert_eq!(count, vec!["1".to_string()]);
 
+    client
+        .simple_query("CREATE DATABASE trace_dest")
+        .await
+        .unwrap();
+    for (target, override_option, destination) in [
+        ("", "", "opentelemetry_traces"),
+        ("copy_target_traces", "", "copy_target_traces"),
+        (
+            "ignored_traces",
+            ", table_name 'override_traces'",
+            "override_traces",
+        ),
+        (
+            "trace_dest.qualified_traces",
+            "",
+            "trace_dest.qualified_traces",
+        ),
+        (
+            "greptime.trace_dest.ignored",
+            ", table_name 'override_traces'",
+            "trace_dest.override_traces",
+        ),
+    ] {
+        let rows = feed_copy_in(
+            &client,
+            &format!("COPY {target} FROM STDIN WITH (FORMAT otlp, signal 'traces', pipeline_name 'greptime_trace_v2'{override_option})"),
+            vec![Bytes::from(request.encode_to_vec())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows, 1);
+        let messages = client
+            .simple_query(&format!(
+                "SELECT count(*) FROM {destination} WHERE service_name = 'copy-svc'"
+            ))
+            .await
+            .unwrap();
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                tokio_postgres::SimpleQueryMessage::Row(row) if row.get(0) == Some("1")
+            )),
+            "destination: {destination}, messages: {messages:?}"
+        );
+    }
+
     server.shutdown().await.unwrap();
 }
 
@@ -1018,6 +1079,16 @@ async fn test_postgres_copy_in_otlp_logs() {
     }))
     .unwrap();
 
+    let error = client
+        .simple_query("COPY copy_logs (body) FROM STDIN WITH (FORMAT otlp, signal 'logs')")
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .as_db_error()
+            .is_some_and(|e| e.message().contains("does not support a column list"))
+    );
+
     let rows = feed_copy_in(
         &client,
         "COPY FROM STDIN WITH (FORMAT otlp, signal 'logs')",
@@ -1039,6 +1110,48 @@ async fn test_postgres_copy_in_otlp_logs() {
         })
         .collect();
     assert_eq!(count, vec!["1".to_string()]);
+
+    client
+        .simple_query("CREATE DATABASE log_dest")
+        .await
+        .unwrap();
+    for (target, override_option, destination) in [
+        ("", ", table_name 'option_only_logs'", "option_only_logs"),
+        ("copy_target_logs", "", "copy_target_logs"),
+        (
+            "ignored_logs",
+            ", table_name 'override_logs'",
+            "override_logs",
+        ),
+        ("log_dest.qualified_logs", "", "log_dest.qualified_logs"),
+        (
+            "greptime.log_dest.ignored",
+            ", table_name 'override_logs'",
+            "log_dest.override_logs",
+        ),
+    ] {
+        let rows = feed_copy_in(
+            &client,
+            &format!("COPY {target} FROM STDIN WITH (FORMAT otlp, signal 'logs'{override_option})"),
+            vec![Bytes::from(request.encode_to_vec())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows, 1);
+        let messages = client
+            .simple_query(&format!(
+                "SELECT count(*) FROM {destination} WHERE body = 'copied via postgres'"
+            ))
+            .await
+            .unwrap();
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                tokio_postgres::SimpleQueryMessage::Row(row) if row.get(0) == Some("1")
+            )),
+            "destination: {destination}, messages: {messages:?}"
+        );
+    }
 
     server.shutdown().await.unwrap();
 }

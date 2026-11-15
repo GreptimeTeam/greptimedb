@@ -18,8 +18,16 @@
 //!
 //! `COPY FROM STDIN WITH (FORMAT otlp [, signal 'traces'] [, <options>])`
 //! is a GreptimeDB-specific, **binary** format (wire format code 1).
-//! Like the influxdb format it is table-less and does not decode here:
-//! the whole payload is buffered until `CopyDone` — exactly like an
+//! Metrics are table-less; traces and logs also accept
+//! `COPY [catalog.][schema.]table FROM STDIN`. For those signals the
+//! destination precedence is `WITH (table_name ...)`, then the COPY
+//! target's table name, then the signal's default table. A qualified COPY
+//! target sets the catalog/schema even when `table_name` overrides its
+//! table name. Targets need not exist before ingestion. Column lists
+//! are not supported: the payload determines the ingested columns.
+//!
+//! This format does not decode here: the whole payload is buffered
+//! until `CopyDone` — exactly like an
 //! OTLP/HTTP request body — then decoded and completed through the
 //! frontend's `OpenTelemetryProtocolHandler`, the same path the
 //! `/v1/otlp/v1/{metrics,traces,logs}` endpoints use, under the

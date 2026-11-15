@@ -68,7 +68,8 @@ pub(super) enum CopyFormat {
     /// pipeline the HTTP write endpoints use (one COPY statement is one
     /// ingestion request; streaming ingest is not supported).
     Influxdb(InfluxdbOptions),
-    /// Table-less, **binary** OTLP: one `ExportMetricsServiceRequest`,
+    /// **Binary** OTLP (optionally table-targeted for logs/traces):
+    /// one `ExportMetricsServiceRequest`,
     /// `ExportTraceServiceRequest` or `ExportLogsServiceRequest`
     /// protobuf message, buffered whole and completed through the
     /// matching OTLP pipeline the OTLP/HTTP endpoints use. Advertises
