@@ -436,6 +436,10 @@ pub(crate) fn build_file_appender(
         builder = builder.latest_symlink(kind.current_link_name());
     }
 
+    // FIXME(tokio-rs/tracing#3612): tracing-appender lists the directory to prune old logs
+    // before creating it, so a missing directory prints a misleading error. If this fails,
+    // `build` reports it.
+    let _ = fs::create_dir_all(&opts.dir);
     let appender = builder.build(&opts.dir).unwrap_or_else(|error| {
         panic!(
             "initializing rolling file appender at {} failed: {}",
@@ -466,11 +470,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::FileIndex;
-    #[cfg(unix)]
     use crate::logging::LoggingOptions;
-    #[cfg(unix)]
-    use crate::logging::file_retention::build_file_appender;
-    use crate::logging::file_retention::{DirectoryRetention, LogFileKind};
+    use crate::logging::file_retention::{DirectoryRetention, LogFileKind, build_file_appender};
 
     fn write_file(path: &Path, contents: &[u8]) {
         let mut file = File::create(path).unwrap();
@@ -505,6 +506,40 @@ mod tests {
         files.remove(&(SystemTime::UNIX_EPOCH, PathBuf::from("missing")));
 
         assert_eq!(files.total_size, 0);
+    }
+
+    #[test]
+    fn test_file_appender_does_not_report_missing_directory() {
+        const CASE_ENV: &str = "GREPTIME_TEST_MISSING_LOG_DIRECTORY";
+        if let Some(dir) = std::env::var_os(CASE_ENV) {
+            let opts = LoggingOptions {
+                dir: dir.into_string().unwrap(),
+                ..Default::default()
+            };
+            let _appender = build_file_appender(&opts, LogFileKind::Default, None);
+            return;
+        }
+
+        // tracing-appender reports errors with `eprintln!`, so check stderr of a child process.
+        let directory = TempDir::new().unwrap();
+        let log_dir = directory.path().join("logs");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "logging::file_retention::tests::test_file_appender_does_not_report_missing_directory",
+                "--nocapture",
+            ])
+            .env(CASE_ENV, &log_dir)
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(
+            !stderr.contains("Error reading the log directory"),
+            "{stderr}"
+        );
+        assert!(log_dir.is_dir());
     }
 
     #[cfg(unix)]
