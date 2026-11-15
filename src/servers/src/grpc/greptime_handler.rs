@@ -16,7 +16,6 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -33,22 +32,21 @@ use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use common_runtime::Runtime;
 use common_runtime::runtime::RuntimeTrait;
-use common_session::ReadPreference;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
-use session::hints::{INSERT_SKIP_WAL_HINT, READ_PREFERENCE_HINT, is_reserved_extension_key};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::task::AbortOnDropHandle;
 use tonic::Status;
 
-use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result, UnknownHintSnafu};
+use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result};
 use crate::grpc::flight::PutRecordBatchRequestStream;
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
+use crate::hints::protocol::{Endpoint, Protocol};
 use crate::metrics::{self, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
@@ -83,8 +81,13 @@ impl GreptimeRequestHandler {
         channel: Channel,
     ) -> Result<Output> {
         let header = request.header.as_ref();
-        let hints = crate::hint_headers::validate_public_hints(hints)?;
-        let query_ctx = create_query_context(channel, header, hints, HashMap::new())?;
+        let protocol = request
+            .request
+            .as_ref()
+            .map(protocol_for_request)
+            .unwrap_or(Protocol::Other);
+        let query_ctx =
+            create_query_context_for_protocol(channel, header, hints, HashMap::new(), protocol)?;
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
@@ -205,6 +208,18 @@ pub fn get_request_type(request: &GreptimeRequest) -> &'static str {
         .unwrap_or_default()
 }
 
+/// Maps the request variant to the protocol declared by hint registrations.
+pub(crate) fn protocol_for_request(request: &QueryRequest) -> Protocol {
+    match request {
+        QueryRequest::Query(ApiQueryRequest {
+            query: Some(Query::PromRangeQuery(_)),
+        }) => Protocol::Promql,
+        QueryRequest::Query(_) => Protocol::Sql,
+        QueryRequest::Inserts(_) | QueryRequest::RowInserts(_) => Protocol::NativeInsert,
+        _ => Protocol::Other,
+    }
+}
+
 /// Creates a new `QueryContext` from the provided request header and extensions.
 /// Strongly recommend setting an appropriate channel, as this is very helpful for statistics.
 pub(crate) fn create_query_context(
@@ -212,6 +227,17 @@ pub(crate) fn create_query_context(
     header: Option<&RequestHeader>,
     extensions: Vec<(String, String)>,
     snapshot_seqs: HashMap<u64, u64>,
+) -> Result<QueryContextRef> {
+    create_query_context_for_protocol(channel, header, extensions, snapshot_seqs, Protocol::Sql)
+}
+
+/// Creates a context using the executable bindings for the request protocol.
+pub(crate) fn create_query_context_for_protocol(
+    channel: Channel,
+    header: Option<&RequestHeader>,
+    extensions: Vec<(String, String)>,
+    snapshot_seqs: HashMap<u64, u64>,
+    protocol: Protocol,
 ) -> Result<QueryContextRef> {
     let (catalog, schema) = header
         .map(|header| {
@@ -241,45 +267,16 @@ pub(crate) fn create_query_context(
             )
         });
     let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
-    let mut ctx_builder = QueryContextBuilder::default()
+    let ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog)
         .current_schema(schema)
         .timezone(timezone)
         .channel(channel)
         .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs)));
 
-    for (key, value) in extensions {
-        match key.as_str() {
-            READ_PREFERENCE_HINT => {
-                let Ok(read_preference) = ReadPreference::from_str(&value) else {
-                    return UnknownHintSnafu {
-                        hint: format!("{key}={value}"),
-                    }
-                    .fail();
-                };
-                ctx_builder = ctx_builder.read_preference(read_preference);
-            }
-            INSERT_SKIP_WAL_HINT => {
-                let skip_wal = value.parse::<bool>().map_err(|_| {
-                    UnknownHintSnafu {
-                        hint: format!("{key}={value}"),
-                    }
-                    .build()
-                })?;
-                ctx_builder = ctx_builder.skip_wal(skip_wal);
-            }
-            _ if is_reserved_extension_key(&key) => {
-                debug!(
-                    key = key.as_str(),
-                    "Ignoring reserved external query context extension key"
-                );
-            }
-            _ => {
-                ctx_builder = ctx_builder.set_extension(key, value);
-            }
-        }
-    }
-    Ok(ctx_builder.build().into())
+    let mut context = ctx_builder.build();
+    crate::hints::parse_endpoint(Endpoint::Grpc(protocol), extensions)?.apply(&mut context);
+    Ok(context.into())
 }
 
 /// Histogram timer for handling gRPC request.
@@ -323,6 +320,8 @@ impl Drop for RequestTimer {
 
 #[cfg(test)]
 mod tests {
+    use common_session::ReadPreference;
+    use session::hints::{INSERT_SKIP_WAL_HINT, READ_PREFERENCE_HINT};
     use std::error::Error as StdError;
     use std::result::Result as StdResult;
     use std::time::Duration;
@@ -515,6 +514,51 @@ mod tests {
         .unwrap();
         assert!(!ctx.skip_wal());
         assert_eq!(ctx.extension(INSERT_SKIP_WAL_HINT), None);
+    }
+
+    #[test]
+    fn test_create_query_context_validates_public_query_options() {
+        use session::query_options;
+
+        for (values, valid) in [
+            (
+                [("query.parallelism", "4"), ("query_parallelism", "4")],
+                true,
+            ),
+            (
+                [("query.parallelism", "4"), ("query_parallelism", "8")],
+                false,
+            ),
+            (
+                [("query.parallelism", "invalid"), ("query_parallelism", "4")],
+                false,
+            ),
+            (
+                [
+                    ("query.allow_query_fallback", "true"),
+                    ("allow_query_fallback", "false"),
+                ],
+                false,
+            ),
+        ] {
+            let result = create_query_context(
+                Channel::Grpc,
+                None,
+                values
+                    .into_iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+                HashMap::new(),
+            );
+            assert_eq!(result.is_ok(), valid, "{values:?}");
+            if let Ok(context) = result {
+                assert_eq!(
+                    context.extension(query_options::QUERY_PARALLELISM),
+                    Some("4")
+                );
+                assert_eq!(context.extension("query_parallelism"), None);
+            }
+        }
     }
 
     #[test]

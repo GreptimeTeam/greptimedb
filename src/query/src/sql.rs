@@ -73,6 +73,7 @@ use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use crate::QueryEngineRef;
 use crate::error::{self, Result, UnsupportedVariableSnafu};
 use crate::planner::DfLogicalPlanner;
+use crate::query_engine::options;
 
 const SCHEMAS_COLUMN: &str = "Database";
 const OPTIONS_COLUMN: &str = "Options";
@@ -870,52 +871,12 @@ pub fn show_query_option(
         return Ok(None);
     };
     let context = engine.engine_context(query_ctx.clone())?;
-    let value = match canonical.as_str() {
-        "query.allow_query_fallback" => context
-            .state()
-            .config_options()
-            .extensions
-            .get::<crate::dist_plan::DistPlannerOptions>()
-            .map(|options| options.allow_query_fallback)
-            .unwrap_or(false)
-            .to_string(),
-        "query.enable_remote_dynamic_filter_pushdown" => {
-            crate::options::remote_dyn_filter_pushdown_enabled_from_extensions(
-                &context.query_ctx().extensions(),
-            )?
-            .to_string()
+    let value = options::effective_query_option(&context, &canonical)?.ok_or_else(|| {
+        error::InvalidQueryContextExtensionSnafu {
+            reason: format!("No DataFusion configuration entry for supported option {canonical}"),
         }
-        "query.parallelism" => context.state().config().target_partitions().to_string(),
-        "datafusion.optimizer.filter_null_join_keys"
-            if context
-                .state()
-                .analyzer()
-                .rules
-                .iter()
-                .any(|rule| rule.name() == "DistPlannerAnalyzer")
-                && context
-                    .query_ctx()
-                    .extension("datafusion.optimizer.filter_null_join_keys")
-                    .is_none() =>
-        {
-            "true".to_string()
-        }
-        _ => context
-            .state()
-            .config_options()
-            .entries()
-            .into_iter()
-            .find(|entry| entry.key == canonical)
-            .and_then(|entry| entry.value)
-            .ok_or_else(|| {
-                error::InvalidQueryContextExtensionSnafu {
-                    reason: format!(
-                        "No DataFusion configuration entry for supported option {canonical}"
-                    ),
-                }
-                .build()
-            })?,
-    };
+        .build()
+    })?;
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
         name.clone(),
         ConcreteDataType::string_datatype(),

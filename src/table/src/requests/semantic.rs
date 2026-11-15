@@ -288,49 +288,67 @@ pub fn validate_semantic_option(key: &str, value: &str) -> bool {
     if is_entity_option_key(key) {
         return !value.is_empty() && value.split(',').all(|column| !column.trim().is_empty());
     }
-    match key {
-        SEMANTIC_TABLE_SCOPE => matches!(value, "catalog" | "public_global" | "global"),
+    if let Some(values) = semantic_option_values(key) {
+        return values.contains(&value);
+    }
+    matches!(
+        key,
         SEMANTIC_PIPELINE
-        | SEMANTIC_SOURCE_VERSION
-        | SEMANTIC_METRIC_UNIT
-        | SEMANTIC_METRIC_ORIGINAL_NAME
-        | SEMANTIC_TRACE_CONVENTIONS => !value.is_empty(),
+            | SEMANTIC_SOURCE_VERSION
+            | SEMANTIC_METRIC_UNIT
+            | SEMANTIC_METRIC_ORIGINAL_NAME
+            | SEMANTIC_TRACE_CONVENTIONS
+    ) && !value.is_empty()
+}
 
-        SEMANTIC_SIGNAL_TYPE => matches!(value, "trace" | "log" | "metric" | "event" | "unknown"),
-        SEMANTIC_SOURCE => matches!(
-            value,
-            "opentelemetry"
-                | "prometheus"
-                | "influxdb"
-                | "opentsdb"
-                | "elasticsearch"
-                | "loki"
-                | "custom"
-                | "mixed"
-                | "unknown"
-        ),
-        SEMANTIC_METRIC_TYPE => matches!(
-            value,
-            "counter"
-                | "gauge"
-                | "histogram"
-                | "summary"
-                | "updown_counter"
-                | "gauge_histogram"
-                | "info"
-                | "stateset"
-                | "mixed"
-                | "unknown"
-        ),
-        SEMANTIC_METRIC_TEMPORALITY => {
-            matches!(
-                value,
-                METRIC_TEMPORALITY_CUMULATIVE | METRIC_TEMPORALITY_DELTA | "mixed" | "unknown"
-            )
-        }
-        SEMANTIC_METRIC_METADATA_QUALITY => matches!(value, "declared" | "inferred" | "unknown"),
-
-        _ => false,
+/// Returns the complete value set for a closed semantic option.
+/// Open string domains and unrecognized keys return `None`.
+/// Shared by [`validate_semantic_option`] and HTTP hint discovery.
+pub fn semantic_option_values(key: &str) -> Option<&'static [&'static str]> {
+    match key {
+        SEMANTIC_TABLE_SCOPE => Some(&["catalog", "public_global", "global"]),
+        SEMANTIC_SIGNAL_TYPE => Some(&[
+            SIGNAL_TYPE_TRACE,
+            SIGNAL_TYPE_LOG,
+            SIGNAL_TYPE_METRIC,
+            SIGNAL_TYPE_EVENT,
+            SEMANTIC_VALUE_UNKNOWN,
+        ]),
+        SEMANTIC_SOURCE => Some(&[
+            SOURCE_OPENTELEMETRY,
+            SOURCE_PROMETHEUS,
+            SOURCE_INFLUXDB,
+            SOURCE_OPENTSDB,
+            SOURCE_ELASTICSEARCH,
+            SOURCE_LOKI,
+            "custom",
+            SEMANTIC_VALUE_MIXED,
+            SEMANTIC_VALUE_UNKNOWN,
+        ]),
+        SEMANTIC_METRIC_TYPE => Some(&[
+            "counter",
+            "gauge",
+            "histogram",
+            "summary",
+            "updown_counter",
+            "gauge_histogram",
+            "info",
+            "stateset",
+            SEMANTIC_VALUE_MIXED,
+            SEMANTIC_VALUE_UNKNOWN,
+        ]),
+        SEMANTIC_METRIC_TEMPORALITY => Some(&[
+            METRIC_TEMPORALITY_CUMULATIVE,
+            METRIC_TEMPORALITY_DELTA,
+            SEMANTIC_VALUE_MIXED,
+            SEMANTIC_VALUE_UNKNOWN,
+        ]),
+        SEMANTIC_METRIC_METADATA_QUALITY => Some(&[
+            METADATA_QUALITY_DECLARED,
+            METADATA_QUALITY_INFERRED,
+            SEMANTIC_VALUE_UNKNOWN,
+        ]),
+        _ => None,
     }
 }
 

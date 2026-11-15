@@ -21,7 +21,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
-use session::hints::INSERT_SKIP_WAL_HINT;
 use snafu::{OptionExt, ResultExt};
 use tonic::Status;
 use tonic::metadata::MetadataMap;
@@ -30,6 +29,7 @@ use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{AuthSnafu, InvalidParameterSnafu, NotFoundAuthHeaderSnafu, Result};
 use crate::grpc::TonicResult;
 use crate::hint_headers;
+use crate::hints::protocol::{Endpoint, Protocol};
 use crate::http::AUTHORIZATION_HEADER;
 use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::metrics::METRIC_AUTH_FAILURE;
@@ -38,6 +38,14 @@ use crate::metrics::METRIC_AUTH_FAILURE;
 pub fn create_query_context_from_grpc_metadata(
     headers: &MetadataMap,
     extensions: &http::Extensions,
+) -> TonicResult<QueryContextRef> {
+    create_query_context_from_grpc_metadata_for_protocol(headers, extensions, Protocol::OtelArrow)
+}
+
+pub(crate) fn create_query_context_from_grpc_metadata_for_protocol(
+    headers: &MetadataMap,
+    extensions: &http::Extensions,
+    protocol: Protocol,
 ) -> TonicResult<QueryContextRef> {
     let (catalog, schema) = if let Some(db) = extract_header(headers, &[GREPTIME_DB_HEADER_NAME])? {
         parse_catalog_and_schema_from_db_string(db)
@@ -48,7 +56,7 @@ pub fn create_query_context_from_grpc_metadata(
         )
     };
 
-    let ctx = QueryContextBuilder::default()
+    let mut ctx = QueryContextBuilder::default()
         .current_catalog(catalog)
         .current_schema(schema)
         .channel(
@@ -58,20 +66,11 @@ pub fn create_query_context_from_grpc_metadata(
                 .unwrap_or(Channel::Grpc),
         )
         .build();
-    // OTEL Arrow uses ordinary inserts. Accept only its request-level WAL hint,
-    // leaving unrelated hints and reserved internal extensions unchanged.
-    if let Some((key, value)) = hint_headers::extract_hints(headers)
-        .into_iter()
-        .find(|(key, _)| key == INSERT_SKIP_WAL_HINT)
-    {
-        let skip_wal = value.parse::<bool>().map_err(|_| {
-            InvalidParameterSnafu {
-                reason: format!("Invalid {key} hint: expected true or false, got {value:?}"),
-            }
-            .build()
-        })?;
-        ctx.set_skip_wal(skip_wal);
-    }
+    crate::hints::parse_endpoint(
+        Endpoint::Grpc(protocol),
+        hint_headers::extract_hints(headers),
+    )?
+    .apply(&mut ctx);
     Ok(Arc::new(ctx))
 }
 
@@ -185,6 +184,7 @@ pub async fn auth(
 
 #[cfg(test)]
 mod tests {
+    use session::hints::INSERT_SKIP_WAL_HINT;
     use session::hints::{HINTS_KEY, REMOTE_QUERY_ID_EXTENSION_KEY, RESERVED_EXTENSION_KEYS};
 
     use super::*;
@@ -206,55 +206,75 @@ mod tests {
         assert_eq!(ctx.channel(), Channel::Internal);
     }
 
-    #[test]
-    fn test_arrow_insert_hint_does_not_accept_reserved_extensions() {
+    fn metadata_context(protocol: Protocol, hints: &str) -> TonicResult<QueryContextRef> {
         let mut headers = MetadataMap::new();
-        assert_eq!(
-            create_query_context_from_grpc_metadata(&headers, &Default::default())
-                .unwrap()
-                .extension(INSERT_SKIP_WAL_HINT),
-            None
-        );
-        for (value, expected) in [("true", true), ("false", false)] {
-            let mut hints = format!("insert_skip_wal={value},ttl=7d");
-            for key in RESERVED_EXTENSION_KEYS {
-                hints.push_str(&format!(",{key}=external"));
-            }
-            headers.insert(HINTS_KEY, hints.parse().unwrap());
-            let ctx =
-                create_query_context_from_grpc_metadata(&headers, &Default::default()).unwrap();
-            assert_eq!(ctx.skip_wal(), expected);
-            assert_eq!(ctx.extension(INSERT_SKIP_WAL_HINT), None);
-            assert_eq!(ctx.extension("ttl"), None);
-            for key in RESERVED_EXTENSION_KEYS {
-                if key == REMOTE_QUERY_ID_EXTENSION_KEY {
-                    // The builder generates this ID; external hints must not replace it.
-                    assert!(ctx.remote_query_id().is_some());
-                    assert_ne!(ctx.extension(key), Some("external"));
-                } else {
-                    assert_eq!(ctx.extension(key), None);
+        headers.insert(HINTS_KEY, hints.parse().unwrap());
+        create_query_context_from_grpc_metadata_for_protocol(
+            &headers,
+            &http::Extensions::new(),
+            protocol,
+        )
+    }
+
+    #[test]
+    fn test_metadata_endpoints_select_supported_hints_and_protect_reserved_keys() {
+        for protocol in [Protocol::OtelArrow, Protocol::BulkInsert] {
+            let empty = metadata_context(protocol, "").unwrap();
+            assert!(!empty.skip_wal());
+            assert_eq!(empty.extension(INSERT_SKIP_WAL_HINT), None);
+            for (value, expected) in [("true", true), ("false", false)] {
+                let mut hints = format!(
+                    "insert_skip_wal={value},auto_create_table=true,auto_create_table=false,ttl=invalid,query.parallelism=invalid,datafusion.unknown=invalid"
+                );
+                for key in RESERVED_EXTENSION_KEYS {
+                    hints.push_str(&format!(",{key}=external"));
+                }
+                let context = metadata_context(protocol, &hints).unwrap();
+                assert_eq!(context.skip_wal(), expected);
+                assert_eq!(context.extension(INSERT_SKIP_WAL_HINT), None);
+                assert_eq!(
+                    context.extension(table::requests::AUTO_CREATE_TABLE_KEY),
+                    (protocol == Protocol::BulkInsert).then_some("false")
+                );
+                for key in ["ttl", "query.parallelism", "datafusion.unknown"] {
+                    assert_eq!(context.extension(key), None, "{protocol:?}: {key}");
+                }
+                for key in RESERVED_EXTENSION_KEYS {
+                    if key == REMOTE_QUERY_ID_EXTENSION_KEY {
+                        assert!(context.remote_query_id().is_some());
+                        assert_ne!(context.extension(key), Some("external"));
+                    } else {
+                        assert_eq!(context.extension(key), None, "{protocol:?}: {key}");
+                    }
                 }
             }
         }
-        // Only the first matching hint is parsed and applied.
-        for (hints, expected) in [
-            ("insert_skip_wal=true,insert_skip_wal=false", true),
-            ("insert_skip_wal=false,insert_skip_wal=true", false),
-            ("insert_skip_wal=true,insert_skip_wal=invalid", true),
-        ] {
-            headers.insert(HINTS_KEY, hints.parse().unwrap());
-            let ctx =
-                create_query_context_from_grpc_metadata(&headers, &Default::default()).unwrap();
-            assert_eq!(ctx.skip_wal(), expected);
-        }
-        for value in ["", "TRUE", "1", "invalid"] {
-            headers.insert(
-                HINTS_KEY,
-                format!("insert_skip_wal={value}").parse().unwrap(),
-            );
-            assert!(
-                create_query_context_from_grpc_metadata(&headers, &Default::default()).is_err()
-            );
+    }
+
+    #[test]
+    fn test_metadata_wal_duplicates_validate_every_value_and_apply_last() {
+        for protocol in [Protocol::OtelArrow, Protocol::BulkInsert] {
+            for (hints, expected) in [
+                ("insert_skip_wal=true,insert_skip_wal=false", false),
+                ("insert_skip_wal=false,insert_skip_wal=true", true),
+            ] {
+                let context = metadata_context(protocol, hints).unwrap();
+                assert_eq!(context.skip_wal(), expected, "{protocol:?}: {hints}");
+            }
+            for value in [
+                "",
+                "TRUE",
+                "1",
+                "invalid",
+                "true,insert_skip_wal=invalid",
+                "invalid,insert_skip_wal=true",
+            ] {
+                let hints = format!("insert_skip_wal={value}");
+                assert!(
+                    metadata_context(protocol, &hints).is_err(),
+                    "{protocol:?}: {hints}"
+                );
+            }
         }
     }
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod context;
+pub mod hint_registry;
 pub mod hints;
 pub mod protocol_ctx;
 pub mod query_id;
@@ -30,7 +31,7 @@ use auth::UserInfoRef;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::cursor::RecordBatchStreamCursor;
-pub use common_session::ReadPreference;
+pub use common_session::{READ_PREFERENCE_VALUES, ReadPreference};
 use common_time::Timezone;
 use common_time::timezone::get_timezone;
 use context::{ConfigurationVariables, QueryContextBuilder};

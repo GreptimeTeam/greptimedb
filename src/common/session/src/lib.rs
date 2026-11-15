@@ -13,12 +13,22 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
-use strum::{AsRefStr, Display, EnumString};
+use strum::{AsRefStr, Display, EnumIter, EnumString};
 
 /// Defines the read preference for frontend route operations,
 /// determining whether to read from the region leader or follower.
 #[derive(
-    Debug, Clone, Copy, Default, EnumString, Display, AsRefStr, PartialEq, Serialize, Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    EnumIter,
+    EnumString,
+    Display,
+    AsRefStr,
+    PartialEq,
+    Serialize,
+    Deserialize,
 )]
 pub enum ReadPreference {
     #[default]
@@ -27,11 +37,28 @@ pub enum ReadPreference {
     Leader,
 }
 
+/// Wire values accepted by `ReadPreference::from_str`, in lower case.
+pub const READ_PREFERENCE_VALUES: &[&str] = &["leader"];
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
-    use crate::ReadPreference;
+    use strum::IntoEnumIterator;
+
+    use crate::{READ_PREFERENCE_VALUES, ReadPreference};
+
+    #[test]
+    fn test_read_preference_values_match_enum() {
+        let values: Vec<_> = ReadPreference::iter()
+            .map(|variant| {
+                let wire = variant.to_string().to_ascii_lowercase();
+                assert_eq!(ReadPreference::from_str(&wire).unwrap(), variant);
+                wire
+            })
+            .collect();
+        assert_eq!(values, READ_PREFERENCE_VALUES);
+    }
 
     #[test]
     fn test_read_preference() {
