@@ -606,12 +606,10 @@ impl RegionScanner for SeqScan {
     fn take_statistics_split(&mut self) -> Option<StatisticsSplit> {
         let plan = self.statistics_split.take()?;
         let input = &self.stream_ctx.input;
-        let exact = input.with_sources(plan.exact_files, Vec::new(), Some(plan.exact_rows))?;
-        let inexact = input.with_sources(plan.remaining_files, input.memtables.clone(), None)?;
+        let residual = input.with_sources(plan.remaining_files, input.memtables.clone())?;
         Some(StatisticsSplit {
-            exact: self.split_part(exact),
-            inexact: self.split_part(inexact),
-            inexact_rows: plan.remaining_rows,
+            exact_rows: plan.exact_rows,
+            residual: self.split_part(residual),
         })
     }
 
@@ -658,7 +656,9 @@ impl RegionScanner for SeqScan {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
+        // Prepared counts did not see the dynamic predicate.
         self.properties.clear_exact_num_rows();
+        self.statistics_split = None;
         self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
     }
 

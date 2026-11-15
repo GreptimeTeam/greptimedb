@@ -38,7 +38,7 @@ use store_api::metadata::RegionMetadataRef;
 use crate::error;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::memtable::bulk::part::{BulkPart, BulkPartConverter};
-use crate::memtable::version::SmallMemtableVec;
+use crate::memtable::version::{SmallMemtableVec, SmallPartTimeRangeVec};
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
@@ -403,6 +403,20 @@ impl TimePartitions {
         memtables.extend(inner.parts.iter().map(|part| part.memtable.clone()));
     }
 
+    /// Appends memtables in partitions with their partition time ranges.
+    pub(crate) fn list_memtables_with_time_ranges(
+        &self,
+        memtables: &mut Vec<(MemtableRef, PartTimeRange)>,
+    ) {
+        let inner = self.inner.lock().unwrap();
+        memtables.extend(
+            inner
+                .parts
+                .iter()
+                .map(|part| (part.memtable.clone(), part.time_range)),
+        );
+    }
+
     /// Returns the number of partitions.
     pub fn num_partitions(&self) -> usize {
         let inner = self.inner.lock().unwrap();
@@ -505,10 +519,16 @@ impl TimePartitions {
             .sum()
     }
 
-    /// Append memtables in partitions to small vec.
-    pub(crate) fn list_memtables_to_small_vec(&self, memtables: &mut SmallMemtableVec) {
+    /// Append memtables in partitions to small vec, and their partition time
+    /// ranges to `time_ranges` in the same order.
+    pub(crate) fn list_memtables_to_small_vec(
+        &self,
+        memtables: &mut SmallMemtableVec,
+        time_ranges: &mut SmallPartTimeRangeVec,
+    ) {
         let inner = self.inner.lock().unwrap();
         memtables.extend(inner.parts.iter().map(|part| part.memtable.clone()));
+        time_ranges.extend(inner.parts.iter().map(|part| part.time_range));
     }
 
     /// Returns the next memtable id.
@@ -779,9 +799,11 @@ impl PartitionsInner {
     }
 }
 
-/// Time range of a partition.
-#[derive(Debug, Clone, Copy)]
-struct PartTimeRange {
+/// Time range of a partition. Writes route every row to the partition whose
+/// range contains its timestamp, so the range bounds every row the partition's
+/// memtable can ever hold, including rows written later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PartTimeRange {
     /// Inclusive min timestamp of rows in the partition.
     min_timestamp: Timestamp,
     /// Exclusive max timestamp of rows in the partition.
@@ -804,6 +826,14 @@ impl PartTimeRange {
     /// Returns whether the `ts` belongs to the partition.
     fn contains_timestamp(&self, ts: Timestamp) -> bool {
         self.min_timestamp <= ts && ts < self.max_timestamp
+    }
+
+    /// Returns the range as inclusive `(min, max)` bounds, or `None` if it
+    /// holds no timestamp.
+    pub(crate) fn to_inclusive(self) -> Option<(Timestamp, Timestamp)> {
+        let max = self.max_timestamp.value().checked_sub(1)?;
+        let max = Timestamp::new(max, self.max_timestamp.unit());
+        (self.min_timestamp <= max).then_some((self.min_timestamp, max))
     }
 }
 

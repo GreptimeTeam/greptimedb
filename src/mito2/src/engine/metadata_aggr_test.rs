@@ -28,10 +28,10 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::datatypes::SchemaRef;
 use object_store::layers::mock::MockLayerBuilder;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionScannerRef};
 use store_api::region_request::{RegionDeleteRequest, RegionPutRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
-use table::table::scan::{PartialAggrRule, statistics_scan_plan};
+use table::table::scan::{PartialAggrRule, RegionScanExec};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
@@ -76,7 +76,8 @@ impl TableProvider for CountTable {
     }
 }
 
-/// A session whose physical optimizer splits COUNT states like the query engine.
+/// A session whose physical optimizer wraps COUNT over a split scan like the
+/// query engine.
 fn count_context() -> SessionContext {
     let mut rules = datafusion::physical_optimizer::optimizer::PhysicalOptimizer::new().rules;
     let index = rules
@@ -89,6 +90,33 @@ fn count_context() -> SessionContext {
         .with_physical_optimizer_rules(rules)
         .build();
     SessionContext::new_with_state(state)
+}
+
+/// Plans and runs `SELECT count(*)` over a scan of the region with the query
+/// engine's COUNT rule. Returns the physical plan and the count.
+async fn sql_count(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> (String, i64) {
+    let scanner = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    let plan = Arc::new(RegionScanExec::new(scanner, request, None).unwrap());
+    let ctx = count_context();
+    ctx.register_table("t", Arc::new(CountTable { plan }))
+        .unwrap();
+    let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
+    let plan = df.clone().create_physical_plan().await.unwrap();
+    let text = displayable(plan.as_ref()).indent(true).to_string();
+    let batches = df.collect().await.unwrap();
+    let ScalarValue::Int64(Some(count)) =
+        ScalarValue::try_from_array(batches[0].column(0), 0).unwrap()
+    else {
+        unreachable!()
+    };
+    (text, count)
 }
 
 #[tokio::test]
@@ -201,7 +229,7 @@ async fn run_compaction_sql_and_fallback(merge_mode: &str) {
         .unwrap();
     assert_eq!(scanner.properties().exact_num_rows(), Some(6));
     let scan: Arc<dyn ExecutionPlan> =
-        statistics_scan_plan(scanner, request.clone(), None, false).unwrap();
+        Arc::new(RegionScanExec::new(scanner, request.clone(), None).unwrap());
     let ctx = SessionContext::new();
     ctx.register_table("t", Arc::new(CountTable { plan: scan }))
         .unwrap();
@@ -369,236 +397,6 @@ async fn test_metadata_aggr_reads_deletes_from_sst_statistics() {
     engine.stop().await.unwrap();
 }
 
-/// Days 0..7 are compacted into one file, days 7..13 are separate flushes,
-/// and day 13 is still in the memtable. A whole-range COUNT counts every file
-/// from metadata and only scans the memtable.
-#[tokio::test]
-async fn test_metadata_aggr_fourteen_day_workload() {
-    use api::v1::value::ValueData;
-    use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
-    use datafusion_common::stats::Precision;
-    use store_api::region_request::RegionFlushRequest;
-
-    const DAY_SECONDS: usize = 86_400;
-    let reads = Arc::new(Mutex::new(Vec::<String>::new()));
-    let observed = reads.clone();
-    let layer = MockLayerBuilder::default()
-        .reader_factory(Arc::new(move |path, _, inner| {
-            if path.ends_with(".parquet") {
-                observed.lock().unwrap().push(path.to_string());
-            }
-            inner
-        }))
-        .build()
-        .unwrap();
-    let mut env = TestEnv::new().await.with_mock_layer(layer);
-    let engine = env
-        .create_engine(MitoConfig {
-            experimental_metadata_aggr: true,
-            min_compaction_interval: Duration::from_secs(3600),
-            schedule_compaction_after_edit: false,
-            ..Default::default()
-        })
-        .await;
-    let region_id = RegionId::new(2, 1);
-    let create = CreateRequestBuilder::new()
-        .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.time_window", "7d")
-        .insert_option("compaction.twcs.trigger_file_num", "2")
-        .build();
-    let schema = test_util::rows_schema(&create);
-    engine
-        .handle_request(region_id, RegionRequest::Create(create))
-        .await
-        .unwrap();
-    let day_rows = |day: usize| {
-        let mut rows = test_util::build_rows_for_key("a", 0, 1000, 0);
-        for (minute, row) in rows.iter_mut().enumerate() {
-            row.values[2].value_data = Some(ValueData::TimestampMillisecondValue(
-                ((day * DAY_SECONDS + minute * 60) * 1000) as i64,
-            ));
-        }
-        api::v1::Rows {
-            schema: schema.clone(),
-            rows,
-        }
-    };
-    for day in 0..14 {
-        test_util::put_rows(&engine, region_id, day_rows(day)).await;
-        if day < 13 {
-            engine
-                .handle_request(
-                    region_id,
-                    RegionRequest::Flush(RegionFlushRequest::default()),
-                )
-                .await
-                .unwrap();
-        }
-        if day == 6 {
-            compact(&engine, region_id).await;
-        }
-    }
-
-    // Ordinary scans are never split, even with the option enabled.
-    let mut scanner = engine
-        .handle_query(region_id, ScanRequest::default())
-        .await
-        .unwrap();
-    assert!(scanner.take_statistics_split().is_none());
-
-    // Both parts keep the properties the metric engine sets after Mito
-    // returns the scanner. This hinted scan also loads the files' metadata.
-    let hinted = ScanRequest {
-        metadata_aggr_hint: true,
-        ..Default::default()
-    };
-    let mut scanner = engine
-        .handle_query(region_id, hinted.clone())
-        .await
-        .unwrap();
-    scanner.set_logical_region(true);
-    scanner.set_query_load_region_id(RegionId::new(2, 7));
-    let split = scanner.take_statistics_split().unwrap();
-    for part in [&split.exact, &split.inexact] {
-        assert!(part.properties().is_logical_region());
-        assert_eq!(
-            part.properties().query_load_region_id(),
-            Some(RegionId::new(2, 7))
-        );
-    }
-    assert_eq!(split.exact.properties().exact_num_rows(), Some(13_000));
-    assert_eq!(split.inexact.properties().exact_num_rows(), None);
-    drop(split);
-
-    let ts = |day: i64| {
-        lit(ScalarValue::TimestampMillisecond(
-            Some(day * 86_400_000),
-            None,
-        ))
-    };
-    // (filters, count, exact count, split into exact and residual scans)
-    for (filters, expected_count, exact, split) in [
-        (vec![], 14_000, None, true),
-        (vec![col("ts").lt(ts(7))], 7_000, Some(7_000), false),
-        // Days 7..13 are exact; day 13 is in the memtable.
-        (vec![col("ts").gt_eq(ts(7))], 7_000, None, true),
-        // The compacted file is only partly covered; days 7..10 are exact.
-        (
-            vec![col("ts").gt_eq(ts(5)).and(col("ts").lt(ts(10)))],
-            5_000,
-            None,
-            true,
-        ),
-    ] {
-        reads.lock().unwrap().clear();
-        let request = ScanRequest {
-            filters,
-            ..hinted.clone()
-        };
-        let scanner = engine
-            .handle_query(region_id, request.clone())
-            .await
-            .unwrap();
-        assert_eq!(scanner.properties().exact_num_rows(), exact, "{request:?}");
-        let scan = statistics_scan_plan(scanner, request.clone(), None, false).unwrap();
-        if request.filters.is_empty() {
-            let children = scan.children();
-            assert_eq!(children.len(), 2);
-            let stats = |plan: &Arc<dyn ExecutionPlan>| {
-                StatisticsContext::new()
-                    .compute(plan.as_ref(), &StatisticsArgs::new())
-                    .unwrap()
-                    .num_rows
-            };
-            assert_eq!(stats(children[0]), Precision::Exact(13_000));
-            assert_eq!(stats(children[1]), Precision::Inexact(1_000));
-            assert_eq!(stats(&scan), Precision::Inexact(14_000));
-        }
-        let ctx = count_context();
-        ctx.register_table("t", Arc::new(CountTable { plan: scan }))
-            .unwrap();
-        let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
-        let plan = df.clone().create_physical_plan().await.unwrap();
-        let text = displayable(plan.as_ref()).indent(true).to_string();
-        assert_eq!(text.contains("SeqScan"), exact.is_none(), "{text}");
-        assert_eq!(text.contains("InexactRegionScanExec"), split, "{text}");
-        assert!(
-            !text.contains("ExactRegionScanExec: "),
-            "exact branch must be folded: {text}"
-        );
-        let batches = df.collect().await.unwrap();
-        assert_eq!(
-            ScalarValue::try_from_array(batches[0].column(0), 0).unwrap(),
-            ScalarValue::Int64(Some(expected_count))
-        );
-        // The files' metadata is cached, and the residual of the whole-range
-        // COUNT is the memtable, so neither query opens an SST.
-        if exact.is_some() || request.filters.is_empty() {
-            let paths = reads.lock().unwrap();
-            assert!(paths.is_empty(), "COUNT opened SSTs: {paths:?}");
-        }
-    }
-    let raw = common_recordbatch::RecordBatches::try_collect(
-        engine
-            .scan_to_stream(region_id, ScanRequest::default())
-            .await
-            .unwrap(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        raw.iter().map(|batch| batch.num_rows()).sum::<usize>(),
-        14_000
-    );
-
-    for (timestamp, delete, expected, retains_exact) in [
-        // A newer row leaves every file isolated.
-        (15 * 86_400_000, false, 14_001, true),
-        // A deletion in memory overlaps every file in time.
-        (86_400_000, true, 14_000, false),
-    ] {
-        let mut rows = test_util::build_rows_for_key("a", 0, 1, 0);
-        rows[0].values[2].value_data = Some(ValueData::TimestampMillisecondValue(timestamp));
-        let rows = api::v1::Rows {
-            schema: schema.clone(),
-            rows,
-        };
-        let request = if delete {
-            RegionRequest::Delete(RegionDeleteRequest {
-                rows,
-                hint: None,
-                partition_expr_version: None,
-            })
-        } else {
-            RegionRequest::Put(RegionPutRequest {
-                rows,
-                hint: None,
-                partition_expr_version: None,
-                skip_wal: false,
-            })
-        };
-        engine.handle_request(region_id, request).await.unwrap();
-        let scanner = engine
-            .handle_query(region_id, hinted.clone())
-            .await
-            .unwrap();
-        let plan = statistics_scan_plan(scanner, hinted.clone(), None, false).unwrap();
-        let ctx = count_context();
-        ctx.register_table("t", Arc::new(CountTable { plan }))
-            .unwrap();
-        let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
-        let plan = df.clone().create_physical_plan().await.unwrap();
-        let text = displayable(plan.as_ref()).indent(true).to_string();
-        assert_eq!(text.contains("13000 as"), retains_exact, "{text}");
-        let batches = df.collect().await.unwrap();
-        assert_eq!(
-            ScalarValue::try_from_array(batches[0].column(0), 0).unwrap(),
-            ScalarValue::Int64(Some(expected))
-        );
-    }
-    engine.stop().await.unwrap();
-}
-
 /// A strict lower bound past the largest timestamp matches no row. The count
 /// must agree with a plain scan rather than cover the file.
 #[tokio::test]
@@ -667,19 +465,293 @@ async fn test_metadata_aggr_strict_bound_past_max() {
     engine.stop().await.unwrap();
 }
 
-/// A row written between preparing a split and executing it is counted once.
-/// File A is exact, file B stays residual, and the memtable is disjoint from A
-/// when the split is prepared. Rewriting A's row into the memtable afterwards
-/// must not let the residual scan count it a second time. A time-series
-/// memtable reads its live series set, so it sees rows written after its
-/// ranges are built.
+/// Rows a scanner yields.
+async fn scanned_rows(scanner: RegionScannerRef, request: ScanRequest) -> usize {
+    let plan = Arc::new(RegionScanExec::new(scanner, request, None).unwrap());
+    datafusion::physical_plan::collect(plan, SessionContext::new().task_ctx())
+        .await
+        .unwrap()
+        .iter()
+        .map(|batch| batch.num_rows())
+        .sum()
+}
+
+/// Rows a plain scan of the region yields for `request`.
+async fn plain_rows(engine: &MitoEngine, region_id: RegionId, request: ScanRequest) -> usize {
+    let request = ScanRequest {
+        metadata_aggr_hint: false,
+        ..request
+    };
+    let scanner = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    scanned_rows(scanner, request).await
+}
+
+/// The rows a hinted scan counts from metadata and the rows its residual scan
+/// yields, or `None` if it does not split.
+async fn split_rows(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> Option<(usize, usize)> {
+    let mut scanner = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    let split = scanner.take_statistics_split()?;
+    Some((
+        split.exact_rows,
+        scanned_rows(split.residual, request).await,
+    ))
+}
+
+/// Metadata rows and residual rows of the hinted scans of
+/// [`test_metadata_aggr_fourteen_day_workload`], in its order.
+struct FourteenDaySplits {
+    whole: Option<(usize, usize)>,
+    from_day_7: Option<(usize, usize)>,
+    days_5_to_10: Option<(usize, usize)>,
+    after_put: Option<(usize, usize)>,
+    after_delete: Option<(usize, usize)>,
+}
+
+/// Days 0..7 are compacted into one file, days 7..13 are separate flushes,
+/// and day 13 is still in the memtable. The memtable partition follows the
+/// 7-day compaction window, `[7d, 14d)`.
+///
+/// - A time-series memtable range is bounded by that partition, so it keeps
+///   the files of days 7..13 residual. Only the compacted file is counted
+///   from metadata.
+/// - A bulk memtable range is bounded by the part it captured, day 13, so
+///   every file is counted from metadata.
 #[rstest::rstest]
-#[case::bulk("flat", "bulk")]
-#[case::time_series("primary_key", "time_series")]
+#[case::time_series("primary_key", "time_series", FourteenDaySplits {
+    whole: Some((7_000, 7_000)),
+    from_day_7: None,
+    // The memtable lies outside the query range, so it is not captured and
+    // bounds nothing; the compacted file is only partly covered.
+    days_5_to_10: Some((3_000, 2_000)),
+    // The put creates partition `[14d, 21d)`, the delete `[0, 7d)`.
+    after_put: Some((7_000, 7_001)),
+    after_delete: None,
+})]
+#[case::bulk("flat", "bulk", FourteenDaySplits {
+    whole: Some((13_000, 1_000)),
+    from_day_7: Some((6_000, 1_000)),
+    days_5_to_10: Some((3_000, 2_000)),
+    after_put: Some((13_000, 1_001)),
+    // The deletion's part overlaps the compacted file only.
+    after_delete: Some((6_000, 8_000)),
+})]
 #[tokio::test]
-async fn test_metadata_aggr_split_ignores_later_memtable_writes(
+async fn test_metadata_aggr_fourteen_day_workload(
     #[case] sst_format: &str,
     #[case] memtable: &str,
+    #[case] splits: FourteenDaySplits,
+) {
+    use api::v1::value::ValueData;
+    use store_api::region_request::RegionFlushRequest;
+
+    const DAY_SECONDS: usize = 86_400;
+    let reads = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed = reads.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".parquet") {
+                observed.lock().unwrap().push(path.to_string());
+            }
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_metadata_aggr: true,
+            min_compaction_interval: Duration::from_secs(3600),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(2, 1);
+    let create = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "7d")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .insert_option("sst_format", sst_format)
+        .insert_option("memtable.type", memtable)
+        .build();
+    let schema = test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let day_rows = |day: usize| {
+        let mut rows = test_util::build_rows_for_key("a", 0, 1000, 0);
+        for (minute, row) in rows.iter_mut().enumerate() {
+            row.values[2].value_data = Some(ValueData::TimestampMillisecondValue(
+                ((day * DAY_SECONDS + minute * 60) * 1000) as i64,
+            ));
+        }
+        api::v1::Rows {
+            schema: schema.clone(),
+            rows,
+        }
+    };
+    for day in 0..14 {
+        test_util::put_rows(&engine, region_id, day_rows(day)).await;
+        if day < 13 {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Flush(RegionFlushRequest::default()),
+                )
+                .await
+                .unwrap();
+        }
+        if day == 6 {
+            compact(&engine, region_id).await;
+        }
+    }
+
+    // Ordinary scans are never split, even with the option enabled.
+    let mut scanner = engine
+        .handle_query(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert!(scanner.take_statistics_split().is_none());
+
+    // The residual scanner keeps the properties the metric engine sets after
+    // Mito returns the scanner. This hinted scan also loads the files' metadata.
+    let hinted = ScanRequest {
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
+    let mut scanner = engine
+        .handle_query(region_id, hinted.clone())
+        .await
+        .unwrap();
+    scanner.set_logical_region(true);
+    scanner.set_query_load_region_id(RegionId::new(2, 7));
+    let split = scanner.take_statistics_split().unwrap();
+    assert_eq!(Some(split.exact_rows), splits.whole.map(|(exact, _)| exact));
+    assert!(split.residual.properties().is_logical_region());
+    assert_eq!(
+        split.residual.properties().query_load_region_id(),
+        Some(RegionId::new(2, 7))
+    );
+    assert_eq!(split.residual.properties().exact_num_rows(), None);
+    drop(split);
+
+    // A dynamic predicate invalidates the prepared split.
+    let mut scanner = engine
+        .handle_query(region_id, hinted.clone())
+        .await
+        .unwrap();
+    scanner.add_dyn_filter_to_predicate(vec![datafusion::physical_plan::expressions::lit(true)]);
+    assert!(scanner.take_statistics_split().is_none());
+
+    let ts = |day: i64| {
+        lit(ScalarValue::TimestampMillisecond(
+            Some(day * 86_400_000),
+            None,
+        ))
+    };
+    // (filters, count, exact count, metadata and residual rows of a split)
+    for (filters, expected_count, exact, split) in [
+        (vec![], 14_000, None, splits.whole),
+        // The memtable lies outside the query range, so it is not scanned.
+        (vec![col("ts").lt(ts(7))], 7_000, Some(7_000), None),
+        (vec![col("ts").gt_eq(ts(7))], 7_000, None, splits.from_day_7),
+        (
+            vec![col("ts").gt_eq(ts(5)).and(col("ts").lt(ts(10)))],
+            5_000,
+            None,
+            splits.days_5_to_10,
+        ),
+    ] {
+        reads.lock().unwrap().clear();
+        let request = ScanRequest {
+            filters,
+            ..hinted.clone()
+        };
+        let scanner = engine
+            .handle_query(region_id, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(scanner.properties().exact_num_rows(), exact, "{request:?}");
+        // The files' metadata is cached, so neither proof opens an SST.
+        let paths = reads.lock().unwrap().clone();
+        assert!(paths.is_empty(), "COUNT opened SSTs: {paths:?}");
+        assert_eq!(
+            split_rows(&engine, region_id, request.clone()).await,
+            split,
+            "{request:?}"
+        );
+        assert_eq!(
+            plain_rows(&engine, region_id, request).await,
+            expected_count
+        );
+    }
+
+    for (timestamp, delete, expected, split) in [
+        (15 * 86_400_000, false, 14_001, splits.after_put),
+        (86_400_000, true, 14_000, splits.after_delete),
+    ] {
+        let mut rows = test_util::build_rows_for_key("a", 0, 1, 0);
+        rows[0].values[2].value_data = Some(ValueData::TimestampMillisecondValue(timestamp));
+        let rows = api::v1::Rows {
+            schema: schema.clone(),
+            rows,
+        };
+        let request = if delete {
+            RegionRequest::Delete(RegionDeleteRequest {
+                rows,
+                hint: None,
+                partition_expr_version: None,
+            })
+        } else {
+            RegionRequest::Put(RegionPutRequest {
+                rows,
+                hint: None,
+                partition_expr_version: None,
+                skip_wal: false,
+            })
+        };
+        engine.handle_request(region_id, request).await.unwrap();
+        assert_eq!(split_rows(&engine, region_id, hinted.clone()).await, split);
+        assert_eq!(
+            plain_rows(&engine, region_id, hinted.clone()).await,
+            expected
+        );
+    }
+    engine.stop().await.unwrap();
+}
+
+/// A captured memtable range bounds its rows by its container, not by the
+/// rows present when it was captured. File A holds `a@100`, file B holds
+/// `b@0` and `b@200`, and the memtable holds `a@memtable_second` when the
+/// split is prepared. `a@100` is written again before the split executes.
+///
+/// - A time-series range reads its live series set, so it sees the later
+///   write. In the same daily partition A overlaps the container and stays
+///   residual, although it is disjoint from the memtable's rows. In another
+///   partition A is exact, and the later write lands in a partition the scan
+///   never captured.
+/// - A bulk range reads the parts captured with it, so A is exact even in the
+///   same partition, and the later write lands in a part the scan never read.
+#[rstest::rstest]
+#[case::time_series_same_partition("primary_key", "time_series", 0, None)]
+#[case::time_series_other_partition("primary_key", "time_series", 2 * 86_400, Some((1, 1)))]
+#[case::bulk_same_partition("flat", "bulk", 0, Some((1, 1)))]
+#[tokio::test]
+async fn test_metadata_aggr_split_bounds_memtables_by_container(
+    #[case] sst_format: &str,
+    #[case] memtable: &str,
+    #[case] memtable_second: usize,
+    #[case] split: Option<(usize, usize)>,
 ) {
     let mut env = TestEnv::new().await;
     let engine = env
@@ -707,37 +779,100 @@ async fn test_metadata_aggr_split_ignores_later_memtable_writes(
     };
     put_and_flush_rows(&engine, region_id, rows("a", &[100])).await;
     put_and_flush_rows(&engine, region_id, rows("b", &[0, 200])).await;
-    test_util::put_rows(&engine, region_id, rows("a", &[0])).await;
+    test_util::put_rows(&engine, region_id, rows("a", &[memtable_second])).await;
 
     let request = ScanRequest {
         filters: vec![col("tag_0").eq(lit("a"))],
         metadata_aggr_hint: true,
         ..Default::default()
     };
-    let scanner = engine
+    let mut scanner = engine
         .handle_query(region_id, request.clone())
         .await
         .unwrap();
+    let prepared = scanner.take_statistics_split();
     // Written after the split is prepared, before it executes.
     test_util::put_rows(&engine, region_id, rows("a", &[100])).await;
 
-    let plan = statistics_scan_plan(scanner, request, None, false).unwrap();
-    let ctx = count_context();
-    ctx.register_table("t", Arc::new(CountTable { plan }))
-        .unwrap();
-    let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
-    let plan = df.clone().create_physical_plan().await.unwrap();
-    let text = displayable(plan.as_ref()).indent(true).to_string();
-    assert!(text.contains("InexactRegionScanExec"), "{text}");
-    let batches = df.collect().await.unwrap();
-    assert_eq!(
-        ScalarValue::try_from_array(batches[0].column(0), 0).unwrap(),
-        ScalarValue::Int64(Some(2))
-    );
+    let actual = match prepared {
+        Some(prepared) => Some((
+            prepared.exact_rows,
+            scanned_rows(prepared.residual, request.clone()).await,
+        )),
+        None => None,
+    };
+    assert_eq!(actual, split);
+    // Whether or not the scan splits, `a@100` is counted once.
+    assert_eq!(plain_rows(&engine, region_id, request).await, 2);
     engine.stop().await.unwrap();
 }
 
 async fn put_and_flush_rows(engine: &MitoEngine, region_id: RegionId, rows: api::v1::Rows) {
     test_util::put_rows(engine, region_id, rows).await;
     test_util::flush_region(engine, region_id, None).await;
+}
+
+/// The COUNT rule wraps the partial COUNT over a split scan and merges the
+/// metadata rows once. Without a split the plan is unchanged.
+#[tokio::test]
+async fn test_metadata_aggr_exec_merges_metadata_rows() {
+    use api::v1::value::ValueData;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_metadata_aggr: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build();
+    let schema = test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let day_rows = |day: i64, rows: usize| {
+        let mut rows = test_util::build_rows_for_key("a", 0, rows, 0);
+        for (second, row) in rows.iter_mut().enumerate() {
+            row.values[2].value_data = Some(ValueData::TimestampMillisecondValue(
+                day * 86_400_000 + second as i64 * 1000,
+            ));
+        }
+        api::v1::Rows {
+            schema: schema.clone(),
+            rows,
+        }
+    };
+    put_and_flush_rows(&engine, region_id, day_rows(0, 7)).await;
+    put_and_flush_rows(&engine, region_id, day_rows(1, 5)).await;
+    // The memtable partition of day 2 is disjoint from both files.
+    test_util::put_rows(&engine, region_id, day_rows(2, 3)).await;
+
+    let hinted = ScanRequest {
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
+    let (plan, count) = sql_count(&engine, region_id, hinted.clone()).await;
+    assert!(plan.contains("MetadataAggrExec: exact_rows=12"), "{plan}");
+    assert_eq!(count, 15);
+
+    // Without the hint the scan carries no split.
+    let (plan, count) = sql_count(&engine, region_id, ScanRequest::default()).await;
+    assert!(!plan.contains("MetadataAggrExec"), "{plan}");
+    assert_eq!(count, 15);
+
+    // A row in the partition of day 1 overlaps the second file; the first
+    // file is still exact.
+    test_util::put_rows(&engine, region_id, day_rows(1, 1)).await;
+    let (plan, count) = sql_count(&engine, region_id, hinted.clone()).await;
+    assert!(plan.contains("MetadataAggrExec: exact_rows=7"), "{plan}");
+    assert_eq!(count, 15);
+
+    // A row in the partition of day 0 leaves no exact file.
+    test_util::put_rows(&engine, region_id, day_rows(0, 1)).await;
+    let (plan, count) = sql_count(&engine, region_id, hinted).await;
+    assert!(!plan.contains("MetadataAggrExec"), "{plan}");
+    assert_eq!(count, 15);
+    engine.stop().await.unwrap();
 }

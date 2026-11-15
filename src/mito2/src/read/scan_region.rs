@@ -252,9 +252,6 @@ pub(crate) struct ScanRegion {
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
     experimental_metadata_aggr: bool,
-    /// Highest sequence memtables yield to a hinted metadata aggregate when
-    /// the request sets no upper bound. See [`Self::with_metadata_aggr_fence`].
-    metadata_aggr_fence: Option<SequenceNumber>,
     /// Whether to ignore range indexes during scans.
     ignore_range_index: bool,
     /// Whether to ignore inverted index.
@@ -294,7 +291,6 @@ impl ScanRegion {
             scan_memory_tracker: None,
             experimental_series_scan_v2: false,
             experimental_metadata_aggr: false,
-            metadata_aggr_fence: None,
             ignore_range_index: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
@@ -350,17 +346,6 @@ impl ScanRegion {
     /// Enables optional exact-count preparation for hinted scalar count scans.
     pub(crate) fn with_experimental_metadata_aggr(mut self, enabled: bool) -> Self {
         self.experimental_metadata_aggr = enabled;
-        self
-    }
-
-    /// Pins memtable reads to `sequence`, the committed sequence of the read
-    /// view. A split proves its exact files disjoint from the memtables'
-    /// bounds when it is prepared, but memtables keep accepting writes, and
-    /// the residual scan would otherwise read rows written later, possibly
-    /// a row an exact file has already counted.
-    #[must_use]
-    pub(crate) fn with_metadata_aggr_fence(mut self, sequence: SequenceNumber) -> Self {
-        self.metadata_aggr_fence = Some(sequence);
         self
     }
 
@@ -538,7 +523,7 @@ impl ScanRegion {
             }
             .fail();
         }
-        let memtables = self.version.memtables.list_memtables();
+        let memtables = self.version.memtables.list_memtables_with_time_ranges();
         // Skip empty memtables and memtables out of time range.
         let mut mem_range_builders = Vec::new();
         let filter_mode = pre_filter_mode(
@@ -546,7 +531,7 @@ impl ScanRegion {
             self.version.options.merge_mode(),
         );
 
-        for m in memtables {
+        for (m, partition_range) in memtables {
             // check if memtable is empty by reading stats.
             let Some((start, end)) = m.stats().time_range() else {
                 continue;
@@ -562,15 +547,22 @@ impl ScanRegion {
                     .with_predicate(predicate.clone())
                     .with_sequence(SequenceRange::new(
                         self.request.memtable_min_sequence,
-                        self.request
-                            .memtable_max_sequence
-                            .or(self.metadata_aggr_fence),
+                        self.request.memtable_max_sequence,
                     ))
                     .with_pre_filter_mode(filter_mode),
             )?;
+            // A range bounds its rows by its captured content when it has one,
+            // otherwise by its partition: memtables may keep accepting writes
+            // after the range is built, but only inside their partition.
+            let partition_range = partition_range.to_inclusive();
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
                 let stats = v.stats().clone();
-                MemRangeBuilder::new(v, stats)
+                let container = v.captured_time_range().or(partition_range);
+                let builder = MemRangeBuilder::new(v, stats);
+                match container {
+                    Some(time_range) => builder.with_container_time_range(time_range),
+                    None => builder,
+                }
             }));
         }
 
@@ -1053,14 +1045,13 @@ impl ScanInput {
         &self,
         files: Vec<FileHandle>,
         memtables: Vec<MemRangeBuilder>,
-        exact_num_rows: Option<usize>,
     ) -> Option<Self> {
         #[cfg(feature = "enterprise")]
         if !self.extension_ranges.is_empty() {
             return None;
         }
         Some(Self {
-            exact_num_rows,
+            exact_num_rows: None,
             statistics_split: None,
             series_index: self.series_index.clone(),
             ignore_range_index: self.ignore_range_index,

@@ -515,15 +515,17 @@ impl Default for QueryScanContext {
     }
 }
 
-/// Two source-disjoint scanners sharing the original scan read view.
+/// A scan split into sources counted from metadata and a residual scan.
+///
+/// The two parts are source-disjoint: no row the residual scan yields is
+/// counted in `exact_rows`, so a scalar COUNT of the original scan is
+/// `exact_rows` plus the COUNT of the residual scan.
 #[derive(Debug)]
 pub struct StatisticsSplit {
-    /// Sources with a proven exact query-visible row count.
-    pub exact: RegionScannerRef,
+    /// Query-visible rows of the sources answered from metadata.
+    pub exact_rows: usize,
     /// All remaining sources, merged and deduplicated together.
-    pub inexact: RegionScannerRef,
-    /// Physical source-row estimate for the remaining scan, never an exact answer.
-    pub inexact_rows: Option<usize>,
+    pub residual: RegionScannerRef,
 }
 
 /// A scanner that provides a way to scan the region concurrently.
@@ -533,9 +535,9 @@ pub struct StatisticsSplit {
 pub trait RegionScanner: Debug + DisplayAs + Send {
     fn name(&self) -> &str;
 
-    /// Takes the source split an engine prepared for a scalar COUNT against
-    /// the original read view. On success the caller must replace this
-    /// scanner with both parts.
+    /// Takes the source split an engine prepared for a scalar COUNT of a scan
+    /// hinted with `metadata_aggr_hint`. On success the caller must replace
+    /// this scanner with the residual scan and add the exact rows once.
     fn take_statistics_split(&mut self) -> Option<StatisticsSplit> {
         None
     }

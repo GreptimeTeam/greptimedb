@@ -754,17 +754,39 @@ pub struct MemtableRange {
     context: MemtableRangeContextRef,
     /// Statistics for this memtable range.
     stats: MemtableStats,
+    /// Inclusive time range of every row the range can yield, set only when
+    /// the range reads content captured when it was built.
+    captured_time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl MemtableRange {
     /// Creates a new range from context and stats.
     pub fn new(context: MemtableRangeContextRef, stats: MemtableStats) -> Self {
-        Self { context, stats }
+        Self {
+            context,
+            stats,
+            captured_time_range: None,
+        }
+    }
+
+    /// Marks the range as reading immutable content captured when it was
+    /// built, whose rows all lie in the inclusive `time_range`. Writes after
+    /// that never reach the range.
+    #[must_use]
+    pub(crate) fn with_captured_time_range(mut self, time_range: (Timestamp, Timestamp)) -> Self {
+        self.captured_time_range = Some(time_range);
+        self
     }
 
     /// Returns the statistics for this range.
     pub fn stats(&self) -> &MemtableStats {
         &self.stats
+    }
+
+    /// Returns the inclusive time range of the captured content, if the range
+    /// reads only content captured when it was built.
+    pub(crate) fn captured_time_range(&self) -> Option<(Timestamp, Timestamp)> {
+        self.captured_time_range
     }
 
     /// Returns the id of the memtable to read.

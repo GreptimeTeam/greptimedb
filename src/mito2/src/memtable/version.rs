@@ -25,10 +25,11 @@ use store_api::storage::SequenceNumber;
 
 use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::time_partition::TimePartitions;
+use crate::memtable::time_partition::{PartTimeRange, TimePartitions};
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 
 pub(crate) type SmallMemtableVec = SmallVec<[MemtableRef; 2]>;
+pub(crate) type SmallPartTimeRangeVec = SmallVec<[PartTimeRange; 2]>;
 
 /// A version of current memtables in a region.
 #[derive(Debug, Clone)]
@@ -41,6 +42,9 @@ pub(crate) struct MemtableVersion {
     /// might need to store more than one immutable memtable on the next time we
     /// flush the region.
     immutables: SmallMemtableVec,
+    /// Time range of the partition each immutable memtable was created for,
+    /// in the order of `immutables`.
+    immutable_time_ranges: SmallPartTimeRangeVec,
     /// Whether immutable memtables may contain skip-WAL writes.
     /// Flushes are serialized per region and cover all immutable memtables.
     immutable_has_skip_wal_writes: bool,
@@ -54,6 +58,7 @@ impl MemtableVersion {
         MemtableVersion {
             mutable: Arc::new(MutableMemtables::new(mutable)),
             immutables: SmallVec::new(),
+            immutable_time_ranges: SmallVec::new(),
             immutable_has_skip_wal_writes: false,
         }
     }
@@ -73,6 +78,24 @@ impl MemtableVersion {
         let mut mems = Vec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
         self.mutable.list_memtables(&mut mems);
         mems.extend_from_slice(&self.immutables);
+        mems
+    }
+
+    /// Lists mutable and immutable memtables with the time range of the
+    /// partition each was created for. A memtable never holds a row outside
+    /// its partition range, even after later writes.
+    pub(crate) fn list_memtables_with_time_ranges(&self) -> Vec<(MemtableRef, PartTimeRange)> {
+        debug_assert_eq!(self.immutables.len(), self.immutable_time_ranges.len());
+        let mut mems = Vec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
+        self.mutable
+            .partitions
+            .list_memtables_with_time_ranges(&mut mems);
+        mems.extend(
+            self.immutables
+                .iter()
+                .cloned()
+                .zip(self.immutable_time_ranges.iter().copied()),
+        );
         mems
     }
 
@@ -117,6 +140,7 @@ impl MemtableVersion {
             return Ok(Some(MemtableVersion {
                 mutable: Arc::new(MutableMemtables::new(mutable)),
                 immutables: self.immutables.clone(),
+                immutable_time_ranges: self.immutable_time_ranges.clone(),
                 immutable_has_skip_wal_writes: self.immutable_has_skip_wal_writes,
             }));
         }
@@ -139,14 +163,16 @@ impl MemtableVersion {
         let mut immutables =
             SmallVec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
         immutables.extend(self.immutables.iter().cloned());
+        let mut immutable_time_ranges = self.immutable_time_ranges.clone();
         // Pushes the mutable memtable to immutable list.
         self.mutable
             .partitions
-            .list_memtables_to_small_vec(&mut immutables);
+            .list_memtables_to_small_vec(&mut immutables, &mut immutable_time_ranges);
 
         Ok(Some(MemtableVersion {
             mutable,
             immutables,
+            immutable_time_ranges,
             immutable_has_skip_wal_writes: self.immutable_has_skip_wal_writes
                 || self.mutable.has_skip_wal_writes(),
         }))
@@ -154,12 +180,13 @@ impl MemtableVersion {
 
     /// Removes memtables by ids from immutable memtables.
     pub(crate) fn remove_memtables(&mut self, ids: &[MemtableId]) {
-        self.immutables = self
+        (self.immutables, self.immutable_time_ranges) = self
             .immutables
             .iter()
-            .filter(|mem| !ids.contains(&mem.id()))
-            .cloned()
-            .collect();
+            .zip(&self.immutable_time_ranges)
+            .filter(|(mem, _)| !ids.contains(&mem.id()))
+            .map(|(mem, time_range)| (mem.clone(), *time_range))
+            .unzip();
         if self.immutables.is_empty() {
             self.immutable_has_skip_wal_writes = false;
         }
@@ -414,5 +441,48 @@ mod tests {
         ));
         assert!(!replacement.has_skip_wal_writes());
         assert!(frozen.has_skip_wal_writes());
+    }
+
+    #[test]
+    fn test_partition_time_ranges_follow_memtables() {
+        let metadata = memtable_util::metadata_for_test();
+        let partitions = TimePartitions::new(
+            metadata.clone(),
+            Arc::new(TimeSeriesMemtableBuilder::default()),
+            0,
+            Some(Duration::from_secs(5)),
+        );
+        let version = MemtableVersion::new(partitions);
+        for ts in [1000, 7000] {
+            let kvs = memtable_util::build_key_values(&metadata, "hello".to_string(), 0, &[ts], 1);
+            version.mutable.write(&kvs).unwrap();
+        }
+        let ranges = |version: &MemtableVersion| {
+            let mut ranges: Vec<_> = version
+                .list_memtables_with_time_ranges()
+                .into_iter()
+                .map(|(mem, range)| {
+                    let (min, max) = range.to_inclusive().unwrap();
+                    (mem.id(), min.value(), max.value())
+                })
+                .collect();
+            ranges.sort_unstable();
+            ranges
+        };
+        // The upper bound of a partition is exclusive.
+        assert_eq!(ranges(&version), [(0, 0, 4999), (1, 5000, 9999)]);
+
+        // Frozen memtables keep their partition ranges. The forked mutable
+        // memtable covers the partition of the latest row.
+        let mut frozen = version
+            .freeze_mutable(&metadata, Some(Duration::from_secs(5)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ranges(&frozen),
+            [(0, 0, 4999), (1, 5000, 9999), (2, 5000, 9999)]
+        );
+        frozen.remove_memtables(&[0]);
+        assert_eq!(ranges(&frozen), [(1, 5000, 9999), (2, 5000, 9999)]);
     }
 }
