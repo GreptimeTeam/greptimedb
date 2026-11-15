@@ -463,12 +463,33 @@ pub(crate) struct MemRangeBuilder {
     range: MemtableRange,
     /// Stats of a memtable.
     stats: MemtableStats,
+    /// Inclusive time range of every row the range can yield, including rows
+    /// written to its memtable after the range was built. `None` if unknown.
+    /// Unlike `stats`, it never shrinks to the rows present at build time.
+    container_time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl MemRangeBuilder {
     /// Builds a mem range builder from row groups.
     pub(crate) fn new(range: MemtableRange, stats: MemtableStats) -> Self {
-        Self { range, stats }
+        Self {
+            range,
+            stats,
+            container_time_range: None,
+        }
+    }
+
+    /// Sets the inclusive time range bounding every row the range can yield.
+    #[must_use]
+    pub(crate) fn with_container_time_range(mut self, time_range: (Timestamp, Timestamp)) -> Self {
+        self.container_time_range = Some(time_range);
+        self
+    }
+
+    /// Returns the inclusive time range bounding every row the range can
+    /// yield, or `None` if it is unknown.
+    pub(crate) fn container_time_range(&self) -> Option<(Timestamp, Timestamp)> {
+        self.container_time_range
     }
 
     /// Builds mem ranges to read in the memtable.

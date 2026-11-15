@@ -42,7 +42,7 @@ use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeri
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictionary_encoding};
-use table::table::scan::statistics_scan_plan;
+use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
 use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
@@ -195,14 +195,11 @@ impl TableProvider for DummyTableProvider {
         }
 
         let query_memory_tracker = self.engine.query_memory_tracker();
-        statistics_scan_plan(
-            scanner,
-            request,
-            query_memory_tracker,
-            self.query_ctx
-                .as_ref()
-                .is_some_and(|ctx| ctx.explain_verbose()),
-        )
+        let mut scan_exec = RegionScanExec::new(scanner, request, query_memory_tracker)?;
+        if let Some(query_ctx) = &self.query_ctx {
+            scan_exec.set_explain_verbose(query_ctx.explain_verbose());
+        }
+        Ok(Arc::new(scan_exec))
     }
 
     fn supports_filters_pushdown(
