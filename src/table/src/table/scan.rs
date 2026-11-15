@@ -59,6 +59,9 @@ use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
 
+mod metadata_aggr;
+pub use metadata_aggr::{MetadataAggrExec, PartialAggrRule};
+
 /// The name of [`RegionScanExec`] plan node.
 pub const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
 
@@ -371,6 +374,29 @@ impl RegionScanExec {
 
     pub fn set_explain_verbose(&mut self, explain_verbose: bool) {
         self.explain_verbose = explain_verbose;
+    }
+
+    /// Takes the statistics split the scanner prepared for a scalar COUNT.
+    /// Returns the rows counted from metadata and a scan of the residual
+    /// sources with this scan's settings. Returns `None` if there is no split,
+    /// or if the scan was partitioned or received dynamic filters since the
+    /// split was prepared.
+    pub fn take_statistics_split(&self) -> DfResult<Option<(usize, Self)>> {
+        if self.is_partition_set || !self.pushed_dyn_filters.lock().unwrap().is_empty() {
+            return Ok(None);
+        }
+        let Some(split) = self.scanner.lock().unwrap().take_statistics_split() else {
+            return Ok(None);
+        };
+        // `new` only reads the distribution from the request.
+        let request = ScanRequest {
+            distribution: self.distribution,
+            ..Default::default()
+        };
+        let mut residual = Self::new(split.residual, request, self.query_memory_tracker.clone())?;
+        residual.output_ordering = self.output_ordering.clone();
+        residual.explain_verbose = self.explain_verbose;
+        Ok(Some((split.exact_rows, residual)))
     }
 
     /// Adds dynamic filters directly to the underlying region scanner predicate.
