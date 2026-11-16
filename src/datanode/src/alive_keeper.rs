@@ -317,7 +317,6 @@ enum CountdownCommand {
 /// A region lease received in a heartbeat response.
 #[derive(Debug)]
 struct GrantedLease {
-    /// The role the region is granted.
     role: RegionRole,
     /// When the heartbeat was sent.
     sent_at: Instant,
