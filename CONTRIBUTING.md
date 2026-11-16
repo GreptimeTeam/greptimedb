@@ -61,6 +61,7 @@ GreptimeDB uses the [Apache 2.0 license](https://github.com/GreptimeTeam/greptim
 - If you must keep a target-specific dependency (e.g. under `[target.'cfg(...)'.dev-dependencies]`), add a cargo-udeps ignore entry in the same `Cargo.toml`, for example:
   `[package.metadata.cargo-udeps.ignore]` with `development = ["rexpect"]` (or `dependencies`/`build` as appropriate).
 - When modifying sample configuration files in `config/`, run `make config-docs` (which requires Docker to be installed) to update the configuration documentation and include it in your commit.
+- If you develop on Windows, read [Develop on Windows](docs/how-to/how-to-develop-on-windows.md). Pull request CI does not test Windows.
 
 #### `pre-commit` Hooks
 
