@@ -1,0 +1,123 @@
+Cargo.lock
+  s_b7d7dd5280bd00::t_350b36687aeb1b 3773,3825,3849,3872,3898,3908,3944,3968,3991,4014,4046,4051,4076,4100,4111,4142,4162,4173,4197,4212,4228,4237,4247,4295,4318,4332,4349,4368,4405,4431,4441,4451,4466,4480,4499,7587
+Cargo.toml
+  s_b7d7dd5280bd00::t_ce05ee61c835df 179,374-389
+licenserc-enterprise.toml
+  s_b7d7dd5280bd00::t_cfc699fd9635e0 29-32
+licenserc.toml
+  s_b7d7dd5280bd00::t_c7412efbda2672 45-48
+src/cmd/src/datanode/objbench.rs
+  s_b7d7dd5280bd00::t_533fe825224318 206
+src/common/query/src/request.rs
+  s_b7d7dd5280bd00::t_56656fe4a43631 528
+src/datatypes/src/types/json_type.rs
+  s_b7d7dd5280bd00::t_2ba58496c515e5 392-394,396-398,405-412,417-418,455-469,531-534,553-566
+src/log-store/src/object_store_wal/catalog.rs
+  s_b7d7dd5280bd00::t_0645132f64b4c3 17,297-314,345-407
+src/log-store/src/object_store_wal/store.rs
+  s_b7d7dd5280bd00::t_5bd56359809ab0 854-866
+src/mito2/AGENTS.md
+  s_b7d7dd5280bd00::t_b9ec13c9d9f08c 28
+src/mito2/src/access_layer.rs
+  s_b7d7dd5280bd00::t_45f2084f57108a 47,445,676-677,714,1034
+src/mito2/src/cache/write_cache.rs
+  s_b7d7dd5280bd00::t_414c2778907976 304,750,868,961
+src/mito2/src/compaction/compactor.rs
+  s_b7d7dd5280bd00::t_b7bc17ac899b91 656
+src/mito2/src/compaction/multi_region.rs
+  s_b7d7dd5280bd00::t_9202ec91f5bc9c 105,107-108
+src/mito2/src/compaction/multi_region/tests.rs
+  s_b7d7dd5280bd00::t_aab415d1612e37 450,546,1668
+src/mito2/src/compaction/multi_region/writer.rs
+  s_b7d7dd5280bd00::t_a7a55f6ab3dc93 108,186-188
+src/mito2/src/engine.rs
+  s_b7d7dd5280bd00::t_3afad8f89afaff 90-91
+src/mito2/src/engine/flush_test.rs
+  s_b7d7dd5280bd00::t_5a48bc28689ef1 20,62,2231-2325
+src/mito2/src/engine/listener.rs
+  s_b7d7dd5280bd00::t_cc4b724f057c8c 50-52
+src/mito2/src/engine/object_store_wal_recovery_test.rs
+  s_b7d7dd5280bd00::t_5a5dff86b5a8fc 61,2193-2733
+src/mito2/src/engine/region_hook.rs
+  s_b7d7dd5280bd00::t_57180e470370d3 160,273-279,326-340
+src/mito2/src/engine/table_compaction.rs
+  s_b7d7dd5280bd00::t_8ba18c907796ac 1-131
+src/mito2/src/engine/table_compaction/output.rs
+  s_b7d7dd5280bd00::t_b9504e8ee15d36 1-207
+src/mito2/src/engine/table_compaction/tests.rs
+  s_b7d7dd5280bd00::t_7b018f753391bf 1-1086
+src/mito2/src/flush.rs
+  s_b7d7dd5280bd00::t_505dd9e05a5f54 223-224,856
+src/mito2/src/metrics.rs
+  s_b7d7dd5280bd00::t_2f37c1195d3a4e 41-45,519-527
+src/mito2/src/read/range_cache.rs
+  s_b7d7dd5280bd00::t_5d59aff52018f4 900-901,912,915-930,963,965
+src/mito2/src/request.rs
+  s_b7d7dd5280bd00::t_164ce540e3e584 1376-1383,1388,1410
+src/mito2/src/sst/file.rs
+  s_b7d7dd5280bd00::t_f5c1b748630f55 150
+src/mito2/src/sst/index.rs
+  s_b7d7dd5280bd00::t_8911522574147b 16,21,25,28,40,49,66,70-71,84-86,98,170,176-177,192-197,213,217-225,262-263,266-269,273-289,297-299,302-308,310,312-313,329-334,337-342,376,379,383,386,403-453,467,469,473-478,505,533-542,544-545,548,550-565,567-570,572,574-602,605-614,618-620,623-624,1828,1881,1896-2675,2693-2736,2827-2830,2845,2878,2902,2926,2962,2988,3014,3047,3450
+src/mito2/src/sst/index/build.rs
+  s_b7d7dd5280bd00::t_f1d04df2a057d8 1-46
+src/mito2/src/sst/index/column_test.rs
+  s_b7d7dd5280bd00::t_2756706750774a 191
+src/mito2/src/sst/index/handler.rs
+  s_b7d7dd5280bd00::t_aaede3ed113484 15,27,31,34,37-49,51,58-61,65,70-71,74-85,88-98,101-105,107-108,114-116,118-121,126-136,142-148
+src/mito2/src/sst/index/handler/builtin.rs
+  s_b7d7dd5280bd00::t_bdafe1e940da31 30,42,44-46,60-66,74-85,125
+src/mito2/src/sst/index/handler/builtin/bloom.rs
+  s_b7d7dd5280bd00::t_3f7e11de7e5eb7 28-31,40,59,64-68,72-73,78,86-91
+src/mito2/src/sst/index/handler/builtin/fulltext.rs
+  s_b7d7dd5280bd00::t_8bf99451478c2c 22,29-32,41,60,65-73,82-83,88,96-101
+src/mito2/src/sst/index/handler/builtin/inverted.rs
+  s_b7d7dd5280bd00::t_f109d6294d8cf6 30-33,43,84-93,98,107-112,270
+src/mito2/src/sst/index/indexer/abort.rs
+  s_b7d7dd5280bd00::t_4fe82279bfdebb 25,28
+src/mito2/src/sst/index/indexer/finish.rs
+  s_b7d7dd5280bd00::t_83eb9d5650462d 15-17,43,51,54-55,97,114
+src/mito2/src/sst/index/indexer/update.rs
+  s_b7d7dd5280bd00::t_825bc9f88cadf7 15-16,33,39-42,46-47,50-56,68-71,75-76,79-85
+src/mito2/src/sst/index/kind.rs
+  s_b7d7dd5280bd00::t_5bf788f1121868 19-22,24,26,28-63,68,73,78,83-85,88-92
+src/mito2/src/sst/index/registry.rs
+  s_b7d7dd5280bd00::t_c0f154b69c375f 15,17,22-24,27-30,32-35,37-38,40,42,48,62-108,110,112-123,127,131-199,206,208-209,215-251,257,259,263-269,272-509
+src/mito2/src/sst/index/sparse_test.rs
+  s_b7d7dd5280bd00::t_c7350844645367 133
+src/mito2/src/sst/parquet.rs
+  s_b7d7dd5280bd00::t_722d3e07e9553c 1563,2110,2232
+src/mito2/src/test_util.rs
+  s_b7d7dd5280bd00::t_1f650e5c8baedc 561-586
+src/mito2/src/wal.rs
+  s_b7d7dd5280bd00::t_0224203c5078b4 24-25,39,90-91,97-100,112,118-135,380-411,433-458
+src/mito2/src/worker.rs
+  s_b7d7dd5280bd00::t_125ad234f5da83 32-33,265,272,539,545,659,745-746,1073-1074,1228-1251,1532-1533
+src/mito2/src/worker/handle_flush.rs
+  s_b7d7dd5280bd00::t_05f0c58b1d1531 404-424
+src/mito2/src/worker/handle_manifest.rs
+  s_b7d7dd5280bd00::t_b2de20bf5771bc 48-49,102-106,127,131,369,375-382,411-428
+src/mito2/src/worker/handle_rebuild_index.rs
+  s_b7d7dd5280bd00::t_9026f6623526cd 79
+src/mito2/src/worker/handle_table_compaction.rs
+  s_b7d7dd5280bd00::t_6abe7176de6ab2 1-151
+src/store-api/src/logstore.rs
+  s_b7d7dd5280bd00::t_2d6c9a6714700c 38-48
+tests/compatibility/manifest/table_compaction/README.md
+  s_b7d7dd5280bd00::t_817dd0cd89b9b1 10-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4dfc7be5e44653bd67d5427660fbd04b6e8b8f39",
+  "prompts": {},
+  "sessions": {
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
