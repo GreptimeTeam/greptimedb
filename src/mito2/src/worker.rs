@@ -1744,7 +1744,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_index_build_stopped(region_id, req).await
             }
             BackgroundNotify::IndexBuildRetry(req) => {
-                self.handle_rebuild_index(req, OptionOutputTx::new(None))
+                self.handle_rebuild_index_inner(req, OptionOutputTx::new(None), true)
                     .await
             }
             BackgroundNotify::CompactionFinished(req) => {

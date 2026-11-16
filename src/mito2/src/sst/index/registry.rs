@@ -241,7 +241,10 @@ impl IndexRegistry {
         });
     }
 
-    fn validate_schema_kinds(&self, metadata: &RegionMetadataRef) -> Result<(), BoxedError> {
+    pub(crate) fn validate_schema_kinds(
+        &self,
+        metadata: &RegionMetadataRef,
+    ) -> Result<(), BoxedError> {
         for column in &metadata.column_metadatas {
             let schema = &column.column_schema;
             for kind in ExtensionIndexKind::ALL {
@@ -327,7 +330,43 @@ impl IndexBuildPlan {
 
     /// Whether every handler considers the published file current.
     pub fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool {
+        let has_removed_extensions = matches!(
+            context.build_type,
+            IndexBuildType::Manual | IndexBuildType::SchemaChange
+        ) && ExtensionIndexKind::ALL.iter().any(|kind| {
+            let index_type = IndexKind::Extension(*kind).index_type();
+            let configured = |column_id| {
+                context
+                    .metadata
+                    .column_by_id(column_id)
+                    .is_some_and(|column| {
+                        column
+                            .column_schema
+                            .metadata()
+                            .contains_key(kind.required_metadata_key())
+                    })
+            };
+            let mut has_column_descriptor = false;
+            for column in &file.indexes {
+                if column.created_indexes.contains(&index_type) {
+                    has_column_descriptor = true;
+                    if !configured(column.column_id) {
+                        return true;
+                    }
+                }
+            }
+            // Legacy file-level descriptors cannot identify individual columns.
+            !has_column_descriptor
+                && file.available_indexes.contains(&index_type)
+                && !context.metadata.column_metadatas.iter().any(|column| {
+                    column
+                        .column_schema
+                        .metadata()
+                        .contains_key(kind.required_metadata_key())
+                })
+        });
         self.failure.is_none()
+            && !has_removed_extensions
             && self
                 .planned
                 .iter()

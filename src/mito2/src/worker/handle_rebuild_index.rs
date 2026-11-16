@@ -109,14 +109,21 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Validates providers and the current plan before selecting or scheduling files.
-    fn prepare_rebuild_registry<'a>(
+    fn prepare_rebuild_registry(
         &self,
         snapshot: &IndexBuildSnapshot,
         build_type: IndexBuildType,
-        files: impl IntoIterator<Item = &'a FileMeta>,
     ) -> Result<IndexRegistryRef> {
-        let registry = index_registry(&self.config, self.plugins.get::<IndexKindProviderRef>())?;
-        validate_rebuild_plan(&registry, snapshot, build_type, files)?;
+        // Post-flush/compaction tasks build the built-in indexes of a new SST.
+        // Compaction extension construction belongs to the compaction writer.
+        let provider = match build_type {
+            IndexBuildType::Flush | IndexBuildType::Compact => None,
+            IndexBuildType::Manual | IndexBuildType::SchemaChange => {
+                self.plugins.get::<IndexKindProviderRef>()
+            }
+        };
+        let registry = index_registry(&self.config, provider)?;
+        validate_rebuild_plan(&registry, snapshot, build_type)?;
         Ok(registry)
     }
 
@@ -180,7 +187,17 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_rebuild_index(
         &mut self,
         request: BuildIndexRequest,
+        sender: OptionOutputTx,
+    ) {
+        self.handle_rebuild_index_inner(request, sender, false)
+            .await;
+    }
+
+    pub(crate) async fn handle_rebuild_index_inner(
+        &mut self,
+        request: BuildIndexRequest,
         mut sender: OptionOutputTx,
+        is_retry: bool,
     ) {
         let region_id = request.region_id;
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
@@ -236,8 +253,7 @@ impl<S> RegionWorkerLoop<S> {
             file_meta.cloned()
         };
 
-        // Check required providers for eligible inputs before currency selection:
-        // an unavailable handler has no plan and could otherwise appear current.
+        // Collect eligible inputs before currency selection.
         let candidates = if request.file_metas.is_empty() {
             all_files
                 .values()
@@ -258,13 +274,13 @@ impl<S> RegionWorkerLoop<S> {
                 .collect::<Vec<_>>()
         };
 
-        let registry = match self.prepare_rebuild_registry(
-            &snapshot,
-            request.build_type.clone(),
-            candidates.iter().map(|(_, metadata)| metadata.as_ref()),
-        ) {
+        let registry = match self.prepare_rebuild_registry(&snapshot, request.build_type.clone()) {
             Ok(registry) => registry,
             Err(err) => {
+                warn!(err;
+                    "Failed to prepare index build, region_id: {}, build_type: {:?}, candidate_files: {}",
+                    region_id, request.build_type, candidates.len()
+                );
                 let err = Arc::new(err);
                 for result_sender in &request.result_senders {
                     let _ = result_sender
@@ -340,9 +356,15 @@ impl<S> RegionWorkerLoop<S> {
                 request.build_type.clone(),
                 result_senders,
             );
-            self.index_build_scheduler
-                .schedule_build(&region.version_control, task)
-                .await;
+            if is_retry {
+                self.index_build_scheduler
+                    .schedule_retry(&region.version_control, task)
+                    .await;
+            } else {
+                self.index_build_scheduler
+                    .schedule_build(&region.version_control, task)
+                    .await;
+            }
         }
         drop(tx);
 
@@ -497,17 +519,20 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 /// Rejects invalid current options before selecting files or scheduling any task.
-fn validate_rebuild_plan<'a>(
+fn validate_rebuild_plan(
     registry: &IndexRegistry,
     snapshot: &IndexBuildSnapshot,
     build_type: IndexBuildType,
-    files: impl IntoIterator<Item = &'a FileMeta>,
 ) -> Result<()> {
-    // Flush builds only built-in indexes in newly written files. Historical
-    // extension indexes are not part of this operation.
-    if build_type != IndexBuildType::Flush {
+    // New SSTs need built-in indexes even when optional providers are unavailable.
+    // Explicit maintenance follows current options, allowing removed sketch options
+    // to discard their historical descriptors without requiring a provider.
+    if matches!(
+        build_type,
+        IndexBuildType::Manual | IndexBuildType::SchemaChange
+    ) {
         registry
-            .validate_required_kinds(&snapshot.metadata, files)
+            .validate_schema_kinds(&snapshot.metadata)
             .with_context(|_| ExternalSnafu {
                 context: "validating index handlers for rebuild".to_string(),
             })?;
@@ -752,9 +777,9 @@ mod tests {
         let snapshot = snapshot_without_builtin_indexes();
         let mut registry =
             IndexRegistry::new(Default::default(), Default::default(), Default::default());
-        assert!(validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, []).is_ok());
+        assert!(validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual).is_ok());
         registry.register(Arc::new(FailingPlanHandler)).unwrap();
-        assert!(validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, []).is_err());
+        assert!(validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual).is_err());
     }
 
     #[test]
@@ -778,9 +803,7 @@ mod tests {
                     .validate_required_kinds(&snapshot.metadata, [])
                     .is_err()
             );
-            assert!(
-                validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, []).is_err()
-            );
+            assert!(validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual).is_err());
             assert!(
                 registry
                     .plan(&PlanContext {
@@ -804,8 +827,20 @@ mod tests {
                 } else {
                     file.available_indexes.push(kind);
                 }
+                // Historical descriptors alone do not require the provider.
                 assert!(
-                    validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, [&file])
+                    validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual).is_ok()
+                );
+                assert!(index_needs_rebuild(
+                    &registry,
+                    &snapshot,
+                    &file,
+                    IndexBuildType::Manual
+                ));
+                // Compaction's strict input validation remains available to its writer.
+                assert!(
+                    registry
+                        .validate_required_kinds(&snapshot.metadata, [&file])
                         .is_err()
                 );
             }
@@ -815,8 +850,11 @@ mod tests {
             available_indexes: smallvec::smallvec![IndexType::VectorIndex],
             ..Default::default()
         };
+        assert!(validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual).is_ok());
         assert!(
-            validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, [&legacy]).is_ok()
+            registry
+                .validate_required_kinds(&snapshot.metadata, [&legacy])
+                .is_ok()
         );
     }
 }

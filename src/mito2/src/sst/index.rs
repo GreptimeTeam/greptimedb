@@ -1028,10 +1028,13 @@ impl IndexBuildTask {
                 .await,
             ));
         };
-        if self.reason != IndexBuildType::Flush {
+        if matches!(
+            self.reason,
+            IndexBuildType::Manual | IndexBuildType::SchemaChange
+        ) {
             self.indexer_builder
                 .registry
-                .validate_required_kinds(&self.target_region_metadata, [current_file_meta.as_ref()])
+                .validate_schema_kinds(&self.target_region_metadata)
                 .with_context(|_| ExternalSnafu {
                     context: "validating index handlers for rebuild".to_string(),
                 })?;
@@ -1332,7 +1335,7 @@ impl IndexBuildTask {
         // cannot storm.
         self.notify_worker(BackgroundNotify::IndexBuildRetry(BuildIndexRequest {
             region_id: self.region_id,
-            build_type: IndexBuildType::SchemaChange,
+            build_type: self.reason.clone(),
             file_metas: vec![self.source.file_meta.clone()],
             result_senders: self.result_senders.clone(),
         }))
@@ -1613,6 +1616,25 @@ impl IndexBuildScheduler {
         version_control: &VersionControlRef,
         task: IndexBuildTask,
     ) {
+        self.schedule_build_inner(version_control, task, false)
+            .await;
+    }
+
+    /// A retry is queued before its previous task releases the active slot.
+    pub(crate) async fn schedule_retry(
+        &mut self,
+        version_control: &VersionControlRef,
+        task: IndexBuildTask,
+    ) {
+        self.schedule_build_inner(version_control, task, true).await;
+    }
+
+    async fn schedule_build_inner(
+        &mut self,
+        version_control: &VersionControlRef,
+        task: IndexBuildTask,
+        is_retry: bool,
+    ) {
         let status = self
             .region_status
             .entry(task.region_id)
@@ -1625,7 +1647,8 @@ impl IndexBuildScheduler {
         );
         // A manual build must not report success while an active build that may
         // not create the requested indexes is still running, so it waits as well.
-        let can_wait_for_active = status.retiring
+        let can_wait_for_active = is_retry
+            || status.retiring
             || matches!(
                 task.reason,
                 IndexBuildType::SchemaChange | IndexBuildType::Manual
@@ -3824,6 +3847,7 @@ mod tests {
             (Some(ProviderFailure::SkipCreate), false, false, true),
             (Some(ProviderFailure::EmptyFinish), true, false, true),
             (Some(ProviderFailure::PartialFinish), true, false, true),
+            (Some(ProviderFailure::None), true, false, true),
             (None, true, false, true),
             (None, false, false, true),
         ] {
@@ -3861,7 +3885,10 @@ mod tests {
             if old_hll {
                 Arc::make_mut(&mut Arc::make_mut(&mut builder).registry)
                     .register(Arc::new(FailingProvider(
-                        if failure == Some(ProviderFailure::PartialFinish) {
+                        if matches!(
+                            failure,
+                            Some(ProviderFailure::PartialFinish | ProviderFailure::None)
+                        ) {
                             ProviderFailure::CompletePair
                         } else {
                             ProviderFailure::None
@@ -3947,6 +3974,17 @@ mod tests {
                         r#"{"precision":10}"#.into(),
                     );
             }
+            if failure == Some(ProviderFailure::None) {
+                // Keep only the first column configured; the second old HLL is obsolete.
+                Arc::make_mut(&mut task.target_region_metadata).column_metadatas[0]
+                    .column_schema
+                    .mut_metadata()
+                    .insert(
+                        datatypes::schema::HLL_KEY.into(),
+                        r#"{"precision":10}"#.into(),
+                    );
+                Arc::make_mut(&mut builder).metadata = task.target_region_metadata.clone();
+            }
             task.file = FileHandle::new(old.clone(), file_purger);
             task.source = IndexBuildSource::new(old.as_ref().clone(), metadata.schema_version);
             task.indexer_builder = builder;
@@ -3959,7 +3997,17 @@ mod tests {
                     IndexBuildReport::Done(IndexBuildOutcome::Aborted(_))
                 ));
                 assert_eq!(old, published);
-            } else if old_hll || failure.is_none() {
+            } else if failure == Some(ProviderFailure::None) {
+                result.unwrap();
+                assert_eq!(published.index_version, old.index_version + 1);
+                let hll_columns = published
+                    .indexes
+                    .iter()
+                    .filter(|column| column.created_indexes.contains(&IndexType::HllIndex))
+                    .map(|column| column.column_id)
+                    .collect::<Vec<_>>();
+                assert_eq!(hll_columns, vec![0]);
+            } else if (old_hll && failure.is_some()) || (failure.is_none() && !old_hll) {
                 assert!(result.is_err(), "maintenance must fail for {failure:?}");
                 assert_eq!(
                     old, published,
@@ -4147,7 +4195,11 @@ mod tests {
                 file_meta.clone(),
                 version_control.current().version.metadata.schema_version,
             ),
-            reason: IndexBuildType::SchemaChange,
+            reason: if registered {
+                IndexBuildType::SchemaChange
+            } else {
+                IndexBuildType::Manual
+            },
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
             manifest_ctx: manifest_ctx.clone(),
@@ -4159,16 +4211,6 @@ mod tests {
             index_options: IndexOptions::default(),
             result_senders: vec![result_tx],
         };
-
-        if remove_sketches && !registered {
-            let mut task = task;
-            assert!(task.index_build(version_control.clone()).await.is_err());
-            assert_eq!(
-                manifest_ctx.manifest().await.files[&file_meta.file_id].as_ref(),
-                &file_meta
-            );
-            return;
-        }
 
         if remove_sketches {
             assert!(task.can_remove_all_indexes());
