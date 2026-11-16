@@ -74,8 +74,8 @@ fn collect_merge_scan_remote_dyn_filter_producer_ids(
     producer_ids.extend(producer_id_list);
 }
 
-/// The analyzer as an engine whose regions are reached over the wire builds it: every plan a region
-/// receives from it has to be encodable.
+/// The analyzer an engine that plans distributed statements builds: every plan a region receives
+/// from it has to be encodable.
 fn analyzer() -> DistPlannerAnalyzer {
     DistPlannerAnalyzer::default()
 }
@@ -97,11 +97,8 @@ fn ordinary_encodable_plan_reports_encodability() {
             .is_ok()
     );
 
-    let in_process_rewriter = PlanRewriter::new(&plan, true);
-    assert!(in_process_rewriter.whole_plan_encodable);
-
-    let wire_rewriter = PlanRewriter::new(&plan, false);
-    assert!(wire_rewriter.whole_plan_encodable);
+    let rewriter = PlanRewriter::new(&plan);
+    assert!(rewriter.whole_plan_encodable);
 }
 
 struct MergeScanRemoteDynFilterProducerIdCollector<'a> {
@@ -408,7 +405,7 @@ fn hybrid_binary_join_rewrites_each_native_operand_boundary() {
         .unwrap()
         .build()
         .unwrap();
-    let rewritten = DistPlannerAnalyzer::new(true).try_push_down(plan).unwrap();
+    let rewritten = DistPlannerAnalyzer::default().try_push_down(plan).unwrap();
     let LogicalPlan::Join(join) = &rewritten else {
         panic!("Join must remain frontend: {rewritten}");
     };
@@ -559,29 +556,24 @@ fn frontend_only_histogram_folds_stay_above_merge_scan() {
             "{name}"
         );
 
-        for analyzer in [
-            DistPlannerAnalyzer::default(),
-            DistPlannerAnalyzer::new(true),
-        ] {
-            let result = analyzer
-                .analyze(plan.clone(), &ConfigOptions::default())
-                .unwrap();
-            let result_text = result.to_string();
-            assert!(
-                result_text.contains("HistogramFold:"),
-                "{name}\n{result_text}"
-            );
+        let result = DistPlannerAnalyzer::default()
+            .analyze(plan.clone(), &ConfigOptions::default())
+            .unwrap();
+        let result_text = result.to_string();
+        assert!(
+            result_text.contains("HistogramFold:"),
+            "{name}\n{result_text}"
+        );
 
-            let remote_input = find_merge_scan(&result).unwrap().input();
-            let remote_text = remote_input.to_string();
-            assert!(
-                !remote_text.contains("HistogramFold:"),
-                "{name}\n{remote_text}"
-            );
-            DFLogicalSubstraitConvertor
-                .encode(remote_input, DefaultSerializer)
-                .unwrap();
-        }
+        let remote_input = find_merge_scan(&result).unwrap().input();
+        let remote_text = remote_input.to_string();
+        assert!(
+            !remote_text.contains("HistogramFold:"),
+            "{name}\n{remote_text}"
+        );
+        DFLogicalSubstraitConvertor
+            .encode(remote_input, DefaultSerializer)
+            .unwrap();
     }
 }
 
@@ -611,24 +603,19 @@ fn unencodable_unnest_stays_above_merge_scan() {
             .is_err()
     );
 
-    for analyzer in [
-        DistPlannerAnalyzer::default(),
-        DistPlannerAnalyzer::new(true),
-    ] {
-        let result = analyzer
-            .analyze(plan.clone(), &ConfigOptions::default())
-            .unwrap();
-        let result_text = result.to_string();
-        assert!(result_text.contains("Unnest:"), "{result_text}");
+    let result = DistPlannerAnalyzer::default()
+        .analyze(plan.clone(), &ConfigOptions::default())
+        .unwrap();
+    let result_text = result.to_string();
+    assert!(result_text.contains("Unnest:"), "{result_text}");
 
-        let remote_input = find_merge_scan(&result).unwrap().input();
-        let remote_text = remote_input.to_string();
-        assert!(!remote_text.contains("Unnest:"), "{remote_text}");
-        assert!(remote_text.contains("make_array"), "{remote_text}");
-        DFLogicalSubstraitConvertor
-            .encode(remote_input, DefaultSerializer)
-            .unwrap();
-    }
+    let remote_input = find_merge_scan(&result).unwrap().input();
+    let remote_text = remote_input.to_string();
+    assert!(!remote_text.contains("Unnest:"), "{remote_text}");
+    assert!(remote_text.contains("make_array"), "{remote_text}");
+    DFLogicalSubstraitConvertor
+        .encode(remote_input, DefaultSerializer)
+        .unwrap();
 }
 
 /// A scan of the test table qualified by `alias`, so one table can stand on both sides of a join.
@@ -720,19 +707,14 @@ fn empty_requirements_leave_a_multi_input_subtree_untouched() {
 
     // The same plan through the analyzer, which reaches the same conclusion and carries on: a join
     // nothing requires a column of is planned as before.
-    for analyzer in [
-        DistPlannerAnalyzer::default(),
-        DistPlannerAnalyzer::new(true),
-    ] {
-        let analyzed = analyzer
-            .analyze(plan.clone(), &ConfigOptions::default())
-            .unwrap();
-        assert_eq!(
-            2,
-            count_merge_scans(&analyzed),
-            "each join input keeps its own region: {analyzed}"
-        );
-    }
+    let analyzed = DistPlannerAnalyzer::default()
+        .analyze(plan.clone(), &ConfigOptions::default())
+        .unwrap();
+    assert_eq!(
+        2,
+        count_merge_scans(&analyzed),
+        "each join input keeps its own region: {analyzed}"
+    );
 }
 
 /// A requirement is still satisfied: the projection that has to publish a required column gets it,

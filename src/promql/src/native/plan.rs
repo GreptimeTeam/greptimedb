@@ -57,7 +57,7 @@ const LE_LABEL: &str = "le";
 
 /// The label a metric name is stored under, which a scan binds beside its tag columns rather than
 /// among them.
-const METRIC_NAME: &str = "__name__";
+pub(crate) const METRIC_NAME: &str = "__name__";
 
 /// Metadata labels the runtime removes from histogram result label sets.
 const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];

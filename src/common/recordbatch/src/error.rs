@@ -44,7 +44,7 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("External error"))]
+    #[snafu(display("External error: {source}"))]
     External {
         #[snafu(implicit)]
         location: Location,
