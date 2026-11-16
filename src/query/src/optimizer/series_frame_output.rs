@@ -382,7 +382,6 @@ mod tests {
             .expect("the frame is a legal schema"),
         );
         let fused = FusedSeries::try_new_with_format(
-            Arc::from("rate(x[5m])"),
             tree,
             FusedSeriesBinding {
                 grid,
@@ -449,7 +448,6 @@ mod tests {
             .expect("the frame is a legal schema"),
         );
         let fused = FusedSeries::try_new_with_format(
-            Arc::from("cpu"),
             tree,
             FusedSeriesBinding {
                 grid,

@@ -157,7 +157,6 @@ async fn native_prefix_multi_partition_single_position_chains() {
     };
     let frame_schema = evaluated_frame_schema(&tree);
     let fused = FusedSeries::try_new_with_format(
-        Arc::from("rate(native_prefix_partitioned[10s])"),
         tree,
         binding,
         vec![child],
@@ -347,7 +346,6 @@ async fn native_prefix_multi_partition_multi_chunk_chains() {
     };
     let frame_schema = evaluated_frame_schema(&tree);
     let fused = FusedSeries::try_new_with_format(
-        Arc::from("rate(native_prefix_partitioned[10s])"),
         tree,
         binding,
         vec![child],
@@ -532,7 +530,6 @@ async fn native_prefix_executes_over_real_mito_region() {
     // the scan below it: `try_new_with_format` compares the two and refuses a mismatch.
     let frame_schema = evaluated_frame_schema(&tree);
     let fused = FusedSeries::try_new_with_format(
-        Arc::from("rate(native_prefix[3s])"),
         tree,
         binding,
         vec![child],
