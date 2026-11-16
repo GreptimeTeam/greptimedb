@@ -1528,7 +1528,10 @@ async fn data_cli_propagates_copy_failures() {
     ])
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("SQL request failed"), "{error}");
+    assert!(
+        format!("{error:?}").contains("SQL request failed"),
+        "{error:?}"
+    );
     let directory = legacy.join("greptime/public");
     assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
 
@@ -1548,7 +1551,10 @@ async fn data_cli_propagates_copy_failures() {
     ])
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("SQL request failed"), "{error}");
+    assert!(
+        format!("{error:?}").contains("SQL request failed"),
+        "{error:?}"
+    );
 
     std::fs::write(directory.join("aaa_valid.parquet"), "invalid parquet").unwrap();
     std::fs::write(
@@ -1570,7 +1576,10 @@ async fn data_cli_propagates_copy_failures() {
     ])
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("SQL request failed"), "{error}");
+    assert!(
+        format!("{error:?}").contains("SQL request failed"),
+        "{error:?}"
+    );
     server.abort();
 }
 
