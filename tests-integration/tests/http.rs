@@ -203,6 +203,7 @@ macro_rules! http_tests {
                 test_pipeline_context,
                 test_pipeline_with_vrl,
                 test_pipeline_vrl_host_access,
+                test_pipeline_ignore_errors_config,
                 test_pipeline_with_hint_vrl,
                 test_pipeline_one_to_many_vrl,
                 test_pipeline_2,
@@ -226,6 +227,7 @@ macro_rules! http_tests {
                 test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
+                test_elasticsearch_pipeline_version,
                 test_splunk_logs,
                 test_splunk_raw,
                 test_log_query,
@@ -3658,6 +3660,7 @@ enable_heap_profiling = true
 [pipeline]
 cache_ttl = "10s"
 allow_vrl_host_access = false
+ignore_errors = false
 
 [event_recorder]
 ttl = "2months 29days 2h 52m 48s"
@@ -7266,6 +7269,7 @@ transform:
             // Force named dry-runs to reload and compile the stored definition.
             cache_ttl: Duration::ZERO,
             allow_vrl_host_access,
+            ..Default::default()
         })
         .build()
         .await;
@@ -7307,6 +7311,132 @@ transform:
                 .await;
             assert_eq!(response.status(), StatusCode::OK);
         }
+        instance.guard.remove_all().await;
+    }
+}
+
+pub async fn test_pipeline_ignore_errors_config(storage_type: StorageType) {
+    let pipeline = "transform:\n  - field: value\n    type: int32\n";
+    let data = "{\"value\":1}\ninvalid JSON\n{\"value\":2}\n";
+
+    for ignore_errors in [false, true] {
+        let mut instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+            "test_pipeline_ignore_errors_config",
+        )
+        .with_default_store_type(storage_type)
+        .with_pipeline_options(pipeline::PipelineOptions {
+            ignore_errors,
+            ..Default::default()
+        })
+        .build()
+        .await;
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let response = client
+            .post("/v1/pipelines/ignore_errors")
+            .header("Content-Type", "application/x-yaml")
+            .body(pipeline)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        for request_override in [None, Some(false), Some(true)] {
+            let effective = request_override.unwrap_or(ignore_errors);
+            let query = request_override
+                .map(|value| format!("&ignore_errors={value}"))
+                .unwrap_or_default();
+            let expected_status = if effective {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+
+            for path in ["/v1/ingest", "/v1/events/logs"] {
+                let response = client
+                    .post(&format!(
+                        "{path}?table=logs&pipeline_name=ignore_errors{query}"
+                    ))
+                    .header("Content-Type", "application/x-ndjson")
+                    .body(data)
+                    .send()
+                    .await;
+                assert_eq!(response.status(), expected_status);
+                if effective {
+                    let body: Value = response.json().await;
+                    assert_eq!(body["output"][0]["affectedrows"], 2);
+                }
+            }
+
+            for (content_type, body) in [
+                ("application/x-ndjson", data.to_string()),
+                (
+                    "application/json",
+                    json!({
+                        "pipeline_name": "ignore_errors",
+                        "data_type": "application/x-ndjson",
+                        "data": data,
+                    })
+                    .to_string(),
+                ),
+                (
+                    "application/json",
+                    json!({
+                        "pipeline": pipeline,
+                        "data_type": "application/x-ndjson",
+                        "data": data,
+                    })
+                    .to_string(),
+                ),
+            ] {
+                let response = client
+                    .post(&format!(
+                        "/v1/pipelines/_dryrun?pipeline_name=ignore_errors{query}"
+                    ))
+                    .header("Content-Type", content_type)
+                    .body(body)
+                    .send()
+                    .await;
+                assert_eq!(response.status(), expected_status);
+                if effective {
+                    let body: Value = response.json().await;
+                    assert_eq!(body[0]["rows"].as_array().unwrap().len(), 2);
+                }
+            }
+
+            let response = client
+                .post(&format!(
+                    "/v1/ingest?table=timestamps&pipeline_name=greptime_identity\
+                     &custom_time_index=ts;epoch;s{query}"
+                ))
+                .header("Content-Type", "application/json")
+                .body(r#"{"ts":"invalid","value":1}"#)
+                .send()
+                .await;
+            assert_eq!(
+                response.status(),
+                if effective {
+                    StatusCode::OK
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            );
+            if effective {
+                let body: Value = response.json().await;
+                assert_eq!(body["output"][0]["affectedrows"], 1);
+            }
+        }
+
+        // Parsing tolerance does not enable skipping pipeline execution errors.
+        let response = client
+            .post("/v1/ingest?table=logs&pipeline_name=ignore_errors&ignore_errors=true")
+            .header("Content-Type", "application/json")
+            .body(r#"{"value":"not an integer"}"#)
+            .send()
+            .await;
+        assert!(!response.status().is_success());
+
         instance.guard.remove_all().await;
     }
 }
@@ -12057,6 +12187,202 @@ pub async fn test_elasticsearch_logs_with_index(store_type: StorageType) {
         &client,
         "select foo, bar from test_index2;",
         expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_elasticsearch_pipeline_version(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_elasticsearch_pipeline_version").await;
+
+    let client = TestClient::new(app).await;
+
+    // Create version 1 of the pipeline: it renames `name` to `name_v1`.
+    let pipeline_v1 = r#"
+processors:
+  - date:
+      field: ts
+      formats:
+        - "%Y-%m-%dT%H:%M:%S%.fZ"
+transform:
+  - field: name, name_v1
+    type: string
+  - field: ts
+    type: time
+    index: timestamp
+"#;
+    let res = client
+        .post("/v1/pipelines/esv")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_v1)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let content: Value = serde_json::from_str(&res.text().await).unwrap();
+    let version_v1 = content
+        .get("pipelines")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("version")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create version 2: it renames `name` to `name_v2` instead.
+    let res = client
+        .post("/v1/pipelines/esv")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_v1.replace("name_v1", "name_v2"))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let content: Value = serde_json::from_str(&res.text().await).unwrap();
+    let version_v2 = content
+        .get("pipelines")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("version")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let bulk_body = |index: &str| {
+        format!(
+            "{{\"create\":{{\"_index\":\"{index}\"}}}}\n{{\"name\":\"alice\",\"ts\":\"2024-01-01T00:00:00.000Z\"}}\n"
+        )
+    };
+
+    // 1. Select version 1 with the `x-greptime-pipeline-version` header.
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-version"),
+                HeaderValue::from_str(&version_v1).unwrap(),
+            ),
+        ],
+        "/v1/elasticsearch/_bulk?pipeline_name=esv",
+        bulk_body("es_hdr").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "es_pipeline_version_header",
+        &client,
+        "select name_v1 from es_hdr;",
+        "[[\"alice\"]]",
+    )
+    .await;
+
+    // 2. Select version 1 with the `version` query parameter.
+    let encoded_version: String =
+        url::form_urlencoded::byte_serialize(version_v1.as_bytes()).collect();
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        &format!("/v1/elasticsearch/_bulk?pipeline_name=esv&version={encoded_version}"),
+        bulk_body("es_url").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "es_pipeline_version_url_param",
+        &client,
+        "select name_v1 from es_url;",
+        "[[\"alice\"]]",
+    )
+    .await;
+
+    // 3. Without a version, the latest version (2) is used.
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk?pipeline_name=esv",
+        bulk_body("es_latest").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "es_pipeline_version_latest",
+        &client,
+        "select name_v2 from es_latest;",
+        "[[\"alice\"]]",
+    )
+    .await;
+
+    // 4. An invalid version is rejected with HTTP 400, and the bulk item carries the
+    // same HTTP status so Elasticsearch clients do not see an internal status code.
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk?pipeline_name=esv&version=not-a-timestamp",
+        bulk_body("es_invalid_version").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let content: Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(content["errors"], json!(true));
+    assert_eq!(content["items"][0]["create"]["status"], json!(400));
+
+    // 5. The query parameter takes precedence over a conflicting header: the header
+    // selects version 1 while the URL selects version 2, so `name_v2` must be written.
+    let encoded_version_v2: String =
+        url::form_urlencoded::byte_serialize(version_v2.as_bytes()).collect();
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-version"),
+                HeaderValue::from_str(&version_v1).unwrap(),
+            ),
+        ],
+        &format!("/v1/elasticsearch/_bulk?pipeline_name=esv&version={encoded_version_v2}"),
+        bulk_body("es_precedence").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "es_pipeline_version_precedence",
+        &client,
+        "select name_v2 from es_precedence;",
+        "[[\"alice\"]]",
     )
     .await;
 

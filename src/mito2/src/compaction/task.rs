@@ -15,7 +15,6 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use common_base::cancellation::CancellableFuture;
 use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::error;
 use futures::FutureExt;
@@ -38,8 +37,6 @@ use crate::request::{
 use crate::schedule::CancellableTaskState;
 use crate::sst::file::UncommittedSsts;
 use crate::worker::WorkerListener;
-
-pub const MAX_PARALLEL_COMPACTION: usize = 1;
 
 /// One local atomic unit. The scheduler owns request waiters and sibling units.
 pub(crate) struct CompactionTask {
@@ -93,25 +90,24 @@ impl CompactionTask {
             None
         } else {
             let _wait_timer = crate::metrics::COMPACTION_MEMORY_WAIT.start_timer();
+            let cancellation = self.state.cancel_token();
             Some(
-                CancellableFuture::new(
-                    self.memory_manager
-                        .acquire_with_policy(bytes, self.memory_policy),
-                    self.state.cancel_handle(),
-                )
-                .await
-                .map_err(|_| CompactionCancelledSnafu.build())?
-                .context(CompactionMemoryExhaustedSnafu {
-                    region_id,
-                    policy: format!("{:?}", self.memory_policy),
-                })?,
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return CompactionCancelledSnafu.fail(),
+                    memory = self.memory_manager.acquire_with_policy(bytes, self.memory_policy) => memory,
+                }
+                    .context(CompactionMemoryExhaustedSnafu {
+                        region_id,
+                        policy: format!("{:?}", self.memory_policy),
+                    })?,
             )
         };
         let _timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["merge"])
             .start_timer();
-        let compactor = DefaultCompactor::with_cancel_handle(
-            self.state.cancel_handle(),
+        let compactor = DefaultCompactor::with_cancel_token(
+            self.state.cancel_token(),
             self.uncommitted.clone(),
         );
         let context = self.compaction_context.clone();

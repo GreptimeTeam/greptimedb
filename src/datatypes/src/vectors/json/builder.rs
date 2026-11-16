@@ -1062,18 +1062,21 @@ mod tests {
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
                 JsonTypeHint {
                     path: vec!["commit".to_string(), "operation".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
                 JsonTypeHint {
                     path: vec!["time_us".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
             ],
             Some(0),
@@ -1170,6 +1173,7 @@ mod tests {
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
                 skipping_index: None,
+                fulltext_index: None,
             }],
             Some(2),
         )?;
@@ -1336,6 +1340,7 @@ mod tests {
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
                 skipping_index: None,
+                fulltext_index: None,
             }],
             Some(8),
         )?;

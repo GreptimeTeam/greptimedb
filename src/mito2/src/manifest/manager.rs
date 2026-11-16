@@ -12,39 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info, warn};
-use futures::TryStreamExt;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::{MAX_VERSION, MIN_VERSION, ManifestVersion};
 
 use crate::cache::manifest_cache::ManifestCache;
 use crate::config::MitoConfig;
 use crate::error::{
-    self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionStoppedSnafu, Result,
+    EndStagingPendingSnafu, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu,
+    RegionStoppedSnafu, Result,
 };
 use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionEdit, RegionManifest, RegionManifestBuilder,
     RegionMetaAction, RegionMetaActionList, RemovedFile,
 };
 use crate::manifest::checkpointer::Checkpointer;
-use crate::manifest::storage::{
-    ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file, list_start_after,
-    manifest_compress_type, manifest_dir,
-};
+use crate::manifest::storage::{ManifestObjectStore, manifest_compress_type, manifest_dir};
 use crate::metrics::MANIFEST_OP_ELAPSED;
-use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
-use crate::sst::FormatType;
+use crate::region::ManifestStats;
+use crate::sst::file_metadata::FileMetadataInternerRef;
+use crate::sst::{FormatType, file};
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
 pub struct RegionManifestOptions {
+    /// Shares immutable file metadata with runtime readers in this engine.
+    pub(crate) file_metadata_interner: FileMetadataInternerRef,
     /// Directory to store manifest.
     pub manifest_dir: String,
     pub object_store: ObjectStore,
@@ -55,12 +56,21 @@ pub struct RegionManifestOptions {
     pub remove_file_options: RemoveFileOptions,
     /// Optional cache for manifest files.
     pub manifest_cache: Option<ManifestCache>,
+    /// Whether two writers can race for a version, so that deltas are published by conditional
+    /// create under a fixed name and recovery starts from the highest listed checkpoint.
+    pub(crate) conditional_publication: bool,
 }
 
 impl RegionManifestOptions {
-    /// Creates a new [RegionManifestOptions] with the given region directory, object store, and configuration.
-    pub fn new(config: &MitoConfig, region_dir: &str, object_store: &ObjectStore) -> Self {
+    /// Creates options using the same metadata interner as the owner's runtime file views.
+    pub fn new(
+        config: &MitoConfig,
+        region_dir: &str,
+        object_store: &ObjectStore,
+        file_metadata_interner: FileMetadataInternerRef,
+    ) -> Self {
         RegionManifestOptions {
+            file_metadata_interner,
             manifest_dir: manifest_dir(region_dir),
             object_store: object_store.clone(),
             // We don't allow users to set the compression algorithm as we use it as a file suffix.
@@ -71,7 +81,15 @@ impl RegionManifestOptions {
                 enable_gc: config.gc.enable,
             },
             manifest_cache: None,
+            conditional_publication: false,
         }
+    }
+
+    /// Sets whether deltas are published by conditional create and recovery starts from the
+    /// highest listed checkpoint.
+    pub(crate) fn with_conditional_publication(mut self, enabled: bool) -> Self {
+        self.conditional_publication = enabled;
+        self
     }
 }
 
@@ -151,16 +169,50 @@ pub struct RemoveFileOptions {
 /// ```
 #[derive(Debug)]
 pub struct RegionManifestManager {
+    file_metadata_interner: FileMetadataInternerRef,
     store: ManifestObjectStore,
     last_version: Arc<AtomicU64>,
     checkpointer: Checkpointer,
     manifest: Arc<RegionManifest>,
-    // Staging manifest is used to store the manifest of the staging region before it becomes available.
-    // It is initially inherited from the previous manifest(i.e., `self.manifest`).
-    // When the staging manifest becomes available, it will be used to construct the new manifest.
-    staging_manifest: Option<Arc<RegionManifest>>,
+    /// Actions of a staging region, committed as one version when staging ends.
+    staged: StagedActions,
     stats: ManifestStats,
     stopped: bool,
+}
+
+/// Actions appended while a region is staging. They take no version and write nothing until
+/// staging ends.
+#[derive(Debug, Default)]
+struct StagedActions {
+    actions: RegionMetaActionList,
+    /// The manifest with `actions` applied, while any are staged.
+    view: Option<Arc<RegionManifest>>,
+    /// Encoded bytes of an end commit that may have been written. A retry commits the same bytes,
+    /// and no other action is appended while they are kept.
+    attempted: Option<Vec<u8>>,
+}
+
+impl StagedActions {
+    /// Returns whether `action_list` only adds files that are already staged, as a retried
+    /// import does.
+    fn only_adds_staged_files(&self, action_list: &RegionMetaActionList) -> bool {
+        let staged: HashSet<_> = self
+            .actions
+            .actions
+            .iter()
+            .flat_map(|action| match action {
+                RegionMetaAction::Edit(edit) => edit.files_to_add.as_slice(),
+                _ => &[],
+            })
+            .map(|meta| meta.file_id)
+            .collect();
+        !action_list.actions.is_empty()
+            && action_list.actions.iter().all(|action| {
+                matches!(action, RegionMetaAction::Edit(edit)
+                    if edit.files_to_remove.is_empty()
+                        && edit.files_to_add.iter().all(|meta| staged.contains(&meta.file_id)))
+            })
+    }
 }
 
 impl RegionManifestManager {
@@ -181,8 +233,10 @@ impl RegionManifestManager {
             stats.total_manifest_size.clone(),
             stats.metric().cloned(),
             options.manifest_cache.clone(),
-        );
+        )
+        .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
+        let file_metadata_interner = options.file_metadata_interner.clone();
 
         info!(
             "Creating region manifest in {} with metadata {:?}, flushed_entry_id: {}",
@@ -190,7 +244,7 @@ impl RegionManifestManager {
         );
 
         let version = MIN_VERSION;
-        let mut manifest_builder = RegionManifestBuilder::default();
+        let mut manifest_builder = RegionManifestBuilder::new(file_metadata_interner.clone());
         // set the initial metadata.
         manifest_builder.apply_change(
             version,
@@ -222,15 +276,14 @@ impl RegionManifestManager {
                 flushed_entry_id: Some(flushed_entry_id),
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }));
         }
 
         // Persist region change.
         let action_list = RegionMetaActionList::new(actions);
 
-        // New region is not in staging mode.
-        // TODO(ruihang): add staging mode support if needed.
-        store.save(version, &action_list.encode()?, false).await?;
+        store.save(version, &action_list.encode()?).await?;
 
         let checkpointer = Checkpointer::new(region_id, options, store.clone(), MIN_VERSION);
         manifest_version.store(version, Ordering::Relaxed);
@@ -238,11 +291,12 @@ impl RegionManifestManager {
             .removed_files
             .update_file_removed_cnt_to_stats(stats);
         let manager = Self {
+            file_metadata_interner,
             store,
             last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
-            staging_manifest: None,
+            staged: StagedActions::default(),
             stats: stats.clone(),
             stopped: false,
         };
@@ -269,8 +323,10 @@ impl RegionManifestManager {
             stats.total_manifest_size.clone(),
             stats.metric().cloned(),
             options.manifest_cache.clone(),
-        );
+        )
+        .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
+        let file_metadata_interner = options.file_metadata_interner.clone();
 
         // recover from storage
         // construct manifest builder
@@ -287,13 +343,16 @@ impl RegionManifestManager {
                 options.manifest_dir, checkpoint.last_version
             );
             version = version.max(checkpoint.last_version + 1);
-            RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
+            RegionManifestBuilder::with_checkpoint(
+                checkpoint.checkpoint,
+                file_metadata_interner.clone(),
+            )
         } else {
             info!(
                 "Checkpoint not found in {}, build manifest from scratch",
                 options.manifest_dir
             );
-            RegionManifestBuilder::default()
+            RegionManifestBuilder::new(file_metadata_interner.clone())
         };
 
         let replay_start_version = version;
@@ -367,19 +426,24 @@ impl RegionManifestManager {
             open_start.elapsed(),
         );
         let manager = Self {
+            file_metadata_interner,
             store,
             last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
-            // TODO(weny): open the staging manifest if exists.
-            staging_manifest: None,
+            staged: StagedActions::default(),
             stats: stats.clone(),
             stopped: false,
         };
         Ok(Some(manager))
     }
 
-    /// Stops the manager.
+    /// Stops the manager. A stopped manager takes no update and starts no checkpoint, but a
+    /// checkpoint already running keeps writing the manifest directory until it ends.
+    ///
+    /// A caller that hands the storage to another instance waits for that checkpoint with
+    /// `pending_checkpoint_completion` after the stop, as engine stop and reload do. Close and
+    /// drop, which run in the region worker loop, deliberately do not.
     pub async fn stop(&mut self) {
         self.stopped = true;
     }
@@ -387,6 +451,11 @@ impl RegionManifestManager {
     /// Returns whether the manager has stopped accepting updates.
     pub(crate) fn is_stopped(&self) -> bool {
         self.stopped
+    }
+
+    /// Returns whether deltas are published by conditional create.
+    pub(crate) fn is_conditional_publication(&self) -> bool {
+        self.store.is_conditional_publication()
     }
 
     /// Installs the manifest changes from the current version to the target version (inclusive).
@@ -476,8 +545,10 @@ impl RegionManifestManager {
         }
 
         debug_assert_eq!(manifests.first().unwrap().0, last_version + 1);
-        let mut manifest_builder =
-            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
+        let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
+            Some(self.manifest.as_ref().clone()),
+            self.file_metadata_interner.clone(),
+        );
 
         for (manifest_version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
@@ -540,7 +611,10 @@ impl RegionManifestManager {
             }
             .fail();
         };
-        let builder = RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint);
+        let builder = RegionManifestBuilder::with_checkpoint(
+            checkpoint.checkpoint,
+            self.file_metadata_interner.clone(),
+        );
         let manifest = builder.try_build()?;
         let last_version = self.set_version(manifest.manifest_version);
         manifest
@@ -556,32 +630,33 @@ impl RegionManifestManager {
     }
 
     /// Updates the manifest. Returns the current manifest version number.
+    ///
+    /// With `is_staging`, the actions are staged in memory: they take no version and write
+    /// nothing until [Self::commit_staged] commits them when staging ends.
+    ///
+    /// The caller has no Leader deadline to show that its commit returned in time, so a normal
+    /// commit under conditional publication is always verified and starts no checkpoint.
     pub async fn update(
         &mut self,
         action_list: RegionMetaActionList,
         is_staging: bool,
     ) -> Result<ManifestVersion> {
-        self.update_inner(action_list, is_staging, !is_staging)
+        self.update_with_verification(action_list, is_staging, !is_staging, || true)
             .await
     }
 
-    /// Updates the normal manifest without starting a checkpoint.
+    /// Updates the manifest. Returns the current manifest version number.
     ///
-    /// This is only used while a leader is downgrading. The final flush still
-    /// publishes its manifest edit, but must not start cleanup after the
-    /// downgrade checkpoint barrier.
-    pub(crate) async fn update_normal_without_checkpoint(
-        &mut self,
-        action_list: RegionMetaActionList,
-    ) -> Result<ManifestVersion> {
-        self.update_inner(action_list, false, false).await
-    }
-
-    async fn update_inner(
+    /// `allow_checkpoint` tells whether a normal commit may start a checkpoint. `must_verify` is
+    /// evaluated after the save returns, for a normal commit under conditional publication. If it
+    /// returns true, the commit may have landed on a name that checkpoint cleanup freed, so it
+    /// only applies when LIST finds no checkpoint that covers it, and it starts no checkpoint.
+    pub(crate) async fn update_with_verification(
         &mut self,
         action_list: RegionMetaActionList,
         is_staging: bool,
         allow_checkpoint: bool,
+        must_verify: impl FnOnce() -> bool,
     ) -> Result<ManifestVersion> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["update"])
@@ -594,21 +669,154 @@ impl RegionManifestManager {
             }
         );
 
-        let version = self.increase_version();
-        self.store
-            .save(version, &action_list.encode()?, is_staging)
-            .await?;
+        for action in &action_list.actions {
+            if let RegionMetaAction::Edit(edit) = action {
+                for file in edit.files_to_add.iter().chain(&edit.files_to_remove) {
+                    ensure!(
+                        file::is_supported_level(file.level),
+                        crate::error::InvalidRequestSnafu {
+                            region_id: self.manifest.metadata.region_id,
+                            reason: format!("Unsupported SST level {}", file.level),
+                        }
+                    );
+                }
+            }
+        }
+        if is_staging {
+            self.stage(action_list)?;
+            return Ok(self.last_version());
+        }
 
-        // For a staging region, the manifest is initially inherited from the previous manifest(i.e., `self.manifest`).
-        // When the staging manifest becomes available, it will be used to construct the new manifest.
-        let mut manifest_builder =
-            if is_staging && let Some(staging_manifest) = self.staging_manifest.as_ref() {
-                RegionManifestBuilder::with_checkpoint(Some(staging_manifest.as_ref().clone()))
-            } else {
-                RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()))
-            };
+        let bytes = action_list.encode()?;
+        self.commit(action_list.actions, &bytes, allow_checkpoint, must_verify)
+            .await
+    }
 
-        for action in action_list.actions {
+    /// Saves `bytes`, the encoded `actions`, as the next version and applies the actions.
+    async fn commit(
+        &mut self,
+        actions: Vec<RegionMetaAction>,
+        bytes: &[u8],
+        mut allow_checkpoint: bool,
+        must_verify: impl FnOnce() -> bool,
+    ) -> Result<ManifestVersion> {
+        let conditional = self.store.is_conditional_publication();
+        let version = if conditional {
+            self.last_version() + 1
+        } else {
+            self.increase_version()
+        };
+        self.store.save(version, bytes).await?;
+        if conditional {
+            if must_verify() {
+                self.store.ensure_version_not_checkpointed(version).await?;
+                allow_checkpoint = false;
+            }
+            self.set_version(version);
+        }
+
+        let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
+            Some(self.manifest.as_ref().clone()),
+            self.file_metadata_interner.clone(),
+        );
+        self.apply_actions(&mut manifest_builder, version, actions);
+        let new_manifest = manifest_builder.try_build()?;
+        new_manifest
+            .removed_files
+            .update_file_removed_cnt_to_stats(&self.stats);
+        let updated_manifest = self
+            .checkpointer
+            .update_manifest_removed_files(new_manifest)?;
+        self.manifest = Arc::new(updated_manifest);
+        if allow_checkpoint {
+            self.checkpointer
+                .maybe_do_checkpoint(self.manifest.as_ref())
+                .await;
+        }
+
+        Ok(version)
+    }
+
+    /// Commits the staged actions as one version and clears them. Returns the version and the
+    /// committed actions.
+    ///
+    /// If the commit fails with an error that may have written it, its encoded bytes are kept:
+    /// the next call commits the same bytes, and no other action is staged until the staged
+    /// actions are cleared.
+    pub(crate) async fn commit_staged(
+        &mut self,
+        must_verify: impl FnOnce() -> bool,
+    ) -> Result<(ManifestVersion, RegionMetaActionList)> {
+        let _t = MANIFEST_OP_ELAPSED
+            .with_label_values(&["update"])
+            .start_timer();
+
+        ensure!(
+            !self.stopped,
+            RegionStoppedSnafu {
+                region_id: self.manifest.metadata.region_id,
+            }
+        );
+
+        let bytes = match &self.staged.attempted {
+            Some(bytes) => bytes.clone(),
+            None => self.staged.actions.encode()?,
+        };
+        // A copy builds the new manifest; the staged list itself goes back for the region version.
+        let actions = self.staged.actions.actions.clone();
+        let result = self.commit(actions, &bytes, true, must_verify).await;
+        if let Err(e) = &result
+            && e.may_have_persisted_manifest_update()
+        {
+            self.staged.attempted = Some(bytes);
+        }
+        let version = result?;
+        let committed = std::mem::take(&mut self.staged).actions;
+        Ok((version, committed))
+    }
+
+    /// Returns the staged actions, or `None` if nothing is staged.
+    pub(crate) fn staged_actions(&self) -> Option<&RegionMetaActionList> {
+        (!self.staged.actions.actions.is_empty()).then_some(&self.staged.actions)
+    }
+
+    /// Stages `action_list` in memory.
+    fn stage(&mut self, action_list: RegionMetaActionList) -> Result<()> {
+        if self.staged.attempted.is_some() {
+            // A kept end commit must be retried with the same content: a retried import of
+            // files that are already staged changes nothing, and nothing else is staged.
+            ensure!(
+                self.staged.only_adds_staged_files(&action_list),
+                EndStagingPendingSnafu {
+                    region_id: self.manifest.metadata.region_id,
+                }
+            );
+            return Ok(());
+        }
+
+        let base = self.staged.view.as_ref().unwrap_or(&self.manifest);
+        let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
+            Some(base.as_ref().clone()),
+            self.file_metadata_interner.clone(),
+        );
+        self.apply_actions(
+            &mut manifest_builder,
+            self.last_version(),
+            action_list.actions.iter().cloned(),
+        );
+        self.staged.view = Some(Arc::new(manifest_builder.try_build()?));
+        self.staged.actions.actions.extend(action_list.actions);
+        Ok(())
+    }
+
+    /// Applies `actions` of `version` to `manifest_builder`.
+    fn apply_actions(
+        &self,
+        manifest_builder: &mut RegionManifestBuilder,
+        version: ManifestVersion,
+        actions: impl IntoIterator<Item = RegionMetaAction>,
+    ) {
+        for action in actions {
             match action {
                 RegionMetaAction::Change(action) => {
                     manifest_builder.apply_change(version, action);
@@ -630,37 +838,23 @@ impl RegionManifestManager {
                 }
             }
         }
+    }
 
-        if is_staging {
-            let new_manifest = manifest_builder.try_build()?;
-            self.staging_manifest = Some(Arc::new(new_manifest));
-
-            info!(
-                "Skipping checkpoint for region {} in staging mode, manifest version: {}",
-                self.manifest.metadata.region_id, self.manifest.manifest_version
-            );
-        } else {
-            let new_manifest = manifest_builder.try_build()?;
-            new_manifest
-                .removed_files
-                .update_file_removed_cnt_to_stats(&self.stats);
-            let updated_manifest = self
-                .checkpointer
-                .update_manifest_removed_files(new_manifest)?;
-            self.manifest = Arc::new(updated_manifest);
-            if allow_checkpoint {
-                self.checkpointer
-                    .maybe_do_checkpoint(self.manifest.as_ref())
-                    .await;
-            }
-        }
-
-        Ok(version)
+    /// Clears the staged actions.
+    fn clear_staged(&mut self) {
+        self.staged = StagedActions::default();
     }
 
     /// Waits for an in-flight checkpoint to finish, including its cleanup.
     pub(crate) async fn wait_for_pending_checkpoint(&mut self) {
         self.checkpointer.wait_for_pending_checkpoint().await;
+    }
+
+    /// Returns a future that resolves once the in-flight checkpoint has finished, including its
+    /// cleanup. Unlike [Self::wait_for_pending_checkpoint], which borrows the manager mutably and
+    /// reaps the task handle, this does neither.
+    pub(crate) fn pending_checkpoint_completion(&self) -> impl Future<Output = ()> + Send + use<> {
+        self.checkpointer.pending_checkpoint_completion()
     }
 
     /// Clear deleted files from manifest's `removed_files` field without update version. Notice if datanode exit before checkpoint then new manifest by open region may still contain these deleted files, which is acceptable for gc process.
@@ -679,9 +873,9 @@ impl RegionManifestManager {
         self.manifest.clone()
     }
 
-    /// Retrieves the current [RegionManifest].
+    /// Returns the manifest with the staged actions applied, or `None` if nothing is staged.
     pub fn staging_manifest(&self) -> Option<Arc<RegionManifest>> {
-        self.staging_manifest.clone()
+        self.staged.view.clone()
     }
 
     /// Returns total manifest size.
@@ -693,37 +887,11 @@ impl RegionManifestManager {
     ///
     /// It is typically used in read-only regions to catch up with manifest.
     /// It doesn't lock the manifest directory in the object store so the result
-    /// may be inaccurate if there are concurrent writes.
+    /// may be inaccurate if there are concurrent writes. A caller holds the region's manifest
+    /// `RwLock` read guard across the listing (e.g. `ManifestContext::has_update`), which
+    /// `ManifestContext::installed_version_if_updated` does not hold while it lists.
     pub async fn has_update(&self) -> Result<bool> {
-        let last_version = self.last_version();
-
-        // Skip older files at the object-store layer. Files for `v == last_version`
-        // may still appear (`{path}{v:020}` sorts before `{path}{v:020}.json`) but
-        // they are filtered out below by the `version > last_version` check.
-        let start_after = list_start_after(self.store.manifest_dir(), last_version);
-        let streamer = self
-            .store
-            .manifest_lister(false, Some(&start_after))
-            .await?
-            .context(error::EmptyManifestDirSnafu {
-                manifest_dir: self.store.manifest_dir(),
-            })?;
-
-        let need_update = streamer
-            .try_any(|entry| async move {
-                let file_name = entry.name();
-                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
-                    let version = file_version(file_name);
-                    if version > last_version {
-                        return true;
-                    }
-                }
-                false
-            })
-            .await
-            .context(error::OpenDalSnafu)?;
-
-        Ok(need_update)
+        self.store.has_version_after(self.last_version()).await
     }
 
     /// Increases last version and returns the increased version.
@@ -768,71 +936,14 @@ impl RegionManifestManager {
         &self.checkpointer
     }
 
-    /// Merge all staged manifest actions into a single action list ready for submission.
-    /// This collects all staging manifests, applies them sequentially, and returns the merged actions.
-    pub(crate) async fn merge_staged_actions(
-        &mut self,
-        region_state: RegionRoleState,
-    ) -> Result<Option<RegionMetaActionList>> {
-        // Only merge if we're in staging mode
-        if region_state != RegionRoleState::Leader(RegionLeaderState::Staging) {
-            return Ok(None);
-        }
-
-        // Fetch all staging manifests
-        let staging_manifests = self.store.fetch_staging_manifests().await?;
-
-        if staging_manifests.is_empty() {
-            info!(
-                "No staging manifests to merge for region {}",
-                self.manifest.metadata.region_id
-            );
-            return Ok(None);
-        }
-
-        info!(
-            "Merging {} staging manifests for region {}",
-            staging_manifests.len(),
-            self.manifest.metadata.region_id
-        );
-
-        // Start with current manifest state as the base
-        let mut merged_actions = Vec::new();
-        let mut latest_version = self.last_version();
-
-        // Apply all staging actions in order
-        for (manifest_version, raw_action_list) in staging_manifests {
-            let action_list = RegionMetaActionList::decode(&raw_action_list)?;
-
-            for action in action_list.actions {
-                merged_actions.push(action);
-            }
-
-            latest_version = latest_version.max(manifest_version);
-        }
-
-        if merged_actions.is_empty() {
-            return Ok(None);
-        }
-
-        info!(
-            "Successfully merged {} actions from staging manifests for region {}, latest version: {}",
-            merged_actions.len(),
-            self.manifest.metadata.region_id,
-            latest_version
-        );
-
-        Ok(Some(RegionMetaActionList::new(merged_actions)))
-    }
-
-    /// Unsets the staging manifest.
+    /// Clears the staged actions.
     pub(crate) fn unset_staging_manifest(&mut self) {
-        self.staging_manifest = None;
+        self.clear_staged();
     }
 
-    /// Clear all staging manifests.
+    /// Clears the staged actions and the staging directory.
     pub(crate) async fn clear_staging_manifest_and_dir(&mut self) -> Result<()> {
-        self.staging_manifest = None;
+        self.clear_staged();
         self.store.clear_staging_manifests().await?;
         info!(
             "Cleared all staging manifests for region {}",
@@ -943,6 +1054,67 @@ mod test {
     }
 
     #[tokio::test]
+    async fn recover_historical_file_expression_types() {
+        use datatypes::value::Value;
+        use partition::expr::col;
+        use store_api::storage::FileId;
+
+        use crate::sst::file::FileMeta;
+
+        for checkpoint_distance in [0, 1] {
+            let env = TestEnv::new().await;
+            let metadata = Arc::new(basic_region_metadata());
+            let mut manager = env
+                .create_manifest_manager(
+                    CompressionType::Uncompressed,
+                    checkpoint_distance,
+                    Some(metadata.clone()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let mut files = Vec::new();
+            for value in [Value::Int32(10), Value::Int64(10)] {
+                let file = FileMeta {
+                    region_id: metadata.region_id,
+                    file_id: FileId::random(),
+                    partition_expr: Some(col("tag").lt(value).into()),
+                    ..Default::default()
+                };
+                manager
+                    .update(
+                        RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                            files_to_add: vec![file.clone()],
+                            ..Default::default()
+                        })),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                manager.wait_for_pending_checkpoint().await;
+                files.push(file);
+            }
+            assert_eq!(
+                checkpoint_distance != 0,
+                manager.checkpointer.last_checkpoint_version() > 0
+            );
+            manager.stop().await;
+            drop(manager);
+            // The helper supplies a fresh interner, so recovery cannot reuse old entries.
+            let recovered = env
+                .create_manifest_manager(CompressionType::Uncompressed, checkpoint_distance, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let manifest = recovered.manifest();
+            assert_eq!(files.len(), manifest.files.len());
+            for file in files {
+                assert_eq!(&file, manifest.files[&file.file_id].as_ref());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn region_change_add_column() {
         let metadata = Arc::new(basic_region_metadata());
         let env = TestEnv::new().await;
@@ -1031,6 +1203,7 @@ mod test {
                         flushed_entry_id: None,
                         flushed_sequence: None,
                         committed_sequence: None,
+                        wal_recovery: Default::default(),
                     })]),
                     false,
                 )

@@ -372,8 +372,10 @@ impl CompactionScheduler {
         // Cancellation during Picking is completed by this notification. No
         // execution callback will follow, so return DDLs released by the fence.
         if !status.accept_plan(finished.plan_id) {
-            return CompactionTransition::from_pending_ddls(
-                self.finish_compaction_on_cancel(region_id),
+            return self.finish_cancelled_compaction(
+                region_id,
+                manifest_ctx,
+                schema_metadata_manager,
             );
         }
 

@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
+use api::v1::WalEntry;
 use arrow_schema::extension::ExtensionType;
 use common_telemetry::{debug, error, info, warn};
 use common_wal::options::WalOptions;
@@ -55,7 +56,8 @@ use crate::error::{
     DataTypeMismatchSnafu, EmptyRegionDirSnafu, InvalidMetadataSnafu, InvalidRegionOptionsSnafu,
     ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
 };
-use crate::manifest::action::RegionManifest;
+use crate::lease::NodeLease;
+use crate::manifest::action::{RegionManifest, cap_wal_release};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
@@ -76,8 +78,11 @@ use crate::sst::FormatType;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::index::IndexBuildType;
+use crate::sst::index::handler::PlanContext;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::IndexRegistryRef;
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
@@ -147,6 +152,7 @@ pub type PartitionExprFetcherRef = Arc<dyn PartitionExprFetcher + Send + Sync>;
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
+    index_registry: Option<IndexRegistryRef>,
     region_id: RegionId,
     metadata_builder: Option<RegionMetadataBuilder>,
     memtable_builder_provider: MemtableBuilderProvider,
@@ -157,6 +163,7 @@ pub(crate) struct RegionOpener {
     options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
+    node_lease: Arc<NodeLease>,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
     time_provider: TimeProviderRef,
@@ -178,6 +185,7 @@ impl RegionOpener {
         region_id: RegionId,
         table_dir: &str,
         path_type: PathType,
+        node_lease: Arc<NodeLease>,
         memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
         purge_scheduler: SchedulerRef,
@@ -188,6 +196,7 @@ impl RegionOpener {
         partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> RegionOpener {
         RegionOpener {
+            index_registry: None,
             region_id,
             metadata_builder: None,
             memtable_builder_provider,
@@ -198,6 +207,7 @@ impl RegionOpener {
             options: None,
             cache_manager: None,
             skip_wal_replay: false,
+            node_lease,
             puffin_manager_factory,
             intermediate_manager,
             time_provider,
@@ -210,6 +220,12 @@ impl RegionOpener {
             series_index_store: None,
             series_index_purger: None,
         }
+    }
+
+    /// Sets the registry used to validate new-region index options.
+    pub(crate) fn with_index_registry(mut self, registry: IndexRegistryRef) -> Self {
+        self.index_registry = Some(registry);
+        self
     }
 
     /// Sets the store for companion range indexes.
@@ -379,14 +395,39 @@ impl RegionOpener {
         };
         ensure_json2_uses_flat_format(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
+        // Validate explicit new-region configuration before creating its manifest.
+        // Opening an existing manifest above does not require its optional providers.
+        if let Some(registry) = &self.index_registry {
+            registry
+                .validate(&PlanContext {
+                    metadata: &metadata,
+                    index_options: &options.index_options,
+                    // Validate initial options without building indexes; extensions skip flush work.
+                    build_type: IndexBuildType::Flush,
+                    existing_indexes: &[],
+                })
+                .map_err(|err| {
+                    InvalidRegionOptionsSnafu {
+                        reason: err.to_string(),
+                    }
+                    .build()
+                })?;
+        }
         // The region's WAL history starts in this log store, so reopening
         // the region on it passes the history check without any entry. It is
         // recorded before the manifest exists: a log store that gave up its
         // history meanwhile fails the create before it leaves a manifest.
         wal.start_region_history(region_id, &provider)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let mut region_manifest_options =
-            RegionManifestOptions::new(config, &region_dir, &object_store);
+        let mut region_manifest_options = RegionManifestOptions::new(
+            config,
+            &region_dir,
+            &object_store,
+            self.file_ref_manager.file_metadata_interner.clone(),
+        )
+        .with_conditional_publication(
+            options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+        );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -424,13 +465,16 @@ impl RegionOpener {
             .flushed_entry_id(flushed_entry_id)
             .build();
         let version_control = Arc::new(VersionControl::new(version));
-        let access_layer = Arc::new(AccessLayer::new(
-            self.table_dir.clone(),
-            self.path_type,
-            object_store,
-            self.puffin_manager_factory,
-            self.intermediate_manager,
-        ));
+        let access_layer = Arc::new(
+            AccessLayer::new(
+                self.table_dir.clone(),
+                self.path_type,
+                object_store,
+                self.puffin_manager_factory,
+                self.intermediate_manager,
+            )
+            .with_file_protection(self.hook.clone()),
+        );
         let now = self.time_provider.current_time_millis();
 
         Ok(Arc::new(MitoRegion {
@@ -445,6 +489,7 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
                 self.hook.clone(),
+                self.node_lease.clone(),
             )),
             file_purger: create_file_purger(
                 config.gc.enable,
@@ -513,8 +558,15 @@ impl RegionOpener {
         let now = Instant::now();
         let mut region_options = self.options.as_ref().unwrap().clone();
         let object_storage = get_object_store(&region_options.storage, &self.object_store_manager)?;
-        let mut region_manifest_options =
-            RegionManifestOptions::new(config, &self.region_dir(), &object_storage);
+        let mut region_manifest_options = RegionManifestOptions::new(
+            config,
+            &self.region_dir(),
+            &object_storage,
+            self.file_ref_manager.file_metadata_interner.clone(),
+        )
+        .with_conditional_publication(
+            region_options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+        );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -559,13 +611,16 @@ impl RegionOpener {
             region_id, self.table_dir, self.options
         );
 
-        let access_layer = Arc::new(AccessLayer::new(
-            self.table_dir.clone(),
-            self.path_type,
-            object_store,
-            self.puffin_manager_factory.clone(),
-            self.intermediate_manager.clone(),
-        ));
+        let access_layer = Arc::new(
+            AccessLayer::new(
+                self.table_dir.clone(),
+                self.path_type,
+                object_store,
+                self.puffin_manager_factory.clone(),
+                self.intermediate_manager.clone(),
+            )
+            .with_file_protection(self.hook.clone()),
+        );
         let file_purger = create_file_purger(
             config.gc.enable,
             self.path_type,
@@ -609,10 +664,13 @@ impl RegionOpener {
             .max(flushed_entry_id);
         let topic_latest_entry_id = if !self.skip_wal_replay {
             check_wal_history(wal, &provider, &version_control.current().version).await?;
+            let node_id = self.file_ref_manager.node_id();
+            let replay_start = replay_from_entry_id.max(manifest.wal_replay_start(node_id));
             info!(
-                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
-                replay_from_entry_id,
+                "Start replaying memtable at replay_start: {} for region {}, replay_from_entry_id: {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
+                replay_start,
                 region_id,
+                replay_from_entry_id,
                 manifest.manifest_version,
                 flushed_entry_id,
                 now.elapsed()
@@ -621,7 +679,8 @@ impl RegionOpener {
                 &provider,
                 wal_entry_reader,
                 region_id,
-                replay_from_entry_id,
+                replay_start,
+                cap_wal_release(&manifest.pending_tails, node_id, replay_start),
                 &version_control,
                 config.allow_stale_entries,
                 on_region_opened,
@@ -693,6 +752,7 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Follower,
                 self.hook.clone(),
+                self.node_lease.clone(),
             )),
             file_purger,
             provider: provider.clone(),
@@ -794,6 +854,7 @@ pub(crate) fn version_builder_from_manifest(
         .truncated_entry_id(manifest.truncated_entry_id)
         .compaction_time_window(manifest.compaction_time_window)
         .options(region_options)
+        .pending_tails(manifest.pending_tails.clone())
 }
 
 /// Updates region options by persistent options.
@@ -953,12 +1014,15 @@ pub(crate) async fn check_wal_history<S: LogStore>(
         .await
 }
 
-/// Replays the mutations from WAL and inserts mutations to memtable of given region.
+/// Replays the mutations from WAL and inserts mutations to memtable of given region,
+/// then releases the WAL up to `release_entry_id`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn replay_memtable<F>(
     provider: &Provider,
     mut wal_entry_reader: Box<dyn WalEntryReader>,
     region_id: RegionId,
     flushed_entry_id: EntryId,
+    release_entry_id: EntryId,
     version_control: &VersionControlRef,
     allow_stale_entries: bool,
     on_region_opened: F,
@@ -972,7 +1036,6 @@ where
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
     let replay_from_entry_id = flushed_entry_id + 1;
-    let region_metadata = version_control.current().version.metadata.clone();
 
     let mut wal_stream = wal_entry_reader.read(provider, replay_from_entry_id)?;
     while let Some(res) = wal_stream.next().await {
@@ -992,68 +1055,13 @@ where
             );
         }
         last_entry_id = last_entry_id.max(entry_id);
-
-        let mut region_write_ctx = RegionWriteCtx::new(
-            region_id,
-            version_control,
-            provider.clone(),
-            // For WAL replay, we don't need to track the write bytes rate.
-            None,
-            WriteSource::WalReplay,
-        );
-        for mutation in entry.mutations {
-            rows_replayed += mutation
-                .rows
-                .as_ref()
-                .map(|rows| rows.rows.len())
-                .unwrap_or(0);
-            region_write_ctx.push_mutation(
-                mutation.op_type,
-                mutation.rows,
-                mutation.write_hint,
-                OptionOutputTx::none(),
-                // We should respect the sequence in WAL during replay.
-                Some(mutation.sequence),
-                false,
-            );
-        }
-
-        for bulk_entry in entry.bulk_entries {
-            let mut part = BulkPart::try_from(bulk_entry)?;
-            // The entry may miss columns added by a concurrent alter if it was
-            // written by a writer with a stale schema (older versions kept the
-            // stale raw data when filling missing columns). Fills missing
-            // columns like the write path, otherwise the memtable rejects the
-            // batch. Skips sparse batches as they don't carry tag columns by
-            // design.
-            part.fill_missing_columns(&region_metadata)?;
-            rows_replayed += part.num_rows();
-            // During replay, we should adopt the sequence from WAL.
-            let bulk_sequence_from_wal = part.sequence;
-            ensure!(
-                region_write_ctx.push_bulk(
-                    OptionOutputTx::none(),
-                    part,
-                    Some(bulk_sequence_from_wal),
-                    false
-                ),
-                RegionCorruptedSnafu {
-                    region_id,
-                    reason: "unable to replay memtable with bulk entries",
-                }
-            );
-        }
-
-        // set next_entry_id and write to memtable.
-        region_write_ctx.set_next_entry_id(last_entry_id + 1);
-        // Publish the replayed sequences only after all rows (including bulk
-        // parts) are installed, matching the write path ordering.
-        region_write_ctx.write_memtables().await;
+        rows_replayed +=
+            replay_entry(provider, region_id, version_control, entry, last_entry_id).await?;
     }
 
     // TODO(weny): We need to update `flushed_entry_id` in the region manifest
     // to avoid reading potentially incomplete entries in the future.
-    (on_region_opened)(region_id, flushed_entry_id, provider).await?;
+    (on_region_opened)(region_id, release_entry_id, provider).await?;
 
     let series_count = version_control.current().series_count();
     info!(
@@ -1067,6 +1075,77 @@ where
         now.elapsed()
     );
     Ok(last_entry_id)
+}
+
+/// Writes one WAL entry into the mutable memtable of `version_control`, keeping the
+/// sequences the WAL recorded, and returns the number of rows. `last_entry_id` is the
+/// largest entry id replayed so far, this one included.
+pub(crate) async fn replay_entry(
+    provider: &Provider,
+    region_id: RegionId,
+    version_control: &VersionControlRef,
+    entry: WalEntry,
+    last_entry_id: EntryId,
+) -> Result<usize> {
+    let mut rows_replayed = 0;
+    let mut region_write_ctx = RegionWriteCtx::new(
+        region_id,
+        version_control,
+        provider.clone(),
+        // For WAL replay, we don't need to track the write bytes rate.
+        None,
+        WriteSource::WalReplay,
+    );
+    for mutation in entry.mutations {
+        rows_replayed += mutation
+            .rows
+            .as_ref()
+            .map(|rows| rows.rows.len())
+            .unwrap_or(0);
+        region_write_ctx.push_mutation(
+            mutation.op_type,
+            mutation.rows,
+            mutation.write_hint,
+            OptionOutputTx::none(),
+            // We should respect the sequence in WAL during replay.
+            Some(mutation.sequence),
+            false,
+        );
+    }
+
+    let region_metadata = region_write_ctx.version().metadata.clone();
+    for bulk_entry in entry.bulk_entries {
+        let mut part = BulkPart::try_from(bulk_entry)?;
+        // The entry may miss columns added by a concurrent alter if it was
+        // written by a writer with a stale schema (older versions kept the
+        // stale raw data when filling missing columns). Fills missing
+        // columns like the write path, otherwise the memtable rejects the
+        // batch. Skips sparse batches as they don't carry tag columns by
+        // design.
+        part.fill_missing_columns(&region_metadata)?;
+        rows_replayed += part.num_rows();
+        // During replay, we should adopt the sequence from WAL.
+        let bulk_sequence_from_wal = part.sequence;
+        ensure!(
+            region_write_ctx.push_bulk(
+                OptionOutputTx::none(),
+                part,
+                Some(bulk_sequence_from_wal),
+                false
+            ),
+            RegionCorruptedSnafu {
+                region_id,
+                reason: "unable to replay memtable with bulk entries",
+            }
+        );
+    }
+
+    // set next_entry_id and write to memtable.
+    region_write_ctx.set_next_entry_id(last_entry_id + 1);
+    // Publish the replayed sequences only after all rows (including bulk
+    // parts) are installed, matching the write path ordering.
+    region_write_ctx.write_memtables().await;
+    Ok(rows_replayed)
 }
 
 /// A task to load and fill the region file cache.
@@ -1096,7 +1175,7 @@ impl RegionLoadCacheTask {
             for level in version.ssts.levels() {
                 for file_handle in level.files.values() {
                     let file_meta = file_handle.meta_ref();
-                    if file_meta.exists_index() {
+                    if file_meta.has_downloadable_index() {
                         let puffin_key = IndexKey::new(
                             file_meta.region_id,
                             file_meta.file_id,
@@ -1447,6 +1526,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
     match state {
         RegionRoleState::Leader(RegionLeaderState::Writable)
         | RegionRoleState::Leader(RegionLeaderState::Staging)
+        | RegionRoleState::Leader(RegionLeaderState::EndingStaging)
         | RegionRoleState::Leader(RegionLeaderState::Altering)
         | RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
         | RegionRoleState::Leader(RegionLeaderState::Editing)
@@ -1520,6 +1600,8 @@ mod tests {
             compaction_time_window: None,
             sst_format,
             append_mode: None,
+            pending_tails: Default::default(),
+            handoff_floors: Default::default(),
         }
     }
 
@@ -1726,6 +1808,95 @@ mod tests {
         writer.close().unwrap();
 
         parquet_bytes
+    }
+
+    #[rstest::rstest]
+    #[case::known_size(7, true)]
+    #[case::unknown_size(0, false)]
+    #[tokio::test]
+    async fn test_preload_column_only_index(
+        #[case] index_file_size: u64,
+        #[case] expected_cached: bool,
+    ) {
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::manifest::action::RegionEdit;
+        use crate::sst::file::{ColumnIndexMetadata, IndexType};
+        use crate::test_util::CreateRequestBuilder;
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        let write_cache = env
+            .create_write_cache(
+                ObjectStore::new(Memory::default()).unwrap(),
+                ReadableSize::mb(1),
+            )
+            .await;
+        let meta = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            index_file_size,
+            index_version: 3,
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: smallvec::smallvec![IndexType::HllIndex],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(meta.available_indexes.is_empty());
+        assert!(meta.exists_index());
+        assert_eq!(meta.index_version(), Some(3));
+        let key = IndexKey::new(region_id, meta.file_id, FileType::Puffin(3));
+        let path = crate::sst::location::index_file_path(
+            region.access_layer.table_dir(),
+            meta.index_id(),
+            region.access_layer.path_type(),
+        );
+        region
+            .access_layer
+            .object_store()
+            .write(&path, b"payload".as_slice())
+            .await
+            .unwrap();
+        region.version_control.apply_edit(
+            Some(RegionEdit {
+                files_to_add: vec![meta],
+                ..Default::default()
+            }),
+            &[],
+            region.file_purger.clone(),
+        );
+
+        super::RegionLoadCacheTask::new(region)
+            .fill_cache(&write_cache.file_cache())
+            .await;
+        let file_cache = write_cache.file_cache();
+        assert_eq!(file_cache.contains_key(&key), expected_cached);
+        let cached_path = file_cache.cache_file_path(key);
+        if expected_cached {
+            assert_eq!(
+                file_cache
+                    .local_store()
+                    .read(&cached_path)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                b"payload"
+            );
+        } else {
+            assert!(!file_cache.local_store().exists(&cached_path).await.unwrap());
+        }
     }
 
     #[tokio::test]

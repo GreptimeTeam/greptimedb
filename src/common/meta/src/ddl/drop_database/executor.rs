@@ -21,12 +21,14 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 use table::table_name::TableName;
 
+use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
 use crate::ddl::drop_database::cursor::DropDatabaseCursor;
 use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
 use crate::ddl::drop_table::executor::DropTableExecutor;
 use crate::ddl::utils::get_region_wal_options;
 use crate::error::{self, Result};
+use crate::instruction::CacheIdent;
 use crate::key::table_route::TableRouteValue;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
@@ -140,7 +142,7 @@ impl State for DropDatabaseExecutor {
                 &ddl_ctx.leader_region_registry,
                 &self.physical_region_routes,
                 true,
-                false,
+                self.target == DropTableTarget::Physical,
                 false,
             )
             .await?;
@@ -148,6 +150,54 @@ impl State for DropDatabaseExecutor {
 
         Ok((
             Box::new(DropDatabaseCursor::new(self.target)),
+            Status::executing(false),
+        ))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// A durable logical-table deletion batch. Physical regions are removed in the next phase.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DropDatabaseBatchExecutor {
+    pub(crate) tables: Vec<(TableId, TableName)>,
+}
+
+#[async_trait::async_trait]
+#[typetag::serde]
+impl State for DropDatabaseBatchExecutor {
+    async fn next(
+        &mut self,
+        ddl_ctx: &DdlContext,
+        _ctx: &mut DropDatabaseContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        ddl_ctx
+            .table_metadata_manager
+            .destroy_logical_tables_metadata(&self.tables)
+            .await?;
+        let idents = self
+            .tables
+            .iter()
+            .flat_map(|(id, name)| {
+                [
+                    CacheIdent::TableId(*id),
+                    CacheIdent::TableName(name.clone()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        ddl_ctx
+            .cache_invalidator
+            .invalidate(
+                &Context {
+                    subject: Some("Invalidate logical tables by dropping database".to_string()),
+                },
+                &idents,
+            )
+            .await?;
+        Ok((
+            Box::new(DropDatabaseCursor::new(DropTableTarget::Logical)),
             Status::executing(false),
         ))
     }

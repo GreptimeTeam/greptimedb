@@ -18,8 +18,9 @@ use std::sync::Arc;
 
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, error, info};
+use snafu::ensure;
 use store_api::logstore::LogStore;
-use store_api::region_engine::{RegionRole, SettableRegionRoleState};
+use store_api::region_engine::SettableRegionRoleState;
 use store_api::region_request::RegionCatchupRequest;
 use store_api::storage::RegionId;
 
@@ -31,7 +32,7 @@ use crate::request::OptionOutputTx;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{RegionWorkerLoop, drain_ended_staging, handle_tail_replay};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_catchup_request(
@@ -52,8 +53,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        if self.catchup_regions.is_region_exists(region_id) {
-            warn!("Region {region_id} under catching up");
+        if self.catchup_regions.is_region_exists(region_id)
+            || region.manifest_ctx.is_reload_pending()
+        {
+            warn!("Region {region_id} under catching up or waiting for a reload");
             sender.send(Err(error::RegionBusySnafu { region_id }.build()));
             return;
         }
@@ -76,6 +79,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         #[cfg(feature = "hdfs-object-store")]
         let sweep_limiter = self.sweep_limiter.clone();
         let node_lease = self.node_lease.clone();
+        let worker_sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -88,28 +92,37 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         // The region takes writes under the node lease until its next Leader
                         // grant.
                         node_lease.seed(&region.manifest_ctx.leader_deadline);
-                        region.set_role(RegionRole::Leader);
-                        // Finalize leadership: persist backfilled metadata.
-                        match region
-                            .set_role_state_gracefully(SettableRegionRoleState::Leader)
-                            .await
-                        {
-                            Ok(()) => {
-                                #[cfg(feature = "hdfs-object-store")]
-                                temp_file_sweeper::spawn_region_sweep(
-                                    region.access_layer(),
-                                    region_id,
-                                    sweep_older_than,
-                                    sweep_limiter,
-                                );
+                        if region.manifest_ctx.promote_after_catchup(region_id) {
+                            // Finalize leadership: persist backfilled metadata.
+                            let drain = drain_ended_staging(&worker_sender, region_id);
+                            match region
+                                .set_role_state_gracefully(SettableRegionRoleState::Leader, drain)
+                                .await
+                            {
+                                Ok(()) => {
+                                    #[cfg(feature = "hdfs-object-store")]
+                                    temp_file_sweeper::spawn_region_sweep(
+                                        region.access_layer(),
+                                        region_id,
+                                        sweep_older_than,
+                                        sweep_limiter,
+                                    );
+                                }
+                                Err(err) => {
+                                    error!(err; "Failed to set region {region_id} to leader");
+                                }
                             }
-                            Err(err) => {
-                                error!(err; "Failed to set region {region_id} to leader");
-                            }
+                            handle_tail_replay::notify_writable(&worker_sender, &region);
                         }
                     }
                     catchup_regions.remove_region(region_id);
-                    sender.send(Ok(0));
+                    // A commit during the catchup, including the backfill above, may have found
+                    // a newer manifest.
+                    if region.manifest_ctx.is_reload_pending() {
+                        sender.send(Err(error::RegionBusySnafu { region_id }.build()));
+                    } else {
+                        sender.send(Ok(0));
+                    }
                 }
                 Err(err) => {
                     error!(err; "Failed to catchup region {region_id}");
@@ -126,15 +139,44 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region: &Arc<MitoRegion>,
     ) -> Result<Arc<MitoRegion>> {
         let region_id = region.region_id;
-        let manifest_version = region.manifest_ctx.manifest_version().await;
+        // Commits of the old instance wait until the reopened one is registered, so a conflict
+        // either fenced the old instance before the check below or happens after it is replaced.
+        let manager = region.manifest_ctx.manifest_manager.read().await;
+        ensure!(
+            !region.manifest_ctx.is_reload_pending(),
+            error::RegionBusySnafu { region_id }
+        );
+        let manifest_version = manager.manifest().manifest_version;
         let flushed_entry_id = region.version_control.current().last_entry_id;
         info!(
             "Reopening the region: {region_id}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}"
         );
-        let reopened_region = RegionOpener::new(
-            region_id,
+        let reopened_region = self
+            .region_reopener(region)?
+            .skip_wal_replay(true)
+            .open(&self.config, &self.wal)
+            .await?;
+        debug_assert!(!reopened_region.is_writable());
+        // Preserve allocated sequences without publishing the old memtables.
+        reopened_region
+            .version_control
+            .update_last_sequence(region.version_control.current().last_sequence);
+        self.register_region(reopened_region.clone());
+        drop(manager);
+        if let Some(state) = &self.series_index_task_state {
+            state.wake();
+        }
+
+        Ok(reopened_region)
+    }
+
+    /// Returns an opener of the region from its manifest, with its current options.
+    pub(crate) fn region_reopener(&self, region: &MitoRegion) -> Result<RegionOpener> {
+        RegionOpener::new(
+            region.region_id,
             region.table_dir(),
             region.access_layer.path_type(),
+            self.node_lease.clone(),
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
             self.purge_scheduler.clone(),
@@ -148,21 +190,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .series_index_store(self.series_index_store.clone())
         .series_index_purger(self.series_index_purger.clone())
         .hook(self.plugins.get())
-        .options(region.version().options.clone())?
-        .skip_wal_replay(true)
-        .open(&self.config, &self.wal)
-        .await?;
-        debug_assert!(!reopened_region.is_writable());
-        // Preserve allocated sequences without publishing the old memtables.
-        reopened_region
-            .version_control
-            .update_last_sequence(region.version_control.current().last_sequence);
-        self.register_region(reopened_region.clone());
-        if let Some(state) = &self.series_index_task_state {
-            state.wake();
-        }
-
-        Ok(reopened_region)
+        .options(region.version().options.clone())
     }
 
     async fn reopen_region_if_needed(
@@ -184,6 +212,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region.version_control.current().last_entry_id
                 );
             }
+            self.listener
+                .on_catchup_reopen_begin(region.region_id)
+                .await;
             self.reopen_region(&region).await?
         } else {
             region

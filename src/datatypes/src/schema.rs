@@ -15,6 +15,8 @@
 mod column_schema;
 pub mod constraint;
 pub mod ext;
+#[cfg(feature = "enterprise")]
+mod sketch;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,10 +38,12 @@ pub use crate::schema::column_schema::{
     COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE, COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
     COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY, COMPRESSION_KEY, ColumnEncoding,
     ColumnExtType, ColumnSchema, CompressionOptions, CompressionType, FULLTEXT_KEY,
-    FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
-    SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType, TIME_INDEX_KEY,
+    FulltextAnalyzer, FulltextBackend, FulltextOptions, HLL_KEY, INVERTED_INDEX_KEY, KLL_KEY,
+    MG_KEY, Metadata, SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType, TIME_INDEX_KEY,
 };
 pub use crate::schema::constraint::ColumnDefaultConstraint;
+#[cfg(feature = "enterprise")]
+pub use crate::schema::sketch::{HllOptions, KllOptions, MgOptions};
 
 /// Key used to store version number of the schema in metadata.
 pub const VERSION_KEY: &str = "greptime:version";

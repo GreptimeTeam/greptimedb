@@ -16,6 +16,7 @@ use common_base::readable_size::ReadableSize;
 use partition::expr::PartitionExpr;
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
 use crate::compaction::multi_region::memory::{self, MemoryLimits};
@@ -27,6 +28,7 @@ use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
+use crate::sst::parquet::writer::SstWriteContext;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub(crate) struct TargetWriter<'a> {
@@ -71,13 +73,14 @@ impl<'a> TargetWriter<'a> {
         let infos = self
             .context
             .access_layer
-            .write_sst_with_guard(
+            .write_sst_with_context(
                 request,
                 &self.options(),
                 &mut metrics,
-                crate::sst::parquet::writer::SstWriteContext {
-                    guard: self.context.protection.clone(),
-                    limits: self.limits.writer,
+                SstWriteContext {
+                    guard: Some(self.context.protection.clone()),
+                    limits: Some(self.limits.writer),
+                    ..Default::default()
                 },
             )
             .await?;
@@ -88,7 +91,7 @@ impl<'a> TargetWriter<'a> {
             .iter()
             .map(|info| {
                 self.validate_sequence(info)?;
-                Ok(self.file_metadata(info, expression.clone()))
+                self.file_metadata(info, expression.clone())
             })
             .collect::<Result<Vec<_>>>()?;
         Ok((files, infos.into_iter().collect()))
@@ -105,6 +108,7 @@ impl<'a> TargetWriter<'a> {
         bloom.mem_threshold_on_create = self.index_threshold(bloom.mem_threshold_on_create());
         let source = output_projection(self.target, source, self.context.cancellation.clone())?;
         Ok(SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Compact,
             metadata: self.target.metadata.clone(),
             source,
@@ -169,38 +173,44 @@ impl<'a> TargetWriter<'a> {
         Ok(())
     }
 
-    fn file_metadata(&self, info: &SstInfo, partition_expr: Option<PartitionExpr>) -> FileMeta {
+    fn file_metadata(
+        &self,
+        info: &SstInfo,
+        partition_expr: Option<PartitionExpr>,
+    ) -> Result<FileMeta> {
         let range = info
             .file_metadata
             .as_ref()
             .and_then(|footer| extract_primary_key_range(footer, &self.target.metadata));
-        FileMeta {
+        Ok(FileMeta {
             region_id: self.target.metadata.region_id,
             file_id: info.file_id,
             time_range: info.time_range,
-            level: 1,
+            // Region-local L0: window merges and semantic folding stay with
+            // ordinary region compaction.
+            level: 0,
             file_size: info.file_size,
             max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
             available_indexes: info.index_metadata.build_available_indexes(),
-            indexes: info.index_metadata.build_indexes(),
+            indexes: info.index_metadata.build_indexes()?,
             index_file_size: info.index_metadata.file_size,
             index_version: 0,
             num_rows: info.num_rows as u64,
             num_row_groups: info.num_row_groups,
             sequence: self.sequence,
-            partition_expr,
+            partition_expr: partition_expr.map(Into::into),
             num_series: info.num_series,
             primary_key_min: range.as_ref().map(|(min, _)| min.clone()),
             primary_key_max: range.map(|(_, max)| max),
             preserve_row_sequence: self.preserve_row_sequence,
-        }
+        })
     }
 }
 
 fn output_projection(
     target: &MultiRegionTarget,
     mut source: FlatSource,
-    cancellation: Arc<common_base::cancellation::CancellationHandle>,
+    cancellation: CancellationToken,
 ) -> Result<FlatSource> {
     let projection: Vec<_> = source
         .schema()

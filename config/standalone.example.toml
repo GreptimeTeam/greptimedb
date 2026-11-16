@@ -2,7 +2,7 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
-## The default column prefix for auto-created time index, value, and native histogram columns.
+## The default column prefix for auto-created time index, value, native histogram, and exemplar-label columns.
 ## Legacy OTLP summary columns keep their historical `greptime_` prefix.
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
@@ -34,13 +34,17 @@ default_column_prefix = "greptime"
 ## @toml2docs:none-default
 #+ user_provider = "static_user_provider:file:/path/to/users"
 
-## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+## Shared quota for concurrent write request bodies and messages (HTTP, gRPC, Flight)
+## plus retained decoder memory and estimated PB-to-Arrow conversion memory for ordinary-table batching.
+## A batch must fit together with its request's existing reservations; only additional memory is acquired.
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
 ## @toml2docs:none-default="0"
 #+ max_in_flight_write_bytes = "1GB"
 
 ## Policy when write bytes quota is exhausted.
 ## Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
+## Table-batch conversion never waits for additional memory. Under a wait policy,
+## temporary contention returns a retryable error; requests that cannot fit are rejected.
 #+ write_bytes_exhausted_policy = "wait"
 
 ## Initialize all regions in the background during the startup.
@@ -802,6 +806,11 @@ compress_manifest = false
 #+ max_background_flushes = 4
 
 ## Max number of running background compaction jobs (default: 1/4 of cpu cores).
+## The same limit bounds engine-wide admission of local compaction units and
+## the merge-output budget of each automatic per-region pick. Outputs sharing
+## inputs form one unit. Expired SSTs may add one expiration-only unit outside
+## the merge-output budget; it still consumes a slot in the same admission limit.
+## Manual compaction keeps using the request's parallelism.
 ## @toml2docs:none-default="Auto"
 #+ max_background_compactions = 2
 
@@ -1158,6 +1167,12 @@ cache_ttl = "10s"
 ## network, and logs. Default is false. Enable only for trusted pipeline authors.
 ## Applies to pipeline creation, execution, and dry-runs. Requires a restart.
 allow_vrl_host_access = false
+## Default for the HTTP log ingestion and pipeline dry-run `ignore_errors` parameter.
+## Explicit request values override this setting. Malformed input may be discarded,
+## and invalid custom timestamps in identity ingestion fall back to server time.
+## Pipeline execution errors are controlled separately by `skip_error`.
+## Default is false. Requires a restart.
+ignore_errors = false
 
 ## Configuration options for the event recorder.
 [event_recorder]

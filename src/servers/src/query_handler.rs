@@ -41,7 +41,9 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use operator::insert::PreparedMetricInserts;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
-use pipeline::{GreptimePipelineParams, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
+use pipeline::{
+    GreptimePipelineParams, Pipeline, PipelineInfo, PipelineOptions, PipelineVersion, PipelineWay,
+};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 use table::metadata::TableInfoRef;
@@ -284,6 +286,9 @@ pub trait PipelineHandler {
         table: &str,
         query_ctx: &QueryContext,
     ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
+
+    /// Returns the server's pipeline options.
+    fn pipeline_options(&self) -> &PipelineOptions;
 
     //// Build a pipeline from a string.
     fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline>;

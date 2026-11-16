@@ -55,7 +55,7 @@ impl From<NaiveDate> for Date {
 impl Display for Date {
     /// [Date] is formatted according to ISO-8601 standard.
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(abs_date) = NaiveDate::from_num_days_from_ce_opt(UNIX_EPOCH_FROM_CE + self.0) {
+        if let Some(abs_date) = self.to_chrono_date() {
             write!(f, "{}", abs_date.format("%F"))
         } else {
             write!(f, "Date({})", self.0)
@@ -93,7 +93,9 @@ impl Date {
     }
 
     pub fn to_chrono_date(&self) -> Option<NaiveDate> {
-        NaiveDate::from_num_days_from_ce_opt(UNIX_EPOCH_FROM_CE + self.0)
+        UNIX_EPOCH_FROM_CE
+            .checked_add(self.0)
+            .and_then(NaiveDate::from_num_days_from_ce_opt)
     }
 
     /// Format Date for given format and timezone.
@@ -215,6 +217,12 @@ mod tests {
         assert_eq!("1969-12-31", Date::new(-1).to_string());
         assert_eq!("1970-01-01", Date::new(0).to_string());
         assert_eq!("1970-02-12", Date::new(42).to_string());
+    }
+
+    #[test]
+    fn test_to_chrono_date_out_of_range() {
+        assert_eq!(None, Date::new(i32::MAX).to_chrono_date());
+        assert_eq!("Date(2147483647)", Date::new(i32::MAX).to_string());
     }
 
     #[test]

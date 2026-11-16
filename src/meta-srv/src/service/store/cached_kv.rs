@@ -344,7 +344,8 @@ impl TxnService for LeaderCachedKvBackend {
     async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
         let _ = self.create_new_version();
 
-        let res = self.store.txn(txn.clone()).await?;
+        // A transaction may commit even if the backend returns an error.
+        let res = self.store.txn(txn.clone()).await;
         self.create_new_version();
         let TxnRequest {
             success, failure, ..
@@ -367,7 +368,10 @@ impl TxnService for LeaderCachedKvBackend {
                 TxnOp::Get(_) => {}
             }
         }
-        self.invalid_keys(keys).await?;
+        let invalidation = self.invalid_keys(keys).await;
+        // Preserve the backend error after completing cache invalidation.
+        let res = res?;
+        invalidation?;
 
         Ok(res)
     }
@@ -420,12 +424,19 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum TxnError {
+        BeforeCommit,
+        AfterCommit,
+    }
+
     #[derive(Default)]
     struct ControlledBackend {
         inner: MemoryKvBackend<Error>,
         before_write: Pause,
         after_write: Pause,
         after_read: Pause,
+        txn_error: Mutex<Option<TxnError>>,
     }
 
     #[async_trait::async_trait]
@@ -433,9 +444,22 @@ mod tests {
         type Error = Error;
 
         async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
+            let error = self.txn_error.lock().unwrap().take();
             self.before_write.wait().await;
+            if matches!(error, Some(TxnError::BeforeCommit)) {
+                return common_meta::error::UnexpectedSnafu {
+                    err_msg: "injected transaction error",
+                }
+                .fail();
+            }
             let res = self.inner.txn(txn).await;
             self.after_write.wait().await;
+            if matches!(error, Some(TxnError::AfterCommit)) {
+                return common_meta::error::UnexpectedSnafu {
+                    err_msg: "injected transaction error",
+                }
+                .fail();
+            }
             res
         }
 
@@ -602,6 +626,86 @@ mod tests {
                 .pop()
         } else {
             store.get(KEY).await.unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_txn_error_invalidates_both_branches() {
+        const OTHER_KEY: &[u8] = b"__table_name/2";
+        for error in [TxnError::BeforeCommit, TxnError::AfterCommit] {
+            for success in [false, true] {
+                let backing = Arc::new(ControlledBackend::default());
+                let store = LeaderCachedKvBackend::with_always_leader(backing.clone());
+                for key in [KEY, OTHER_KEY] {
+                    store
+                        .put(PutRequest::new().with_key(key).with_value(b"old"))
+                        .await
+                        .unwrap();
+                    assert!(store.cache.get(key).await.unwrap().is_some());
+                }
+                *backing.txn_error.lock().unwrap() = Some(error);
+                let txn = Txn::new()
+                    .when(vec![Compare::with_value(
+                        KEY.to_vec(),
+                        CompareOp::Equal,
+                        if success {
+                            b"old".to_vec()
+                        } else {
+                            b"missing".to_vec()
+                        },
+                    )])
+                    .and_then(vec![TxnOp::Put(KEY.to_vec(), b"new".to_vec())])
+                    .or_else(vec![TxnOp::Delete(OTHER_KEY.to_vec())]);
+                let err = store.txn(txn).await.err().unwrap();
+                assert!(matches!(err, Error::Unexpected { err_msg, .. }
+                    if err_msg == "injected transaction error"));
+                for key in [KEY, OTHER_KEY] {
+                    assert!(store.cache.get(key).await.unwrap().is_none());
+                    assert_eq!(
+                        store.get(key).await.unwrap(),
+                        backing.inner.get(key).await.unwrap()
+                    );
+                }
+                let expected = if matches!(error, TxnError::AfterCommit) && success {
+                    b"new".as_slice()
+                } else {
+                    b"old".as_slice()
+                };
+                assert_eq!(store.get(KEY).await.unwrap().unwrap().value(), expected);
+                assert_eq!(
+                    store.get(OTHER_KEY).await.unwrap().is_none(),
+                    matches!(error, TxnError::AfterCommit) && !success
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_txn_error_invalidates_overlapping_cache_fill() {
+        for batch in [false, true] {
+            let backing = Arc::new(ControlledBackend::default());
+            backing
+                .inner
+                .put(PutRequest::new().with_key(KEY).with_value(b"old"))
+                .await
+                .unwrap();
+            let store = LeaderCachedKvBackend::with_always_leader(backing.clone());
+            *backing.txn_error.lock().unwrap() = Some(TxnError::AfterCommit);
+            let commit = backing.before_write.arm();
+            let writer =
+                store.txn(Txn::new().and_then(vec![TxnOp::Put(KEY.to_vec(), b"new".to_vec())]));
+            tokio::pin!(writer);
+            assert!(poll!(writer.as_mut()).is_pending());
+
+            let return_read = backing.after_read.arm();
+            let reader = read(&store, batch);
+            tokio::pin!(reader);
+            assert!(poll!(reader.as_mut()).is_pending());
+            commit.send(()).unwrap();
+            assert!(writer.await.is_err());
+            return_read.send(()).unwrap();
+            assert_eq!(reader.await.unwrap().value(), b"old");
+            assert_eq!(read(&store, batch).await.unwrap().value(), b"new");
         }
     }
 

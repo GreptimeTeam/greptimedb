@@ -138,6 +138,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
 |_| ]]_|
+| logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
@@ -166,6 +167,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
@@ -297,6 +299,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
 |_| ]]_|
+| logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
@@ -325,6 +328,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
@@ -487,6 +491,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_|_Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)_|
 |_|_TableScan: test_nano, partial_filters=[test_nano.j > TimestampNanosecond(-300000000000, None), test_nano.j <= TimestampNanosecond(10000000000, None)] |
 |_| ]]_|
+| logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
@@ -515,6 +520,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|

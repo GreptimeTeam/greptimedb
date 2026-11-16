@@ -1552,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn test_flat_compat_batch_compact_sparse() {
+    fn test_flat_compat_batch_compact_sparse_added_and_dropped_fields() {
         let mut actual_metadata = new_metadata(
             &[
                 (
@@ -1561,6 +1561,7 @@ mod tests {
                     ConcreteDataType::timestamp_millisecond_datatype(),
                 ),
                 (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (4, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[],
         );
@@ -1599,6 +1600,7 @@ mod tests {
         let sparse_k1 = encode_sparse_key(&[]);
         let input_columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(Int64Array::from(vec![300, 400])), // dropped field
             Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
             build_flat_test_pk_array(&[&sparse_k1, &sparse_k1]),
             Arc::new(UInt64Array::from_iter_values([1, 2])),
@@ -1613,6 +1615,11 @@ mod tests {
         );
         let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
 
+        // The physical read projection omits the dropped source field. Sparse
+        // conversion preserves this encoded layout, which goes directly to compat.
+        assert!(read_format.projected_index_by_id(4).is_none());
+        let input_batch = input_batch.project(&[0, 2, 3, 4, 5]).unwrap();
+        let input_batch = read_format.convert_batch(input_batch, None).unwrap();
         let result = compat_batch.compat(input_batch).unwrap();
 
         let expected_columns: Vec<ArrayRef> = vec![

@@ -178,7 +178,7 @@ def overview(path):
     return '\n'.join(lines)
 
 
-def audit(root, report, targets, mode, baseline=False):
+def audit(root, report, targets, mode, baseline=False, allow_trace_query_failures=False):
     data = json.loads(report.read_text())
     actual = {(p['target'], p.get('storage', {}).get('type'), p['role'])
               for w in data['workloads'] for p in w['participants']}
@@ -189,14 +189,28 @@ def audit(root, report, targets, mode, baseline=False):
                      for role in (['candidate', 'baseline'] if baseline else ['candidate'])}
     if actual != expected:
         raise ValueError(f'participant mismatch: expected {sorted(map(str, expected))}, got {sorted(map(str, actual))}')
+    query_failures = []
     for w in data['workloads']:
+        partial = allow_trace_query_failures and w.get('id') == 'traces'
+        if partial and not w['scenarios']:
+            raise ValueError('missing trace scenarios')
         for scenario in w['scenarios']:
+            if partial and {r['participant'] for r in scenario['results']} != {p['id'] for p in w['participants']}:
+                raise ValueError('missing trace participant results')
             for result in scenario['results']:
+                if partial and result.get('health') != 'recorded healthy snapshots':
+                    raise ValueError('missing or unhealthy trace evidence: ' + result['participant'])
                 queries = result['queries']
                 if not any(q['status'] == 'passed' for q in queries.values()):
                     raise ValueError('no successful measured queries: ' + result['participant'])
-                if any(q['status'] in ('failed', 'unavailable') for q in queries.values()):
+                if any(q['status'] == 'unavailable' or (q['status'] == 'failed' and not partial)
+                       for q in queries.values()):
                     raise ValueError('failed or unavailable queries: ' + result['participant'])
+                for query_id, query in queries.items():
+                    if query['status'] == 'failed':
+                        query_failures.append(dict(workload=w['id'], scenario=scenario['id'],
+                                                   participant=result['participant'], query=query_id,
+                                                   reason=query.get('reason', '')))
     for manifest_path in root.glob('o11ybench/*/run-manifest.json'):
         manifest = json.loads(manifest_path.read_text())
         if manifest.get('status') != 'passed':
@@ -215,10 +229,15 @@ def audit(root, report, targets, mode, baseline=False):
         if m.upper() not in text:
             raise ValueError('storage mode missing from saved summary: ' + m)
     result = dict(passed=True, participants=[dict(target=t, storage=m, role=role)
-                  for t, m, role in sorted(expected, key=str)], s3_arms=len(probes))
+                  for t, m, role in sorted(expected, key=str)], s3_arms=len(probes), query_failures=query_failures)
     (root / 'artifact-audit.json').write_text(json.dumps(result, indent=2) + '\n')
     lines = ['## Artifact validation', '', '- Selected participants: ' + str(len(expected)) + '; all present.',
              '- Query result coverage and S3 probe/inventory/cleanup: passed.', '']
+    if query_failures:
+        lines += ['- Collection completed with query failures; this is not an all-pass query run.', '']
+        lines += [f"- {f['participant']} / {f['query']}: failed (excluded from comparison)."
+                  for f in query_failures]
+        lines.append('')
     renderer = module(Path(__file__).with_name('agent-observability-summary.py'))
     rows = []
     for probe in probes:
@@ -243,10 +262,12 @@ def main():
         parser.add_argument('--root', type=Path, required=True)
         parser.add_argument('--report', type=Path, required=True)
         parser.add_argument('--targets', required=True)
+        parser.add_argument('--allow-trace-query-failures', action='store_true',
+                            help='Retain failed Traces queries after native validation; missing results still fail')
         args = parser.parse_args(sys.argv[2:])
         print(json.dumps(audit(args.root, args.report, args.targets.split(','),
                               os.environ.get('GREPTIMEDB_STORAGE', 'file'),
-                              os.environ.get('COMPARE_GREPTIMEDB') == 'true')))
+                              os.environ.get('COMPARE_GREPTIMEDB') == 'true', args.allow_trace_query_failures)))
         return
     if len(sys.argv) > 1 and sys.argv[1] == 'normalize-metrics':
         path = Path(sys.argv[2])

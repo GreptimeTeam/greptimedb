@@ -64,7 +64,7 @@ use crate::http::otlp::OtlpState;
 use crate::http::prom_store::PromStoreState;
 use crate::http::prometheus::{
     build_info_query, format_query, instant_query, label_values_query, labels_query,
-    metadata_query, parse_query, range_query, series_query,
+    metadata_query, parse_query, query_exemplars, range_query, series_query,
 };
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
@@ -240,9 +240,16 @@ pub async fn set_http_write_batching(
         .extensions()
         .get::<LogicalBatchingProtocols>()
         .is_some_and(|protocols| protocols.0.contains(&protocol));
+    let body_memory_bytes = req
+        .extensions()
+        .get::<memory_limit::BodyMemoryAccounting>()
+        .map(memory_limit::BodyMemoryAccounting::reserved_bytes_counter);
     if let Some(ctx) = req.extensions_mut().get_mut::<QueryContext>() {
         ctx.set_batching_enabled(enabled);
         ctx.set_logical_batching_enabled(logical_enabled);
+        if let Some(bytes) = body_memory_bytes {
+            ctx.set_body_memory_bytes(bytes);
+        }
     }
     next.run(req).await
 }
@@ -1458,6 +1465,10 @@ impl HttpServer {
             .route("/status/buildinfo", routing::get(build_info_query))
             .route("/query", routing::post(instant_query).get(instant_query))
             .route("/query_range", routing::post(range_query).get(range_query))
+            .route(
+                "/query_exemplars",
+                routing::post(query_exemplars).get(query_exemplars),
+            )
             .route("/labels", routing::post(labels_query).get(labels_query))
             .route("/metadata", routing::get(metadata_query))
             .route("/series", routing::post(series_query).get(series_query))

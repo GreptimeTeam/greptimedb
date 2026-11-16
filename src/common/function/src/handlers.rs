@@ -70,6 +70,14 @@ pub trait TableMutationHandler: Send + Sync {
         ctx: QueryContextRef,
     ) -> Result<AffectedRows>;
 
+    /// Cancels one identified compaction task on a table region.
+    async fn cancel_region_compaction(
+        &self,
+        region_id: RegionId,
+        task_id: String,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
+
     /// Discard all unflushed data from a table region.
     async fn discard_unflushed_data(
         &self,

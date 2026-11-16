@@ -266,6 +266,7 @@ async fn test_sql_not_provided() {
             State(api_state.clone()),
             Query(query),
             axum::Extension(ctx.clone()),
+            None,
             Form(http_handler::SqlQuery::default()),
         )
         .await
@@ -294,6 +295,7 @@ async fn test_sql_output_rows() {
             State(api_state.clone()),
             query,
             axum::Extension(ctx.clone()),
+            None,
             Form(http_handler::SqlQuery::default()),
         )
         .await;
@@ -397,6 +399,7 @@ async fn test_dashboard_sql_limit() {
             State(api_state.clone()),
             query,
             axum::Extension(ctx.clone()),
+            None,
             Form(http_handler::SqlQuery::default()),
         )
         .await;
@@ -441,6 +444,7 @@ async fn test_sql_form() {
             State(api_state.clone()),
             Query(http_handler::SqlQuery::default()),
             axum::Extension(ctx.clone()),
+            None,
             form,
         )
         .await;
@@ -750,6 +754,7 @@ async fn test_analyze_stream_worker_panic_emits_one_error_terminal() {
             ..Default::default()
         }),
         axum::Extension(ctx),
+        None,
         Ok(Form(http_handler::SqlQuery::default())),
     )
     .await;
@@ -791,6 +796,7 @@ async fn test_analyze_stream_worker_panic_after_metrics_uses_current_sequence() 
             ..Default::default()
         }),
         axum::Extension(ctx),
+        None,
         Ok(Form(http_handler::SqlQuery::default())),
     )
     .await;

@@ -85,6 +85,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to join a blocking task of the log store"))]
+    Join {
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Log store not started yet"))]
     IllegalState {
         #[snafu(implicit)]
@@ -446,6 +454,19 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Source WAL prefix {prefix} on {storage} does not hold the history of region {region_id}: {reason}. \
+         Check the source node prefix and whether its WAL objects were reclaimed or moved"
+    ))]
+    MissingSourceWalHistory {
+        region_id: RegionId,
+        prefix: String,
+        storage: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Object store WAL gave up its start object {} after refusing a region without its history, and accepts nothing more until it opens again",
         path
     ))]
@@ -510,11 +531,13 @@ impl ErrorExt for Error {
             | InvalidWalObjectStore { .. }
             | MismatchedWalPrefix { .. }
             | MissingWalHistory { .. }
+            | MissingSourceWalHistory { .. }
             | MismatchedWalRegion { .. }
             | IncompleteWalEntry { .. }
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
+            | Join { .. }
             | IllegalState { .. }
             | NoMaxValue { .. }
             | Cast { .. }

@@ -626,6 +626,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_cancel_compaction_through_handle() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        let request = RegionRequest {
+            header: Some(RegionRequestHeader::default()),
+            body: Some(region_request::Body::CancelCompaction(
+                api::v1::region::CancelCompactionRequest {
+                    region_id: 42,
+                    task_id: "cycle-id".into(),
+                },
+            )),
+        };
+        for affected_rows in [0, 1] {
+            let mut response = build_response(StatusCode::Success);
+            response.affected_rows = affected_rows;
+            server
+                .service
+                .responses
+                .lock()
+                .unwrap()
+                .push_back(Ok(response));
+            assert_eq!(
+                requester
+                    .handle(request.clone())
+                    .await
+                    .unwrap()
+                    .affected_rows,
+                affected_rows as usize
+            );
+        }
+        let requests = server.service.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for (actual, _, _) in requests.iter() {
+            assert_eq!(actual.body, request.body);
+        }
+    }
+
     fn build_insert_request() -> RegionRequest {
         RegionRequest {
             header: Some(RegionRequestHeader {

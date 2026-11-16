@@ -134,6 +134,19 @@ impl TableMutationHandler for TableMutationOperator {
             .context(query_error::TableMutationSnafu)
     }
 
+    async fn cancel_region_compaction(
+        &self,
+        region_id: RegionId,
+        task_id: String,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_cancel_region_compaction(region_id, task_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
     async fn discard_unflushed_data(
         &self,
         region_id: RegionId,

@@ -277,7 +277,7 @@ impl Fixture {
                 cache: Arc::new(CacheManager::default()),
                 config: self.config.clone(),
                 protection: protection.clone(),
-                cancellation: Arc::new(CancellationHandle::default()),
+                cancellation: CancellationToken::new(),
             },
             protection,
         )
@@ -447,6 +447,7 @@ fn write_request(
     format: FormatType,
 ) -> SstWriteRequest {
     SstWriteRequest {
+        index_build_inputs: None,
         op_type: OperationType::Flush,
         metadata,
         source,
@@ -542,7 +543,7 @@ async fn test_single_scan_routes_all_versions_without_folding(
             }
             for file in files {
                 assert!(protected.files.lock().unwrap().contains(&file.file_id()));
-                assert_eq!(1, file.level);
+                assert_eq!(0, file.level);
                 assert_eq!(id, file.region_id);
                 assert_eq!(id != fixture.metadata.region_id, file.preserve_row_sequence);
                 let rows = fixture
@@ -1008,6 +1009,7 @@ fn json2_hint(path: &str, data_type: ConcreteDataType) -> JsonTypeHint {
         data_type,
         inverted_index: false,
         skipping_index: None,
+        fulltext_index: None,
     }
 }
 
@@ -1663,7 +1665,7 @@ async fn test_streaming_merge_preserves_overlapping_versions_and_field_routing(
         for (file, info) in files.into_iter().zip(&output.sst_infos[&id]) {
             assert!(protection.files.lock().unwrap().contains(&file.file_id()));
             assert_eq!(id, file.region_id);
-            assert_eq!(1, file.level);
+            assert_eq!(0, file.level);
             assert_eq!(info.file_id, file.file_id);
             assert_eq!(info.num_rows as u64, file.num_rows);
             assert_eq!(info.file_size, file.file_size);
@@ -2000,7 +2002,7 @@ async fn test_interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibli
     }
 }
 
-struct CancelBeforeCreate(Arc<CancellationHandle>);
+struct CancelBeforeCreate(CancellationToken);
 
 #[async_trait::async_trait]
 impl SstWriteGuard for CancelBeforeCreate {

@@ -754,6 +754,7 @@ mod tests {
                 data_type: ConcreteDataType::int64_datatype(),
                 inverted_index: false,
                 skipping_index: None,
+                fulltext_index: None,
             }],
             None,
         )
@@ -789,12 +790,14 @@ mod tests {
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
                 JsonTypeHint {
                     path: vec!["payload.cpu".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
             ],
             None,

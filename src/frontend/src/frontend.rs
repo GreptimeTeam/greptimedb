@@ -59,11 +59,15 @@ pub struct FrontendOptions {
     /// New logical tables created under such a physical table inherit its unit.
     /// Options: "Second", "Millisecond" (default), "Microsecond", "Nanosecond".
     pub auto_create_physical_table_timestamp_unit: TimeUnit,
-    /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+    /// Shared quota for write bodies/messages, retained decoder memory, and estimated
+    /// ordinary-table batch conversion memory. A batch must fit alongside its request's
+    /// existing reservations; only additional memory is acquired.
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
     /// Policy when write bytes quota is exhausted.
     /// Options: "wait" (default, 10s), "wait(<duration>)", "fail"
+    /// Table-batch conversion never waits for additional memory. Under a wait policy,
+    /// temporary contention returns a retryable error; requests that cannot fit are rejected.
     pub write_bytes_exhausted_policy: OnExhaustedPolicy,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
@@ -342,12 +346,15 @@ mod tests {
     }
 
     #[test]
-    fn test_pipeline_host_access_config() {
+    fn test_pipeline_config() {
         let defaults: FrontendOptions = toml::from_str("").unwrap();
         assert!(!defaults.pipeline.allow_vrl_host_access);
+        assert!(!defaults.pipeline.ignore_errors);
         let options: FrontendOptions =
-            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true\nignore_errors = true")
+                .unwrap();
         assert!(options.pipeline.allow_vrl_host_access);
+        assert!(options.pipeline.ignore_errors);
         let serialized = toml::to_string(&options).unwrap();
         let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
         assert_eq!(options.pipeline, restored.pipeline);

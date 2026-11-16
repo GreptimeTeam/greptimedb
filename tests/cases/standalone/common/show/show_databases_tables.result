@@ -36,6 +36,7 @@ SHOW TABLES;
 | column_privileges                     |
 | column_statistics                     |
 | columns                               |
+| compaction_tasks                      |
 | engines                               |
 | events                                |
 | files                                 |
@@ -93,6 +94,7 @@ SHOW FULL TABLES;
 | column_privileges                     | LOCAL TEMPORARY |
 | column_statistics                     | LOCAL TEMPORARY |
 | columns                               | LOCAL TEMPORARY |
+| compaction_tasks                      | LOCAL TEMPORARY |
 | engines                               | LOCAL TEMPORARY |
 | events                                | LOCAL TEMPORARY |
 | files                                 | LOCAL TEMPORARY |
@@ -144,6 +146,7 @@ SHOW TABLE STATUS;
 |column_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|greptime.semantic.table_scope=global||
 |column_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|greptime.semantic.table_scope=global||
 |columns||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|greptime.semantic.table_scope=catalog||
+|compaction_tasks||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|greptime.semantic.table_scope=global||
 |engines||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|greptime.semantic.table_scope=public_global||
 |events||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|greptime.semantic.table_scope=global||
 |files||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|greptime.semantic.table_scope=global||

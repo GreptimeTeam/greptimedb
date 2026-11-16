@@ -594,7 +594,9 @@ mod tests {
             LifecycleChange::Remove => {
                 regions.remove_region(region.region_id).unwrap();
             }
-            LifecycleChange::Demote => region.set_role(RegionRole::Follower),
+            LifecycleChange::Demote => {
+                region.set_role(RegionRole::Follower);
+            }
             LifecycleChange::Stop => state.stop(),
         }
         release.notify_one();
@@ -813,6 +815,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[],
             crate::test_util::new_noop_file_purger(),

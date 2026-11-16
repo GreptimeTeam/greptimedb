@@ -347,6 +347,132 @@ async fn test_schema_validating() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_database_existence_is_checked_after_authentication_and_authorization() -> Result<()> {
+    let provider = Arc::new(MixedAuthProvider {
+        scram_verifier: PgScramSha256Verifier::from_password(
+            MIXED_AUTH_SCRAM_PASSWORD,
+            b"database-auth-salt",
+            4096,
+        )
+        .unwrap(),
+        selections: Mutex::new(HashMap::new()),
+        authorize_calls: Mutex::new(HashMap::new()),
+    });
+    let (server, port) = start_test_server_with_user_provider(provider, Default::default()).await?;
+    for database in [DEFAULT_SCHEMA_NAME, "missing", "missing_catalog-public"] {
+        for (user, password, authenticated) in [
+            (MIXED_AUTH_CLEARTEXT_USER, "wrong", false),
+            (MIXED_AUTH_SCRAM_USER, "wrong", false),
+            ("unknown", "wrong", false),
+            (MIXED_AUTH_DENIED_USER, "scram-password", false),
+            (
+                MIXED_AUTH_CLEARTEXT_USER,
+                MIXED_AUTH_CLEARTEXT_PASSWORD,
+                true,
+            ),
+            (MIXED_AUTH_SCRAM_USER, "scram-password", true),
+        ] {
+            let result = tokio_postgres::Config::new()
+                .host("127.0.0.1")
+                .port(port)
+                .user(user)
+                .password(password)
+                .dbname(database)
+                .connect_timeout(Duration::from_secs(2))
+                .connect(NoTls)
+                .await;
+            if authenticated && database == DEFAULT_SCHEMA_NAME {
+                let (client, connection) = result.unwrap();
+                let task = tokio::spawn(connection);
+                client.simple_query("SELECT 1").await.unwrap();
+                drop(client);
+                task.await.unwrap().unwrap();
+            } else {
+                let error = match result {
+                    Err(error) => error,
+                    Ok(_) => panic!("unexpected successful login for {user} in {database}"),
+                };
+                assert_eq!(
+                    Some(if !authenticated {
+                        &SqlState::INVALID_PASSWORD
+                    } else if database == "missing_catalog-public" {
+                        &SqlState::INTERNAL_ERROR
+                    } else {
+                        &SqlState::INVALID_CATALOG_NAME
+                    }),
+                    error.code(),
+                    "{user} in {database}: {error}"
+                );
+            }
+        }
+    }
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_startup_database_backend_error_closes_connection() -> Result<()> {
+    let provider = Arc::new(MixedAuthProvider {
+        scram_verifier: PgScramSha256Verifier::from_password(
+            MIXED_AUTH_SCRAM_PASSWORD,
+            b"database-auth-salt",
+            4096,
+        )
+        .unwrap(),
+        selections: Mutex::new(HashMap::new()),
+        authorize_calls: Mutex::new(HashMap::new()),
+    });
+    let (server, port) = start_test_server_with_user_provider(provider, Default::default()).await?;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    // The in-memory catalog reports an error for an unknown catalog, exercising
+    // the backend-error path after successful authentication and authorization.
+    let mut startup = 196608i32.to_be_bytes().to_vec();
+    startup.extend_from_slice(
+        format!("user\0{MIXED_AUTH_CLEARTEXT_USER}\0database\0missing_catalog-public\0\0")
+            .as_bytes(),
+    );
+    stream
+        .write_all(&((startup.len() + 4) as i32).to_be_bytes())
+        .await
+        .unwrap();
+    stream.write_all(&startup).await.unwrap();
+    let mut header = [0; 5];
+    stream.read_exact(&mut header).await.unwrap();
+    assert_eq!(b'R', header[0]);
+    let mut body = vec![0; i32::from_be_bytes(header[1..].try_into().unwrap()) as usize - 4];
+    stream.read_exact(&mut body).await.unwrap();
+    assert_eq!(3i32.to_be_bytes(), body.as_slice());
+    let password = format!("{MIXED_AUTH_CLEARTEXT_PASSWORD}\0");
+    let mut message = vec![b'p'];
+    message.extend_from_slice(&((password.len() + 4) as i32).to_be_bytes());
+    message.extend_from_slice(password.as_bytes());
+    stream.write_all(&message).await.unwrap();
+    stream.read_exact(&mut header).await.unwrap();
+    assert_eq!(b'E', header[0]);
+    let mut body = vec![0; i32::from_be_bytes(header[1..].try_into().unwrap()) as usize - 4];
+    stream.read_exact(&mut body).await.unwrap();
+    assert!(body.windows(7).any(|part| part == b"SFATAL\0"));
+    assert!(body.windows(7).any(|part| part == b"CXX000\0"));
+    // A client that ignores the startup error must not enter the query loop.
+    let query = b"SELECT 1\0";
+    let mut message = vec![b'Q'];
+    message.extend_from_slice(&((query.len() + 4) as i32).to_be_bytes());
+    message.extend_from_slice(query);
+    let _ = stream.write_all(&message).await;
+    let mut response = [0];
+    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut response))
+        .await
+        .unwrap();
+    assert!(
+        matches!(read, Ok(0))
+            || matches!(read, Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+        "{read:?}"
+    );
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_scram_sha256_auth() -> Result<()> {
     let verifier =
         format_pg_scram_sha256_password_verifier(b"greptime", b"pg-scram-salt", 4096).unwrap();

@@ -21,7 +21,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_procedure::{ProcedureContext, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::info;
 use common_time::util::current_time_millis;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::Mutex;
 
 use crate::error::{self, Result};
@@ -161,6 +161,14 @@ impl DrainDatanodeManager {
             .fail();
         }
 
+        // The budget starts at submission and must fit the persisted absolute deadline.
+        let deadline_ms = i64::try_from(timeout.as_millis())
+            .ok()
+            .and_then(|timeout_ms| current_time_millis().checked_add(timeout_ms))
+            .context(error::InvalidArgumentsSnafu {
+                err_msg: "the timeout exceeds the supported deadline range",
+            })?;
+
         self.ensure_ready()?;
         let Some(guard) = self.tracker.insert_running_procedure(&task) else {
             return error::DrainDatanodeRunningSnafu {
@@ -176,7 +184,7 @@ impl DrainDatanodeManager {
             strategy: task.strategy,
             // The budget starts when the task is submitted, so neither a slow start nor a
             // restart extends it.
-            deadline_ms: current_time_millis() + timeout.as_millis() as i64,
+            deadline_ms,
         };
         let procedure = DrainDatanodeProcedure::new(self.context(persistent_ctx), vec![guard]);
         let procedure_with_id =
@@ -698,21 +706,38 @@ mod tests {
             assert!(matches!(error, error::Error::InvalidArguments { .. }));
         }
 
-        // The timeout must be greater than zero.
-        let error = manager
-            .submit_procedure(
-                common_procedure::ProcedureContext::default(),
-                DrainDatanodeProcedureTask {
-                    node_id: 1,
-                    target_node_id: Some(2),
-                    parallelism: DEFAULT_PARALLELISM,
-                    strategy: DrainDatanodeStrategy::FailFast,
-                    timeout: Some(Duration::ZERO),
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(error, error::Error::InvalidArguments { .. }));
+        // Reject zero, millisecond conversion overflow, and absolute deadline overflow.
+        for timeout in [
+            Duration::ZERO,
+            Duration::from_millis(i64::MAX as u64 + 1),
+            Duration::from_millis(i64::MAX as u64),
+        ] {
+            let error = manager
+                .submit_procedure(
+                    common_procedure::ProcedureContext::default(),
+                    DrainDatanodeProcedureTask {
+                        timeout: Some(timeout),
+                        ..task()
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, error::Error::InvalidArguments { .. }));
+            assert!(!manager.tracker.contains(1));
+        }
+        assert!(
+            env.procedure_manager()
+                .list_procedures()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            env.node_scheduling_manager
+                .is_schedulable(NodeSchedulingRole::Datanode, 1)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

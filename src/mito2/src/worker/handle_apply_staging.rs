@@ -14,15 +14,12 @@
 
 use chrono::Utc;
 use common_telemetry::{debug, info};
-use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_request::ApplyStagingManifestRequest;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
-use crate::error::{
-    RegionStateSnafu, Result, SerdeJsonSnafu, StagingPartitionExprMismatchSnafu, UnexpectedSnafu,
-};
+use crate::error::{RegionStateSnafu, Result, StagingPartitionExprMismatchSnafu, UnexpectedSnafu};
 use crate::manifest::action::{RegionEdit, RegionManifest};
 use crate::manifest::storage::manifest_dir;
 use crate::manifest::storage::staging::{StagingBlobStorage, staging_blob_path};
@@ -30,6 +27,8 @@ use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, RegionEditRequest, WorkerRequest, WorkerRequestWithTime};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::RegionWorkerLoop;
+use crate::worker::drain_ended_staging;
+use crate::worker::handle_reload::notify_if_fenced;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_apply_staging_manifest_request(
@@ -118,7 +117,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
 
-            let files_to_add = staging_manifest.files.values().cloned().collect::<Vec<_>>();
+            let files_to_add = staging_manifest
+                .files
+                .values()
+                .map(|meta| meta.as_ref().clone())
+                .collect::<Vec<_>>();
             let edit = RegionEdit {
                 files_to_add,
                 files_to_remove: vec![],
@@ -127,6 +130,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             };
 
             let (tx, rx) = oneshot::channel();
@@ -140,7 +144,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         region_id, edit,
                         // we don't need to preload sst cache during repartition, as it may cause extra network overhead.
                         false, tx,
-                    ),
+                    )
+                    .for_staging(request.partition_expr),
                 )))
                 .await;
 
@@ -151,15 +156,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender.send(result.map(|_| 0));
                     return;
                 };
-                let mut manager = region.manifest_ctx.manifest_manager.write().await;
-                let hook_payload = match region.exit_staging_on_success(&mut manager).await {
+                let manager = region.manifest_ctx.manifest_manager.write().await;
+                let drain = drain_ended_staging(&worker_sender, region_id);
+                let hook_payload = match region.end_staging(manager, drain).await {
                     Ok(payload) => payload,
                     Err(e) => {
+                        notify_if_fenced(&worker_sender, &region).await;
                         sender.send(Err(e));
                         return;
                     }
                 };
-                drop(manager);
                 if let Some(pending) = hook_payload {
                     pending.fire().await;
                 }
@@ -193,6 +199,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         let staging_manifest = staging_blob_storage.get(manifest_path).await?;
 
-        serde_json::from_slice::<RegionManifest>(&staging_manifest).context(SerdeJsonSnafu)
+        RegionManifest::decode(&staging_manifest)
     }
 }

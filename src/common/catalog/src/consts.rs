@@ -128,6 +128,8 @@ pub const INFORMATION_SCHEMA_PLUGINS_TABLE_ID: u32 = 47;
 pub const INFORMATION_SCHEMA_USER_PRIVILEGES_TABLE_ID: u32 = 48;
 /// id for information_schema.PROCESSLIST (for mysql)
 pub const INFORMATION_SCHEMA_PROCESSLIST_TABLE_ID: u32 = 49;
+/// Id for information_schema.compaction_tasks.
+pub const INFORMATION_SCHEMA_COMPACTION_TASKS_TABLE_ID: u32 = 50;
 
 // ----- End of information_schema tables -----
 

@@ -14,6 +14,7 @@
 
 mod cluster_info;
 pub mod columns;
+mod compaction_tasks;
 pub mod flow_statistics;
 pub mod flows;
 mod information_memory_table;
@@ -58,6 +59,7 @@ use lazy_static::lazy_static;
 use paste::paste;
 use process_list::InformationSchemaProcessList;
 use region_info::InformationSchemaRegionInfo;
+use store_api::compaction_task::CompactionTaskEntry;
 use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
@@ -74,6 +76,7 @@ use crate::CatalogManager;
 use crate::error::Error;
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
+use crate::system_schema::information_schema::compaction_tasks::InformationSchemaCompactionTasks;
 use crate::system_schema::information_schema::flow_statistics::InformationSchemaFlowStatistics;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
@@ -312,6 +315,9 @@ impl InformationSchemaProvider {
                     self.catalog_manager.clone(),
                 ),
             ) as _),
+            COMPACTION_TASKS => Some(Arc::new(InformationSchemaCompactionTasks::new(
+                self.catalog_manager.clone(),
+            )) as _),
             REGION_INFO => Some(Arc::new(InformationSchemaRegionInfo::new(
                 self.catalog_manager.clone(),
             )) as _),
@@ -382,6 +388,7 @@ impl InformationSchemaProvider {
                 CLUSTER_INFO,
                 PROCEDURE_INFO,
                 REGION_STATISTICS,
+                COMPACTION_TASKS,
                 REGION_INFO,
                 SSTS_MANIFEST,
                 SSTS_STORAGE,
@@ -506,6 +513,8 @@ pub struct DatanodeInspectRequest {
 /// The kind of the datanode inspect request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatanodeInspectKind {
+    /// Live compaction cycles.
+    CompactionTasks,
     /// List SST entries recorded in manifest
     SstManifest,
     /// List SST entries discovered in storage layer
@@ -520,6 +529,7 @@ impl DatanodeInspectRequest {
     /// Builds a logical plan for the datanode inspect request.
     pub fn build_plan(self) -> std::result::Result<LogicalPlan, DataFusionError> {
         match self.kind {
+            DatanodeInspectKind::CompactionTasks => CompactionTaskEntry::build_plan(self.scan),
             DatanodeInspectKind::SstManifest => ManifestSstEntry::build_plan(self.scan),
             DatanodeInspectKind::SstStorage => StorageSstEntry::build_plan(self.scan),
             DatanodeInspectKind::SstIndexMeta => PuffinIndexMetaEntry::build_plan(self.scan),
@@ -704,11 +714,11 @@ mod tests {
             // An extension replacing a built-in supplies the replacement table's scope.
             let provider = provider.with_extra_table_factories(factories.clone());
             let expected_count =
-                44 + usize::from(with_process_manager) + usize::from(cfg!(feature = "enterprise"))
+                45 + usize::from(with_process_manager) + usize::from(cfg!(feature = "enterprise"))
                     - if catalog == DEFAULT_CATALOG_NAME {
                         0
                     } else {
-                        8
+                        9
                     };
             assert_eq!(provider.tables().len(), expected_count);
             for (name, table) in provider.tables() {
@@ -821,6 +831,29 @@ mod tests {
                 .information_schema_provider()
                 .tables()
                 .contains_key("visible_a")
+        );
+    }
+
+    #[test]
+    fn test_compaction_tasks_build_plan() {
+        let request = DatanodeInspectRequest {
+            kind: DatanodeInspectKind::CompactionTasks,
+            scan: ScanRequest {
+                projection: Some(vec![0]),
+                filters: vec![
+                    datafusion::logical_expr::col("state")
+                        .eq(datafusion::logical_expr::lit("running")),
+                ],
+                limit: Some(1),
+                ..Default::default()
+            },
+        };
+        let plan = request.build_plan().unwrap();
+        assert_eq!(plan.schema().fields().len(), 1);
+        assert!(
+            plan.display_indent()
+                .to_string()
+                .contains("__compaction_tasks")
         );
     }
 
