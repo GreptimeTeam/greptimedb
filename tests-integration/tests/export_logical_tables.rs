@@ -1505,7 +1505,9 @@ async fn export_http(instance: Arc<Instance>) -> (String, tokio::task::JoinHandl
     (addr, task)
 }
 
-struct FailCopyExport;
+struct FailCopyExport {
+    all_jobs: bool,
+}
 
 impl servers::interceptor::SqlQueryInterceptor for FailCopyExport {
     type Error = frontend::error::Error;
@@ -1518,10 +1520,16 @@ impl servers::interceptor::SqlQueryInterceptor for FailCopyExport {
     ) -> Result<(), Self::Error> {
         use sql::statements::copy::{Copy, CopyDatabase};
         use sql::statements::statement::Statement;
-        if matches!(
+        let copy_export = matches!(
             statement,
             Some(Statement::Copy(Copy::CopyDatabase(CopyDatabase::To(_))))
-        ) {
+        );
+        let other_job = matches!(
+            statement,
+            Some(Statement::ShowCreateTable(_))
+                | Some(Statement::Copy(Copy::CopyDatabase(CopyDatabase::From(_))))
+        );
+        if copy_export || (self.all_jobs && other_job) {
             return Err(operator::error::InvalidDatabaseExportSnafu {
                 reason: "injected COPY export failure",
             }
@@ -1536,7 +1544,9 @@ impl servers::interceptor::SqlQueryInterceptor for FailCopyExport {
 async fn data_cli_propagates_copy_failures() {
     use servers::interceptor::SqlQueryInterceptorRef;
     let plugins = common_base::Plugins::new();
-    plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(FailCopyExport));
+    plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(FailCopyExport {
+        all_jobs: false,
+    }));
     let standalone = GreptimeDbStandaloneBuilder::new("cli_copy_failures")
         .with_plugin(plugins)
         .build()
@@ -1619,6 +1629,100 @@ async fn data_cli_propagates_copy_failures() {
         format!("{error:?}").contains("SQL request failed"),
         "{error:?}"
     );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn data_cli_logs_all_failed_schema_jobs() {
+    use common_telemetry::tracing::instrument::WithSubscriber;
+    use servers::interceptor::SqlQueryInterceptorRef;
+
+    let plugins = common_base::Plugins::new();
+    plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(FailCopyExport {
+        all_jobs: true,
+    }));
+    let standalone = GreptimeDbStandaloneBuilder::new("cli_failed_schema_jobs")
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    let schemas = ["public", "other_schema"];
+    sql(instance, "CREATE DATABASE other_schema").await;
+    for schema in schemas {
+        sql(
+            instance,
+            &format!("CREATE TABLE {schema}.t (ts TIMESTAMP TIME INDEX)"),
+        )
+        .await;
+    }
+    let (addr, server) = export_http(instance.clone()).await;
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    for (command, target, path_arg, message) in [
+        (
+            "export",
+            "schema",
+            "--output-dir",
+            "Failed to export database schema",
+        ),
+        (
+            "export",
+            "data",
+            "--output-dir",
+            "Failed to export database data",
+        ),
+        (
+            "import",
+            "data",
+            "--input-dir",
+            "Failed to import copy_from.sql for database",
+        ),
+    ] {
+        let path = destination.path().join(format!("{command}-{target}"));
+        if command == "import" {
+            for schema in schemas {
+                let directory = path.join("greptime").join(schema);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    directory.join("copy_from.sql"),
+                    format!(
+                        "COPY DATABASE {schema} FROM '<PATH/TO/FILES>' WITH (FORMAT='parquet');"
+                    ),
+                )
+                .unwrap();
+            }
+        }
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = common_telemetry::tracing_subscriber::fmt()
+            .with_max_level(common_telemetry::tracing::Level::ERROR)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(log.reopen().unwrap())
+            .finish();
+        let result = run_data_cli(&[
+            command,
+            "--addr",
+            &addr,
+            "--database",
+            "greptime",
+            "--target",
+            target,
+            path_arg,
+            path.to_str().unwrap(),
+            "--no-proxy",
+        ])
+        .with_subscriber(subscriber)
+        .await;
+        assert!(result.is_err(), "{command} {target} unexpectedly succeeded");
+        let logs = std::fs::read_to_string(log.path()).unwrap();
+        for schema in schemas {
+            let expected = format!("{message} greptime.{schema}");
+            assert_eq!(
+                logs.lines().filter(|line| line.contains(&expected)).count(),
+                1,
+                "{logs}"
+            );
+        }
+    }
     server.abort();
 }
 

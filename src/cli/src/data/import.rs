@@ -148,11 +148,11 @@ impl Import {
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_count);
-        for schema in db_names {
+        for schema in &db_names {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                let database_input_dir = self.catalog_path().join(&schema);
+                let database_input_dir = self.catalog_path().join(schema);
                 let sql_file = database_input_dir.join(filename);
                 let mut sql = tokio::fs::read_to_string(sql_file)
                     .await
@@ -161,9 +161,9 @@ impl Import {
                     info!("Empty `{filename}` {database_input_dir:?}");
                 } else {
                     if filename == "copy_from.sql" {
-                        sql = self.rewrite_copy_database_sql(&schema, &sql)?;
+                        sql = self.rewrite_copy_database_sql(schema, &sql)?;
                     }
-                    let db = exec_db.unwrap_or(&schema);
+                    let db = exec_db.unwrap_or(schema);
                     self.database_client.sql(&sql, db).await?;
                     info!("Imported `{filename}` for database {schema}");
                 }
@@ -173,8 +173,10 @@ impl Import {
         }
 
         let results = futures::future::join_all(tasks).await;
-        for error in results.iter().filter_map(|result| result.as_ref().err()) {
-            error!(error; "Failed to import {filename}");
+        for (schema, result) in db_names.iter().zip(&results) {
+            if let Err(error) = result {
+                error!(error; "Failed to import {filename} for database {}.{schema}", self.catalog);
+            }
         }
         for result in results {
             result?;

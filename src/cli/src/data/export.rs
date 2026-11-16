@@ -379,14 +379,14 @@ impl Export {
         let operator = Arc::new(self.build_prefer_fs_operator().await?);
         let mut tasks = Vec::with_capacity(db_names.len());
 
-        for schema in db_names {
+        for schema in &db_names {
             let semaphore_moved = semaphore.clone();
             let export_self = self.clone();
             let operator = operator.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
                 let (metric_physical_tables, remaining_tables, views) = export_self
-                    .get_table_list(&export_self.catalog, &schema)
+                    .get_table_list(&export_self.catalog, schema)
                     .await?;
 
                 // Create directory if needed for file system storage
@@ -395,7 +395,7 @@ impl Export {
                     operator.create_dir(&db_dir).await.context(OpenDalSnafu)?;
                 }
 
-                let file_path = export_self.get_file_path(&schema, "create_tables.sql");
+                let file_path = export_self.get_file_path(schema, "create_tables.sql");
                 let mut content = String::new();
                 let objects = metric_physical_tables
                     .iter()
@@ -409,7 +409,7 @@ impl Export {
                 append_schema_ddl(
                     &export_self.database_client,
                     &export_self.catalog,
-                    &schema,
+                    schema,
                     objects,
                     &mut content,
                 )
@@ -432,8 +432,10 @@ impl Export {
         }
 
         let results = futures::future::join_all(tasks).await;
-        for error in results.iter().filter_map(|result| result.as_ref().err()) {
-            error!(error; "Failed to export database schema");
+        for (schema, result) in db_names.iter().zip(&results) {
+            if let Err(error) = result {
+                error!(error; "Failed to export database schema {}.{schema}", self.catalog);
+            }
         }
         for result in results {
             result?;
@@ -474,7 +476,7 @@ impl Export {
         let fs_first_operator = Arc::new(self.build_prefer_fs_operator().await?);
         let with_options = build_with_options(&self.start_time, &self.end_time, self.parallelism);
 
-        for schema in db_names {
+        for schema in &db_names {
             let semaphore_moved = semaphore.clone();
             let export_self = self.clone();
             let with_options_clone = with_options.clone();
@@ -492,7 +494,7 @@ impl Export {
 
                 let (path, connection_part) = export_self
                     .storage_type
-                    .get_storage_path(&export_self.catalog, &schema);
+                    .get_storage_path(&export_self.catalog, schema);
 
                 // Execute COPY DATABASE TO command
                 let sql = format!(
@@ -532,7 +534,7 @@ impl Export {
                     }
                 };
 
-                let copy_from_path = export_self.get_file_path(&schema, "copy_from.sql");
+                let copy_from_path = export_self.get_file_path(schema, "copy_from.sql");
                 export_self
                     .write_to_storage(
                         &fs_first_operator,
@@ -553,8 +555,10 @@ impl Export {
         }
 
         let results = futures::future::join_all(tasks).await;
-        for error in results.iter().filter_map(|result| result.as_ref().err()) {
-            error!(error; "Failed to export database data");
+        for (schema, result) in db_names.iter().zip(&results) {
+            if let Err(error) = result {
+                error!(error; "Failed to export database data {}.{schema}", self.catalog);
+            }
         }
         for result in results {
             result?;
