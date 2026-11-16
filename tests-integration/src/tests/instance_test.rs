@@ -6205,3 +6205,53 @@ async fn test_exemplar_cross_schema_exact_identity() {
     }
     assert!(encoded.contains("\"timestamp\":-0.001"), "{encoded}");
 }
+
+/// A standalone query over a table with more than one region must go through the in-process
+/// grouped-read consumer. The planner selects `GroupRead` for this plain projection; before the
+/// local `RegionServer::handle_read` learned to consume it, this query failed as an unsupported
+/// extension before the region scans ran.
+#[apply(standalone_instance_case)]
+async fn test_standalone_grouped_region_read(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE standalone_grouped_read (
+    ts TIMESTAMP(3) TIME INDEX,
+    host STRING,
+    v DOUBLE,
+    PRIMARY KEY (host)
+)
+PARTITION ON COLUMNS (host) (
+    host < 'b',
+    host >= 'b' AND host < 'c',
+    host >= 'c'
+)
+ENGINE = mito
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"
+INSERT INTO standalone_grouped_read VALUES
+    (1, 'a', 1.0),
+    (2, 'b', 2.0),
+    (3, 'c', 3.0)
+"#,
+    )
+    .await;
+
+    let output = execute_sql(&frontend, "SELECT host, v FROM standalone_grouped_read").await;
+    check_unordered_output_stream(
+        output,
+        r#"+------+-----+
+| host | v   |
++------+-----+
+| a    | 1.0 |
+| b    | 2.0 |
+| c    | 3.0 |
++------+-----+"#,
+    )
+    .await;
+}

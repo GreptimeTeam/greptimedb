@@ -228,6 +228,8 @@ pub struct RecordBatchStreamAdapter {
     metrics_2: Metrics,
     query_load_region_id: Option<u64>,
     query_stat_counters: Option<RegionQueryStatCounters>,
+    /// Per-region counters and independent scan plan metric sources for a composite plan.
+    query_stat_owners: Vec<RegionQueryStatOwner>,
     /// Display plan and metrics in verbose mode.
     explain_verbose: bool,
     span: Span,
@@ -240,6 +242,14 @@ pub struct RegionQueryStatCounters {
     pub query_cpu_time: Arc<AtomicU64>,
     /// The total scanned bytes.
     pub query_scanned_bytes: Arc<AtomicU64>,
+}
+
+/// One region-owned counter set paired with the scan plan that measures it.
+#[derive(Clone)]
+pub struct RegionQueryStatOwner {
+    pub region_id: u64,
+    pub counters: RegionQueryStatCounters,
+    pub plan: Arc<dyn ExecutionPlan>,
 }
 
 /// Json encoded metrics. Contains metric from a whole plan tree.
@@ -261,6 +271,7 @@ impl RecordBatchStreamAdapter {
             metrics_2: Metrics::Unavailable,
             query_load_region_id: None,
             query_stat_counters: None,
+            query_stat_owners: Vec::new(),
             explain_verbose: false,
             span: Span::current(),
         })
@@ -277,6 +288,7 @@ impl RecordBatchStreamAdapter {
             metrics_2: Metrics::Unavailable,
             query_load_region_id: None,
             query_stat_counters: None,
+            query_stat_owners: Vec::new(),
             explain_verbose: false,
             span: subspan,
         })
@@ -287,6 +299,17 @@ impl RecordBatchStreamAdapter {
     }
 
     fn record_query_stats_on_drop(&self) {
+        if !self.query_stat_owners.is_empty() {
+            for owner in &self.query_stat_owners {
+                let metrics = collect_lightweight_query_load_metrics(
+                    owner.plan.as_ref(),
+                    Some(owner.region_id),
+                );
+                record_query_stats(&owner.counters, &metrics);
+            }
+            return;
+        }
+
         let Some(counters) = &self.query_stat_counters else {
             return;
         };
@@ -312,6 +335,10 @@ impl RecordBatchStreamAdapter {
 
     pub fn set_query_stat_counters(&mut self, counters: Option<RegionQueryStatCounters>) {
         self.query_stat_counters = counters;
+    }
+
+    pub fn set_query_stat_owners(&mut self, owners: Vec<RegionQueryStatOwner>) {
+        self.query_stat_owners = owners;
     }
 
     /// Set the verbose mode for displaying plan and metrics.
@@ -1208,6 +1235,7 @@ mod test {
             ),
             query_load_region_id: None,
             query_stat_counters: Some(counters.clone()),
+            query_stat_owners: Vec::new(),
             explain_verbose: false,
             span: Span::current(),
         };
@@ -1387,6 +1415,123 @@ mod test {
     }
 
     #[test]
+    fn test_owner_path_updates_each_source_once_and_leaves_unexecuted_region_untouched() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let arrow_schema = schema.arrow_schema().clone();
+        let counters = || RegionQueryStatCounters {
+            query_cpu_time: Arc::new(AtomicU64::new(0)),
+            query_scanned_bytes: Arc::new(AtomicU64::new(0)),
+        };
+        let first = counters();
+        let second = counters();
+        let unexecuted = counters();
+        let owners = vec![
+            RegionQueryStatOwner {
+                region_id: 1,
+                counters: first.clone(),
+                plan: Arc::new(TestMetricsExec::with_output_bytes(
+                    arrow_schema.clone(),
+                    &[24],
+                )),
+            },
+            RegionQueryStatOwner {
+                region_id: 1,
+                counters: second.clone(),
+                plan: Arc::new(TestMetricsExec::with_output_bytes(
+                    arrow_schema.clone(),
+                    &[48],
+                )),
+            },
+            RegionQueryStatOwner {
+                region_id: 2,
+                counters: unexecuted.clone(),
+                plan: Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                    arrow_schema,
+                )),
+            },
+        ];
+        let df_stream = Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema.arrow_schema().clone(),
+                futures::stream::empty::<datafusion::error::Result<DfRecordBatch>>(),
+            ),
+        );
+        let adapter = RecordBatchStreamAdapter {
+            schema,
+            stream: df_stream,
+            metrics: None,
+            metrics_2: Metrics::Resolved(RecordBatchMetrics::default()),
+            query_load_region_id: None,
+            query_stat_counters: None,
+            query_stat_owners: owners,
+            explain_verbose: false,
+            span: Span::current(),
+        };
+        // Repeated snapshots must not update owner counters; only terminal drop does, once.
+        let _ = adapter.metrics();
+        let _ = adapter.metrics();
+        drop(adapter);
+        assert_eq!(first.query_cpu_time.load(Ordering::Relaxed), 42);
+        assert_eq!(first.query_scanned_bytes.load(Ordering::Relaxed), 24);
+        assert_eq!(second.query_cpu_time.load(Ordering::Relaxed), 42);
+        assert_eq!(second.query_scanned_bytes.load(Ordering::Relaxed), 48);
+        assert_eq!(unexecuted.query_cpu_time.load(Ordering::Relaxed), 0);
+        assert_eq!(unexecuted.query_scanned_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_single_region_whole_plan_cpu_is_not_lost() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let df_stream = Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema.arrow_schema().clone(),
+                futures::stream::empty::<datafusion::error::Result<DfRecordBatch>>(),
+            ),
+        );
+        let counters = RegionQueryStatCounters {
+            query_cpu_time: Arc::new(AtomicU64::new(10)),
+            query_scanned_bytes: Arc::new(AtomicU64::new(20)),
+        };
+        let metrics = RecordBatchMetrics {
+            // Whole-plan CPU includes Projection/Filter/etc., not only RegionScanExec.
+            elapsed_compute: 5_000_000,
+            plan_metrics: vec![PlanMetrics {
+                plan: "RegionScanExec: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 42)],
+            }],
+            ..Default::default()
+        };
+        let adapter = RecordBatchStreamAdapter {
+            schema,
+            stream: df_stream,
+            metrics: None,
+            metrics_2: Metrics::Resolved(metrics),
+            query_load_region_id: Some(1),
+            query_stat_counters: Some(counters.clone()),
+            query_stat_owners: Vec::new(),
+            explain_verbose: false,
+            span: Span::current(),
+        };
+        let first = adapter.metrics().unwrap();
+        let second = adapter.metrics().unwrap();
+        assert_eq!(first.elapsed_compute, second.elapsed_compute);
+        assert_eq!(counters.query_cpu_time.load(Ordering::Relaxed), 10);
+        drop(adapter);
+        assert_eq!(counters.query_cpu_time.load(Ordering::Relaxed), 5_000_010);
+        assert_eq!(counters.query_scanned_bytes.load(Ordering::Relaxed), 62);
+    }
+
+    #[test]
     fn test_record_query_stats_updates_region_counters() {
         let counters = RegionQueryStatCounters {
             query_cpu_time: Arc::new(AtomicU64::new(10)),
@@ -1443,6 +1588,7 @@ mod test {
             metrics_2: Metrics::Resolved(metrics),
             query_load_region_id: None,
             query_stat_counters: Some(counters.clone()),
+            query_stat_owners: Vec::new(),
             explain_verbose: false,
             span: Span::current(),
         };

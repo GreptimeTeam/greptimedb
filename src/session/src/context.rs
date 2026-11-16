@@ -117,6 +117,8 @@ pub struct QueryContext {
 #[derive(Debug, Builder, Clone, Default)]
 pub struct QueryContextMutableFields {
     warning: Option<String>,
+    /// Whether this request only explains or analyzes a query instead of returning its rows.
+    is_explain: bool,
     // TODO: remove this when format is supported in datafusion
     explain_format: Option<String>,
     /// Explain options to control the verbose analyze output.
@@ -647,6 +649,15 @@ impl QueryContext {
 
     pub fn set_warning(&self, msg: String) {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
+    }
+
+    /// Whether this request explains or analyzes a query rather than returning its rows.
+    pub fn is_explain(&self) -> bool {
+        self.mutable_query_context_data.read().unwrap().is_explain
+    }
+
+    pub fn set_explain(&self, is_explain: bool) {
+        self.mutable_query_context_data.write().unwrap().is_explain = is_explain;
     }
 
     pub fn explain_format(&self) -> Option<String> {

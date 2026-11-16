@@ -156,6 +156,15 @@ pub enum Error {
         location: Location,
     },
 
+    /// The client sent a query request this server cannot interpret: a malformed plan envelope
+    /// or a payload that fails the request-level checks. Never a server-side invariant.
+    #[snafu(display("Invalid query request: {}", reason))]
+    InvalidQueryRequest {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
@@ -516,6 +525,7 @@ impl ErrorExt for Error {
             Delete { source, .. } => source.status_code(),
 
             InvalidQueryContext { .. }
+            | InvalidQueryRequest { .. }
             | InvalidSql { .. }
             | IllegalPrimaryKeysDef { .. }
             | MissingTimestampColumn { .. }
@@ -655,6 +665,32 @@ mod tests {
             assert_eq!(error.status_code(), status);
             assert_eq!(error.retry_hint(), hint);
         }
+    }
+
+    #[test]
+    fn test_invalid_query_request_is_invalid_arguments() {
+        let err = InvalidQueryRequestSnafu {
+            reason: "malformed grouped read envelope",
+        }
+        .build();
+
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+        assert!(
+            err.output_msg().contains("malformed grouped read envelope"),
+            "{}",
+            err.output_msg()
+        );
+    }
+
+    #[test]
+    fn test_grouped_read_unsupported_version_stays_unsupported() {
+        let err = NotYetImplementedSnafu {
+            what: "GroupRead version 1",
+        }
+        .build();
+
+        assert_eq!(err.status_code(), StatusCode::Unsupported);
     }
 
     #[test]
