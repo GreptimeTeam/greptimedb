@@ -28,7 +28,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{
     RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
-use datatypes::series::time::{GridRange, TimeAxis, union_positions};
+use datatypes::series::time::{EvalGrid, GridRange, TimeAxis, union_positions};
 use datatypes::series::{Label, SeriesLabels};
 
 use crate::go_sort;
@@ -307,11 +307,7 @@ fn sample_offset(metric: &SeriesLabels) -> f64 {
 /// value, no row index, no second copy of the answer -- which is what the caller reserves for it.
 pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
     single_field(schema, "scalar")?;
-    let points = grid_points(schema, series)?;
-    let grid = schema
-        .eval_grid
-        .clone()
-        .expect("grid_points reads the schema's evaluation grid");
+    let (grid, points) = grid_and_points(schema, series)?;
     // A point no float has reached answers the Go NaN, which is where it starts. The first float of
     // a point writes its value there; the second takes the point back to NaN, and so does any float
     // after it, so a point holding more than one float never reads as holding one.
@@ -696,6 +692,14 @@ fn single_field(schema: &SeriesSchema, operator: &str) -> Result<()> {
 
 /// Checks every series against `schema` and returns the grid length.
 fn grid_points(schema: &SeriesSchema, series: &[Series]) -> Result<usize> {
+    Ok(grid_and_points(schema, series)?.1)
+}
+
+/// Checks every series against `schema` and returns the grid it validated them on, with its length.
+///
+/// An operator that addresses points on the grid needs the grid itself, not just its length, and
+/// resolving it twice would let the two answers disagree.
+fn grid_and_points(schema: &SeriesSchema, series: &[Series]) -> Result<(Arc<EvalGrid>, usize)> {
     let grid = schema.eval_grid.as_ref().ok_or_else(|| {
         DataFusionError::Execution("select operators need an evaluation grid".into())
     })?;
@@ -713,7 +717,7 @@ fn grid_points(schema: &SeriesSchema, series: &[Series]) -> Result<usize> {
             ));
         }
     }
-    Ok(grid.spec().len as usize)
+    Ok((Arc::clone(grid), grid.spec().len as usize))
 }
 
 /// The first field's value of `series` at grid `point`, looked up by position.
