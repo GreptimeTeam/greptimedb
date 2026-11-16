@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use api::v1::Rows;
+use api::v1::helper::row;
+use api::v1::value::ValueData;
 use common_recordbatch::RecordBatches;
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::Expr;
@@ -154,6 +156,93 @@ async fn test_prune_tag_and_field_with_format(flat_format: bool) {
         flat_format,
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_prune_float_field_with_nan() {
+    test_prune_float_field_with_nan_with_format(false).await;
+    test_prune_float_field_with_nan_with_format(true).await;
+}
+
+/// Parquet float statistics leave NaN out, so row groups holding a NaN must
+/// not be pruned by min/max. Filters should return the same rows after a flush
+/// as they do from the memtable.
+async fn test_prune_float_field_with_nan_with_format(flat_format: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = [(1, 1.0), (2, f64::NAN), (3, -1.0)]
+        .into_iter()
+        .map(|(sec, value)| {
+            row(vec![
+                ValueData::StringValue("a".to_string()),
+                ValueData::F64Value(value),
+                ValueData::TimestampMillisecondValue(sec * 1000),
+            ])
+        })
+        .collect();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows,
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    let nan_row = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | NaN     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    let cases = [
+        (col("field_0").gt(lit(2.0)), nan_row),
+        (col("field_0").eq(lit(f64::NAN)), nan_row),
+        (
+            col("field_0").not_eq(lit(1.0)),
+            "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | NaN     | 1970-01-01T00:00:02 |
+| a     | -1.0    | 1970-01-01T00:00:03 |
++-------+---------+---------------------+",
+        ),
+    ];
+    for (expr, expected) in cases {
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    filters: vec![expr.clone()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            expected,
+            batches.pretty_print().unwrap(),
+            "filter: {expr}, flat_format: {flat_format}"
+        );
+    }
 }
 
 /// Creates a time range `[start_sec, end_sec)`

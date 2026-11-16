@@ -183,16 +183,13 @@ pub(crate) fn column_values_by_type(
                     }
                 }
                 Statistics::Int96(_) => None,
-                Statistics::Float(s) => Some(ScalarValue::Float32(Some(if is_min {
-                    *s.min_opt()?
-                } else {
-                    *s.max_opt()?
-                }))),
-                Statistics::Double(s) => Some(ScalarValue::Float64(Some(if is_min {
-                    *s.min_opt()?
-                } else {
-                    *s.max_opt()?
-                }))),
+                // Parquet writers leave NaN out of float min/max statistics,
+                // but DataFusion orders NaN above (and -NaN below) every other
+                // float. A row group holding a NaN would then be pruned wrongly
+                // for predicates like `v > 2`, `v = 'NaN'` or `v != 1.0`, so
+                // float statistics are not usable for pruning.
+                // See https://github.com/apache/datafusion/issues/15812.
+                Statistics::Float(_) | Statistics::Double(_) => None,
                 Statistics::ByteArray(s) => {
                     let bytes = if is_min {
                         s.min_bytes_opt()?
