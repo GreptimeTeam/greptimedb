@@ -1703,7 +1703,9 @@ async fn data_cli_logs_all_failed_schema_jobs() {
             "--addr",
             &addr,
             "--database",
-            "greptime",
+            "greptime-*",
+            "--db-parallelism",
+            "2",
             "--target",
             target,
             path_arg,
@@ -1712,14 +1714,18 @@ async fn data_cli_logs_all_failed_schema_jobs() {
         ])
         .with_subscriber(subscriber)
         .await;
-        assert!(result.is_err(), "{command} {target} unexpectedly succeeded");
+        let error = result.unwrap_err();
+        assert!(
+            format!("{error:?}").contains("SQL request failed"),
+            "{error:?}"
+        );
         let logs = std::fs::read_to_string(log.path()).unwrap();
         for schema in schemas {
             let expected = format!("{message} greptime.{schema}");
             assert_eq!(
                 logs.lines().filter(|line| line.contains(&expected)).count(),
                 1,
-                "{logs}"
+                "{command} {target}: {error:?}\n{logs}"
             );
         }
     }
