@@ -3935,6 +3935,15 @@ async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
     execute_sql_with(instance, sql, QueryContext::arc()).await
 }
 
+async fn get_table(instance: &Arc<Instance>, name: &str) -> table::TableRef {
+    instance
+        .catalog_manager()
+        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, name, None)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
 async fn execute_sql_with_query_parallelism(
     instance: &Arc<Instance>,
     sql: &str,
@@ -4558,17 +4567,7 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
             );
         }
         for suffix in ["a", "b"] {
-            let table = frontend
-                .catalog_manager()
-                .table(
-                    DEFAULT_CATALOG_NAME,
-                    "public",
-                    &format!("routed_{version}_{suffix}"),
-                    None,
-                )
-                .await
-                .unwrap()
-                .unwrap();
+            let table = get_table(frontend, &format!("routed_{version}_{suffix}")).await;
             assert_eq!(
                 table.table_info().meta.options.extra_options["on_physical_table"],
                 format!("physical_{suffix}")
@@ -4582,17 +4581,7 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
             "+----------+\n| count(*) |\n+----------+\n| 1        |\n+----------+",
         )
         .await;
-        let table = frontend
-            .catalog_manager()
-            .table(
-                DEFAULT_CATALOG_NAME,
-                "public",
-                METRICS_EXEMPLARS_TABLE,
-                None,
-            )
-            .await
-            .unwrap()
-            .unwrap();
+        let table = get_table(frontend, METRICS_EXEMPLARS_TABLE).await;
         let info = table.table_info();
         let ids = info.name_to_ids().unwrap();
         assert_eq!(
@@ -4807,17 +4796,7 @@ async fn test_exemplar_precreated_table_options(
             "{error:?}"
         );
     }
-    let table = frontend
-        .catalog_manager()
-        .table(
-            DEFAULT_CATALOG_NAME,
-            "public",
-            METRICS_EXEMPLARS_TABLE,
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let table = get_table(frontend, METRICS_EXEMPLARS_TABLE).await;
     // Invalid destinations must fail before auto-ALTER adds the inherited label.
     assert_eq!(
         table.schema().column_schema_by_name("job").is_some(),
@@ -4899,23 +4878,11 @@ async fn test_exemplar_source_identity_policy() {
     execute_sql(frontend, "CREATE TABLE source_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
     let create = "CREATE TABLE metric_source (job STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('on_physical_table'='source_physical')";
     execute_sql(frontend, create).await;
-    let source = frontend
-        .catalog_manager()
-        .table(DEFAULT_CATALOG_NAME, "public", "metric_source", None)
-        .await
-        .unwrap()
-        .unwrap()
-        .table_info();
+    let source = get_table(frontend, "metric_source").await.table_info();
     // A metric write's captured table ID must not be replaced by a later name lookup.
     execute_sql(frontend, "DROP TABLE metric_source").await;
     execute_sql(frontend, create).await;
-    let replacement = frontend
-        .catalog_manager()
-        .table(DEFAULT_CATALOG_NAME, "public", "metric_source", None)
-        .await
-        .unwrap()
-        .unwrap()
-        .table_info();
+    let replacement = get_table(frontend, "metric_source").await.table_info();
     assert_ne!(source.table_id(), replacement.table_id());
     let mut missing_tag_request = request("metric_source");
     let rows = missing_tag_request.inserts[0].rows.as_mut().unwrap();
@@ -4936,13 +4903,7 @@ async fn test_exemplar_source_identity_policy() {
             .await
             .is_err()
     );
-    let after = frontend
-        .catalog_manager()
-        .table(DEFAULT_CATALOG_NAME, "public", "metric_source", None)
-        .await
-        .unwrap()
-        .unwrap()
-        .table_info();
+    let after = get_table(frontend, "metric_source").await.table_info();
     assert_eq!(
         replacement, after,
         "reconciliation must not alter a replacement table"
@@ -4959,17 +4920,7 @@ async fn test_exemplar_source_identity_policy() {
         .write_exemplars_prepared(request("metric_source"), QueryContext::arc())
         .await
         .unwrap();
-    let table = frontend
-        .catalog_manager()
-        .table(
-            DEFAULT_CATALOG_NAME,
-            "public",
-            METRICS_EXEMPLARS_TABLE,
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let table = get_table(frontend, METRICS_EXEMPLARS_TABLE).await;
     let info = table.table_info();
     assert_eq!(
         info.meta
@@ -5452,13 +5403,7 @@ async fn test_exemplar_source_tag_reconciliation() {
         ("first", vec!["first_only", "later"]),
         ("second", vec!["second_only"]),
     ] {
-        let info = frontend
-            .catalog_manager()
-            .table("greptime", "public", name, None)
-            .await
-            .unwrap()
-            .unwrap()
-            .table_info();
+        let info = get_table(frontend, name).await.table_info();
         source_ids.insert(name, info.table_id());
         let tags = info
             .meta
@@ -5493,13 +5438,7 @@ async fn test_exemplar_source_tag_reconciliation() {
     }
 
     // Disabled automatic DDL and malformed values must not add source tags.
-    let source = frontend
-        .catalog_manager()
-        .table("greptime", "public", "first", None)
-        .await
-        .unwrap()
-        .unwrap()
-        .table_info();
+    let source = get_table(frontend, "first").await.table_info();
     let mut ctx = QueryContext::arc().fork();
     ctx.set_extension(AUTO_CREATE_TABLE_KEY, "false");
     let blocked = into_rows(vec![exemplar("first", "blocked", "present")])
@@ -5525,13 +5464,7 @@ async fn test_exemplar_source_tag_reconciliation() {
             .await
             .is_err()
     );
-    let after = frontend
-        .catalog_manager()
-        .table("greptime", "public", "first", None)
-        .await
-        .unwrap()
-        .unwrap()
-        .table_info();
+    let after = get_table(frontend, "first").await.table_info();
     assert_eq!(source, after);
 
     execute_sql(frontend, "CREATE TABLE conflict_physical (ts TIMESTAMP TIME INDEX, occupied_field DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
@@ -5836,13 +5769,8 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
     )
     .await;
 
-    let source = context
-        .frontend()
-        .catalog_manager()
-        .table("greptime", "public", "retained_exemplar", None)
+    let source = get_table(&context.frontend(), "retained_exemplar")
         .await
-        .unwrap()
-        .unwrap()
         .table_info();
     assert!(source.meta.schema.column_schema_by_name("zone").is_some());
     create_exemplar_source(&context.frontend(), "public", "v1_exemplar_only").await;
@@ -5886,13 +5814,8 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
         "{:?}",
         to_bytes(response.into_body(), usize::MAX).await.unwrap()
     );
-    let source = context
-        .frontend()
-        .catalog_manager()
-        .table("greptime", "public", "v1_exemplar_only", None)
+    let source = get_table(&context.frontend(), "v1_exemplar_only")
         .await
-        .unwrap()
-        .unwrap()
         .table_info();
     assert!(source.meta.schema.column_schema_by_name("v1_tag").is_some());
     let output = execute_sql(&context.frontend(), "SELECT COUNT(*) FROM v1_exemplar_only").await;
@@ -5991,18 +5914,8 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
         assert_eq!(value["status"], "success", "{phase}: {value}");
         for series in value["data"].as_array().unwrap() {
             let labels = &series["seriesLabels"];
-            let source = context
-                .frontend()
-                .catalog_manager()
-                .table(
-                    "greptime",
-                    "public",
-                    labels["__name__"].as_str().unwrap(),
-                    None,
-                )
+            let source = get_table(&context.frontend(), labels["__name__"].as_str().unwrap())
                 .await
-                .unwrap()
-                .unwrap()
                 .table_info();
             assert_eq!(labels["__table_id"], source.table_id().to_string());
             assert!(labels["__tsid"].as_str().unwrap().parse::<u64>().is_ok());
@@ -6278,22 +6191,12 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
         });
         assert_eq!(futures::future::join_all(writes).await, vec![1; 8]);
     }
-    let info = frontend
-        .catalog_manager()
-        .table("greptime", "public", METRICS_EXEMPLARS_TABLE, None)
+    let info = get_table(frontend, METRICS_EXEMPLARS_TABLE)
         .await
-        .unwrap()
-        .unwrap()
         .table_info();
     assert_eq!(info.meta.primary_key_indices.len(), 12);
     operator::insert::validate_exemplar_table(&info).unwrap();
-    let source = frontend
-        .catalog_manager()
-        .table("greptime", "public", "concurrent", None)
-        .await
-        .unwrap()
-        .unwrap()
-        .table_info();
+    let source = get_table(frontend, "concurrent").await.table_info();
     assert_eq!(source.meta.primary_key_indices.len(), 9);
     let response = frontend
         .query_exemplars(
@@ -6319,12 +6222,8 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
     ] {
         execute_sql(frontend, &format!("DROP TABLE {METRICS_EXEMPLARS_TABLE}")).await;
         execute_sql(frontend, &definition).await;
-        let before = frontend
-            .catalog_manager()
-            .table("greptime", "public", METRICS_EXEMPLARS_TABLE, None)
+        let before = get_table(frontend, METRICS_EXEMPLARS_TABLE)
             .await
-            .unwrap()
-            .unwrap()
             .table_info();
         assert!(
             frontend
@@ -6333,21 +6232,11 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
                 .is_err(),
             "{definition}"
         );
-        let after = frontend
-            .catalog_manager()
-            .table("greptime", "public", METRICS_EXEMPLARS_TABLE, None)
+        let after = get_table(frontend, METRICS_EXEMPLARS_TABLE)
             .await
-            .unwrap()
-            .unwrap()
             .table_info();
         assert_eq!(before, after, "incompatible table must not be altered");
-        let source_after = frontend
-            .catalog_manager()
-            .table("greptime", "public", "concurrent", None)
-            .await
-            .unwrap()
-            .unwrap()
-            .table_info();
+        let source_after = get_table(frontend, "concurrent").await.table_info();
         assert_eq!(
             source, source_after,
             "incompatible destination must not alter sources"
@@ -6374,13 +6263,7 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
             .unwrap()
             .is_none()
     );
-    let source = frontend
-        .catalog_manager()
-        .table("greptime", "public", "concurrent", None)
-        .await
-        .unwrap()
-        .unwrap()
-        .table_info();
+    let source = get_table(frontend, "concurrent").await.table_info();
     assert!(source.meta.primary_key_indices.is_empty());
 }
 

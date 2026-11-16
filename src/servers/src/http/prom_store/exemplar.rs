@@ -479,6 +479,34 @@ mod tests {
         }
     }
 
+    fn metric_request(tables: &[&str], num_rows: usize) -> RowInsertRequests {
+        RowInsertRequests {
+            inserts: tables
+                .iter()
+                .map(|name| RowInsertRequest {
+                    table_name: (*name).into(),
+                    rows: Some(Rows {
+                        schema: vec![],
+                        rows: vec![Row { values: vec![] }; num_rows],
+                    }),
+                })
+                .collect(),
+        }
+    }
+
+    fn exemplar_requests(schema: Option<String>) -> ExemplarRequests {
+        ExemplarRequests::from([(
+            schema,
+            vec![Exemplar {
+                metric: "metric".into(),
+                series_labels: BTreeMap::new().into(),
+                labels: BTreeMap::new(),
+                timestamp: 1,
+                value: 1.0,
+            }],
+        )])
+    }
+
     #[tokio::test]
     async fn exemplar_requires_successful_metric_engine_source_preparation() {
         for metric_engine in [false, true] {
@@ -488,38 +516,17 @@ mod tests {
             });
             let ctx = QueryContext::arc();
             let samples = if metric_engine {
-                vec![(
-                    ctx.clone(),
-                    RowInsertRequests {
-                        inserts: vec![RowInsertRequest {
-                            table_name: "metric".into(),
-                            rows: Some(Rows {
-                                schema: vec![],
-                                rows: vec![Row { values: vec![] }],
-                            }),
-                        }],
-                    },
-                )]
+                vec![(ctx.clone(), metric_request(&["metric"], 1))]
             } else {
                 vec![]
             };
-            let exemplars = ExemplarRequests::from([(
-                None,
-                vec![Exemplar {
-                    metric: "metric".into(),
-                    series_labels: BTreeMap::new().into(),
-                    labels: BTreeMap::new(),
-                    timestamp: 1,
-                    value: 1.0,
-                }],
-            )]);
             let outcome = write(
                 handler.clone(),
                 None,
                 metric_engine,
                 samples,
                 vec![],
-                exemplars,
+                exemplar_requests(None),
                 ctx,
             )
             .await;
@@ -549,29 +556,8 @@ mod tests {
             if let Some(physical) = physical {
                 target.set_extension(PHYSICAL_TABLE_PARAM, physical);
             }
-            (
-                Arc::new(target),
-                RowInsertRequests {
-                    inserts: vec![RowInsertRequest {
-                        table_name: "metric".into(),
-                        rows: Some(Rows {
-                            schema: vec![],
-                            rows: vec![Row { values: vec![] }],
-                        }),
-                    }],
-                },
-            )
+            (Arc::new(target), metric_request(&["metric"], 1))
         };
-        let exemplars = ExemplarRequests::from([(
-            None,
-            vec![Exemplar {
-                metric: "metric".into(),
-                series_labels: BTreeMap::new().into(),
-                labels: BTreeMap::new(),
-                timestamp: 1,
-                value: 1.0,
-            }],
-        )]);
         let (writes, targets) = prepare(
             &handler,
             vec![
@@ -580,7 +566,7 @@ mod tests {
                 batch(None),
             ],
             vec![batch(Some("histogram_physical"))],
-            exemplars,
+            exemplar_requests(None),
             ctx,
         )
         .await
@@ -616,32 +602,18 @@ mod tests {
         let ctx = QueryContext::arc();
         let samples = ["metric", "other", "other"]
             .into_iter()
-            .map(|name| {
-                (
-                    Arc::new(ctx.fork()),
-                    RowInsertRequests {
-                        inserts: vec![RowInsertRequest {
-                            table_name: name.into(),
-                            rows: Some(Rows {
-                                schema: vec![],
-                                rows: vec![Row { values: vec![] }; 2],
-                            }),
-                        }],
-                    },
-                )
-            })
+            .map(|name| (Arc::new(ctx.fork()), metric_request(&[name], 2)))
             .collect();
-        let exemplars = ExemplarRequests::from([(
+        let outcome = write(
+            handler,
             None,
-            vec![Exemplar {
-                metric: "metric".into(),
-                series_labels: BTreeMap::new().into(),
-                labels: BTreeMap::new(),
-                timestamp: 1,
-                value: 1.0,
-            }],
-        )]);
-        let outcome = write(handler, None, true, samples, vec![], exemplars, ctx).await;
+            true,
+            samples,
+            vec![],
+            exemplar_requests(None),
+            ctx,
+        )
+        .await;
         assert!(outcome.error.is_none());
         assert_eq!(outcome.written, [6, 0, 1]);
     }
@@ -663,42 +635,19 @@ mod tests {
                         ..Default::default()
                     });
                     let ctx = QueryContext::arc();
-                    let batch = |name: &str| {
-                        (
-                            ctx.clone(),
-                            RowInsertRequests {
-                                inserts: vec![RowInsertRequest {
-                                    table_name: name.into(),
-                                    rows: Some(Rows {
-                                        schema: vec![],
-                                        rows: vec![Row { values: vec![] }; 2],
-                                    }),
-                                }],
-                            },
-                        )
-                    };
+                    let batch = |name: &str| (ctx.clone(), metric_request(&[name], 2));
                     let (samples, histograms) = if histogram {
                         (vec![batch("other")], vec![batch("metric")])
                     } else {
                         (vec![batch("metric"), batch("other")], vec![])
                     };
-                    let exemplars = ExemplarRequests::from([(
-                        None,
-                        vec![Exemplar {
-                            metric: "metric".into(),
-                            series_labels: BTreeMap::new().into(),
-                            labels: BTreeMap::new(),
-                            timestamp: 1,
-                            value: 1.0,
-                        }],
-                    )]);
                     let response = write(
                         handler.clone(),
                         None,
                         true,
                         samples,
                         histograms,
-                        exemplars,
+                        exemplar_requests(None),
                         ctx,
                     );
                     tokio::pin!(response);
@@ -771,34 +720,17 @@ mod tests {
                 ..Default::default()
             });
             let ctx = QueryContext::arc();
-            let inserts = [Some("other"), source_rows.map(|_| "metric")]
+            let tables = [Some("other"), source_rows.map(|_| "metric")]
                 .into_iter()
                 .flatten()
-                .map(|name| RowInsertRequest {
-                    table_name: name.into(),
-                    rows: Some(Rows {
-                        schema: vec![],
-                        rows: vec![Row { values: vec![] }; 2],
-                    }),
-                })
-                .collect();
-            let request = ExemplarRequests::from([(
-                None,
-                vec![Exemplar {
-                    metric: "metric".into(),
-                    series_labels: BTreeMap::new().into(),
-                    labels: BTreeMap::new(),
-                    timestamp: 1,
-                    value: 1.0,
-                }],
-            )]);
+                .collect::<Vec<_>>();
             let outcome = write(
                 handler,
                 None,
                 true,
-                vec![(ctx.clone(), RowInsertRequests { inserts })],
+                vec![(ctx.clone(), metric_request(&tables, 2))],
                 vec![],
-                request,
+                exemplar_requests(None),
                 ctx,
             )
             .await;
@@ -994,36 +926,12 @@ mod tests {
                 source_result: WriteResult::CompletionFailure,
                 ..Default::default()
             });
-            let mut exemplars = ExemplarRequests::new();
-            for schema in if denied {
-                vec![None, Some("other".into())]
-            } else {
-                vec![None]
-            } {
-                exemplars.insert(
-                    schema,
-                    vec![Exemplar {
-                        metric: "metric".into(),
-                        series_labels: BTreeMap::new().into(),
-                        labels: BTreeMap::new(),
-                        timestamp: 1,
-                        value: 1.0,
-                    }],
-                );
+            let mut exemplars = exemplar_requests(None);
+            if denied {
+                exemplars.extend(exemplar_requests(Some("other".into())));
             }
             let ctx = QueryContext::arc();
-            let samples = vec![(
-                ctx.clone(),
-                RowInsertRequests {
-                    inserts: vec![RowInsertRequest {
-                        table_name: "metric".into(),
-                        rows: Some(Rows {
-                            schema: vec![],
-                            rows: vec![Row { values: vec![] }; 2],
-                        }),
-                    }],
-                },
-            )];
+            let samples = vec![(ctx.clone(), metric_request(&["metric"], 2))];
             let outcome = write(handler.clone(), None, true, samples, vec![], exemplars, ctx).await;
             assert!(outcome.error.is_some());
             let events = handler.events.lock().unwrap();
