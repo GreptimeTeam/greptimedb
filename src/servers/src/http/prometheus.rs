@@ -30,6 +30,7 @@ use auth::{PermissionTableTarget, PermissionTableTargets, UserProviderRef};
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form};
 use catalog::CatalogManagerRef;
+use common_catalog::consts;
 use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -965,7 +966,7 @@ async fn get_all_column_names(
     let mut table_names = Vec::new();
     let mut tables = manager.tables(catalog, schema, None);
     while let Some(table) = tables.try_next().await? {
-        if is_internal_physical_metric_table(&table) {
+        if is_internal_metric_table(&table) {
             continue;
         }
         table_names.push(table.table_info().name.clone());
@@ -990,7 +991,7 @@ async fn get_target_column_names(
                 Some(query_ctx),
             )
             .await?
-            && !is_internal_physical_metric_table(&table)
+            && !is_internal_metric_table(&table)
         {
             extend_tag_column_names(&mut labels, &table);
         }
@@ -1458,8 +1459,9 @@ fn current_schema_metric_targets(
     )
 }
 
-fn is_internal_physical_metric_table(table: &TableRef) -> bool {
-    table.table_info().is_physical_table()
+fn is_internal_metric_table(table: &TableRef) -> bool {
+    let info = table.table_info();
+    info.is_physical_table() || info.name == consts::METRICS_EXEMPLARS_TABLE
 }
 
 fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
@@ -2225,7 +2227,7 @@ async fn retrieve_table_names(
             .options
             .extra_options
             .contains_key(LOGICAL_TABLE_METADATA_KEY)
-            || is_internal_physical_metric_table(&table)
+            || is_internal_metric_table(&table)
         {
             // skip non-prometheus (non-metricengine) tables for __name__ query
             continue;
@@ -2416,7 +2418,7 @@ async fn readable_metadata_tables(
         }
     }
     candidates.retain(|table| {
-        !is_internal_physical_metric_table(table)
+        !is_internal_metric_table(table)
             && (selectors.is_empty()
                 || selectors
                     .iter()
@@ -4039,6 +4041,126 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fields, HashSet::from(["value".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_exemplar_table_is_hidden_from_metadata() {
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use common_query::prelude::{EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels};
+        use datatypes::types::json_type::JsonNativeType;
+
+        let manager = MemoryCatalogManager::with_default_setup();
+        for (id, name, tag, field, data_type) in [
+            (
+                1024,
+                "cpu_usage",
+                "host",
+                "value",
+                ConcreteDataType::float64_datatype(),
+            ),
+            (
+                1025,
+                METRICS_EXEMPLARS_TABLE,
+                EXEMPLAR_METRIC_COLUMN,
+                greptime_exemplar_labels(),
+                ConcreteDataType::json2(JsonNativeType::Null),
+            ),
+        ] {
+            let mut info = test_table_info(
+                id,
+                name,
+                DEFAULT_SCHEMA_NAME,
+                DEFAULT_CATALOG_NAME,
+                Arc::new(Schema::new(vec![
+                    ColumnSchema::new(tag, ConcreteDataType::string_datatype(), true),
+                    ColumnSchema::new(field, data_type, true),
+                ])),
+            );
+            info.meta.primary_key_indices = vec![0];
+            manager
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: name.to_string(),
+                    table_id: id,
+                    table: EmptyTable::from_table_info(&info),
+                })
+                .unwrap();
+        }
+        let manager: CatalogManagerRef = manager;
+        let handler: PrometheusHandlerRef = Arc::new(TestPrometheusHandler {
+            catalog_manager: manager.clone(),
+            deny_operation: false,
+            denied_table: Some(METRICS_EXEMPLARS_TABLE),
+            metric_names: Vec::new(),
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
+            queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
+        });
+        let ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let response = labels_query(
+            None,
+            State(handler.clone()),
+            Query(LabelsQuery::default()),
+            Extension(ctx.fork()),
+            Form(LabelsQuery::default()),
+        )
+        .await;
+        assert_eq!(None, response.status_code, "{:?}", response.error);
+        assert_eq!(
+            response.data,
+            PrometheusResponse::Labels(vec![METRIC_NAME_LABEL.into(), "host".into()])
+        );
+
+        let targets = ["cpu_usage", METRICS_EXEMPLARS_TABLE].map(|name| {
+            PermissionTableTarget::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, name)
+        });
+        assert_eq!(
+            get_target_column_names(&targets, &manager, &ctx)
+                .await
+                .unwrap(),
+            HashSet::from(["host".to_string()])
+        );
+
+        let exemplar_selector = format!(r#"{{__name__=~"{METRICS_EXEMPLARS_TABLE}"}}"#);
+        let mixed_selector = format!(r#"{{__name__=~"cpu_usage|{METRICS_EXEMPLARS_TABLE}"}}"#);
+        for (label, selectors, expected) in [
+            (FIELD_NAME_LABEL, vec![], vec!["value"]),
+            (FIELD_NAME_LABEL, vec!["cpu_usage"], vec!["value"]),
+            (
+                FIELD_NAME_LABEL,
+                vec![mixed_selector.as_str()],
+                vec!["value"],
+            ),
+            (FIELD_NAME_LABEL, vec![METRICS_EXEMPLARS_TABLE], vec![]),
+            (FIELD_NAME_LABEL, vec![exemplar_selector.as_str()], vec![]),
+            ("__schema__", vec![METRICS_EXEMPLARS_TABLE], vec![]),
+            ("__schema__", vec![exemplar_selector.as_str()], vec![]),
+            (
+                "__schema__",
+                vec![mixed_selector.as_str()],
+                vec![DEFAULT_SCHEMA_NAME],
+            ),
+        ] {
+            let response = label_values_query(
+                None,
+                State(handler.clone()),
+                Path(label.to_string()),
+                Extension(ctx.fork()),
+                Query(LabelValueQuery {
+                    matches: Matches(selectors.iter().map(|value| value.to_string()).collect()),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            assert_eq!(None, response.status_code, "{:?}", response.error);
+            assert_eq!(
+                response.data,
+                PrometheusResponse::LabelValues(expected.into_iter().map(String::from).collect()),
+                "label={label}, selectors={selectors:?}",
+            );
+        }
     }
 
     #[tokio::test]

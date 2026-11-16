@@ -14,12 +14,13 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use api::v1::Rows;
 use common_base::Plugins;
 use common_recordbatch::RecordBatches;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionCloseRequest, RegionRequest};
+use store_api::region_request::{PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -27,7 +28,8 @@ use crate::engine::flush_test::MockRegionHook;
 use crate::engine::listener::AlterFlushListener;
 use crate::engine::region_hook::RegionHookRef;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+    CheckpointTaskBlocker, CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows,
+    rows_schema,
 };
 
 #[tokio::test]
@@ -410,4 +412,77 @@ async fn test_repeated_close_during_edit_preserves_flush_requirement(
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
     );
     engine.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_engine_stop_waits_for_checkpoint() {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_last_checkpoint_write();
+    let mut env = TestEnv::with_prefix("stop-waits-for-checkpoint")
+        .await
+        .with_mock_layer(mock_layer);
+    let config = MitoConfig {
+        manifest_checkpoint_distance: 1,
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    // The flush starts a checkpoint, which blocks after it has created `_last_checkpoint`
+    // and before it has written the pointer.
+    flush_region(&engine, region_id, None).await;
+    blocker.wait_until_blocked().await;
+    let wait_started = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .checkpointer()
+        .pending_checkpoint_wait_started();
+
+    let mut reopen = tokio::spawn(async move {
+        let engine = env.reopen_engine(engine, config).await;
+        let open = RegionRequest::Open(RegionOpenRequest {
+            engine: String::new(),
+            table_dir,
+            path_type: PathType::Bare,
+            options: Default::default(),
+            skip_wal_replay: false,
+            checkpoint: None,
+            requirements: Default::default(),
+        });
+        let result = engine.handle_request(region_id, open).await;
+        (env, result)
+    });
+    tokio::time::timeout(Duration::from_secs(10), wait_started.notified())
+        .await
+        .expect("the engine stop does not wait for the checkpoint");
+    // The new engine would read the empty pointer while the old checkpoint is blocked.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), &mut reopen)
+            .await
+            .is_err()
+    );
+    blocker.release();
+    let (_env, result) = tokio::time::timeout(Duration::from_secs(10), reopen)
+        .await
+        .unwrap()
+        .unwrap();
+    result.unwrap();
 }

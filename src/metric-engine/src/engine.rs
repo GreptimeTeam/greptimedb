@@ -581,6 +581,20 @@ impl MetricEngine {
         self.inner.put_regions_batch(requests).await
     }
 
+    /// Returns the physical region's logical regions from the loaded engine state.
+    /// Unlike `logical_regions`, this does not read the metadata region and remains usable
+    /// while a partially completed drop or close is being retried.
+    pub fn loaded_logical_regions(&self, physical_region_id: RegionId) -> Vec<RegionId> {
+        self.inner
+            .state
+            .read()
+            .unwrap()
+            .physical_region_states()
+            .get(&utils::to_data_region_id(physical_region_id))
+            .map(|state| state.logical_regions().iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// Returns all logical regions associated with the physical region.
     pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
         self.inner

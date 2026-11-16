@@ -126,6 +126,20 @@ pub enum RegionRoleState {
 }
 
 impl RegionRoleState {
+    /// Returns whether a region in this state can replay pending tails: a leader that is
+    /// Writable, Altering or Editing. A region with pending tails cannot enter staging; a
+    /// downgrading one is leaving.
+    pub(crate) fn can_replay_tails(self) -> bool {
+        matches!(
+            self,
+            RegionRoleState::Leader(
+                RegionLeaderState::Writable
+                    | RegionLeaderState::Altering
+                    | RegionLeaderState::Editing
+            )
+        )
+    }
+
     /// Converts the region role state to leader state if it is a leader state.
     pub fn into_leader_state(self) -> Option<RegionLeaderState> {
         match self {
@@ -446,17 +460,10 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Truncating)
     }
 
-    /// Returns whether the region can replay pending tails: a leader that is Writable, Altering or
-    /// Editing. A region with pending tails cannot enter staging; a downgrading one is leaving.
+    /// Returns whether the region can replay pending tails (see
+    /// [RegionRoleState::can_replay_tails]).
     pub(crate) fn can_replay_tails(&self) -> bool {
-        matches!(
-            self.manifest_ctx.state.load(),
-            RegionRoleState::Leader(
-                RegionLeaderState::Writable
-                    | RegionLeaderState::Altering
-                    | RegionLeaderState::Editing
-            )
-        )
+        self.manifest_ctx.state.load().can_replay_tails()
     }
 
     pub fn region_id(&self) -> RegionId {
@@ -486,9 +493,10 @@ impl MitoRegion {
         self.manifest_ctx.state.load()
     }
 
-    /// Sets the region role state.
-    pub(crate) fn set_role(&self, next_role: RegionRole) {
-        self.manifest_ctx.set_role(next_role, self.region_id);
+    /// Sets the region role state. Returns the state this call replaced, None if it left the
+    /// state unchanged.
+    pub(crate) fn set_role(&self, next_role: RegionRole) -> Option<RegionRoleState> {
+        self.manifest_ctx.set_role(next_role, self.region_id)
     }
 
     pub(crate) fn region_role(&self) -> RegionRole {
@@ -1528,6 +1536,60 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
+    /// Waits for the in-flight checkpoint of a stopped manager. A stopped manager starts no
+    /// checkpoint, so this instance no longer writes the manifest directory afterwards.
+    ///
+    /// Callers must not hold the manifest lock: this takes its read lock, and the lock is not
+    /// reentrant. Under the lock, use [RegionManifestManager::wait_for_pending_checkpoint]
+    /// instead. The wait itself holds no lock.
+    pub(crate) async fn wait_for_checkpoint_after_stop(&self) {
+        let done = {
+            let manager = self.manifest_manager.read().await;
+            debug_assert!(manager.is_stopped());
+            manager.pending_checkpoint_completion()
+        };
+        done.await;
+    }
+
+    /// Returns the installed manifest version if the storage holds a newer one. The version is
+    /// read under the manifest read lock, which is not held across the listing, so a caller
+    /// rechecks it under the write lock before acting on it. It is the installed version, not
+    /// `last_version`, which a failed commit leaves ahead of it.
+    pub(crate) async fn installed_version_if_updated(&self) -> Result<Option<ManifestVersion>> {
+        let (store, installed) = {
+            let manager = self.manifest_manager.read().await;
+            (manager.store(), manager.manifest().manifest_version)
+        };
+        // Lists without the read lock: held across the listing, it would let a queued writer
+        // block every later reader.
+        Ok(store
+            .has_version_after(installed)
+            .await?
+            .then_some(installed))
+    }
+
+    /// Fences the region for a reload, see [Self::fence_for_reload], if it is still a Writable
+    /// leader at `expected_version`. Returns whether it fenced the region.
+    pub(crate) async fn fence_for_reload_if_unchanged(
+        &self,
+        manager: &mut RegionManifestManager,
+        region_id: RegionId,
+        expected_version: ManifestVersion,
+    ) -> bool {
+        let state = self.state.load();
+        let version = manager.manifest().manifest_version;
+        if state != RegionRoleState::Leader(RegionLeaderState::Writable)
+            || version != expected_version
+        {
+            info!(
+                "Region {region_id} is {state:?} at manifest version {version}, not a writable leader at version {expected_version}, not fencing it"
+            );
+            return false;
+        }
+        self.fence_for_reload(manager, region_id).await;
+        true
+    }
+
     /// Returns the current region role state.
     pub(crate) fn current_state(&self) -> RegionRoleState {
         self.state.load()
@@ -2078,7 +2140,14 @@ impl ManifestContext {
     ///
     /// A region that is ending staging keeps its state: the end of staging reads the Leader
     /// deadline and the downgrade start when it leaves that state.
-    pub(crate) fn set_role(&self, next_role: RegionRole, region_id: RegionId) {
+    ///
+    /// Returns the state this call replaced, None if it left the state unchanged. It comes from
+    /// the atomic operation that replaced it.
+    pub(crate) fn set_role(
+        &self,
+        next_role: RegionRole,
+        region_id: RegionId,
+    ) -> Option<RegionRoleState> {
         match next_role {
             RegionRole::Follower => {
                 if self
@@ -2090,7 +2159,7 @@ impl ManifestContext {
                         region_id,
                         RegionRoleState::Leader(RegionLeaderState::Staging)
                     );
-                    return;
+                    return Some(RegionRoleState::Leader(RegionLeaderState::Staging));
                 }
                 match self.state.fetch_update(|state| {
                     if !matches!(
@@ -2103,10 +2172,13 @@ impl ManifestContext {
                         None
                     }
                 }) {
-                    Ok(state) => info!(
-                        "Convert region {} to follower, previous role state: {:?}",
-                        region_id, state
-                    ),
+                    Ok(state) => {
+                        info!(
+                            "Convert region {} to follower, previous role state: {:?}",
+                            region_id, state
+                        );
+                        Some(state)
+                    }
                     Err(state) => {
                         if state != RegionRoleState::Follower {
                             warn!(
@@ -2114,6 +2186,7 @@ impl ManifestContext {
                                 region_id, state
                             )
                         }
+                        None
                     }
                 }
             }
@@ -2130,7 +2203,7 @@ impl ManifestContext {
                         region_id,
                         RegionRoleState::Leader(RegionLeaderState::Staging)
                     );
-                    return;
+                    return Some(RegionRoleState::Leader(RegionLeaderState::Staging));
                 }
                 match self.state.fetch_update(|state| {
                     if matches!(
@@ -2143,10 +2216,13 @@ impl ManifestContext {
                         None
                     }
                 }) {
-                    Ok(state) => info!(
-                        "Convert region {} to leader, previous role state: {:?}",
-                        region_id, state
-                    ),
+                    Ok(state) => {
+                        info!(
+                            "Convert region {} to leader, previous role state: {:?}",
+                            region_id, state
+                        );
+                        Some(state)
+                    }
                     Err(state) => {
                         // These states already have the leader role; keep their ongoing operation.
                         if !matches!(
@@ -2166,6 +2242,7 @@ impl ManifestContext {
                                 region_id, state
                             )
                         }
+                        None
                     }
                 }
             }
@@ -2174,6 +2251,7 @@ impl ManifestContext {
                     "Ignore direct conversion of region {} to staging leader; staging requires the dedicated workflow",
                     region_id
                 );
+                None
             }
             RegionRole::DowngradingLeader => {
                 if self
@@ -2188,16 +2266,19 @@ impl ManifestContext {
                         region_id,
                         RegionRoleState::Leader(RegionLeaderState::Staging)
                     );
-                    return;
+                    return Some(RegionRoleState::Leader(RegionLeaderState::Staging));
                 }
                 match self.state.compare_exchange(
                     RegionRoleState::Leader(RegionLeaderState::Writable),
                     RegionRoleState::Leader(RegionLeaderState::Downgrading),
                 ) {
-                    Ok(state) => info!(
-                        "Convert region {} to downgrading region, previous role state: {:?}",
-                        region_id, state
-                    ),
+                    Ok(state) => {
+                        info!(
+                            "Convert region {} to downgrading region, previous role state: {:?}",
+                            region_id, state
+                        );
+                        Some(state)
+                    }
                     Err(state) => {
                         if state != RegionRoleState::Leader(RegionLeaderState::Downgrading) {
                             warn!(
@@ -2205,6 +2286,7 @@ impl ManifestContext {
                                 region_id, state
                             )
                         }
+                        None
                     }
                 }
             }
@@ -3371,49 +3453,115 @@ mod tests {
             .await;
 
         let region_id = RegionId::new(1024, 0);
+        // Each call returns the state it replaced, None if it left the state unchanged.
         // Leader -> Follower
-        manifest_ctx.set_role(RegionRole::Follower, region_id);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Follower, region_id),
+            Some(RegionRoleState::Leader(RegionLeaderState::Writable))
+        );
         assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
 
+        // Follower -> Follower
+        assert_eq!(manifest_ctx.set_role(RegionRole::Follower, region_id), None);
+
         // Follower -> Leader
-        manifest_ctx.set_role(RegionRole::Leader, region_id);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Leader, region_id),
+            Some(RegionRoleState::Follower)
+        );
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
 
         // Direct Leader -> StagingLeader should be ignored.
-        manifest_ctx.set_role(RegionRole::StagingLeader, region_id);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::StagingLeader, region_id),
+            None
+        );
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
 
         // Leader -> Downgrading Leader
-        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id),
+            Some(RegionRoleState::Leader(RegionLeaderState::Writable))
+        );
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         );
 
         // Downgrading Leader -> Follower
-        manifest_ctx.set_role(RegionRole::Follower, region_id);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Follower, region_id),
+            Some(RegionRoleState::Leader(RegionLeaderState::Downgrading))
+        );
         assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
 
         // Can't downgrade from follower (Follower -> Downgrading Leader)
-        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id),
+            None
+        );
         assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
 
         // Set region role too Downgrading Leader
-        manifest_ctx.set_role(RegionRole::Leader, region_id);
-        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Leader, region_id),
+            Some(RegionRoleState::Follower)
+        );
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id),
+            Some(RegionRoleState::Leader(RegionLeaderState::Writable))
+        );
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         );
 
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id),
+            None
+        );
+
         // Downgrading Leader -> Leader
-        manifest_ctx.set_role(RegionRole::Leader, region_id);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Leader, region_id),
+            Some(RegionRoleState::Leader(RegionLeaderState::Downgrading))
+        );
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+
+        assert_eq!(manifest_ctx.set_role(RegionRole::Leader, region_id), None);
+
+        // Altering Leader -> Follower
+        let altering = RegionRoleState::Leader(RegionLeaderState::Altering);
+        manifest_ctx.state.store(altering);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Follower, region_id),
+            Some(altering)
+        );
+        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+
+        // Staging Leader -> Follower
+        let staging = RegionRoleState::Leader(RegionLeaderState::Staging);
+        manifest_ctx.state.store(staging);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Follower, region_id),
+            Some(staging)
+        );
+        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+
+        manifest_ctx.state.store(staging);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Leader, region_id),
+            Some(staging)
+        );
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable)

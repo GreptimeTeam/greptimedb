@@ -68,7 +68,7 @@ use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRe
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::compaction::{CancelCompactionResult, CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
-use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{self, CreateDirSnafu, ExternalSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::lease::{GrantedLeases, NodeLease};
@@ -77,8 +77,8 @@ use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
-    CatchupRegions, CatchupRegionsRef, MitoRegion, MitoRegionRef, OpeningRegions,
-    OpeningRegionsRef, RegionMap, RegionMapRef,
+    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
+    RegionMapRef,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
@@ -92,8 +92,11 @@ use crate::series_index::{
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
+use crate::sst::index::handler::IndexKindProviderRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
+use crate::tail_replay::TailReplayLimits;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -218,6 +221,7 @@ impl WorkerGroup {
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
+        let tail_replay_limits = TailReplayLimits::new(&config);
         // We use another scheduler to avoid purge jobs blocking other jobs.
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
         let upload_store_wrapper = plugins.get::<WriteCacheUploadStoreWrapperRef>();
@@ -297,6 +301,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    tail_replay_limits: tail_replay_limits.clone(),
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
@@ -432,8 +437,13 @@ impl WorkerGroup {
     }
 
     /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
-    pub(crate) fn notify_writable(&self, region: &MitoRegion) {
+    pub(crate) fn notify_writable(&self, region: &MitoRegionRef) {
         handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
+    }
+
+    /// Asks the worker of `region` to cancel its tail replay, if one runs, without waiting.
+    pub(crate) fn notify_cannot_replay(&self, region: &MitoRegionRef) {
+        handle_tail_replay::notify_cannot_replay(&self.worker(region.region_id).sender, region);
     }
 
     /// Get worker for specific `region_id`.
@@ -503,6 +513,7 @@ impl WorkerGroup {
             config.max_background_compactions,
         ));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
+        let tail_replay_limits = TailReplayLimits::new(&config);
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
@@ -583,6 +594,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    tail_replay_limits: tail_replay_limits.clone(),
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
@@ -672,6 +684,23 @@ pub(crate) fn worker_init_check_delay() -> Duration {
     Duration::from_secs(init_check_delay)
 }
 
+/// Constructs the shared registry for region creation and index maintenance.
+fn index_registry(
+    config: &MitoConfig,
+    provider: Option<IndexKindProviderRef>,
+) -> Result<IndexRegistryRef> {
+    IndexRegistry::new(
+        config.inverted_index.clone(),
+        config.fulltext_index.clone(),
+        config.bloom_filter_index.clone(),
+    )
+    .with_provider(provider)
+    .map(Arc::new)
+    .with_context(|_| ExternalSnafu {
+        context: "registering index handlers".to_string(),
+    })
+}
+
 /// Worker start config.
 struct WorkerStarter<S> {
     id: WorkerId,
@@ -701,6 +730,8 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    /// Limits of the node's tail replays.
+    tail_replay_limits: TailReplayLimits,
     #[cfg(feature = "hdfs-object-store")]
     /// Limiter for the temporary file sweeps, or `None` if the datanode allows
     /// no concurrent GC job.
@@ -810,6 +841,7 @@ impl<S: LogStore> WorkerStarter<S> {
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
+            tail_replay_limits: self.tail_replay_limits,
             plugins: self.plugins,
             #[cfg(feature = "hdfs-object-store")]
             sweep_limiter: self.sweep_limiter,
@@ -1269,6 +1301,8 @@ struct RegionWorkerLoop<S> {
     partition_expr_fetcher: PartitionExprFetcherRef,
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
+    /// Limits of the node's tail replays.
+    tail_replay_limits: TailReplayLimits,
     /// Plugins for flush hooks.
     plugins: Plugins,
     #[cfg(feature = "hdfs-object-store")]
@@ -1740,7 +1774,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_index_build_stopped(region_id, req).await
             }
             BackgroundNotify::IndexBuildRetry(req) => {
-                self.handle_rebuild_index(req, OptionOutputTx::new(None))
+                self.handle_rebuild_index_inner(req, OptionOutputTx::new(None), true)
                     .await
             }
             BackgroundNotify::CompactionFinished(req) => {
@@ -1769,6 +1803,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_region_reloaded(region_id, old, result).await
             }
             BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::RegionCannotReplay { region } => {
+                self.handle_region_cannot_replay(region_id, region)
+            }
             BackgroundNotify::TailReplayCommitted {
                 region,
                 edit,
@@ -1784,7 +1821,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if should_dispatch_pending {
             self.dispatch_pending_region_requests(region_id).await;
         }
-        // A commit that found a newer manifest fenced the region before its job reported here.
+        // A commit or a tail replay that found a newer manifest fenced the region before its job
+        // reported here.
         if !is_reload_result {
             self.maybe_reload_region(region_id);
         }
@@ -1866,6 +1904,15 @@ impl<S> RegionWorkerLoop<S> {
             region.deactivate_region_manifest_size_metric();
             region.stop().await;
         }
+        // Another engine may open these regions from the same storage after the stop. Regions
+        // closed earlier are not waited for; a datanode or standalone shutdown closes every region
+        // first, so there this only covers regions whose close failed.
+        join_all(
+            regions
+                .iter()
+                .map(|region| region.manifest_ctx.wait_for_checkpoint_after_stop()),
+        )
+        .await;
 
         self.regions.clear();
         for region in regions {
@@ -1935,6 +1982,14 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_tail_lease_check(_region_id);
+        }
+    }
+
+    /// A tail replay that found a newer manifest is about to wait to fence the region.
+    pub(crate) fn on_tail_fence_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_fence_begin(_region_id);
         }
     }
 
@@ -2146,6 +2201,13 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_index_build_abort(_region_file_id).await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_stopped(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_stopped(_region_file_id).await;
         }
     }
 

@@ -183,7 +183,11 @@ pub(crate) fn field_column_start(metadata: &RegionMetadata, num_columns: usize) 
 // sparse encoding).
 /// Helper for reading the flat SST format with projection.
 ///
-/// It only supports flat format that stores primary keys additionally.
+/// Physical Parquet projections describe stored columns and drive pruning and
+/// prefiltering. Converted projections describe batches returned by `convert_batch`.
+/// Sparse compaction can retain encoded-only tags; query reads may expand them.
+/// Neither layout is the final user projection. Compatibility aligns converted
+/// batches before merge; temporary predicate columns never change their layout.
 pub struct FlatReadFormat {
     /// Sequence number to override the sequence read from the SST.
     override_sequence: Option<SequenceNumber>,
@@ -252,7 +256,7 @@ impl FlatReadFormat {
         self.pk_dict_wrap_schema = Some(output_schema);
     }
 
-    /// Index of a column in the projected batch by its column id.
+    /// Index in the converted batch, never in a separately projected prefilter batch.
     pub fn projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
         self.format_projection()
             .column_id_to_projected_index

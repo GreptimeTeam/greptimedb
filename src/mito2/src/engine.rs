@@ -175,7 +175,7 @@ use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
 use crate::read::stream::ScanBatchStream;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::options::parse_wal_options;
-use crate::region::{MitoRegion, MitoRegionRef};
+use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
@@ -1356,18 +1356,33 @@ impl EngineInner {
         let region = self.find_region(region_id)?;
         let was_leader = region.region_role() == RegionRole::Leader;
         let was_writable = region.is_writable();
-        region.set_role(role);
+        let previous = region.set_role(role);
         if role == RegionRole::Leader && !was_leader {
             // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
             region.manifest_ctx.record_leader_lease(Instant::now());
         }
+        self.notify_if_can_no_longer_replay(&region, previous);
         self.notify_if_became_writable(&region, was_writable);
         Ok(())
     }
 
+    /// Asks the worker to cancel the tail replay of `region` if a role change left it unable to
+    /// replay. `previous` is the state the change replaced; a later state could come from a
+    /// concurrent promotion. A change to Leader only replaces states that cannot replay. A replay
+    /// may wait on I/O that never notices the role change.
+    fn notify_if_can_no_longer_replay(
+        &self,
+        region: &MitoRegionRef,
+        previous: Option<RegionRoleState>,
+    ) {
+        if previous.is_some_and(RegionRoleState::can_replay_tails) {
+            self.workers.notify_cannot_replay(region);
+        }
+    }
+
     /// Asks the worker to replay the pending tails of `region` if a role change made it
     /// writable. The worker may already have started an ALTER or an edit of the region.
-    fn notify_if_became_writable(&self, region: &MitoRegion, was_writable: bool) {
+    fn notify_if_became_writable(&self, region: &MitoRegionRef, was_writable: bool) {
         if !was_writable && region.can_replay_tails() {
             self.workers.notify_writable(region);
         }
@@ -1728,7 +1743,8 @@ impl RegionEngine for MitoEngine {
             self.inner.notify_if_became_writable(&region, was_writable);
             return Ok(promoted);
         }
-        region.set_role(role);
+        let previous = region.set_role(role);
+        self.inner.notify_if_can_no_longer_replay(&region, previous);
         Ok(true)
     }
 
