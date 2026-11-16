@@ -15,10 +15,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use datafusion::arrow::array::Float64Array;
+use datafusion::arrow::array::{Array, Float64Array};
 use datafusion::error::DataFusionError;
 use datatypes::series::samples::{
-    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels};
@@ -337,6 +337,104 @@ fn sort_drops_histogram_samples() {
     assert_eq!(sorted.len(), 1);
     let positions: Vec<usize> = sorted[0].time.positions().map(|(point, _)| point).collect();
     assert_eq!(positions, [1]);
+}
+
+/// `scalar` reads float samples only, as Prometheus' `funcScalar` does: a point whose only sample
+/// is a histogram holds no float value, so it answers NaN; a histogram beside one float leaves
+/// that float; and two floats are more than one sample, so they answer NaN.
+#[test]
+fn scalar_ignores_histogram_samples() {
+    let histogram =
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
+    let schema = schema(1, 1);
+    let hist = |name: &str| -> Series {
+        let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+        builder
+            .push_samples(
+                0,
+                &[Some(GridSample::Histogram(Box::new(
+                    FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+                )))],
+            )
+            .unwrap();
+        builder
+            .finish(metric(&format!("__name__={name}")))
+            .unwrap()
+            .unwrap()
+    };
+    // A scalar exists at every grid point, so the one point of this grid is the whole answer.
+    let value = |series: &[Series]| -> f64 {
+        let result = scalar(&schema, series).unwrap();
+        assert_eq!(result.time.len(), 1, "a scalar exists at every point");
+        match result.fields.as_slice()[0].sample(0) {
+            SampleRef::Float(value) => value,
+            SampleRef::Missing => panic!("scalar wrote no value at a grid point"),
+            SampleRef::Histogram(_) => panic!("scalar answered with a histogram"),
+        }
+    };
+    let first = build(&schema, metric("__name__=f"), &vec![vec![Some(1.0)]]).unwrap();
+    let second = build(&schema, metric("__name__=g"), &vec![vec![Some(2.0)]]).unwrap();
+
+    assert!(
+        value(&[hist("h")]).is_nan(),
+        "a histogram alone holds no float value"
+    );
+    assert_eq!(
+        value(&[hist("h"), first.clone()]),
+        1.0,
+        "the float beside a histogram is the only element"
+    );
+    assert!(
+        value(&[first, second, hist("h")]).is_nan(),
+        "two floats are more than one element"
+    );
+}
+
+/// `scalar` answers one dense run of values over the whole grid: one value per point and no null,
+/// so the value buffer the input is read into is the result's array.
+///
+/// The answer is the only thing a scalar can be -- a value at every point of the grid -- which is
+/// why it is written directly rather than staged as optional values and rebuilt from a row index.
+#[test]
+fn scalar_answers_one_dense_run_over_the_grid() {
+    let schema = schema(3, 1);
+    let series = [
+        build(
+            &schema,
+            metric("__name__=a"),
+            &vec![vec![Some(1.0)], vec![Some(2.0)], vec![None]],
+        )
+        .unwrap(),
+        build(
+            &schema,
+            metric("__name__=b"),
+            &vec![vec![None], vec![Some(3.0)], vec![None]],
+        )
+        .unwrap(),
+    ];
+    let result = scalar(&schema, &series).unwrap();
+
+    assert_eq!(result.time.len(), 3, "a scalar exists at every point");
+    assert!(result.time.is_contiguous(), "one run, not a run per value");
+    let positions: Vec<usize> = result.time.positions().map(|(point, _)| point).collect();
+    assert_eq!(positions, [0, 1, 2], "the run covers the grid");
+
+    let samples = &result.fields.as_slice()[0];
+    assert_eq!(samples.segments().len(), 1, "one dense segment, not chunks");
+    match samples.dense() {
+        Some(DenseSamplesRef::Float(values)) => {
+            assert_eq!(values.len(), 3);
+            assert_eq!(
+                values.null_count(),
+                0,
+                "every point answers a value, a NaN where the point is undefined"
+            );
+            assert_eq!(values.value(0), 1.0, "the only float of the point");
+            assert!(values.value(1).is_nan(), "two floats are no element");
+            assert!(values.value(2).is_nan(), "no sample is no element");
+        }
+        _ => panic!("scalar answered with something other than a float array"),
+    }
 }
 
 /// A selection hands back the sample it selected, start timestamp included.
