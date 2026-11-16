@@ -424,9 +424,11 @@ async fn test_granted_lease_keeps_latest_heartbeat_across_catchup_reopen() {
         sent_at: sent_before,
     };
     assert_eq!(granted_lease(&engine), Some(latest));
-    // A lease of an earlier heartbeat that arrives late does not replace it.
+    // A lease of an earlier or the same heartbeat that arrives late does not replace it.
     let earlier = sent_before - Duration::from_millis(1);
     grant_at(&engine, RegionRole::Follower, earlier, Some(1));
+    assert_eq!(granted_lease(&engine), Some(latest));
+    grant_at(&engine, RegionRole::Follower, sent_before, None);
     assert_eq!(granted_lease(&engine), Some(latest));
 
     let region = engine.get_region(REGION_ID).unwrap();

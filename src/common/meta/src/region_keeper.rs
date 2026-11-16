@@ -63,16 +63,6 @@ impl OperatingRegionGuard {
 
 pub type MemoryRegionKeeperRef = Arc<MemoryRegionKeeper>;
 
-/// Returns the first non-zero value of `random`, since 0 means no candidate lease id on the wire.
-fn new_candidate_lease_id(mut random: impl FnMut() -> u64) -> u64 {
-    loop {
-        let candidate_lease_id = random();
-        if candidate_lease_id != 0 {
-            return candidate_lease_id;
-        }
-    }
-}
-
 /// Tracks regions in memory.
 ///
 /// It used in following cases:
@@ -123,28 +113,6 @@ impl MemoryRegionKeeper {
         )
     }
 
-    fn register(
-        &self,
-        datanode_id: DatanodeId,
-        region_id: RegionId,
-        operating_region: OperatingRegion,
-    ) -> Option<OperatingRegionGuard> {
-        let mut inner = self.inner.write().unwrap();
-
-        match inner.entry((datanode_id, region_id)) {
-            Entry::Occupied(_) => None,
-            Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(operating_region);
-                Some(OperatingRegionGuard {
-                    datanode_id,
-                    region_id,
-                    candidate_lease_id: operating_region.candidate_lease_id,
-                    inner: self.inner.clone(),
-                })
-            }
-        }
-    }
-
     /// Returns true if the keeper contains a (`datanoe_id`, `region_id`) tuple.
     pub fn contains(&self, datanode_id: DatanodeId, region_id: RegionId) -> bool {
         let inner = self.inner.read().unwrap();
@@ -183,6 +151,38 @@ impl MemoryRegionKeeper {
     pub fn clear(&self) {
         let mut inner = self.inner.write().unwrap();
         inner.clear();
+    }
+
+    fn register(
+        &self,
+        datanode_id: DatanodeId,
+        region_id: RegionId,
+        operating_region: OperatingRegion,
+    ) -> Option<OperatingRegionGuard> {
+        let mut inner = self.inner.write().unwrap();
+
+        match inner.entry((datanode_id, region_id)) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(operating_region);
+                Some(OperatingRegionGuard {
+                    datanode_id,
+                    region_id,
+                    candidate_lease_id: operating_region.candidate_lease_id,
+                    inner: self.inner.clone(),
+                })
+            }
+        }
+    }
+}
+
+/// Returns the first non-zero value of `random`, since 0 means no candidate lease id on the wire.
+fn new_candidate_lease_id(mut random: impl FnMut() -> u64) -> u64 {
+    loop {
+        let candidate_lease_id = random();
+        if candidate_lease_id != 0 {
+            return candidate_lease_id;
+        }
     }
 }
 

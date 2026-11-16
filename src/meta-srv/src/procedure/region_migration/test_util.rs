@@ -595,23 +595,6 @@ pub fn new_procedure_context() -> ProcedureContext {
     }
 }
 
-/// Returns a table metadata manager that records, before each of its transactions, whether
-/// `keeper` holds no registration.
-fn table_metadata_manager_observing_keeper(
-    keeper: MemoryRegionKeeperRef,
-) -> (TableMetadataManagerRef, Arc<Mutex<Vec<bool>>>) {
-    let keeper_empty_at_txn = Arc::new(Mutex::new(Vec::new()));
-    let recorded = keeper_empty_at_txn.clone();
-    let kv_backend = Arc::new(TxnObservingKvBackend {
-        inner: Arc::new(MemoryKvBackend::new()),
-        before_txn: Box::new(move || recorded.lock().unwrap().push(keeper.is_empty())),
-    });
-    (
-        Arc::new(TableMetadataManager::new(kv_backend)),
-        keeper_empty_at_txn,
-    )
-}
-
 /// A migration about to roll back: its region is led by the source peer in the downgrading state,
 /// and registered on the target peer as the migration's candidate.
 pub(crate) struct CandidateRollback {
@@ -664,4 +647,21 @@ pub(crate) fn assert_registration_dropped_before_route_write(
     let keeper_empty_at_txn = keeper_empty_at_txn.lock().unwrap();
     assert!(!keeper_empty_at_txn.is_empty());
     assert!(keeper_empty_at_txn.iter().all(|empty| *empty));
+}
+
+/// Returns a table metadata manager that records, before each of its transactions, whether
+/// `keeper` holds no registration.
+fn table_metadata_manager_observing_keeper(
+    keeper: MemoryRegionKeeperRef,
+) -> (TableMetadataManagerRef, Arc<Mutex<Vec<bool>>>) {
+    let keeper_empty_at_txn = Arc::new(Mutex::new(Vec::new()));
+    let recorded = keeper_empty_at_txn.clone();
+    let kv_backend = Arc::new(TxnObservingKvBackend {
+        inner: Arc::new(MemoryKvBackend::new()),
+        before_txn: Box::new(move || recorded.lock().unwrap().push(keeper.is_empty())),
+    });
+    (
+        Arc::new(TableMetadataManager::new(kv_backend)),
+        keeper_empty_at_txn,
+    )
 }
