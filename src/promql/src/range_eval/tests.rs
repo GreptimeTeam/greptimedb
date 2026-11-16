@@ -1318,20 +1318,21 @@ fn synthetic_zero_still_extrapolates_to_the_window_end() {
         }
     }
 
-    // Three real samples, where the two spans finally differ: the sampled interval runs from the
-    // synthetic zero (5000 - 1000) while the average interval is measured between the real samples
-    // (5000 - 2000 over two steps). Both are 4000 against 1500 here, so an average taken from the
-    // sampled interval instead divides by three and under-reports the increase. Prometheus answers
-    // 9 * 1.375 = 12.375.
-    for (function, expected) in [
-        (RangeFunction::Increase, 12.375),
-        (RangeFunction::Rate, 2.0625),
-    ] {
+    // Two real samples, where the two spans finally differ: the sampled interval runs from the
+    // synthetic zero (3000 - 1000) while the average interval is measured between the real samples
+    // (3000 - 2000 over one step). That is 2000ms against 1000ms, so both ends fall past
+    // 1.1 * 1000ms and back to half of it, and the counter's zero point then takes the start to 0:
+    // the factor is (2000 + 0 + 500) / 2000 = 1.25. Measuring the average from the synthetic zero
+    // instead makes it 2000ms, leaves both ends inside 1.1 * 2000ms and answers 1.75 -- the swap
+    // this geometry fails on rather than passes by agreeing with itself. The zero adds its own
+    // sample back, so the count is (4 - 2) + 2 = 4, and Prometheus answers 4 * 1.25 = 5 for the
+    // increase and 4 * 1.25 / 4 = 1.25 for the rate.
+    for (function, expected) in [(RangeFunction::Increase, 5.0), (RangeFunction::Rate, 1.25)] {
         let mut evaluator = RangeEvaluator::try_new(
             &schema,
-            grid(6_500, 3_000, 1),
+            grid(4_500, 3_000, 1),
             RangeWindow {
-                range_ms: 6_000,
+                range_ms: 4_000,
                 offset_ms: 0,
                 anchor_ms: None,
                 modifier: None,
@@ -1343,19 +1344,18 @@ fn synthetic_zero_still_extrapolates_to_the_window_end() {
             &mut evaluator,
             &[
                 make_chunk(2_000, 2.0, Some(1_000), false),
-                make_chunk(3_500, 5.0, None, false),
-                make_chunk(5_000, 9.0, None, true),
+                make_chunk(3_000, 4.0, None, true),
             ],
         );
         let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
         match series.fields.as_slice()[0].cursor().at(0).unwrap() {
             SampleRef::Histogram(histogram) => assert!(
                 (histogram.count - expected).abs() < 1e-12,
-                "{function:?} over three samples: {} vs {expected}",
+                "{function:?} over two samples: {} vs {expected}",
                 histogram.count
             ),
             other => panic!(
-                "expected histogram for {function:?} over three samples, got {}",
+                "expected histogram for {function:?} over two samples, got {}",
                 describe_sample(Some(other))
             ),
         }
@@ -1392,6 +1392,90 @@ fn single_histogram_start_timestamp_is_compared_on_shifted_axis() {
         }
         other => panic!(
             "expected histogram rate, got {}",
+            describe_sample(Some(other))
+        ),
+    }
+}
+
+/// A first histogram whose count is negative is not extrapolated towards zero.
+///
+/// The zero point is `first.count / increase`, and a negative one would pull the sampled start
+/// *backwards* (`duration_to_zero < duration_to_start`), handing the counter time it never spent
+/// below zero. Prometheus guards it with `first.count >= 0`, which is what the histogram route now
+/// reads too: without the guard this window answers 15 instead of 24.
+#[test]
+fn a_negative_first_histogram_count_is_not_extrapolated_towards_zero() {
+    let schema = raw_schema(1);
+    let make_chunk = |ts, count, is_last| {
+        let offsets = [0];
+        let lengths = [2];
+        // The buckets follow the count, so the increase is the count difference bucket by bucket.
+        let buckets = [count / 2.0; 2];
+        let mut builder = HistogramBatchBuilder::new();
+        let index = builder
+            .push(HistogramView {
+                schema: 0,
+                zero_threshold: 0.0,
+                zero_count: 0.0,
+                count,
+                sum: count,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp: None,
+                custom_values: &[],
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: &buckets,
+                },
+                negative: BucketSideView {
+                    span_offsets: &[],
+                    span_lengths: &[],
+                    buckets: &[],
+                },
+            })
+            .unwrap();
+        let samples = Samples::try_from_histogram(
+            UInt32Array::from(vec![Some(index)]),
+            builder.finish().unwrap(),
+        )
+        .unwrap();
+        RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(0u64.to_le_bytes().to_vec()),
+            Some(metric(0)),
+            RawTimestamps::try_new(ScalarBuffer::from(vec![ts])).unwrap(),
+            SeriesFields::try_from_vec(vec![samples]).unwrap(),
+            is_last,
+        )
+        .unwrap()
+    };
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(6_500, 6_000, 1),
+        RangeWindow {
+            range_ms: 6_000,
+            offset_ms: 0,
+            anchor_ms: None,
+            modifier: None,
+        },
+        RangeFunction::Increase,
+    )
+    .unwrap();
+    let chunks = collect_chunks(
+        &mut evaluator,
+        &[make_chunk(2_000, -3.0, false), make_chunk(5_000, 9.0, true)],
+    );
+    let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+    match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+        // 9 - (-3) = 12 over the 3000ms between the samples, extrapolated 1500ms to the window's
+        // open end and 1500ms past the last sample: 12 * 2.
+        SampleRef::Histogram(histogram) => assert!(
+            (histogram.count - 24.0).abs() < 1e-12,
+            "increase {}",
+            histogram.count
+        ),
+        other => panic!(
+            "expected a histogram increase, got {}",
             describe_sample(Some(other))
         ),
     }

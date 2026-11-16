@@ -420,8 +420,14 @@ fn extrapolated_rate_of(
     }
     let zero_point = (is_counter && result > 0.0 && first >= 0.0).then(|| first / result);
     let factor = extrapolation_factor(
-        (first_t, last_t),
-        samples_minus_one,
+        ExtrapolationSpan {
+            // A float sample carries no start timestamp, so both intervals start at the first
+            // sample.
+            sampled_from: first_t,
+            average_from: first_t,
+            last: last_t,
+            samples_minus_one,
+        },
         eval_ts,
         range_ms,
         is_counter,
@@ -464,27 +470,64 @@ pub(crate) fn extrapolated_rate_batch<const IS_COUNTER: bool, const IS_RATE: boo
     }
 }
 
-/// The factor `extrapolatedRate` scales the sampled increase by. `zero_point` is the first
-/// value over the increase, given only when Prometheus extrapolates a counter to zero.
+/// The span one window's extrapolation factor is measured over.
+///
+/// A float window has one anchor: its first sample starts both the interval the increase was
+/// sampled over and the interval the average sample distance is measured over. A native histogram
+/// counter can have two, because a `start_timestamp` inside the window is a synthetic zero the
+/// sampled interval starts at, while the average sample distance still belongs to the real samples.
+pub(super) struct ExtrapolationSpan {
+    /// The first sample, or a native histogram's synthetic zero.
+    pub sampled_from: i64,
+    /// The first sample, always.
+    pub average_from: i64,
+    /// The last sample.
+    pub last: i64,
+    /// Intervals between samples, i.e. the sample count minus one; `0` when the window has a
+    /// single sample and so no average interval to measure.
+    pub samples_minus_one: usize,
+}
+
+/// The factor `extrapolatedRate` scales the sampled increase by. `zero_point` is the first value
+/// over the increase, given only when Prometheus extrapolates a counter to zero: it is the share of
+/// the sampled interval that lies before `span.sampled_from`, so `0` says the counter's zero point
+/// is `span.sampled_from` itself, which is what a synthetic zero is.
+///
+/// Floats and native histograms both come through here, and this is the only place the factor is
+/// computed; the two routes differ in the anchors they read, never in the arithmetic. The one
+/// deliberate difference is not in the formula: a zero `sampled_interval` makes this function
+/// answer `1.0` (`1 / range` for a rate), which is the identity a float window wants to multiply
+/// its increase by, while the histogram caller answers no value at all before calling this. Its
+/// buckets are all zero there, and an `Inf` or `NaN` rate would only poison what consumes it
+/// downstream; a float window has no such leftovers to hand on.
 pub(super) fn extrapolation_factor(
-    (first_t, last_t): (i64, i64),
-    samples_minus_one: usize,
+    span: ExtrapolationSpan,
     eval_ts: i64,
     range_ms: i64,
     is_counter: bool,
     is_rate: bool,
     zero_point: Option<f64>,
 ) -> f64 {
+    let ExtrapolationSpan {
+        sampled_from,
+        average_from,
+        last,
+        samples_minus_one,
+    } = span;
     // Millisecond differences in 64-bit arithmetic: widening to `i128` and narrowing back with
     // `as f64` compiles to a call to the `__floattidf` builtin instead of an instruction, once per
     // grid point per series. The subtractions wrap, which is what Go's `int64` arithmetic does, so
     // an out-of-range window start produces the same value Prometheus computes rather than a
     // clamped one; real timestamps are nowhere near that range, where both agree.
     let range_start = eval_ts.wrapping_sub(range_ms);
-    let mut duration_to_start = first_t.wrapping_sub(range_start) as f64 / 1000.0;
-    let mut duration_to_end = eval_ts.wrapping_sub(last_t) as f64 / 1000.0;
-    let sampled_interval = last_t.wrapping_sub(first_t) as f64 / 1000.0;
-    let average_interval = sampled_interval / samples_minus_one as f64;
+    let mut duration_to_start = average_from.wrapping_sub(range_start) as f64 / 1000.0;
+    let mut duration_to_end = eval_ts.wrapping_sub(last) as f64 / 1000.0;
+    let sampled_interval = last.wrapping_sub(sampled_from) as f64 / 1000.0;
+    let average_interval = if samples_minus_one == 0 {
+        0.0
+    } else {
+        last.wrapping_sub(average_from) as f64 / 1000.0 / samples_minus_one as f64
+    };
     let threshold = average_interval * 1.1;
     if duration_to_start >= threshold {
         duration_to_start = average_interval / 2.0;
@@ -643,5 +686,270 @@ impl std::hash::Hash for RangeFunction {
             }
             _ => (),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExtrapolationSpan, extrapolation_factor};
+
+    /// One window as both range-function routes read it: `sampled_from` starts the interval the
+    /// increase was sampled over, `average_from` the interval the average sample distance is
+    /// measured over. They are the same timestamp except for a native histogram counter with a
+    /// synthetic zero, whose sampled interval starts at the zero.
+    #[derive(Clone, Copy, Debug)]
+    struct Window {
+        sampled_from: i64,
+        average_from: i64,
+        last: i64,
+        samples_minus_one: usize,
+        eval_ts: i64,
+        range_ms: i64,
+        is_counter: bool,
+        is_rate: bool,
+        zero_point: Option<f64>,
+    }
+
+    impl Window {
+        /// The factor the float route computes. A float sample carries no start timestamp, so its
+        /// single anchor starts both intervals and `sampled_from` plays no part.
+        fn as_float(self) -> f64 {
+            extrapolation_factor(
+                ExtrapolationSpan {
+                    sampled_from: self.average_from,
+                    average_from: self.average_from,
+                    last: self.last,
+                    samples_minus_one: self.samples_minus_one,
+                },
+                self.eval_ts,
+                self.range_ms,
+                self.is_counter,
+                self.is_rate,
+                self.zero_point,
+            )
+        }
+
+        /// The factor the native histogram route computes, with both anchors as its call site
+        /// builds them.
+        fn as_histogram(self) -> f64 {
+            extrapolation_factor(
+                ExtrapolationSpan {
+                    sampled_from: self.sampled_from,
+                    average_from: self.average_from,
+                    last: self.last,
+                    samples_minus_one: self.samples_minus_one,
+                },
+                self.eval_ts,
+                self.range_ms,
+                self.is_counter,
+                self.is_rate,
+                self.zero_point,
+            )
+        }
+    }
+
+    /// Both routes reach one function, so their factors can only differ in how each fills the span.
+    /// A window without a synthetic zero is filled the same way by both, and the factors have to
+    /// agree to the bit. A window whose sampled anchor is a synthetic zero is the one shape the two
+    /// fills answer differently, and pinning both answers there is what puts the anchors, not only
+    /// the arithmetic, under the assertions.
+    #[test]
+    fn both_routes_compute_one_extrapolation_factor() {
+        // Evaluation at 6500ms over a 6000ms range: the window opens at 500ms and the last sample
+        // sits 1500ms inside its closed end.
+        let windows = [
+            Window {
+                sampled_from: 2_000,
+                average_from: 2_000,
+                last: 5_000,
+                samples_minus_one: 1,
+                eval_ts: 6_500,
+                range_ms: 6_000,
+                is_counter: true,
+                is_rate: false,
+                zero_point: None,
+            },
+            Window {
+                sampled_from: 2_000,
+                average_from: 2_000,
+                last: 5_000,
+                samples_minus_one: 2,
+                eval_ts: 6_500,
+                range_ms: 6_000,
+                is_counter: true,
+                is_rate: true,
+                zero_point: None,
+            },
+            Window {
+                sampled_from: 2_000,
+                average_from: 2_000,
+                last: 5_000,
+                samples_minus_one: 2,
+                eval_ts: 6_500,
+                range_ms: 6_000,
+                is_counter: false,
+                is_rate: false,
+                zero_point: None,
+            },
+            // The last sample further in than the average interval allows, so both ends fall back
+            // to half of it.
+            Window {
+                sampled_from: 4_000,
+                average_from: 4_000,
+                last: 4_500,
+                samples_minus_one: 1,
+                eval_ts: 6_500,
+                range_ms: 6_000,
+                is_counter: true,
+                is_rate: true,
+                zero_point: None,
+            },
+            // A single sample holds no average interval to measure.
+            Window {
+                sampled_from: 5_000,
+                average_from: 5_000,
+                last: 5_000,
+                samples_minus_one: 0,
+                eval_ts: 6_500,
+                range_ms: 6_000,
+                is_counter: true,
+                is_rate: false,
+                zero_point: None,
+            },
+        ];
+        for window in windows {
+            for zero_point in [None, Some(0.0), Some(0.25), Some(1.5)] {
+                let window = Window {
+                    zero_point,
+                    ..window
+                };
+                assert_eq!(
+                    window.as_float().to_bits(),
+                    window.as_histogram().to_bits(),
+                    "{window:?}"
+                );
+            }
+        }
+
+        // A synthetic zero at 2000ms with real samples at 2500ms and 4500ms, evaluated at 7000ms
+        // over a 6000ms range, gives the histogram route a sampled interval of 2500ms and the
+        // 2000ms average interval between the real samples. The end is 2500ms from the range end,
+        // past 1.1 * 2000ms, so it falls back to half the average interval; the start is 1500ms
+        // from the range start, inside that threshold, and the counter's zero point then takes it
+        // to 0: (2500 + 0 + 1000) / 2500 = 1.4. A float sample carries no start timestamp, so the
+        // float route samples the same 2000ms it measures its average over and answers
+        // (2000 + 0 + 1000) / 2000 = 1.5. The two fills disagree, which is what makes reading one
+        // anchor for the other observable rather than a change of arguments with no effect.
+        let two_anchor = Window {
+            sampled_from: 2_000,
+            average_from: 2_500,
+            last: 4_500,
+            samples_minus_one: 1,
+            eval_ts: 7_000,
+            range_ms: 6_000,
+            is_counter: true,
+            is_rate: false,
+            zero_point: Some(0.0),
+        };
+        assert_eq!(two_anchor.as_histogram().to_bits(), 1.4f64.to_bits());
+        assert_eq!(two_anchor.as_float().to_bits(), 1.5f64.to_bits());
+        // Both directions an anchor can be replaced in are pinned, so neither the divisor nor the
+        // end's fallback can absorb the swap. Reading the average anchor for the sampled one
+        // shortens the sampled interval to 2000ms and answers 1.5; reading the sampled anchor for
+        // the average one widens the average interval to 2500ms, which puts the end back inside the
+        // threshold so it stays at 2500ms, and answers 2.0. The zero point takes the start to 0
+        // whatever the average interval says, so the end has to fall past one threshold and inside
+        // the other for that: an end falling back under both average intervals, or under neither,
+        // answers the same either way and pins nothing.
+        assert_eq!(
+            Window {
+                sampled_from: two_anchor.average_from,
+                ..two_anchor
+            }
+            .as_histogram()
+            .to_bits(),
+            1.5f64.to_bits()
+        );
+        assert_eq!(
+            Window {
+                average_from: two_anchor.sampled_from,
+                ..two_anchor
+            }
+            .as_histogram()
+            .to_bits(),
+            2.0f64.to_bits()
+        );
+    }
+
+    /// A synthetic zero puts the sampled anchor before the average anchor, and no float window
+    /// describes that: a float window starting at the zero would move its average interval there
+    /// too. The geometry is chosen so the two answers differ -- measuring the average from the
+    /// synthetic zero answers 1.75 where the real samples answer 1.25 -- so a swapped anchor cannot
+    /// pass by agreeing with itself.
+    #[test]
+    fn a_synthetic_zero_moves_only_the_sampled_anchor() {
+        // A zero at 1000ms, real samples at 2000ms and 3000ms, evaluated at 4500ms over a 4000ms
+        // range: the window opens at 500ms and the range ends 1500ms past the last sample. The
+        // sampled interval runs 2000ms from the zero, the average interval is the 1000ms between
+        // the real samples, so both ends lie past 1.1 * 1000ms and fall back to half of it, and the
+        // counter's zero point then takes the start to 0: (2000 + 0 + 500) / 2000 = 1.25. Measuring
+        // the average from the synthetic zero instead makes the average interval 2000ms, leaves
+        // both ends inside 1.1 * 2000ms and answers (2000 + 0 + 1500) / 2000 = 1.75. Both are
+        // pinned below, so swapping the anchors fails here instead of agreeing with itself.
+        let window = Window {
+            sampled_from: 1_000,
+            average_from: 2_000,
+            last: 3_000,
+            samples_minus_one: 1,
+            eval_ts: 4_500,
+            range_ms: 4_000,
+            is_counter: true,
+            is_rate: false,
+            zero_point: Some(0.0),
+        };
+        assert_eq!(window.as_histogram().to_bits(), 1.25f64.to_bits());
+        assert_eq!(
+            Window {
+                is_rate: true,
+                ..window
+            }
+            .as_histogram()
+            .to_bits(),
+            (1.25f64 / 4.0).to_bits()
+        );
+        // The answer a swapped average anchor gives, pinned so that this geometry stays one the
+        // assertions above can tell apart.
+        assert_eq!(
+            Window {
+                average_from: 1_000,
+                ..window
+            }
+            .as_histogram()
+            .to_bits(),
+            1.75f64.to_bits()
+        );
+        // The float route on the same numbers starts its sampled interval at the first sample,
+        // which is a different window: 1.5 rather than 1.25.
+        assert_eq!(window.as_float().to_bits(), 1.5f64.to_bits());
+
+        // One real sample behind the zero leaves no average interval, so neither end is
+        // extrapolated and the factor is the identity.
+        let single = Window {
+            sampled_from: 1_000,
+            average_from: 2_000,
+            last: 2_000,
+            samples_minus_one: 0,
+            ..window
+        };
+        assert_eq!(single.as_histogram().to_bits(), 1.0f64.to_bits());
+        assert_eq!(
+            Window {
+                is_rate: true,
+                ..single
+            }
+            .as_histogram()
+            .to_bits(),
+            (1.0f64 / 4.0).to_bits()
+        );
     }
 }
