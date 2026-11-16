@@ -69,7 +69,8 @@ impl DropDatabaseCursor {
     const MAX_BATCH_BYTES: usize = ReadableSize::mb(1).as_bytes() as usize;
 
     fn estimated_table_bytes(catalog: &str, schema: &str, name: &str) -> usize {
-        // Allow 128 bytes for per-table JSON/key overhead and 8x for nested JSON escaping.
+        // A control byte can expand to 6 JSON bytes, then 7 inside ProcedureMessage's
+        // JSON string. Round up to 8x and allow 128 bytes for fixed per-table JSON/key overhead.
         128 + 8 * (catalog.len() + schema.len() + name.len())
     }
 

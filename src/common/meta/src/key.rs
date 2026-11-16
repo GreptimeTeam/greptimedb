@@ -1329,19 +1329,14 @@ impl TableMetadataManager {
         Ok(())
     }
 
-    /// Number of logical tables whose identity keys fit in one backend transaction.
-    pub fn destroy_logical_tables_metadata_chunk_size(&self) -> usize {
-        (self.kv_backend.max_txn_ops() / Self::TABLE_IDENTITY_KEYS).max(1)
-    }
-
     /// Permanently deletes a batch of logical tables. The caller holds their schema write lock
     /// and persists the deletion plan before calling, since backend requests may partially succeed.
-    pub async fn destroy_logical_tables_metadata(
+    pub(crate) async fn destroy_logical_tables_metadata(
         &self,
         tables: &[(TableId, TableName)],
     ) -> Result<()> {
         let max_ops = self.kv_backend.max_txn_ops().max(1);
-        let tables_per_request = self.destroy_logical_tables_metadata_chunk_size();
+        let tables_per_request = (max_ops / Self::TABLE_IDENTITY_KEYS).max(1);
         // Keep a table's keys together whenever they fit in one backend request. A backend
         // limit smaller than a single table still requires splitting, as with single-table drop.
         for tables in tables.chunks(tables_per_request) {
