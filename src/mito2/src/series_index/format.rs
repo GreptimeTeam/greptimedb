@@ -123,7 +123,7 @@ pub(crate) trait SamplesFormatReader: Send + Sync {
     -> Result<BoxStream<'static, Result<SamplesBatch>>>;
 }
 
-/// Builds and opens immutable per-SST samples artifacts.
+/// Builds and opens immutable samples artifacts.
 #[async_trait]
 pub(crate) trait SamplesFormat: Debug + Send + Sync {
     fn format(&self) -> ArtifactFormat;

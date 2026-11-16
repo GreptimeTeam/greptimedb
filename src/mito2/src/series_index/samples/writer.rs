@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Streaming per-SST sample writing with bounded blocks and owned outputs.
+//! Streaming sample writing with bounded blocks and owned outputs.
 
 use async_trait::async_trait;
 use datatypes::arrow::array::{
