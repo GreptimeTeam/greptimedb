@@ -1,0 +1,19 @@
+src/frontend/src/instance/entity_graph.rs
+  s_e34fd7705c5d97::t_dd5d1f4da3586b 445-448,619,622-629,802-872
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c9057760af797d880b21e8ea497aac84b4a7ad31",
+  "prompts": {},
+  "sessions": {
+    "s_e34fd7705c5d97": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a5c8-659d-7ba3-b164-540806c9f233",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
