@@ -16,6 +16,7 @@ use std::any::Any;
 use std::collections::HashSet;
 use std::pin::Pin;
 
+use common_base::readable_size::ReadableSize;
 use common_catalog::format_full_table_name;
 use common_procedure::Status;
 use futures::{StreamExt, TryStreamExt};
@@ -24,13 +25,13 @@ use snafu::{OptionExt, ensure};
 use table::metadata::{TableId, TableType};
 use table::table_name::TableName;
 
+use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
-use crate::ddl::drop_database::executor::{
-    DropDatabaseBatchExecutor, DropDatabaseExecutor, DropDatabaseViewExecutor,
-};
+use crate::ddl::drop_database::executor::{DropDatabaseBatchExecutor, DropDatabaseExecutor};
 use crate::ddl::drop_database::metadata::DropDatabaseRemoveMetadata;
 use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
 use crate::error::{Result, TableInfoNotFoundSnafu, UnexpectedSnafu};
+use crate::instruction::CacheIdent;
 use crate::key::table_route::TableRouteValue;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,29 +65,17 @@ impl DropDatabaseCursor {
         ))
     }
 
-    // Leave 512 KiB below etcd's default 1.5 MiB request limit, plus room within
-    // the budget for the procedure envelope, metadata key prefixes and protobuf framing.
-    const MAX_BATCH_BYTES: usize = 1024 * 1024;
-    const BATCH_OVERHEAD: usize = 64 * 1024;
+    // Leave headroom below etcd's default 1.5 MiB request limit.
+    const MAX_BATCH_BYTES: usize = ReadableSize::mb(1).as_bytes() as usize;
 
     fn estimated_table_bytes(catalog: &str, schema: &str, name: &str) -> usize {
-        // The procedure JSON is itself a string in ProcedureMessage. Quotes and
-        // backslashes are escaped twice; control characters may become \u00XX.
-        // The fixed allowance covers IDs, field names and all four delete keys.
-        256 + [catalog, schema, name]
-            .into_iter()
-            .flat_map(str::bytes)
-            .map(|byte| match byte {
-                0..=31 => 8,
-                b'"' | b'\\' => 4,
-                _ => 1,
-            })
-            .sum::<usize>()
+        // Allow for nested JSON escaping and fixed per-table metadata overhead.
+        256 + 8 * (catalog.len() + schema.len() + name.len())
     }
 
     async fn collect_page(ctx: &mut DropDatabaseContext) -> Result<Vec<(String, TableId)>> {
         let mut page = Vec::new();
-        let mut bytes = Self::BATCH_OVERHEAD;
+        let mut bytes: usize = 0;
         let tables = ctx.tables.as_mut().unwrap();
         loop {
             match Pin::new(&mut *tables).peek().await {
@@ -214,6 +203,39 @@ impl DropDatabaseCursor {
             )),
         }
     }
+    async fn handle_view(
+        &self,
+        ddl_ctx: &DdlContext,
+        ctx: &mut DropDatabaseContext,
+        table_name: String,
+        table_id: TableId,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let view_name = TableName::new(&ctx.catalog, &ctx.schema, &table_name);
+        ddl_ctx
+            .table_metadata_manager
+            .destroy_view_info(table_id, &view_name)
+            .await?;
+
+        let cache_invalidator = &ddl_ctx.cache_invalidator;
+        let ctx = Context {
+            subject: Some("Invalidate table cache by dropping table".to_string()),
+        };
+
+        cache_invalidator
+            .invalidate(
+                &ctx,
+                &[
+                    CacheIdent::TableName(view_name),
+                    CacheIdent::TableId(table_id),
+                ],
+            )
+            .await?;
+
+        Ok((
+            Box::new(DropDatabaseCursor::new(self.target)),
+            Status::executing(false),
+        ))
+    }
 }
 
 #[async_trait::async_trait]
@@ -231,10 +253,49 @@ impl State for DropDatabaseCursor {
                 .tables(&ctx.catalog, &ctx.schema);
             ctx.tables = Some(tables.peekable());
         }
-        let result = match self.target {
-            DropTableTarget::Logical => self.collect_logical_tables(ddl_ctx, ctx).await,
-            DropTableTarget::Physical => self.collect_physical_table(ddl_ctx, ctx).await,
-        };
+        let result = async {
+            if self.target == DropTableTarget::Logical {
+                return self.collect_logical_tables(ddl_ctx, ctx).await;
+            }
+            // Safety: must exist
+            match ctx.tables.as_mut().unwrap().try_next().await? {
+                Some((table_name, table_name_value)) => {
+                    let table_id = table_name_value.table_id();
+
+                    let table_info_value = ddl_ctx
+                        .table_metadata_manager
+                        .table_info_manager()
+                        .get(table_id)
+                        .await?
+                        .with_context(|| TableInfoNotFoundSnafu {
+                            table: format_full_table_name(&ctx.catalog, &ctx.schema, &table_name),
+                        })?;
+
+                    if table_info_value.table_info.table_type == TableType::View {
+                        return self.handle_view(ddl_ctx, ctx, table_name, table_id).await;
+                    }
+
+                    match ddl_ctx
+                        .table_metadata_manager
+                        .table_route_manager()
+                        .table_route_storage()
+                        .get(table_id)
+                        .await?
+                    {
+                        Some(table_route_value) => {
+                            self.handle_table(ctx, table_name, table_id, table_route_value)
+                                .await
+                        }
+                        None => Ok((
+                            Box::new(DropDatabaseCursor::new(self.target)),
+                            Status::executing(false),
+                        )),
+                    }
+                }
+                None => self.handle_reach_end(ctx),
+            }
+        }
+        .await;
         if result.is_err() {
             // The entry was consumed but no deletion plan was persisted. Rescan on retry.
             ctx.tables.take();
@@ -244,58 +305,6 @@ impl State for DropDatabaseCursor {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl DropDatabaseCursor {
-    async fn collect_physical_table(
-        &mut self,
-        ddl_ctx: &DdlContext,
-        ctx: &mut DropDatabaseContext,
-    ) -> Result<(Box<dyn State>, Status)> {
-        // Safety: must exist
-        match ctx.tables.as_mut().unwrap().try_next().await? {
-            Some((table_name, table_name_value)) => {
-                let table_id = table_name_value.table_id();
-
-                let table_info_value = ddl_ctx
-                    .table_metadata_manager
-                    .table_info_manager()
-                    .get(table_id)
-                    .await?
-                    .with_context(|| TableInfoNotFoundSnafu {
-                        table: format_full_table_name(&ctx.catalog, &ctx.schema, &table_name),
-                    })?;
-
-                if table_info_value.table_info.table_type == TableType::View {
-                    return Ok((
-                        Box::new(DropDatabaseViewExecutor {
-                            table_id,
-                            table_name: TableName::new(&ctx.catalog, &ctx.schema, table_name),
-                        }),
-                        Status::executing(true),
-                    ));
-                }
-
-                match ddl_ctx
-                    .table_metadata_manager
-                    .table_route_manager()
-                    .table_route_storage()
-                    .get(table_id)
-                    .await?
-                {
-                    Some(table_route_value) => {
-                        self.handle_table(ctx, table_name, table_id, table_route_value)
-                            .await
-                    }
-                    None => Ok((
-                        Box::new(DropDatabaseCursor::new(self.target)),
-                        Status::executing(false),
-                    )),
-                }
-            }
-            None => self.handle_reach_end(ctx),
-        }
     }
 }
 
@@ -418,17 +427,12 @@ mod tests {
                 if page.is_empty() {
                     break;
                 }
-                let estimated = DropDatabaseCursor::BATCH_OVERHEAD
-                    + page
-                        .iter()
-                        .map(|(name, _)| {
-                            DropDatabaseCursor::estimated_table_bytes(
-                                &ctx.catalog,
-                                &ctx.schema,
-                                name,
-                            )
-                        })
-                        .sum::<usize>();
+                let estimated = page
+                    .iter()
+                    .map(|(name, _)| {
+                        DropDatabaseCursor::estimated_table_bytes(&ctx.catalog, &ctx.schema, name)
+                    })
+                    .sum::<usize>();
                 assert!(estimated <= DropDatabaseCursor::MAX_BATCH_BYTES);
                 let tables = page
                     .iter()

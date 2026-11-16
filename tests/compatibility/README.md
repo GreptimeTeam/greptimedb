@@ -27,7 +27,7 @@ cargo nextest run -p servers -E 'test(native_histogram_remote_read_wire_fixture)
 
 The inline fixture in [`test_drop_database_legacy_state_fixture`](../../src/common/meta/src/ddl/tests/drop_database.rs)
 checks recovery and serialization of legacy single-table executors with the
-`common-meta` Rust tests. New logical batches and view executors use separate state tags; drain
+`common-meta` Rust tests. New logical batches use a separate state tag; drain
 these procedures before downgrading metasrv. This verifies upgrade recovery,
 not downgrade support.
 
