@@ -2,479 +2,525 @@
 Feature Name: In-Memory Frontend Write Retry Queue
 Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/8085
 Date: 2026-10-27
+Updated: 2026-11-16
 Author: @lczllx
 Status: Draft for discussion
 ---
 
 # Summary
 
-This RFC proposes an optional in-memory retry queue owned by one Frontend. Core
-v1 covers ordinary inserts whose first dispatcher round fails per entry
-(`Error::PartialRegion`), including eligible Prometheus remote write; that round
-stays in the request path, and admission runs in `WriteDispatcher::finish`
-before the client error is returned. Each per-region failure is evaluated
-independently: a terminal sibling is returned and never queued, an eligible
-retryable sibling is admitted, and an ineligible sibling is dropped without
-suppressing an eligible one.
+This RFC proposes an in-memory, per-Frontend retry queue for ordinary inserts (including eligible Prometheus
+remote write) failing per entry in the first dispatcher round (`Error::PartialRegion`);
+`WriteDispatcher::finish` admits before returning the client error.
 
-With the queue enabled, it is the only retry lifecycle owner: `finish` does not
-call `WriteRetry::retry`, a rejection does not re-enter the inline loop, and the
-disabled path is unchanged. A worker issues at most one target-region RPC per
-invocation, with per-region FIFO and lineage-aware successors. The queue is
-process-local: it claims no durability, restart recovery, at-least-once
-delivery, or exactly-once application. A replay success is never reported to the
-client and does not change the error already returned.
+The proposed default for the completed and validated implementation is `enable = true`, matching the existing
+policy of enabling retry by default while explicitly changing the retry lifecycle and admission-rejection
+behavior; `enable = false` is the runtime kill switch. The default does not permit shipping an incomplete
+implementation: the prerequisites and validation below block release. When enabled the queue owns
+the retry lifecycle, so admission rejection does not re-enter the inline loop and cannot start a second retry
+scheduler; within a key at most one record is in flight in enqueue order, lineage is not an execution guarantee,
+and multi-key merge order is unresolved (R4).
 
-`send_authorized` is only a gate flag. An invocation is `NotIssued`, `Unknown`,
-or `Issued` by whether the RPC can have been sent, and `attempts` is a
-conservative replay budget charged for `Issued` and `Unknown`, not a count of
-confirmed RPCs. `replay_not_sent` is only a queue-phase scope; the first round
-may already have applied the write.
+# Motivation
 
-# Motivation, Goals and Non-goals
+The dispatcher retries a failed per-region write inline with `write_retry.max_retries = 3`, jittered backoff,
+and no per-attempt endpoint timeout on the Frontend-to-datanode channel: roughly 10.5s to under 21s plus RPC
+time. A restart, migration, or partition can outlast that, and a client without a per-region view duplicates or
+drops regions. Issue #8085 asks for a bounded Frontend buffer after the first round: an admitted record keeps
+retrying in the queue, while a rejected one returns the original client error without the inline wait. With
+`enable = false` the existing inline behavior is unchanged.
 
-The dispatcher retries a failed per-region write inside the caller future with
-`write_retry.max_retries = 3`, jittered backoff, and no endpoint timeout on the
-Frontend-to-datanode channel. The three delays total about 10.5s to under 21s
-plus RPC time. A datanode restart, migration, or partition can outlast that, and
-a client without a per-region view duplicates or drops regions. Issue #8085 asks
-for a bounded Frontend buffer after the first round; rejection keeps today's
-client wait.
+# Goals
 
-**Goals:** one bounded queue per Frontend; a failed first round never returns
-`Ok`; reuse `write_retry` backoff, `TableRouteCache`, `TablePartitioner`, and
-`RetryAfterRouteRefresh`; no second payload copy; one lookup set and one RPC
-deadline per invocation; supervisor-owned close, join, and drain; disabled by
-default; no response-shape or `affected_rows` change.
+One bounded queue per Frontend; a failed first round never returns `Ok`; reuse `write_retry` backoff for
+retryable errors, `TableRouteCache`, `TablePartitioner`, and `RetryAfterRouteRefresh`; no second payload copy;
+one lookup set and
+RPC deadline per invocation; supervisor-owned close, join, and drain; no response-shape or `affected_rows` change.
 
-**Non-goals:** no durability, restart recovery, exactly-once, or at-least-once;
-no error proves non-application; no first-round timeout rescue, live-write
-ordering, or atomic DDL fence; no record-level `not_sent`; no RSS or
-allocation-interlock claim (`max_bytes` and `max_transient_bytes` are accounting
-ceilings); no new wire field; no Flow consistency.
+# Non-Goals
+
+No durability, restart recovery, exactly-once, or at-least-once; no error proves non-application; no first-round
+timeout rescue, live-write ordering, or atomic DDL fence; no record-level "sent"/"not sent" claim; no RSS or
+allocation bound; no new wire field; no Flow consistency. Rejected admission gets no inline fallback or
+automatic compensation. Delete, `BulkInsert` (both pending-rows batchers), and the other excluded paths stay out
+of scope.
 
 # Design
 
 ## Architecture
 
-The queue is an operator-layer component owned by the Frontend, shared by the
-builder's dispatchers. It never calls `WriteDispatcher::execute`, `finish`,
-`WriteRetry::retry`, or a second dispatcher round. Successful writes take no
-queue lock, allocate no record, and skip admission; plan-metadata cost must be
-measured during validation.
+The queue is an operator-layer component owned by the Frontend and shared by the builder's dispatchers; it never
+calls `WriteDispatcher::execute`, `finish`, `WriteRetry::retry`, or a second dispatcher round. Successful writes
+take no queue lock, allocate no record, and skip admission. With `enable = false` admission never runs and the
+inline path is used unchanged.
 
-```mermaid
-flowchart LR
-    F[first dispatcher round] -->|success| OK[Ok]
-    F -->|per-entry failure| AD[independent admission per sibling]
-    AD -->|eligible| Q[queue: per-region deques]
-    Q --> W[worker: lookups, gate, issue, one RPC]
-    W -->|success| AP[applied]
-    W -->|retryable| Q
-    W -->|rebuild classified| RB[rebuild driver]
-    RB -->|successors| Q
-    W -->|panic| RC[completion-cell recovery] --> Q
-    RC -->|Succeeded| AP
-    RC -->|Rebuilding| RI[rebuild_interrupted]
-```
+`finish` merges the round, selects the client error, and, when the queue is enabled, admits each eligible
+retryable sibling independently before returning. Admission cannot change the selected error — the first
+terminal failure in flattened per-region order, otherwise the first retryable failure — and a rejected sibling
+is not queued and does not re-enter inline retry. The queue uses `max_attempts`, not `write_retry.max_retries`;
+per-entry capture is installed when `max_retries > 0` or the queue is enabled.
 
-Queue-enabled `finish` merges the round, selects the client error, admits each
-eligible retryable sibling independently, and returns. The error is the first
-terminal (no retained request) failure in flattened per-region order, otherwise
-the first retryable failure; admission cannot change it. `prepare` groups peers
-in a `HashMap`, so cross-peer order is per-run; queue-disabled `finish` keeps
-the inline path.
+## Record and Retry Work Model
 
-The dispatcher must install the retry path (per-entry capture) when
-`max_retries > 0` or the queue is enabled; otherwise no `RoutedWrite` is
-retained to admit. Current `with_retry` installs `WriteRetry` only above zero,
-so queue-enabled zero retries is an implementation prerequisite: it must still
-capture per-region failures and admit eligible siblings. The queue uses its own
-`max_attempts`, not `write_retry.max_retries`.
+A record retains target `region_id`, `RoutedWrite` (`{ peer, request: Arc<RegionRequest> }`), the monotonic
+admission `deadline`, plan-time `TableIdent.version`, `partition_expr_version`, `may_have_applied`,
+`consecutive_failures`, lineage `(sequence, record id)`, and one lease state snapshot `{ phase, invocation,
+attempts }`. Retaining `RoutedWrite` keeps its `Arc` and allocation with no encode or second payload copy.
+`may_have_applied` is a conservative admission-time assumption from the failed first round, not proof of
+issuance or application and not a lifecycle phase. `attempts` exists only inside that snapshot and is the
+record's authoritative cumulative replay budget; no second counter is maintained. No confirmed-issue counter is
+normative; `attempts` is the only replay budget.
 
-## Record Model and Admission
+The lineage sequence is unique within one Frontend queue lifetime and identifies descent; the record id is
+unique per record in that queue, and a successor keeps the parent's sequence with a later id. Neither value
+orders scheduling: sequence/id are metadata for lineage correlation, metrics, and debugging, with no FIFO,
+deduplication, fencing, or budget authority.
 
-A record represents one single-region insert and holds queue identity, target
-`region_id`, the retained `RoutedWrite`, `deadline`, plan-time
-`TableIdent.version`, `partition_expr_version` when present, `may_have_applied`,
-`attempts` (consumed replay budget), `confirmed_rpc_issues`, `issue_unknown`,
-`consecutive_failures`, and lineage ordering. `RoutedWrite` is
-`{ peer, request: Arc<RegionRequest> }`; retaining it keeps that `Arc` and its
-allocation, with no encode, decode, or second payload copy. `may_have_applied`
-is true from admission because the first round reached a datanode; it is not a
-queue-replay scope, and it stays true even when every queue invocation is
-`NotIssued`.
+`TableIdent.version` (logical), `TableInfoValue.version` (metadata revision), and `partition_expr_version` are
+distinct; a physical repartition need not bump the logical version, and only a partition-expression mismatch
+through route refresh or rebuild catches it. Planning captures `TableInfo.ident.version` and preserves it
+through `prepare`, `send_batch`, peer merging, and `finish`; admission and replay never re-capture it.
+**Implementation prerequisite (unverified):** `RegionRequestHeader` cannot carry the sidecar.
 
-Three versions are distinct: `TableIdent.version` is the logical table version;
-`TableInfoValue.version` is a metadata-store revision; `partition_expr_version`
-covers request and route-refresh/rebuild partitioning. A physical repartition
-need not bump the logical version and is caught only by a partition-expression
-mismatch through route refresh or rebuild. The v1 design captures
-`TableInfo.ident.version` during planning, attaches it per per-region item, and
-preserves it through `prepare`, `send_batch`, peer merging, and the handoff into
-`finish`; replay uses it, never a fresh admission-time lookup. **Implementation
-prerequisite (feasibility unverified):** `RegionRequestHeader` cannot carry this
-sidecar and peer-merge or `split_request` propagation does not exist in the
-current implementation.
+Settlement charges the parent's final invocation once. A successor inherits post-settlement `attempts`,
+`consecutive_failures`, the original deadline, and the lineage sequence, starts a lease at `Empty` /
+`NotIssued` with that inherited cumulative `attempts` (never the parent's transient phase or classification),
+and computes `next_ready` from the inherited failure count. A route-refresh rebuild records the triggering
+invocation's observed `Issued` classification (already charged) and keeps it through `Rebuilding`; a topology
+rebuild keeps `NotIssued` with no charge. Each record gets a fresh queue-local id.
 
-Admission runs in `finish` after client-error selection and before the error is
-returned; admission cannot change the selected error. An attempt is eligible
-only if it is `Body::Inserts` with one `InsertRequest` from the per-entry
-`PartialRegion` branch, has consistent ids, `flow_source` false, targets
-`mito`/`mito2`/`metric`, is not append mode or instant TTL, and has
-`owners: None`; the queue must be open and the record must fit the limits.
-Eligibility may `await` table and Flow cache reads; reserve and commit happen
-under the state lock with no `await` or user code, after a cancellation
-checkpoint.
+## Admission
 
-| Sibling | Result | Queue effect |
-| --- | --- | --- |
-| A: terminal failure | Returned to client | Not queued |
-| B: eligible retryable | Admitted independently | Replayed if recorded |
-| C: ineligible or rejected retryable | Not admitted | Only C is lost; B is unaffected |
-| A + B + C | A returned; B admitted; C rejected | No sibling suppresses another |
+Admission runs in `finish` only when the queue is enabled, after client-error selection and before the error is
+returned; it cannot change the selected error or response shape. A sibling is eligible only if it is
+`Body::Inserts` with one `InsertRequest` from the per-entry `PartialRegion` branch, has consistent ids,
+`flow_source` false, targets `mito`/`mito2`/`metric`, is not append mode or instant TTL, has `owners: None`, the
+queue is open, and the request fits the admission limits (Memory Accounting). Eligibility may `await` bounded
+table and Flow cache reads under a provisional 5s `admission_lookup_deadline`, distinct from the replay lookup
+deadline and requiring validation; timeout or failure rejects admission for that record without altering the
+client error, re-entering inline retry, or affecting other siblings, and these reads are read-only and never
+replace the captured Flow snapshot. Reservation and commit then happen under the state lock after a final open
+and limit check, with no `await` or user code. An eligible sibling is admitted independently; a terminal,
+ineligible, or rejected sibling is never queued and gets no automatic later compensation. Admission is
+best-effort, not durability or acknowledgment; a whole-RPC failure, including a single-entry tonic error, is not
+admitted.
 
-A terminal sibling never suppresses an eligible one. An admission rejection
-returns the original client error unchanged and does not re-enter inline retry;
-the queue-enabled path has no second retry mechanism. Admission is best-effort,
-not success acknowledgment, and does not verify dedup. A whole-RPC failure,
-including a single-entry tonic error, is not admitted: the per-entry outcome is
-unknown.
+**Runtime disable versus commit.** Queue-enabled state and admission commit synchronize through the same
+authoritative mechanism. Admission may `await` lookups outside the lock, but the final locked section re-checks
+`enabled` before reservation and commit. If disable linearizes before commit, no record is committed and no
+lease is created; if commit linearizes before disable, the record is admitted and continues under the queue
+policy. No commit may occur after disable takes effect. A request already in the admission path when disable
+wins does not fall back to inline retry: it commits no record, keeps the original client error, and starts no
+second scheduler; requests that reach `finish` after disable use the inline path. This is runtime transition
+behavior, not an admission failure mode.
 
-## Issue State and Attempt Budget
+## Queue Invariants and Recovery
 
-An invocation records one issue state:
+**Recovery authority.** Supervisor recovery reads one authoritative, recoverable lease-state snapshot:
+`phase` (one of the six lifecycle phases), `invocation` (the current lease's `NotIssued` / `IssueUnknown` /
+`Issued` classification), and `attempts` (the record's cumulative queue replay budget). The three fields are
+committed and read as one unit, and `attempts` has no independent second copy; any counter elsewhere is
+derived. `phase` selects the recovery and shutdown action, `invocation` preserves the current lease's budget
+classification across later phases, and `attempts` is the authoritative cumulative count. A phase alone never
+decides whether the current invocation was charged.
 
-| State | Meaning |
+A new lease starts at `Empty` / `NotIssued` and inherits the record's cumulative `attempts`; `Empty` does not
+mean zero history. The boundary transition is the only one that changes `attempts`; every other transition
+preserves the existing charge. The worker publishes `IssueUnknown` immediately before the first poll, crossing
+the conservative boundary; it proves neither transmission nor remote execution. `Issued` is published when an
+invocation result (response or RPC error) is observed; it proves observation, not datanode receipt or execution.
+
+| Phase | Meaning | Invocation classification | Budget effect |
+| --- | --- | --- | --- |
+| `Empty` | First poll not entered | `NotIssued` | current invocation not charged |
+| `IssueUnknown` | Boundary crossed; may have started | `IssueUnknown` | current invocation charged once |
+| `Issued` | Result observed | `Issued` | existing charge retained |
+| `Succeeded` | Success observed; never replay | `Issued` | success invocation already charged |
+| `Rebuilding` | Rebuild published; never rebuild twice | classification of the triggering path | no new RPC charge |
+| `Settled` | Terminal settlement completed | classification that caused settlement | historical charge untouched |
+
+Transitions preserve classification except at the boundary and at an observed result: `Empty` → `Rebuilding`
+keeps `NotIssued`; `IssueUnknown` → `Rebuilding` first records the observed `Issued` (a
+`RetryAfterRouteRefresh`) and keeps it; `Empty` → `Settled` keeps `NotIssued`; `IssueUnknown` → `Settled` keeps
+`IssueUnknown`; `Issued` → `Settled` keeps `Issued`; `Rebuilding` → `Settled` keeps its saved classification;
+`Succeeded` → `Settled` keeps `Issued`. After `Ok`, the worker's first action is to publish `Succeeded` /
+`Issued`; that publication takes no allocation or other fallible step, and an abort during it recovers from the
+last committed snapshot (`IssueUnknown` or `Issued`), never as success.
+
+A published `Rebuilding` decision is atomic and never executed twice; admitted successors survive a later parent
+panic, unadmitted rows are lost, and the parent is removed once: `rebuilt` if any successor was admitted,
+otherwise `unknown_remote_outcome` with `rebuild_interrupted`. Settlement happens at most once: the worker
+settles while holding the lease, and the supervisor recovers from the snapshot alone.
+
+Close rejects new admission, leases, and send authorization under the state lock and stops scheduling. A task
+stopped before the gate is at `Empty` / `NotIssued` and releases without joining; a task past the gate is
+joined and handled by its snapshot:
+
+| Phase / classification | Shutdown behavior |
 | --- | --- |
-| `NotIssued` | The RPC future was never polled; no target-region RPC can have been sent. |
-| `Unknown` | The first poll was reached or conservatively assumed; no response was observed, and the RPC may have reached the datanode. |
-| `Issued` | A response or RPC error was observed; the datanode may still not have applied the write. |
+| `Empty` / `NotIssued` | No boundary crossed: release lease and permit; the record remains for drain |
+| `IssueUnknown` / `IssueUnknown` | RPC may have started: await the in-flight future to completion or `rpc_deadline`; never reclassify as `NotIssued`; settle `unknown_remote_outcome` when the result cannot be observed |
+| `Issued` / `Issued` | Result observed: join the worker's classification, rebuild, or settlement; do not wait for `rpc_deadline` |
+| `Succeeded` / `Issued` | Never replay; complete `applied` settlement |
+| `Rebuilding` / saved | Never execute rebuild twice; resume from the published decision and keep its saved classification |
+| `Settled` / saved | No second settlement |
 
-Calling the async requester returns an unpolled future with no send side
-effect; the issue commit point is its **first poll**. The worker marks
-`Unknown` immediately before that poll and drives the RPC in the same poll; a
-panic in that window leaves it conservatively `Unknown`. A
-constructed-but-never-polled future, or a drop before the first poll, is
-`NotIssued`; a local timeout, a drop after the first poll, or a panic while
-waiting is `Unknown`. Only an observed success or RPC error sets `Issued`; a
-timeout or cancellation never does.
+`rpc_deadline` bounds only the wait for a future whose result is not observed; it is not extra wait for
+`Issued`. The supervisor never re-issues an RPC for an `Issued` invocation, and worker or supervisor
+cancellation never downgrades `IssueUnknown` to `NotIssued`.
 
-`attempts` is the cumulative replay budget, excluding the first dispatcher
-round. It increments by one for `Issued` and one for `Unknown`; `NotIssued`
-adds zero, including a gate pass without a polled RPC. `attempts` is therefore a
-conservative budget, not a confirmed RPC count. `confirmed_rpc_issues` increments
-only on `Issued`, and `issue_unknown` is set by any `Unknown`. One invocation
-adds at most one to each counter. Exhaustion uses `attempts >= max_attempts`; an
-`Unknown` invocation may consume the last slot even though no response was seen.
+## Memory Accounting
 
-`consecutive_failures` is separate: a deferral increments it, so rebuild never
-resets backoff. Settlement charges the parent's final invocation exactly once.
-Successors inherit the resulting counts: a route-refresh rebuild is `Issued` and
-has already added one to `attempts` and `confirmed_rpc_issues`; a topology
-rebuild is `NotIssued` and adds none. `issue_unknown` and
-`consecutive_failures + 1` are copied. Rebuild neither resets nor double-counts
-the parent's last attempt, and a successor never re-inherits the same issue.
+`max_bytes`, `max_records`, and `max_record_size` bound retained estimates and count, not RSS: the charge is the
+retained `RegionRequest`'s `encoded_len()` plus fixed `RoutedWrite`/`Arc` overhead, computed from the existing
+request without creating a second full payload. Reserved, stored, and leased records all count against
+`max_records`; a reservation converts without a second charge, and the count is released only on removal.
+`max_record_size` is checked before a record is reserved; an oversized request is rejected through the existing
+admission rejection path, enters no queue, sends no replay RPC, and consumes no attempt. It cannot prevent the
+first-round allocation, which already exists at admission; `max_bytes` covers retained records only, and neither
+bounds transient materialization or RSS.
 
-Replay scope follows cumulative issue history, not the lease or
-`send_authorized`: `replay_issued` if `confirmed_rpc_issues > 0`, otherwise
-`replay_issue_unknown` if `issue_unknown`, otherwise `replay_not_sent`, which
-means no queue RPC is confirmed or possibly issued. The first round may have
-applied; there is no record-level `not_sent`.
+`max_transient_bytes` bounds replay and rebuild reservations, separate from retained accounting and not an RSS
+bound. The reservation object, formula, and factor source are implementation prerequisites: charge each
+transient materialization once, avoid double-charging retained records, use checked arithmetic so overflow fails
+closed, release only through an RAII guard, and treat a failed reservation as `TransientFull` with no RPC, no
+attempt, and dead-letter `transient_full`. Whether replay and rebuild share one factor is undecided; either
+choice needs an explicit policy validated against representative request sizes, concurrency, and rebuild peak.
+The current rebuild path materializes the full `Vec` before limits apply, so the peak is unbounded until the
+streaming helper exists, and the queue must not be released until that policy and its measurements exist.
+Provisional values (`512KiB`, `128MiB`, `replay_concurrency = 8`, successor limit 256) remain unvalidated.
 
-## Scheduling and Replay
+## Retry Scheduling
 
-One invocation performs all table, route, leader, and client lookups before
-authorization, bounded by a 5s
-`lookup_deadline = min(record.deadline, invocation_start + LOOKUP_TIMEOUT)`
-(provisional);
-lookup failure reinserts with backoff while open, and deadline expiry settles.
-Only then does the worker take the state lock, check `closed` and the deadline,
-set `send_authorized`, and release. No `await` or further lookup sits between
-the gate and the RPC poll; lookup after authorization is forbidden.
+The three invocation classifications and their mapping to phases are defined in Queue Invariants. Authorization
+never charges. An invocation crossing the `IssueUnknown` boundary consumes one replay attempt; the charge is
+deliberately conservative and applies even if a panic prevents the first poll.
 
-TTL bounds **starting a new invocation**, not an RPC already issued. At the
-gate, a record past `deadline` settles `unknown_remote_outcome` as
-`ttl_expired_before_attempt` with zero budget; prior issue history keeps its
-cumulative scope. Once polled, `record.deadline` no longer cancels the RPC,
-which waits only to `rpc_deadline = send_start + datanode.client.timeout` (an
-existing option, default 10s, positive when enabled); shutdown adds no second
-timeout. Dropping a timed-out future stops only the client wait; the invocation
-is `Unknown` and charges one budget. A success after `record.deadline` still
-settles `applied`.
+`attempts` counts queue replay budget only, never the original dispatcher round, a scheduling pass, a lookup
+retry, a send authorization, or a guaranteed datanode arrival. The boundary transition is the charge
+linearization point: it constructs and publishes the complete next snapshot — `phase = IssueUnknown`,
+`invocation = IssueUnknown`, and the incremented cumulative `attempts` — with no panic, `await`, allocation,
+user code, or other fallible step between the start of the commit and its completion. Recovery observes either
+the complete pre-commit snapshot or the complete post-commit snapshot, never a partial update; holding a lock
+while assigning several fields is not sufficient by itself unless a partially written state is discarded.
+**Implementation prerequisite:** the record representation must provide this single-publish guarantee; until it
+does, the linearization argument is unmet. No separate mutable field may duplicate the charge, and the worker
+and supervisor must not derive or overwrite competing counters.
 
-| Pre-issue condition | Outcome |
-| --- | --- |
-| Table missing, id mismatch, contradictory target, or `TableIdent.version` changed from plan time | `table_changed`; no RPC; zero budget |
-| Route lookup error, or region present without a leader | `NotAttempted`; defer |
-| Target region absent from the physical route | `TopologyRefresh`; rebuild without an RPC; zero budget |
-| `RetryAfterRouteRefresh` response, including a partition-expression mismatch | Rebuild; the response is `Issued` and charges one budget |
-| Transient reservation fails (`TransientFull`) | Dead-letter `transient_full`; no RPC, zero budget |
+Panic behavior follows from the contract: a panic before the commit leaves `Empty` / `NotIssued` with no charge
+for this invocation; a panic after the commit but before the first poll leaves `IssueUnknown` / `IssueUnknown`
+with exactly one charge for this invocation, and it is not resent; an observed RPC error moves to `Issued` /
+`Issued` with no second charge, and a later classification, rebuild, or settlement panic keeps `Issued`; an
+observed `Ok` publishes `Succeeded` / `Issued` with the existing charge and is never retried. A future that
+produces no result and is cancelled or panics stays `IssueUnknown`; non-execution is never inferred.
+`attempts >= max_attempts` blocks further replay; concurrent replay invocations are bounded by
+`replay_concurrency`.
 
-Classification reuses `error.retry_hint()`: `Retryable` reschedules while open,
-within TTL, and within the budget; `RetryAfterRouteRefresh` rebuilds;
-`NonRetryable` dead-letters. Backoff is exponential with jitter, capped at 30s,
-and reuses the `write_retry` settings. A retryable result observed after
-`record.deadline` is not rescheduled; it settles
-`unknown_remote_outcome` with reason `ttl_expired_after_attempt`, because the
-RPC was issued. The budget is `max_attempts` (currently 3) against cumulative
-`attempts` (confirmed plus unknown), checked before lease.
+**Lookups.** All table and route lookups happen before authorization, bounded by a provisional 5s replay
+`lookup_deadline`; failure reinserts with backoff while open and consumes no attempt. Admission lookup has its
+own bounded deadline.
 
-## Rebuild
+**No-leader deferral.** A leaderless region never crosses the `IssueUnknown` boundary, consumes no attempt, and
+keeps the current invocation `NotIssued`. The record stays under the TTL, must not busy-loop or bypass TTL
+through repeated lookups, and must produce an executable `next_ready`. The concrete deferral policy, including
+whether it increments `consecutive_failures`, is an implementation prerequisite; no backoff value or new
+configuration is fixed here.
 
-Rebuild invalidates routes, loads current `TableInfo`, builds a
-`TablePartitioner`, and must use a bounded rebuild path. The current
-implementation has no such path:
-`TablePartitioner::rebuild_write_requests` returns
-`Result<Vec<RegionRequest>>`, `rebuild_insert_requests` builds the full `Vec`,
-and `RowSplitter::split` materializes all destination rows before returning;
-there is no early stop or cancellation. A bounded helper is an implementation
-blocker. Until it exists, the queue cannot claim a rebuild memory bound.
+**Send authorization gate.** The gate runs once per invocation under the `QueueState` lock. The same critical
+section checks the queue is open, the monotonic clock has not reached the deadline, the lease is valid, and
+`attempts < max_attempts`; only then is `send_authorized` set. Close takes the same lock, so close and
+authorization serialize: if close wins, every later gate fails and sends no RPC; if authorization wins, the
+invocation is an authorized task that shutdown joins and handles by its snapshot. `send_authorized` is gate state
+only, not proof of issuance, and adds no attempt. No `await`, lookup, or other suspending step may sit between a
+successful gate and the first poll, and the gate cannot eliminate scheduler delay before that poll. An
+invocation authorized before the deadline stays authorized even if the deadline passes before its first poll;
+later TTL expiry neither revokes authorization nor reclassifies it.
 
-**Implementation requirement.** Add a bounded/streaming helper that enforces the
-successor count and transient reservation before materializing the peak, never
-calls the existing unbounded helper for inserts, and shares the
-partition-expression and row-routing logic. `MAX_SUCCESSORS_PER_RECORD = 256`
-is a provisional design constant, not a measured or source-derived value;
-validation must establish that 256 is appropriate. A partial emission reports
-how many successors were admitted.
+**TTL and budget.** TTL is the maximum record age from admission on a monotonic clock; successors inherit it and
+rebuild never resets it. `max_attempts = 3` counts queue replays only, so budget and TTL are independent and
+either may end retries first. With the existing `write_retry` backoff, consecutive retryable RPC failures
+normally exhaust three replays well before `ttl = 5m`; lookup failure, no-leader, and `NotIssued` outcomes
+consume no attempt but can occupy the record to the TTL, so no fixed completion bound is claimed. TTL expiry
+blocks a new authorization only; an authorized invocation waits to its `rpc_deadline = send_start +
+datanode.client.timeout` (`send_start` is the first poll; existing option, default 10s, not a global change).
+Record TTL and per-RPC timeout are distinct and never merged. A timeout leaves the invocation `IssueUnknown`
+and does not prove non-execution; success after the record deadline still settles `applied`.
 
-The transient reservation is acquired before rebuild work. Before any rebuild
-work, the outcome is classified and `Rebuilding { issue_state, source }` is
-published atomically to the completion cell, with no `await`, allocation, cache
-invalidation, or fallible call in between. Publication is the single rebuild
-decision: recovery never starts a second rebuild. Successors are generated and
-independently admitted; each has its own charge, lease, and lineage. A parent
-removed after a successful rebuild is `rebuilt`; admitted successors remain
-independent and unadmitted rows are lost.
+**Failure progression.** Backoff is exponential with jitter, computed from `consecutive_failures` and capped at
+30s.
 
-Publication is per successor, not an atomic multi-record commit. If the task
-panics after B and C are admitted but before D, B and C remain, the parent is
-removed once as `rebuild_interrupted`, and D is lost; the parent is never
-rebuilt again. A panic during a successor's reserve or commit releases that
-admission reservation without rolling back admitted successors. Parent charge,
-lease, and transient reservation are released once; the transient reservation
-is released by its RAII guard, not by parent removal. No successor is published
-twice, and admitted successors are not rolled back; process crash and
-supervisor panic remain outside the guarantee.
-
-## Worker Completion and Recovery
-
-The completion cell belongs to the lease and is the only state recovery trusts;
-it is separate from the record lifecycle (`Ready`/`Leased`/`Rebuilding`/
-`Removed`) and the lease state (`Held`/`Released`).
-
-| Cell | Set when | Recovery after a task panic |
-| --- | --- | --- |
-| `Empty` | First poll not reached; independent of whether the gate passed | Requeue while open and before the deadline, TTL-settle, or leave for drain; budget 0 |
-| `IssueUnknown` | First poll reached or conservatively assumed; no response observed | Charge one budget and defer, TTL-settle, or drain unknown; never claim a confirmed issue |
-| `Issued` | A response or RPC error observed; classification not published | Charge one budget and one confirmed issue; defer or terminal-settle; never rebuild from recovery |
-| `Succeeded` | First non-fallible action after the requester returns `Ok` | Charge the issued increment once and perform one `applied` removal; never replay |
-| `Rebuilding { issue_state, source }` | Atomic classify-and-publish before rebuild | Remove the parent once as `rebuild_interrupted`; admitted successors remain; no second rebuild |
-| `Settled` | Same non-fallible critical section as normal removal or requeue | No action |
-
-Transitions: `Empty -> IssueUnknown` at the commit write before the first poll;
-`IssueUnknown -> Issued` on error or `Succeeded` on `Ok`; a non-`Rebuilding`
-cell -> `Settled` on settlement or requeue; `Empty|Issued -> Rebuilding` (a
-topology refresh is `NotIssued` from `Empty`); `Rebuilding` never returns to
-`Issued` or `Empty`; `Settled` is absorbing. A transition and its `Settled`
-write share one non-fallible critical section. `Rebuilding` carries `Issued` for
-a route-refresh response and `NotIssued` for a topology refresh, never `Unknown`.
-
-The recovery invariants are:
-
-1. A successful RPC is never replayed: `Succeeded` is the first non-fallible
-   action after `Ok`, before the queue lock, allocation, or other fallible work.
-2. A panic before that write remains `IssueUnknown`; it is conservatively
-   budgeted and may duplicate, but is never confirmed success.
-3. A published rebuild decision is never executed twice, and admitted
-   successors are not rolled back by a later parent panic.
-4. Settlement and resource release happen at most once. The worker owns normal
-   settlement under `Held`; the supervisor owns recovery after join with the
-   cell as its only input; a `Settled` cell makes recovery a no-op; drain
-   removes only records still present. Supervisor panic, an unjoinable task, or
-   an invalid cell has no final-settlement guarantee and does not restart the
-   worker.
-
-## Failure and Outcome Semantics
-
-Every removal settles `applied` or `unknown_remote_outcome`, and a rebuilt
-parent is `rebuilt`. The issue state and budget increment follow the definitions
-above; the table below is the single list of terminal reasons.
-
-| Terminal path | Outcome | Issue state (last invocation) | Budget increment | Reason |
+| Path | `consecutive_failures` | Successor | Invocation charge | `next_ready` |
 | --- | --- | --- | --- | --- |
-| Replay success | `applied` | `Issued` | +1 | Replayed rows |
-| TTL expired before the first poll | `unknown_remote_outcome` | `NotIssued` | 0 | `ttl_expired_before_attempt` |
-| Retryable result after the deadline | `unknown_remote_outcome` | `Issued` | +1 | `ttl_expired_after_attempt` |
-| Attempts exhausted before lease | `unknown_remote_outcome` | Last `Unknown`/`Issued`, or `NotIssued` before any queue invocation | +1 for a prior `Unknown`/`Issued`; 0 for `NotIssued`; no new charge at removal | `attempts_exhausted` |
-| Table missing, id/version changed, or contradictory target | `unknown_remote_outcome` | `NotIssued` | 0 | `table_changed` |
-| Transient reservation fails | `unknown_remote_outcome` | `NotIssued` | 0 | `transient_full` |
-| Non-retryable response | `unknown_remote_outcome` | `Issued` | +1 | `non_retryable` |
-| RPC timeout, cancellation, or panic after the first poll | `unknown_remote_outcome` | `Unknown` | +1 | `rpc_timeout` or `rpc_unknown` |
-| Rebuild failure | `unknown_remote_outcome` | `Issued` after route refresh, `NotIssued` after topology refresh | +1 iff `Issued` | `rebuild_failed` |
-| Rebuild interrupted by a panic | `unknown_remote_outcome` | `Issued` or `NotIssued` | +1 iff `Issued` | `rebuild_interrupted` |
-| Drained record whose last invocation was `NotIssued` | `unknown_remote_outcome` | `NotIssued` | 0 | `shutdown` |
-| Drained record whose last invocation was `Unknown` or `Issued` | `unknown_remote_outcome` | `Unknown` or `Issued` | +1 | `shutdown` |
-| Rebuilt parent | `rebuilt` | `Issued` or `NotIssued` | +1 iff `Issued` | Carried into the successor basis |
+| Retryable RPC error | +1 | no | +1 (`Issued`) | backoff |
+| `RetryAfterRouteRefresh` | +1 | yes, route-refresh rebuild | +1 (`Issued`) | backoff |
+| `TopologyRefresh` | +1 | yes, topology rebuild | 0 (`NotIssued`) | backoff |
+| Lookup error | +1 | no | 0 (`NotIssued`) | backoff |
+| No leader | implementation prerequisite | no | 0 (`NotIssued`) | deferral; policy pending |
+| Transient reservation failure | n/a | no | 0 (`NotIssued`) | dead-letter `transient_full` |
+| Admission rejection | n/a, no record | no | n/a (no record) | n/a |
+| Non-retryable RPC error | n/a, terminal | no | +1 (`Issued`) | dead-letter |
+| Observed success | n/a, record removed | no | +1 (`Issued`) | n/a |
 
-A rejected successor is not a queue record: it increments
-`successor_rejected_total` and loses its rows. A parent stopped at the successor
-limit or deadline after admissions is `rebuilt`; before any admission it takes
-the TTL reason matching its issue state.
+`Invocation charge` describes only the current invocation's budget effect; it is not the record's cumulative
+`attempts`, which lives in the authoritative snapshot and is inherited by a successor, never reset by
+settlement. An invocation stopped at the boundary is `+1 (IssueUnknown)` in the terminal table. No-leader
+constraints are in Retry Scheduling. A retryable result after the deadline settles `ttl_expired_after_attempt`
+instead of scheduling.
 
-No error proves non-application. `UnacknowledgedWrite` may have applied and
-carries `RetryAfterRouteRefresh`; `NonRetryable` is also recorded unknown. A
-record with prior replay attempts keeps `unknown_remote_outcome` even if a later
-table check fails; it is never a safe `not_sent` stop.
+## Routing and Layout Changes
 
-## Memory, Shutdown and Flow
+A target region is resolved from `TableRouteCache` after all lookups. A missing table, id mismatch,
+contradictory target, or changed plan-time `TableIdent.version` dead-letters `table_changed` with no RPC and no
+attempt; a route lookup error or a region without a leader defers as described in Retry Scheduling
+(`NotAttempted`, `NotIssued`, consuming TTL but no attempt). A region absent from the physical route rebuilds as `TopologyRefresh` without RPC or attempt; a
+`RetryAfterRouteRefresh`, including a partition-expression mismatch, rebuilds. The version check compares the
+captured planning version with the routing target; it is a timing window, not an atomic DDL fence.
 
-`max_bytes`, `max_records`, and `max_record_size` bound retained estimates and
-count, not RSS: the charged estimate is `encoded_len()` of the retained
-`RegionRequest` plus fixed overhead for `RoutedWrite` and its `Arc`; it is not a
-second allocation or actual RSS. `max_record_size` constrains queue admission,
-not the first-round dispatcher allocation; `max_bytes` covers only retained
-queue records. `max_transient_bytes` separately bounds replay and rebuild
-reservations and is not part of `max_bytes`.
+Rebuild invalidates routes and builds a `TablePartitioner`. The current `rebuild_write_requests` returns a fully
+materialized `Result<Vec<RegionRequest>>`, `rebuild_insert_requests` builds the full `Vec`, and
+`RowSplitter::split` materializes all destination rows with no early stop. A streaming bounded helper is an
+implementation blocker: it must enforce `MAX_SUCCESSORS_PER_RECORD` (provisional 256) and the transient
+reservation before materializing the peak, and never call the unbounded insert path.
 
-| Quantity | What it counts | Bound |
-| --- | --- | --- |
-| Per-record estimate and ledger | `encoded_len()` plus fixed overhead per retained `RoutedWrite`; no decode copy; summed over records | Charged once; above `max_record_size` (512 KiB, provisional) admission rejects |
-| Transient request | `record_len.checked_mul(factor)`, positive integer `factor` | One reservation per active task; checked arithmetic; no numeric factor is fixed or measured |
-| Transient aggregate | Sum of active task reservations | `max_transient_bytes`; independent of `max_bytes` |
-| Validation ceiling | `per_task_max = max_record_size × factor`; `aggregate_max = replay_concurrency × per_task_max` | Checked; requires `0 < max_transient_bytes <= aggregate_max` |
-| Actual RSS | Allocator, tonic, compression, runtime, connection buffers, metadata cache | Not bounded by either accounting ceiling |
+## Failure Handling and Client Contract
 
-A task acquires its transient reservation under the state lock before rebuild
-materialization, successor construction, or replay buffers outside the retained
-record. Overflow or an aggregate above `max_transient_bytes` fails closed as
-`TransientFull`: no reservation, no RPC, no budget increment, and dead-letter
-`transient_full`. An RAII guard is the sole releaser; unified removal never
-releases it, and explicit consumption atomically disarms `Drop`. The reservation
-is accounting, not an allocation interlock, and does not prevent allocations by
-rebuild, tonic, compression, runtime, connection buffers, or the allocator.
-Until the bounded helper exists, the rebuild peak is not bounded and the
-reservation does not cover it. `WriteProgress`/`WriteAttribution`, if present,
-require their own resource, quota, and lifetime validation and are not part of
-the queue ledger.
+Final settlement is `applied` when success was observed, `unknown_remote_outcome` when non-application cannot be
+proven, or `rebuilt` when at least one admitted successor carries its rows, with unadmitted rows lost; `rebuilt`
+is not `applied` and not client-visible. No error proves non-application: `UnacknowledgedWrite` may have applied
+and carries `RetryAfterRouteRefresh`, and `NonRetryable` is also unknown. A record with prior replays is never
+inferred `applied` unless success is observed.
 
-**Shutdown.** Close rejects new admission, leases, and send authorization under
-the state lock and stops scheduling. A task before the gate sends nothing,
-releases its lease and permit, and leaves the record for drain. A task past the
-gate is joined; if it has not reached the first poll it releases, otherwise its
-RPC is awaited to completion or `rpc_deadline`, and TTL does not shorten that
-wait. Success writes `Succeeded` and settles `applied` after close; a terminal
-error is recorded; a retryable or rebuild result is not deferred and admits no
-successor. After joins, drain removes remaining records; a worker-settled record
-is absent, so settlement and release happen at most once. Supervisor panic or an
-unjoinable task has no final-settlement guarantee.
+| Terminal path | Outcome | Current invocation charge | Reason |
+| --- | --- | --- | --- |
+| Replay success | `applied` | `Issued`, +1 | Replayed rows |
+| TTL expired with phase `Empty` | `unknown_remote_outcome` | `NotIssued`, 0 | `ttl_expired_before_attempt` |
+| Stopped with phase `IssueUnknown`, no result | `unknown_remote_outcome` | `IssueUnknown`, +1 | `rpc_timeout` / `rpc_cancelled` / `worker_panicked` / `rpc_unknown` |
+| Retryable after deadline | `unknown_remote_outcome` | `Issued`, +1 | `ttl_expired_after_attempt` |
+| Attempts exhausted before invocation | `unknown_remote_outcome` | `NotIssued`, 0 | `attempts_exhausted` |
+| Table changed or transient full | `unknown_remote_outcome` | `NotIssued`, 0 | `table_changed` / `transient_full` |
+| Non-retryable response | `unknown_remote_outcome` | `Issued`, +1 | `non_retryable` |
+| Panic after observed RPC error, before settlement | `unknown_remote_outcome` | `Issued`, +1 | `worker_panicked` |
+| Rebuild done or interrupted after admissions | `rebuilt` | +1 iff `Issued`; else 0 | successors admitted; `rebuild_interrupted` |
+| Rebuild failed before admitting a successor | `unknown_remote_outcome` | +1 iff `Issued`; else 0 | `rebuild_failed` / `rebuild_interrupted` |
+| Drain before first poll (phase `Empty`) | `unknown_remote_outcome` | `NotIssued`, 0 | `shutdown` |
 
-**Flow.** `Inserter::do_request` materializes impure defaults, then
-`FlowMirrorTask::new(...).await?` snapshots the source set before
-`dispatcher.prepare`; the mirror is detached before dispatch and never
-repeated, so a snapshot table is excluded from the queue. A later Flow is
-invisible: the table can be queued, neither pass is mirrored, and the new sink
-misses both. No consistency is guaranteed.
+The current-invocation charge column records that invocation's classification and whether it was charged;
+cumulative `attempts` lives in the authoritative snapshot and is never reset by settlement. The four reasons in
+the `IssueUnknown` row record the event, not the remote outcome; other unobserved stops map to `rpc_unknown`.
+The drain row covers only an invocation that never crossed the boundary: `NotIssued, 0` applies to that
+invocation and never resets historical `attempts`. Shutdown for every other phase follows the state table in
+Queue Invariants; this table is a terminal-path summary, not the shutdown state machine.
 
-## Configuration, Metrics and Validation
+A rejected successor is not a record: `successor_rejected_total` increments and its rows are lost. A parent
+stopped at the successor limit or deadline after admitting a successor is `rebuilt`; before admitting one it
+takes the TTL reason matching its phase. The client keeps the original error; replay is compensation, not
+acknowledgment, and `affected_rows` keeps its applied semantics. Drain removes remaining unsettled records;
+`Succeeded`, `Settled`, and published `Rebuilding` records are not drained, and a `Rebuilding` parent settles by
+the rebuild rows above.
+
+## Flow Semantics
+
+The Flow mirror snapshot is captured in `Inserter::do_request` before `dispatcher.prepare`; replay never
+re-captures or replaces it. Admission eligibility lookup is read-only, never mutates or replaces that snapshot,
+and may only reject admission: it cannot make an ineligible request eligible or change the snapshot used by the
+original request, so later cache state narrows eligibility only. No cross-Flow-version consistency is claimed;
+the routing table snapshot is a distinct input.
+
+# Configuration and Observability
 
 ```toml
 [write_queue]
-enable = false              # off by default; enabling changes failure timing
-max_bytes = "512MiB"        # retained-estimate ledger, not RSS
+enable = true
+max_bytes = "512MiB"
 max_records = 100000
-max_record_size = "512KiB"  # provisional admission bound, not an RSS cap
-max_transient_bytes = "128MiB"  # provisional; independent of max_bytes
-ttl = "5m"                  # maximum record age; bounds new invocations
-max_attempts = 3            # conservative replay budget per chain
-replay_concurrency = 8      # in-flight records, at most one RPC each
+max_record_size = "512KiB"
+max_transient_bytes = "128MiB"
+ttl = "5m"
+max_attempts = 3
+replay_concurrency = 8
 ```
 
-An opt-in deployment sets `enable = true`; the default stays `false` because a
-replay can duplicate rows and changes client-visible timing. The queue reuses
-`write_retry.initial_backoff`, `max_backoff`, and `backoff_multiplier`; when
-enabled, `max_attempts` controls replay rather than `write_retry.max_retries`.
-Configuration rejects zero bounds, `max_record_size > max_bytes`, a
-`max_transient_bytes` above the aggregate ceiling or arithmetic overflow, and
-zero `datanode.client.timeout` when enabled; it does not clamp. A cap below one
-maximum-size reservation is accepted and that record takes `TransientFull`.
+`enable = true` is the proposed default for the completed and validated implementation; it is not permission to
+release before the prerequisites and validation pass. `enable = false` selects the existing inline path. A
+runtime switch from true to false stops new admission under the commit race contract in Admission: already
+admitted records keep their policy, TTL, budget, and scheduling; authorized invocations are not cancelled; new
+eligible writes use inline retry; the switch neither re-admits records nor resets deadlines. Runtime disable is not close: close also rejects leases
+and send authorization and enters the supervisor drain protocol (Queue Invariants). **Implementation
+prerequisite:** live configuration reload; until it exists, this paragraph defines the required behavior.
 
-TTL and the budget are independent: TTL bounds new invocations and does not
-cancel an issued RPC; `Issued`/`Unknown` charge budget, so three retryable RPC
-failures exhaust the default budget before 5m, while no-send failures charge
-none but remain TTL-bounded. `attempts_exhausted` and `ttl_expired_*` are
-distinct terminal reasons. The current `max_attempts = 3` is a design default,
-not a measured availability guarantee; its operational adequacy is a validation
-requirement.
+Configuration rejects zero bounds, `max_record_size > max_bytes`, a `max_transient_bytes` above the counter
+ceiling, and a zero `datanode.client.timeout`; it does not clamp. A `max_transient_bytes` below one maximum-size
+reservation is accepted with `TransientFull`; `max_attempts = 3` adequacy is validation, not a guarantee.
 
-Metrics use the `greptime_write_queue_` prefix, with no table/region labels:
-`admitted_total`, `shed_total{reason}`, `charged_bytes`, `charged_records`,
-`transient_reserved_bytes`, `attempts_total{issue_state}`,
-`rebuild_total{result,successors}`, `dead_letters_total{reason}`,
-`settled_total{outcome,replay_scope}`, `successor_rejected_total`,
-`drained_total{reason,outcome}`, `replay_latency_seconds`, `inflight`.
-`attempts_total{issue_state}` uses `issued`, `issue_unknown`, and `not_issued`;
-`replay_scope` uses `replay_issued`, `replay_issue_unknown`, or
-`replay_not_sent`.
+Metrics use the `greptime_write_queue_` prefix without table/region labels: `admitted_total`,
+`shed_total{reason}`, `charged_bytes`, `charged_records`, `transient_reserved_bytes`,
+`replay_invocations_total{issue_state}`, `rebuild_total{result,successors}`, `dead_letters_total{reason}`,
+`settled_total{outcome,replay_scope}`, `successor_rejected_total`, `drained_total{reason,outcome}`,
+`replay_latency_seconds`, and `inflight`. `issue_state` is `issued`, `issue_unknown`, or `not_issued`; a
+`not_issued` sample classifies a zero-attempt invocation, not an RPC attempt. `replay_scope` uses one
+deterministic, risk-preserving label: `replay_issue_unknown` if any replay crossed the boundary without an
+observed result (a later observed invocation does not erase it), otherwise `replay_issued` if any result was
+observed, otherwise `replay_not_sent`; the last says nothing about the original dispatcher round.
 
-Every terminal removal increments `settled_total` once, except a rebuilt parent
-(`rebuild_total{result="rebuilt"}`); each successor is a new admission. A
-rejected successor increments `successor_rejected_total{reason}` and loses its
-rows; a parent stopped at the successor limit is `rebuilt`, not a dead-letter.
+# Consistency
 
-These are validation requirements, not measured results. The transient factor
-remains a validation input. Validation must show:
+**Ordering.** Scheduling within one key follows queue enqueue FIFO within one Frontend, with at most one
+in-flight record; a failed head blocks its key while other keys continue. The lineage metadata defined above is
+correlation only: a successor is appended at the tail and may carry an older sequence than records ahead of it,
+so it can execute after newer records; strict lineage FIFO is not promised. There is no global or
+cross-Frontend order; `prepare` groups peers in a `HashMap`, so cross-peer order is per-run; streams rebuilt
+from multiple old keys into one destination region have no defined merge order (R4).
 
-- independent A/B/C sibling admission and the documented client-error selection
-  order;
-- queue-enabled capture and admission when `max_retries = 0`;
-- `NotIssued`/`Unknown`/`Issued` accounting, conservative budget charging, TTL
-  versus budget separation, and the six completion cells with the
-  success-before-panic and partial-rebuild-publication recovery invariants;
-- shutdown joining authorized invocations and at-most-once settlement;
-- plan-time `TableIdent.version` propagation through `prepare`, `send_batch`,
-  peer merging, and the failure handoff into `finish`;
-- the bounded rebuild helper enforcing successor and transient-memory limits
-  before materialization, without falling back to the existing unbounded path;
-- actual replay and rebuild memory shape sufficient to establish the transient
-  factor and to validate the provisional `max_record_size = 512 KiB`,
-  `max_transient_bytes = 128 MiB`, and `MAX_SUCCESSORS_PER_RECORD = 256`;
-- the operational adequacy of the provisional 5s lookup deadline;
-- operational adequacy of `max_attempts = 3` under prolonged datanode restarts
-  and migrations, without treating 3 as a measured availability guarantee;
-- transient exhaustion with at-most-once RAII release;
-- performance, resource overhead, and success-path plan-metadata cost under
-  representative workloads.
+**Newer live writes.** The queue orders admitted records only against each other; a live write reaching the key
+after admission is not detected or fenced, so older rows can replay after it, and no per-key epoch exists.
 
-No implementation is claimed.
+**DDL and stale replay.** Replay compares the captured `TableIdent.version` with the routing target's version;
+it is a timing window, not an atomic fence. `ALTER` can race between check and RPC, cache hits are not
+revalidated, `TRUNCATE` does not bump the version, `DROP` appears as a missing table, a recreated table has a
+new id, and `UNDROP` restores metadata. The queue adds a window where the client sees the error, runs DDL such
+as `TRUNCATE`, and an earlier-admitted replay applies old rows; inline retry would finish first. This is the
+risk R1 asks the maintainer to accept.
+
+**Duplicates.** A lost response, a timeout that applied, a panic after submission, a rebuild, or a client retry
+can duplicate rows; no idempotency key, deduplication, or exactly-once protocol exists.
+
+# Implementation Plan
+
+None of these prerequisites is complete, and they block release, including a default-on release; until they and
+the validation below pass, `enable = true` must not ship.
+
+1. **Dispatcher handoff.** Preserve retryable `RoutedWrite`s through
+   `merge_attempts`/`should_retry`; capture failures at `max_retries = 0`.
+2. **Version propagation.** Carry plan-time `TableIdent.version` through `prepare`,
+   `send_batch`, peer merging, `split_request`, and `finish`; the sidecar is unimplemented.
+3. **Admission and record.** Implement eligibility, bounded admission lookup, cancellation,
+   the `encoded_len()` ledger, per-region insertion, lineage metadata, independent
+   per-sibling admission, and the runtime-disable re-check at commit while retaining
+   `RoutedWrite`.
+4. **Worker and scheduling.** Implement the one-shot invocation, lookup deadlines, gate,
+   the authoritative phase/classification/attempts snapshot and its single-publish transition,
+   TTL, backoff, the no-leader deferral policy, and lease check.
+5. **Bounded rebuild.** Add the streaming helper enforcing successor and transient limits
+   before materialization; no unbounded fallback.
+6. **Completion and shutdown.** Implement the six phases, supervisor recovery from the
+   snapshot, at-most-once settlement, close, join, and drain.
+7. **Configuration and metrics.** Implement validation, metrics, and live enable reload; the
+   transient-factor policy and measurements are required before release.
+
+# Implementation Validation and Testing
+
+These are acceptance criteria, not results; no measured bound is claimed.
+
+- **Default and release gate.** The completed implementation defaults to `enable = true` only
+  after every prerequisite and criterion here passes; `enable = false` preserves the existing
+  inline retry path and client behavior. A runtime switch to `enable = false` rejects new
+  admission, leaves admitted records running, and does not cancel authorized invocations.
+- **Admission and error contract.** Independent per-sibling admission; capture at
+  `max_retries = 0`; admission lookup timeout rejects only that record; cancellation before
+  commit leaves no record; a rejected admission returns the original error with no inline
+  attempt; unchanged error selection.
+- **Issue state and budget.** Gate pass, boundary crossing, drop-before-poll, timeout,
+  cancellation, panic; panic immediately before and after the boundary commit yields zero and
+  one charge respectively; one charge per invocation crossing the boundary, including a panic
+  before the first poll, and zero for `NotIssued`; `IssueUnknown` to `Issued` and to `Succeeded`
+  never recharge; TTL versus budget; `max_attempts = 3` adequacy under prolonged restarts.
+- **Recovery and shutdown.** Six phases; snapshot recovery preserves classification through
+  `Rebuilding` and `Settled`; the `Ok`-to-`Succeeded` write has no intervening fallible step;
+  `Empty` versus `IssueUnknown` close handling; `Issued` shutdown does not wait for
+  `rpc_deadline`; partial successor admission; no double rebuild; no replay of `Succeeded`;
+  no double settlement; drain scope.
+- **Runtime disable race.** Commit before disable admits and continues; disable before commit
+  produces no record; disable during the lookup `await` is re-checked at commit; requests after
+  disable use inline retry; disable does not cancel authorized RPCs, does not empty admitted
+  records, and remains distinct from close.
+- **Version and rebuild.** The plan-time version survives the handoff and a changed version
+  dead-letters `table_changed` with no RPC or attempt; the bounded helper enforces limits
+  before materialization.
+- **No-leader deferral.** Sustained no-leader keeps `NotIssued`, sends no RPC, adds no attempt,
+  does not repeat lookup at high frequency, produces an executable `next_ready`, still ends at
+  TTL, and resumes normal scheduling when a leader appears without affecting other keys.
+- **Memory and transient factor.** Measure replay and rebuild memory across column shapes and
+  multi-region fan-out; fix and document the formula and factor source; validate provisional
+  sizes and `replay_concurrency`; verify checked arithmetic and RAII-only release.
+- **Client response latency.** Measure request start to original client-error return separately
+  for the disabled inline-retry baseline, enabled with admission success, and enabled with
+  admission rejection; do not pool them. The provisional acceptance target is p99 no more than
+  5% worse than the disabled baseline for the admission-success path under the same failure
+  injection and workload; the rejection path is reported without a 5% claim.
+- **Replay settlement latency.** From successful admission to `applied`, `unknown_remote_outcome`,
+  or `rebuilt`, report time-to-observed-success and time-to-terminal-settlement separately; a
+  fast post-admission client error is not evidence of replay performance. Also validate lookup
+  deadlines, the `TopologyRefresh`/`RetryAfterRouteRefresh` split, lock contention at 1, 8, and
+  64 writers, success-path metadata cost, admission cost, and `ttl` restart.
+- **Exclusion boundary.** Both pending-rows batchers flush `BulkInsert`
+  (`src/servers/src/batcher/logical_table/region_write.rs:240`,
+  `src/servers/src/batcher/table/batch.rs:75`); Instant TTL, delete, and Enterprise Flow
+  children are unreachable or shed.
 
 # Risks
 
-- **Process-local loss.** Restart or crash drops records; no recovery claimed.
-- **Duplicates and unknown application.** Applied-but-lost responses, retryable
-  `UnacknowledgedWrite`, timeouts, rebuilds, and successor fan-out can duplicate
-  rows; an error never proves non-application, and dedup is unverified.
-- **DDL timing and ordering.** The plan-time version check is a timing check,
-  not an atomic fence: `ALTER` can land between the check and the replay RPC,
-  and cache hits are not revalidated. `TRUNCATE` does not bump
-  `TableIdent.version`; `DROP` is a missing table and a recreated table has a
-  new id, but `UNDROP` restores dropped-table metadata. A replay can also apply
-  after a newer live write; there is no newer-write detection, per-key epoch, or
-  stale-replay protection.
-- **Best-effort boundaries.** Accounting is not RSS; authorized RPCs join only
-  to `rpc_deadline`; and supervisor panic, an unjoinable task, or an invalid
-  cell has no final-settlement guarantee and does not restart the worker.
-- **The bounded rebuild helper is an implementation blocker.** The current
-  implementation returns a fully materialized `Vec`, and `RowSplitter::split`
-  materializes all destination rows. Without the streaming helper, the
-  successor limit is checked after the peak and the transient bound is not real.
-- **Excluded paths stay excluded.** Whole-RPC, single-entry tonic,
-  `BatchRequest`, `External`, `BulkInsert`, both pending-rows batchers, instant
-  TTL, and delete are deferred; Flow coverage is not claimed.
+- **Default-on release.** Enabling by default changes retry and memory behavior for all eligible
+  writes and is not equivalent to the existing inline retry; releasing before prerequisites and
+  validation pass is unsupported. `enable = false` limits blast radius but does not substitute
+  for validation.
+- **Admission rejection loses the retry opportunity.** Queue saturation, admission limits, or a
+  lookup failure reject a sibling; it gets no queue replay and no inline fallback, so an
+  automatic retry opportunity is lost, and the client can receive the original error earlier
+  than the inline path would have returned.
+- **Runtime transition window.** An admission already awaiting lookups when disable wins commits
+  no record and gets no inline fallback, so that request loses the automatic queue retry; the
+  window is bounded by the admission lookup deadline.
+- **Process-local loss.** Restart, crash, TTL, or close can lose admitted rows after the client
+  saw a failure; retention is best-effort.
+- **Duplicates and unknown application.** Lost responses, timeouts, rebuilds, fan-out, and
+  client retries can duplicate rows; an error never proves non-application.
+- **DDL and stale replay.** `ALTER`, stale cache, `TRUNCATE`, `DROP`/recreate, `UNDROP`, and
+  newer writes can change the final value; residual risk is R1.
+- **Fan-out budget.** Each successor consumes its own inherited budget; no lineage-wide
+  aggregate exists, so aggregate RPCs grow within other limits.
+- **No admission visibility.** The client cannot tell whether a failed write was admitted,
+  replayed, or applied.
+- **Memory is not RSS.** Accounting does not bound the allocator, tonic, compression, runtime,
+  connections, or caches.
+- **Bounded rebuild is blocked.** The current path materializes all destination rows, so limits
+  apply after the peak and the bound is not real.
+- **Shutdown gaps.** Teardown can outlast `rpc_deadline`; supervisor panic, an unjoinable task,
+  or an invalid phase has no final-settlement guarantee.
+- **Ordering.** A successor can execute after newer records; one in-flight record per key
+  bounds but does not eliminate inversion; cross-Frontend and multi-key merge order are
+  undefined.
 
-# Open Questions
+# Questions for Review
 
-**DDL risk acceptance:** Are the documented DDL and stale-replay risks
-acceptable for v1 without an atomic fence? The v1 design already omits the
-fence; only acceptance of the disclosed risk is open.
+**R1. Is the disclosed DDL and stale-replay risk acceptable for v1 without an atomic fence?**
+
+The v1 design does not provide an atomic DDL fence. It documents the remaining ALTER, TRUNCATE, DROP/UNDROP, and newer-write windows. Is this trade-off acceptable for v1, or is stronger DDL coordination required before adoption?
+
+**R2. Is insert-only scope acceptable for v1?**
+
+This RFC covers ordinary inserts only. Delete and BulkInsert remain excluded. The earlier RFC and current PR description still mention delete and need separate synchronization if this scope is accepted.
+
+**R3. How should ordering be defined when multiple old keys rebuild into one destination region?**
+
+Options are a merge ordering rule, gating the new destination region until rebuilt records land, or explicitly accepting that no FIFO is promised across the merge.
+
+# Future Work
+
+Durable retention and recovery with region-side idempotency; deduplication or idempotency keys; delete and other
+excluded paths; a region-side DDL fence, newer-write detection, and stale-replay protection; unit-level rebuild
+accounting; Flow consistency; fairness, adaptive pacing, a queryable dead-letter store, manual replay, and
+worker restart. No schedule implied.
+
+# Alternatives
+
+- **Inline retry plus a post-retry buffer.** Keeps two schedulers and budgets on one write;
+  rejected for the enabled path.
+- **Encoded envelope decoded per replay.** Adds an encode, a decode, and a second payload;
+  `RoutedWrite` and `encoded_len()` accounting are retained.
+- **One record with a multi-target work set.** Needs multi-RPC attempts and a unit-completion
+  protocol; Core v1 keeps independent successors.
+- **A separate crate with a durable-shaped `QueueStore`.** No v1 caller.
+- **A bounded channel plus a writer task.** Adds an admitted-but-not-stored state and failure
+  paths; direct commit is a short critical section.
+- **Region-side DDL fence.** Correct, but adds proto/manifest/region work before the core is
+  validated; Future Work.
