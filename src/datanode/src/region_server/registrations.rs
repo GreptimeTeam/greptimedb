@@ -273,6 +273,8 @@ impl RemoteDynFilterState {
     }
 }
 
+/// Counted in [`REMOTE_DYN_FILTER_REGISTRY_ENTRIES`] from construction to drop;
+/// build it only through `new` and do not derive `Clone`.
 #[derive(Debug)]
 pub(super) struct RegisteredDynFilter {
     pub(super) filter_id: RemoteDynFilterId,
@@ -522,9 +524,11 @@ pub(super) fn register_initial_dyn_filter_regs(
         }
         drop(locked);
 
-        // An empty query state can be removed between looking it up and
-        // registering into it. A non-empty one stays, so the registration
-        // holds once the registry still has this state.
+        // An empty query state can be removed from the registry between the
+        // lookup above and the insert. A non-empty state is never removed, so
+        // the registration is visible if the registry still holds this state.
+        // Check after releasing the query lock: `remove_query_if_empty` takes
+        // that lock while holding the registry shard.
         if regs_by_query.is_current_query(query_id, &query_regs) {
             return registered_filter_ids;
         }
@@ -790,6 +794,10 @@ mod tests {
             // The registry, this test and the registering thread each hold the
             // query state once the registration has looked it up.
             while Arc::strong_count(&query_regs) < 3 {
+                assert!(
+                    !registering.is_finished(),
+                    "registration returned without waiting for the query lock"
+                );
                 std::thread::yield_now();
             }
 
