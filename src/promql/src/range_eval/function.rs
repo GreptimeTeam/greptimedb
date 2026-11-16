@@ -750,8 +750,9 @@ mod tests {
 
     /// Both routes reach one function, so their factors can only differ in how each fills the span.
     /// A window without a synthetic zero is filled the same way by both, and the factors have to
-    /// agree to the bit -- the assertion that fails as soon as one of them grows arithmetic of its
-    /// own again.
+    /// agree to the bit. A window whose sampled anchor is a synthetic zero is the one shape the two
+    /// fills answer differently, and pinning both answers there is what puts the anchors, not only
+    /// the arithmetic, under the assertions.
     #[test]
     fn both_routes_compute_one_extrapolation_factor() {
         // Evaluation at 6500ms over a 6000ms range: the window opens at 500ms and the last sample
@@ -829,31 +830,60 @@ mod tests {
                 );
             }
         }
-    }
 
-    /// A synthetic zero puts the sampled anchor before the average anchor, and no float window
-    /// describes that: a float window starting at the zero would move its average interval there
-    /// too. The two-anchor numbers are pinned instead, at the geometry
-    /// `synthetic_zero_still_extrapolates_to_the_window_end` and the Prometheus goldens carry, so a
-    /// swapped anchor cannot pass by agreeing with itself.
-    #[test]
-    fn a_synthetic_zero_moves_only_the_sampled_anchor() {
-        // Three real samples from 2000ms to 5000ms behind a zero at 1000ms: sampled 4000ms,
-        // average (5000-2000)/2 = 1500ms, and 1500ms from the last sample to the range end.
-        // (4000 + 0 + 1500) / 4000 = 1.375; taking the average from the sampled interval instead
-        // divides by three and answers 1.25.
-        let window = Window {
-            sampled_from: 1_000,
-            average_from: 2_000,
+        // A synthetic zero at 2000ms with real samples at 3000ms and 5000ms, evaluated at 6500ms
+        // over a 6000ms range, gives the histogram route a sampled interval of 3000ms and the
+        // 2000ms average interval between the real samples. The start lies past 1.1 * 2000ms, so it
+        // falls back to half of it and the counter's zero point then takes it to 0; the end is
+        // 1500ms from the range end, inside that threshold, so it stays:
+        // (3000 + 0 + 1500) / 3000 = 1.5. A float sample carries no start timestamp, so the float
+        // route samples the same 2000ms it measures its average over and answers
+        // (2000 + 0 + 1500) / 2000 = 1.75. The two fills disagree, which is what makes reading one
+        // anchor for the other observable rather than a change of arguments with no effect: were
+        // the histogram route to collapse its sampled anchor onto the average one, it would answer
+        // the float route's 1.75 and these two pins fail.
+        let two_anchor = Window {
+            sampled_from: 2_000,
+            average_from: 3_000,
             last: 5_000,
-            samples_minus_one: 2,
+            samples_minus_one: 1,
             eval_ts: 6_500,
             range_ms: 6_000,
             is_counter: true,
             is_rate: false,
             zero_point: Some(0.0),
         };
-        assert_eq!(window.as_histogram().to_bits(), 1.375f64.to_bits());
+        assert_eq!(two_anchor.as_histogram().to_bits(), 1.5f64.to_bits());
+        assert_eq!(two_anchor.as_float().to_bits(), 1.75f64.to_bits());
+    }
+
+    /// A synthetic zero puts the sampled anchor before the average anchor, and no float window
+    /// describes that: a float window starting at the zero would move its average interval there
+    /// too. The geometry is chosen so the two answers differ -- measuring the average from the
+    /// synthetic zero answers 1.75 where the real samples answer 1.25 -- so a swapped anchor cannot
+    /// pass by agreeing with itself.
+    #[test]
+    fn a_synthetic_zero_moves_only_the_sampled_anchor() {
+        // A zero at 1000ms, real samples at 2000ms and 3000ms, evaluated at 4500ms over a 4000ms
+        // range: the window opens at 500ms and the range ends 1500ms past the last sample. The
+        // sampled interval runs 2000ms from the zero, the average interval is the 1000ms between
+        // the real samples, so both ends lie past 1.1 * 1000ms and fall back to half of it, and the
+        // counter's zero point then takes the start to 0: (2000 + 0 + 500) / 2000 = 1.25. Measuring
+        // the average from the synthetic zero instead makes the average interval 2000ms, leaves
+        // both ends inside 1.1 * 2000ms and answers (2000 + 0 + 1500) / 2000 = 1.75. Both are
+        // pinned below, so swapping the anchors fails here instead of agreeing with itself.
+        let window = Window {
+            sampled_from: 1_000,
+            average_from: 2_000,
+            last: 3_000,
+            samples_minus_one: 1,
+            eval_ts: 4_500,
+            range_ms: 4_000,
+            is_counter: true,
+            is_rate: false,
+            zero_point: Some(0.0),
+        };
+        assert_eq!(window.as_histogram().to_bits(), 1.25f64.to_bits());
         assert_eq!(
             Window {
                 is_rate: true,
@@ -861,10 +891,21 @@ mod tests {
             }
             .as_histogram()
             .to_bits(),
-            (1.375f64 / 6.0).to_bits()
+            (1.25f64 / 4.0).to_bits()
+        );
+        // The answer a swapped average anchor gives, pinned so that this geometry stays one the
+        // assertions above can tell apart.
+        assert_eq!(
+            Window {
+                average_from: 1_000,
+                ..window
+            }
+            .as_histogram()
+            .to_bits(),
+            1.75f64.to_bits()
         );
         // The float route on the same numbers starts its sampled interval at the first sample,
-        // which is a different window: 1.5 rather than 1.375.
+        // which is a different window: 1.5 rather than 1.25.
         assert_eq!(window.as_float().to_bits(), 1.5f64.to_bits());
 
         // One real sample behind the zero leaves no average interval, so neither end is
@@ -884,7 +925,7 @@ mod tests {
             }
             .as_histogram()
             .to_bits(),
-            (1.0f64 / 6.0).to_bits()
+            (1.0f64 / 4.0).to_bits()
         );
     }
 }
