@@ -651,7 +651,7 @@ impl AggregateRuntime {
         if evidence.custom_bounds_reconciled {
             collector.record_info(format!("{name}: custom buckets reconciled"));
         }
-        if evidence.counter_reset_seen && evidence.not_counter_reset_seen {
+        if evidence.counter_reset_collision {
             collector.record_warning(format!("{name}: contradictory reset hints"));
         }
     }
@@ -948,6 +948,7 @@ mod tests {
             custom_bounds_reconciled: false,
             counter_reset_seen: true,
             not_counter_reset_seen: true,
+            counter_reset_collision: true,
         };
         let mut partial = runtime(AggregateStage::Partial);
         let collector = PromqlAnnotationCollector::default();
@@ -983,6 +984,43 @@ mod tests {
             assert_eq!(warnings.len(), 2, "{stage:?} reported {warnings:?}");
             assert!(infos.is_empty(), "{stage:?} reported {infos:?}");
         }
+    }
+
+    /// The two reset-hint bits are OR-ed over every point the fold saw, so between them they say
+    /// only what the inputs reported -- two groups can each hold one of them. Whether they
+    /// contradict is a per-point decision, which the summary carries in `counter_reset_collision`,
+    /// and that bit is what the reporter warns about.
+    #[test]
+    fn a_reset_hint_held_by_one_group_each_is_not_a_collision() {
+        let mut quiet = runtime(AggregateStage::Complete);
+        let collector = PromqlAnnotationCollector::default();
+        quiet.set_annotations(collector.clone());
+        quiet.report_evidence(HistogramEvidence {
+            counter_reset_seen: true,
+            not_counter_reset_seen: true,
+            ..HistogramEvidence::default()
+        });
+        assert_eq!(
+            collected(&collector),
+            (Vec::new(), Vec::new()),
+            "two points that each saw one hint contradict nothing"
+        );
+
+        // One point that saw both is the collision, and it is what the message is for.
+        let mut colliding = runtime(AggregateStage::Complete);
+        let collector = PromqlAnnotationCollector::default();
+        colliding.set_annotations(collector.clone());
+        colliding.report_evidence(HistogramEvidence {
+            counter_reset_collision: true,
+            ..HistogramEvidence::default()
+        });
+        let (warnings, infos) = collected(&collector);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("contradictory reset hints"),
+            "{warnings:?}"
+        );
+        assert!(infos.is_empty(), "{infos:?}");
     }
 
     /// A reconciled point that answered reports its reconciliation as information, once.
