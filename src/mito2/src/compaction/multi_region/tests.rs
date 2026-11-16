@@ -2565,7 +2565,7 @@ async fn test_invalid_optional_index_options_do_not_block_routed_compaction() {
 }
 
 #[tokio::test]
-async fn test_missing_index_handler_blocks_source_and_target_descriptors() {
+async fn test_missing_index_handler_does_not_block_routed_compaction() {
     use crate::sst::file::{ColumnIndexMetadata, IndexType};
 
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
@@ -2600,13 +2600,26 @@ async fn test_missing_index_handler_blocks_source_and_target_descriptors() {
             }
         }
         let (context, _) = fixture.context(None);
-        let result = compact_regions(plan, context).await;
-        let error = result
-            .err()
-            .expect("configured or persisted kind requires a handler");
-        assert!(
-            error.to_string().contains("compaction index planning"),
-            "{required_by}: {error}"
-        );
+        let output = compact_regions(plan, context)
+            .await
+            .unwrap_or_else(|error| panic!("{required_by}: {error}"));
+        assert_eq!(output.stats.source_rows, output.stats.output_rows);
+        assert!(output.stats.output_rows > 0);
+        assert!(!output.files.is_empty());
+        for file in output.files.values().flatten() {
+            assert!(file.num_rows > 0);
+            assert!(file.available_indexes.iter().all(|kind| !matches!(
+                kind,
+                IndexType::HllIndex | IndexType::KllIndex | IndexType::MgIndex
+            )));
+            assert!(
+                file.indexes
+                    .iter()
+                    .all(|index| index.created_indexes.iter().all(|kind| !matches!(
+                        kind,
+                        IndexType::HllIndex | IndexType::KllIndex | IndexType::MgIndex
+                    )))
+            );
+        }
     }
 }

@@ -292,6 +292,11 @@ impl Indexer {
         self.creators.is_empty()
     }
 
+    /// Whether this output has an active extension creator.
+    pub(crate) fn has_extension_creators(&self) -> bool {
+        self.creators.iter().any(|active| !active.is_builtin())
+    }
+
     #[cfg(test)]
     fn has_kind(&self, kind: kind::IndexKind) -> bool {
         self.creators

@@ -763,8 +763,8 @@ where
             self.check_cancelled()?;
             stats.update_flat(batch)?;
             let start = Instant::now();
-            // The indexer exists once the first batch has been written. In async
-            // mode it contains only the compaction extension, if one is enabled.
+            // The indexer exists once the first batch has been written. Outputs
+            // with extensions build all indexes together, including in async mode.
             self.current_indexer
                 .as_mut()
                 .unwrap()
@@ -892,10 +892,14 @@ where
                     Some(opts.row_group_size),
                 )
                 .await;
-            if matches!(self.index_config.build_mode, IndexBuildMode::Async) {
-                // The async task builds builtin indexes; extensions follow this output synchronously.
+            if matches!(self.index_config.build_mode, IndexBuildMode::Async)
+                && !indexer.has_extension_creators()
+            {
                 indexer.abort_builtin_creators().await;
             }
+            // Extensions share one Puffin with built-in indexes. When an extension
+            // is active, finish all creators here instead of replacing its output
+            // with a built-in-only Puffin in the background.
             self.current_indexer = Some(indexer);
 
             // safety: self.writer is assigned above

@@ -118,6 +118,49 @@ impl IndexRegistry {
         self.validate_file_kinds(files)
     }
 
+    /// Reports unavailable sketches without blocking compaction after a downgrade.
+    /// Logs each missing kind at most once for this input group.
+    pub(crate) fn warn_missing_compaction_handlers<'a>(
+        &self,
+        metadata: &RegionMetadataRef,
+        files: impl IntoIterator<Item = &'a FileMeta>,
+    ) {
+        let missing = ExtensionIndexKind::ALL
+            .map(|kind| !self.has_handler(IndexKind::Extension(kind).index_type()));
+        if !missing.iter().any(|missing| *missing) {
+            return;
+        }
+        let mut requested = ExtensionIndexKind::ALL.map(|kind| {
+            metadata.column_metadatas.iter().any(|column| {
+                column
+                    .column_schema
+                    .metadata()
+                    .contains_key(kind.required_metadata_key())
+            })
+        });
+        for file in files {
+            for (position, kind) in ExtensionIndexKind::ALL.iter().enumerate() {
+                if missing[position] && !requested[position] {
+                    let index_type = IndexKind::Extension(*kind).index_type();
+                    requested[position] = file.available_indexes.contains(&index_type)
+                        || file
+                            .indexes
+                            .iter()
+                            .any(|column| column.created_indexes.contains(&index_type));
+                }
+            }
+        }
+        for (position, kind) in ExtensionIndexKind::ALL.iter().enumerate() {
+            if missing[position] && requested[position] {
+                warn!(
+                    "Compacting without unavailable sketch provider, region_id: {}, kind: {}; output will omit this sketch",
+                    metadata.region_id,
+                    kind.as_str()
+                );
+            }
+        }
+    }
+
     /// Rejects unavailable implementations for indexes being replaced.
     fn validate_file_kinds<'a>(
         &self,

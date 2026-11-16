@@ -2829,7 +2829,7 @@ impl IndexCreator for RebuildSketchCreator {
 #[case(false)]
 #[case(true)]
 #[tokio::test]
-async fn test_async_compaction_builds_only_builtin_indexes(#[case] registered: bool) {
+async fn test_async_compaction_respects_optional_sketch_provider(#[case] registered: bool) {
     let mut env = TestEnv::new().await;
     let provider = Arc::new(RebuildSketchProvider::default());
     let plugins = Plugins::new();
@@ -2866,8 +2866,18 @@ async fn test_async_compaction_builds_only_builtin_indexes(#[case] registered: b
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
-    put_and_flush(&engine, region_id, &schema, 0..2).await;
-    put_and_flush(&engine, region_id, &schema, 2..4).await;
+    for start in [0, 2] {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(start, start + 2),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
     let inputs = engine
         .get_region(region_id)
         .unwrap()
@@ -2907,11 +2917,18 @@ async fn test_async_compaction_builds_only_builtin_indexes(#[case] registered: b
                 && !inputs.iter().any(|input| input.file_id == output.file_id)
                 && output.available_indexes.contains(&IndexType::InvertedIndex)
             {
-                assert_eq!(
-                    output.available_indexes.as_slice(),
+                let expected: &[IndexType] = if registered {
+                    &[IndexType::InvertedIndex, IndexType::HllIndex]
+                } else {
                     &[IndexType::InvertedIndex]
-                );
+                };
+                assert_eq!(output.available_indexes.as_slice(), expected);
                 assert_eq!(output.num_rows, 4);
+                assert_tag_inverted_index(&region.access_layer, output.index_id()).await;
+                if registered {
+                    assert_eq!(output.index_version, 0);
+                    assert_sketch_rows(&region.access_layer, output.index_id(), 4).await;
+                }
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2919,8 +2936,13 @@ async fn test_async_compaction_builds_only_builtin_indexes(#[case] registered: b
     })
     .await
     .expect("async compaction did not publish built-in indexes");
-    assert_eq!(provider.compact_plans.load(Ordering::Relaxed), 0);
-    assert_eq!(provider.creates.load(Ordering::Relaxed), 0);
+    if registered {
+        assert!(provider.compact_plans.load(Ordering::Relaxed) > 0);
+        assert_eq!(provider.creates.load(Ordering::Relaxed), 1);
+    } else {
+        assert_eq!(provider.compact_plans.load(Ordering::Relaxed), 0);
+        assert_eq!(provider.creates.load(Ordering::Relaxed), 0);
+    }
     engine.stop().await.unwrap();
 }
 
@@ -2965,6 +2987,22 @@ async fn assert_tag_inverted_index(
         .unwrap();
         assert!(fst.get(&encoded).is_some(), "missing tag {value}");
     }
+}
+
+async fn assert_sketch_rows(
+    layer: &crate::access_layer::AccessLayer,
+    index_id: RegionIndexId,
+    expected_rows: usize,
+) {
+    use common_base::range_read::RangeReader;
+
+    let manager = layer.build_puffin_manager();
+    let reader = manager.reader(&index_id).await.unwrap();
+    let blob = reader.blob("test.sketch").await.unwrap();
+    let reader = blob.reader().await.unwrap();
+    let metadata = reader.metadata().await.unwrap();
+    let bytes = reader.read(0..metadata.content_length).await.unwrap();
+    assert_eq!(bytes.as_ref(), expected_rows.to_le_bytes().as_slice());
 }
 
 #[tokio::test]
@@ -3037,7 +3075,6 @@ async fn test_async_compaction_builds_and_manual_rebuild_maintains_sketch() {
         loop {
             let files = region.all_manifest_files().await.0;
             if files.len() == 1
-                && files[0].index_version > 0
                 && files[0].indexes.iter().any(|column| {
                     column.created_indexes.iter().any(|kind| {
                         matches!(
@@ -3057,7 +3094,9 @@ async fn test_async_compaction_builds_and_manual_rebuild_maintains_sketch() {
     .await
     .unwrap();
     let before = region.all_manifest_files().await.0[0].clone();
+    assert_eq!(before.index_version, 0);
     assert_tag_inverted_index(&region.access_layer, before.index_id()).await;
+    assert_sketch_rows(&region.access_layer, before.index_id(), 4).await;
     let before_inputs = provider.readable_inputs.lock().unwrap().len();
     let before_creates = provider.creates.load(Ordering::Relaxed);
     engine
@@ -3081,6 +3120,7 @@ async fn test_async_compaction_builds_and_manual_rebuild_maintains_sketch() {
             .contains(&crate::sst::file::IndexType::HllIndex)
     }));
     assert_tag_inverted_index(&region.access_layer, files[0].index_id()).await;
+    assert_sketch_rows(&region.access_layer, files[0].index_id(), 4).await;
     engine.stop().await.unwrap();
 }
 
@@ -3186,7 +3226,7 @@ async fn test_rebuild_column_only_index_advances_zero_generation() {
 }
 
 #[tokio::test]
-async fn test_compaction_without_required_provider_preserves_indexes() {
+async fn test_compaction_without_provider_drops_historical_sketch_indexes() {
     use crate::sst::file::{ColumnIndexMetadata, IndexType};
 
     let mut env = TestEnv::new().await;
@@ -3255,22 +3295,29 @@ async fn test_compaction_without_required_provider_preserves_indexes() {
         .into_iter()
         .map(|file| (file.file_id, file))
         .collect();
-    let err = engine
+    engine
         .handle_request(
             region_id,
             RegionRequest::Compact(RegionCompactRequest::default()),
         )
         .await
-        .unwrap_err();
-    assert!(format!("{err:?}").contains("required index HllIndex has no registered handler"));
-    let after: HashMap<_, _> = region
-        .all_manifest_files()
-        .await
-        .0
-        .into_iter()
-        .map(|file| (file.file_id, file))
-        .collect();
-    assert_eq!(before, after);
+        .unwrap();
+    let outputs = region.all_manifest_files().await.0;
+    assert_eq!(outputs.len(), 1);
+    let output = &outputs[0];
+    assert!(!before.contains_key(&output.file_id));
+    assert_eq!(output.num_rows, 4);
+    assert_eq!(
+        output.available_indexes.as_slice(),
+        &[IndexType::InvertedIndex]
+    );
+    assert!(
+        output
+            .indexes
+            .iter()
+            .all(|column| !column.created_indexes.contains(&IndexType::HllIndex))
+    );
+    assert_tag_inverted_index(&region.access_layer, output.index_id()).await;
     engine.stop().await.unwrap();
 }
 

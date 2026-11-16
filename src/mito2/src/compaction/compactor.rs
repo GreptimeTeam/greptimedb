@@ -476,15 +476,12 @@ async fn invoke_sst_hook(
 }
 
 impl CompactionContext {
-    /// Rejects missing configured or persisted index handlers before file I/O.
-    /// This check is independent of plan failures: an absent handler produces no plan.
-    fn validate_index_plan<'a>(&self, inputs: impl Iterator<Item = &'a FileHandle>) -> Result<()> {
-        self.index_registry
-            .validate_required_kinds(&self.region_metadata, inputs.map(FileHandle::meta_ref))
-            .with_context(|_| error::ExternalSnafu {
-                context: "compaction index planning".to_string(),
-            })?;
-        Ok(())
+    /// Missing sketch implementations must not block compaction after a downgrade.
+    fn warn_missing_index_handlers<'a>(&self, inputs: impl Iterator<Item = &'a FileHandle>) {
+        self.index_registry.warn_missing_compaction_handlers(
+            &self.region_metadata,
+            inputs.map(FileHandle::meta_ref),
+        );
     }
 
     /// Checks each physical input once before output tasks begin. Missing inputs
@@ -973,7 +970,7 @@ impl<M: SstMerger> DefaultCompactor<M> {
         context: &CompactionContext,
         unit: &CompactionUnit,
     ) -> Result<MergeOutput> {
-        context.validate_index_plan(unit.inputs.iter())?;
+        context.warn_missing_index_handlers(unit.inputs.iter());
         let mut context = context.clone();
         context
             .prepare_index_inputs(reusable_index_inputs(
@@ -1054,12 +1051,12 @@ where
         let compaction_time_window = picker_output.time_window_size;
         let region_id = compaction_region.region_id;
         let mut context = CompactionContext::try_from(compaction_region)?;
-        context.validate_index_plan(
+        context.warn_missing_index_handlers(
             picker_output
                 .outputs
                 .iter()
                 .flat_map(|output| output.inputs.iter()),
-        )?;
+        );
         context
             .prepare_index_inputs(reusable_index_inputs(
                 &picker_output.outputs,
@@ -2040,7 +2037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_missing_index_handler_blocks_configured_and_persisted_kinds() {
+    async fn test_missing_index_handler_does_not_block_builtin_compaction() {
         use api::v1::SemanticType;
         use datatypes::prelude::ConcreteDataType;
         use datatypes::schema::{
@@ -2086,16 +2083,6 @@ mod tests {
                 column_id: 5,
             });
             region.region_metadata = Arc::new(metadata.build().unwrap());
-            let context = CompactionContext::try_from(&region).unwrap();
-            assert_eq!(
-                context
-                    .index_plan
-                    .planned()
-                    .iter()
-                    .flat_map(|plan| plan.kinds().iter().copied())
-                    .collect::<Vec<_>>(),
-                [IndexKind::Inverted, IndexKind::Fulltext, IndexKind::Bloom]
-            );
             let mut input = dummy_file_meta();
             match required_by {
                 RequiredBy::Schema => {
@@ -2115,6 +2102,16 @@ mod tests {
                 }),
                 _ => {}
             }
+            let context = CompactionContext::try_from(&region).unwrap();
+            assert_eq!(
+                context
+                    .index_plan
+                    .planned()
+                    .iter()
+                    .flat_map(|plan| plan.kinds().iter().copied())
+                    .collect::<Vec<_>>(),
+                [IndexKind::Inverted, IndexKind::Fulltext, IndexKind::Bloom]
+            );
             let output = PickerOutput {
                 outputs: vec![CompactionOutput {
                     output_level: 1,
@@ -2138,15 +2135,8 @@ mod tests {
                 } else {
                     compactor.merge_ssts(&region, output.clone()).await
                 };
-                assert_eq!(
-                    result.is_err(),
-                    required_by != RequiredBy::None,
-                    "{required_by:?}, local={local}"
-                );
-                assert_eq!(
-                    calls.load(Ordering::SeqCst),
-                    usize::from(required_by == RequiredBy::None)
-                );
+                assert!(result.is_ok(), "{required_by:?}, local={local}: {result:?}");
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
             }
         }
     }
