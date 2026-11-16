@@ -406,8 +406,9 @@ impl RegionEngine for MetricEngine {
             ) {
                 Ok(true) => {}
                 Ok(false) => {
-                    // The physical region received the grant, so record it for the data region,
-                    // which is not given the grant. The data region records its own grants.
+                    // If the metadata region ignored the grant, the data region is not handed it, so
+                    // record it for the data region. If the data region ignored it, the data region
+                    // has already recorded it.
                     if x == metadata_region_id {
                         self.inner.mito.record_granted_lease(
                             data_region_id,
@@ -1041,6 +1042,10 @@ mod test {
                 .unwrap()
         );
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Follower));
+        assert_eq!(
+            mito.role(utils::to_metadata_region_id(physical_region_id)),
+            Some(RegionRole::Leader)
+        );
         for region_id in [
             utils::to_metadata_region_id(physical_region_id),
             utils::to_data_region_id(physical_region_id),

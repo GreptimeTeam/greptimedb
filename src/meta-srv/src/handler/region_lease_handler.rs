@@ -101,7 +101,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 let renewed = if let Some(renewer) = &self.customized_region_lease_renewer {
                     let candidate_lease_ids = renewed
                         .iter()
-                        .map(|(region_id, info)| (*region_id, info.candidate_lease_id))
+                        .filter_map(|(region_id, info)| {
+                            info.candidate_lease_id.map(|id| (*region_id, id))
+                        })
                         .collect::<HashMap<_, _>>();
                     renewer
                         .renew(ctx, renewed)
@@ -110,8 +112,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
                             GrantedRegion {
                                 candidate_lease_id: candidate_lease_ids
                                     .get(&region.region_id)
-                                    .copied()
-                                    .flatten(),
+                                    .copied(),
                                 ..region
                             }
                             .into()
@@ -347,8 +348,8 @@ mod test {
         );
     }
 
-    /// Grants each renewed region except `skipped`, and `extra`, all with a candidate lease id the
-    /// handler must not keep.
+    /// Grants every renewed region except `skipped`, plus `extra`, which is not in the heartbeat.
+    /// Each lease has a candidate lease id the handler must not keep.
     struct StubRegionLeaseRenewer {
         skipped: RegionId,
         extra: RegionId,
