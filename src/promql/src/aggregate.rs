@@ -1193,7 +1193,7 @@ struct HistogramAccumulator {
 /// These are the Boolean components of the histogram state layout: the fold records them per point
 /// so a merge of two partitions can report what the inputs disagreed about. Only `poisoned` steers
 /// the fold's own output today -- a poisoned point is removed -- and the rest are carried for that
-/// merge.
+/// merge, except `counter_reset_collision`, which is decided from them when the answer is finished.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HistogramEvidence {
     /// The point cannot be answered because its samples disagreed on their bucket layout.
@@ -1206,6 +1206,13 @@ pub(crate) struct HistogramEvidence {
     pub(crate) counter_reset_seen: bool,
     /// Some sample reported that no counter reset happened.
     pub(crate) not_counter_reset_seen: bool,
+    /// One point saw both a reset hint and its negation, which cannot both hold of its samples.
+    ///
+    /// The two bits above are recorded per point and travel through the state, so a summary of them
+    /// is a claim about the fold rather than about one point. This bit is the per-point decision:
+    /// [`evidence_summary`] sets it for a point that holds both bits and is not poisoned, so two
+    /// groups that each saw one of the hints do not contradict each other.
+    pub(crate) counter_reset_collision: bool,
 }
 
 /// Which field of which layout a fold is writing, and how it folds it.
@@ -1583,12 +1590,16 @@ impl HistogramAccumulator {
             compensation: Some(compensation),
             mean: switched.then_some(value),
             count: payload.count,
+            // A decoded state is one point's payload, so whether its two hint bits contradict is
+            // decided where the whole answer is, in `evidence_summary`: the state layout carries the
+            // bits, not the decision.
             evidence: HistogramEvidence {
                 poisoned: payload.poisoned,
                 incompatible_layout: payload.incompatible_layout,
                 custom_bounds_reconciled: payload.custom_bounds_reconciled,
                 counter_reset_seen: payload.counter_reset_seen,
                 not_counter_reset_seen: payload.not_counter_reset_seen,
+                counter_reset_collision: false,
             },
         })
     }
@@ -1752,6 +1763,14 @@ fn decoded_histogram(batch: &HistogramBatch) -> Result<FloatHistogram> {
 ///
 /// A poisoned point suppresses its own reconciliation bit: the point answers nothing, so reporting
 /// that its bounds were reconciled would report a reconciliation of an answer that is not there.
+///
+/// The reset hints are per point too: a point whose samples report a reset and no reset contradicts
+/// itself -- Prometheus skips such a point -- while two points that each report one of the two do
+/// not contradict each other, and neither does one series whose hint changes from one point to the
+/// next. The summary therefore ORs the per-point collision rather than the two bits themselves: a
+/// `sum by (job)` whose `job` a only ever resets and whose `job` b never does is two ordinary
+/// points, and a point cannot be both poisoned and in contradiction.
+///
 /// Everything else is reported if any point recorded it, which is what makes the message set the same
 /// whichever order the partitions were merged in.
 fn evidence_summary(groups: &[Group]) -> HistogramEvidence {
@@ -1762,6 +1781,8 @@ fn evidence_summary(groups: &[Group]) -> HistogramEvidence {
         summary.incompatible_layout |= evidence.incompatible_layout;
         summary.counter_reset_seen |= evidence.counter_reset_seen;
         summary.not_counter_reset_seen |= evidence.not_counter_reset_seen;
+        summary.counter_reset_collision |=
+            evidence.counter_reset_seen && evidence.not_counter_reset_seen && !evidence.poisoned;
         summary.custom_bounds_reconciled |= evidence.custom_bounds_reconciled && !evidence.poisoned;
     }
     summary

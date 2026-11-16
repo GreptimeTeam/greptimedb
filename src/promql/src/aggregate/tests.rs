@@ -2840,11 +2840,102 @@ fn sum_records_both_counter_reset_hints() {
     assert!(evidence.counter_reset_seen, "{evidence:?}");
     assert!(evidence.not_counter_reset_seen, "{evidence:?}");
     assert!(!evidence.poisoned);
+    // The two samples met at one point of one group, so that point contradicts itself.
+    assert!(aggregator.evidence_summary().counter_reset_collision);
     // The hints are evidence, not payload: the answer is the two histograms' sum.
     let answer = aggregator.finish().unwrap();
     let value = answered_histogram(&answer[0], 0, 0);
     assert_eq!(value.count, 2.0);
     assert_eq!(value.sum, 2.0);
+}
+
+/// The reset hints are per point: a job that only ever resets and a job that never does are two
+/// ordinary points, whatever the OR of their two bits says. Prometheus decides the contradiction
+/// per group per step, and so does the summary's collision bit.
+#[test]
+fn sum_by_job_does_not_collide_a_reset_in_one_job_with_none_in_another() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let reset = histogram_sample(
+        0,
+        &[(0, 1.0)],
+        &[],
+        1.0,
+        1.0,
+        CounterResetHint::CounterReset,
+    );
+    let not_reset = histogram_sample(
+        0,
+        &[(0, 1.0)],
+        &[],
+        1.0,
+        1.0,
+        CounterResetHint::NotCounterReset,
+    );
+    let input = [
+        histogram_series(&schema, "a", vec![(0, reset)]),
+        histogram_series(&schema, "b", vec![(0, not_reset)]),
+    ];
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["job"])).unwrap();
+    for series in &input {
+        aggregator.update(series).unwrap();
+    }
+    assert_eq!(aggregator.groups(), 2, "one group per job");
+    let evidence = aggregator.evidence_summary();
+    // Both bits are there -- they are what the two points reported -- and no point contradicts
+    // itself, which is what decides the message.
+    assert!(evidence.counter_reset_seen, "{evidence:?}");
+    assert!(evidence.not_counter_reset_seen, "{evidence:?}");
+    assert!(!evidence.counter_reset_collision, "{evidence:?}");
+    // Each group answers on its own, so the answer is not removed either.
+    let answer = aggregator.finish().unwrap();
+    assert_eq!(answer.len(), 2);
+    for series in &answer {
+        assert_eq!(answered_histogram(series, 0, 0).count, 1.0);
+    }
+}
+
+/// A poisoned point answers nothing, so its hints neither contradict nor agree: like its
+/// reconciliation, the collision stays out of the summary -- and the point is removed anyway.
+#[test]
+fn a_poisoned_point_reports_no_reset_collision() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let exponential = histogram_sample(
+        0,
+        &[(0, 1.0)],
+        &[],
+        1.0,
+        2.0,
+        CounterResetHint::CounterReset,
+    );
+    let custom = histogram_sample(
+        CUSTOM_BUCKETS,
+        &[(0, 1.0)],
+        &[1.0],
+        1.0,
+        3.0,
+        CounterResetHint::NotCounterReset,
+    );
+    let input = [
+        histogram_series(&schema, "a", vec![(0, exponential)]),
+        histogram_series(&schema, "b", vec![(0, custom)]),
+    ];
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    for series in &input {
+        aggregator.update(series).unwrap();
+    }
+    let evidence = aggregator.evidence_summary();
+    assert!(evidence.poisoned, "{evidence:?}");
+    assert!(evidence.counter_reset_seen && evidence.not_counter_reset_seen);
+    assert!(
+        !evidence.counter_reset_collision,
+        "a removed point does not contradict anything: {evidence:?}"
+    );
+    assert!(
+        aggregator.finish().unwrap().is_empty(),
+        "the poisoned point answers nothing"
+    );
 }
 
 /// A histogram that observed nothing is still a sample: it opens the point, and it adds nothing.
@@ -3303,6 +3394,76 @@ fn merging_two_overflowing_partials_answers_a_finite_mean() {
     assert_eq!(value.count, 1.0);
 }
 
+/// A mean-path merge weights each side's mean by that side's own count, so partitions of unequal
+/// size answer the weighted mean and not an average of two means.
+///
+/// Both partitions fold only the sample values `2^1023` and `2^1021`, which keeps every step exact:
+/// the left one overflows on its second sample and switches to a mean of `2^1023` over 2 samples,
+/// while the right one keeps summing six samples of `2^1021` into `3 * 2^1022`, a mean of `2^1021`
+/// over 6. Eight samples in all, so the weights are exactly `2/8` and `6/8`, and the answer is
+/// `2^1023 * 2/8 + 2^1021 * 6/8 = 7 * 2^1019`. Swapping the two weights answers
+/// `2^1023 * 6/8 + 2^1021 * 2/8 = 13 * 2^1019`, which is why the assertion is on the literal.
+#[test]
+fn merging_unequal_mean_partials_weights_each_mean_by_its_count() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let large = || {
+        histogram_sample(
+            0,
+            &[(0, 1.0)],
+            &[],
+            1.0,
+            2f64.powi(1023),
+            CounterResetHint::Unknown,
+        )
+    };
+    let small = || {
+        histogram_sample(
+            0,
+            &[(0, 1.0)],
+            &[],
+            1.0,
+            2f64.powi(1021),
+            CounterResetHint::Unknown,
+        )
+    };
+    // `2^1023 + 2^1023` is `Inf`, so the left partition's second sample is what forces its switch.
+    let left_input: Vec<Series> = (0..2)
+        .map(|index| histogram_series(&schema, &format!("a{index}"), vec![(0, large())]))
+        .collect();
+    let right_input: Vec<Series> = (0..6)
+        .map(|index| histogram_series(&schema, &format!("b{index}"), vec![(0, small())]))
+        .collect();
+    let left = partial_state(AggregateOp::Avg, &schema, &left_input);
+    let right = partial_state(AggregateOp::Avg, &schema, &right_input);
+    let left_payload = left.groups[0].states[0][0]
+        .as_ref()
+        .and_then(StatePayload::histogram)
+        .expect("a histogram state");
+    assert!(left_payload.incremental_mean, "the left partition switched");
+    assert_eq!(left_payload.count, 2.0);
+    let right_payload = right.groups[0].states[0][0]
+        .as_ref()
+        .and_then(StatePayload::histogram)
+        .expect("a histogram state");
+    assert!(
+        !right_payload.incremental_mean,
+        "the right partition kept its sum"
+    );
+    assert_eq!(right_payload.count, 6.0);
+    // One side switching is enough to put the merge on its mean path.
+    let merged = merged_answer(AggregateOp::Avg, &schema, &[left, right]);
+    let value = answered_histogram(&merged[0], 0, 0);
+    assert_eq!(
+        value.sum,
+        7.0 * 2f64.powi(1019),
+        "2^1023 * 2/8 + 2^1021 * 6/8, not an average of the two means"
+    );
+    // The observation counts follow the same weights, and both sides average one observation per
+    // sample, so the answer's count stays 1 whatever the weights are.
+    assert_eq!(value.count, 1.0);
+    assert_eq!(side_buckets(&value.positive), vec![(0, 1.0)]);
+}
+
 /// A poisoned partition poisons the point whatever the other partition holds, and a poisoned point
 /// answers nothing.
 #[test]
@@ -3396,6 +3557,67 @@ fn the_merged_evidence_does_not_depend_on_the_merge_order() {
     let backward = merged_evidence(AggregateOp::Sum, &schema, &[right, left]);
     assert!(forward.custom_bounds_reconciled, "{forward:?}");
     assert_eq!(forward, backward, "the evidence is order independent");
+}
+
+/// The two partitions of one group can each hold one of the reset hints: merged into that group's
+/// point, both bits are set, and the point -- one point's samples, whoever folded them -- does
+/// contradict itself. The same two hints in two groups stay apart, exactly as they do in one fold.
+#[test]
+fn a_merge_collides_the_reset_hints_of_one_group_but_not_of_two() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let reset = || {
+        histogram_sample(
+            0,
+            &[(0, 1.0)],
+            &[],
+            1.0,
+            1.0,
+            CounterResetHint::CounterReset,
+        )
+    };
+    let not_reset = || {
+        histogram_sample(
+            0,
+            &[(0, 1.0)],
+            &[],
+            1.0,
+            1.0,
+            CounterResetHint::NotCounterReset,
+        )
+    };
+    // The partials are grouped by `job`, so the merge pairs the points of a job across partitions
+    // and keeps two jobs apart -- the shape a `sum by (job)` hands to a `Final` node.
+    let partial = |job: &str, sample: GridSample| {
+        let series = histogram_series(&schema, job, vec![(0, sample)]);
+        let mut aggregator =
+            FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["job"])).unwrap();
+        aggregator.update(&series).unwrap();
+        aggregator.finish_partial().unwrap()
+    };
+    // One group on each side of the merge: no point saw both hints.
+    let left = partial("a", reset());
+    let right = partial("b", not_reset());
+    for one in [&left, &right] {
+        assert!(
+            !merged_evidence(AggregateOp::Sum, &schema, std::slice::from_ref(one))
+                .counter_reset_collision
+        );
+    }
+    let apart = merged_evidence(AggregateOp::Sum, &schema, &[left, right]);
+    assert!(apart.counter_reset_seen && apart.not_counter_reset_seen);
+    assert!(
+        !apart.counter_reset_collision,
+        "two groups do not contradict each other: {apart:?}"
+    );
+
+    // The same group on both sides: the point holds both hints once they are merged.
+    let left = partial("a", reset());
+    let right = partial("a", not_reset());
+    let together = merged_evidence(AggregateOp::Sum, &schema, &[left, right]);
+    assert!(
+        together.counter_reset_collision,
+        "one point saw both hints: {together:?}"
+    );
 }
 
 /// Two partitions can each be valid and still disagree on the bucket family: neither partial is
