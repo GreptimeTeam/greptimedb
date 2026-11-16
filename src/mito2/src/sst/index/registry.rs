@@ -97,6 +97,14 @@ impl IndexRegistry {
         files: impl IntoIterator<Item = &'a FileMeta>,
     ) -> Result<(), BoxedError> {
         self.validate_schema_kinds(metadata)?;
+        self.validate_file_kinds(files)
+    }
+
+    /// Rejects unavailable implementations for indexes being replaced.
+    pub(crate) fn validate_file_kinds<'a>(
+        &self,
+        files: impl IntoIterator<Item = &'a FileMeta>,
+    ) -> Result<(), BoxedError> {
         for file in files {
             for kind in file.available_indexes.iter().chain(
                 file.indexes

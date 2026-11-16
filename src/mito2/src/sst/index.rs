@@ -1028,12 +1028,18 @@ impl IndexBuildTask {
                 .await,
             ));
         };
-        self.indexer_builder
-            .registry
-            .validate_required_kinds(&self.target_region_metadata, [current_file_meta.as_ref()])
-            .with_context(|_| ExternalSnafu {
-                context: "validating index handlers for rebuild".to_string(),
-            })?;
+        let registry = &self.indexer_builder.registry;
+        let validation = if self.reason == IndexBuildType::Flush {
+            // Do not require schema extensions for built-in flush indexing, but
+            // still protect any extension indexes published while this task waited.
+            registry.validate_file_kinds([current_file_meta.as_ref()])
+        } else {
+            registry
+                .validate_required_kinds(&self.target_region_metadata, [current_file_meta.as_ref()])
+        };
+        validation.with_context(|_| ExternalSnafu {
+            context: "validating index handlers for rebuild".to_string(),
+        })?;
         let context = handler::PlanContext {
             metadata: &self.target_region_metadata,
             index_options: &self.index_options,
@@ -4010,6 +4016,10 @@ mod tests {
 
         if remove_sketches && !registered {
             let mut task = task;
+            assert!(task.index_build(version_control.clone()).await.is_err());
+            // A flush retry must not overwrite an already published extension
+            // index merely because it skips schema-level provider requirements.
+            task.reason = IndexBuildType::Flush;
             assert!(task.index_build(version_control.clone()).await.is_err());
             assert_eq!(
                 manifest_ctx.manifest().await.files[&file_meta.file_id].as_ref(),

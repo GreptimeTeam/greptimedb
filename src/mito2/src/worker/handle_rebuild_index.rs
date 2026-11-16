@@ -514,11 +514,15 @@ fn validate_rebuild_plan<'a>(
     build_type: IndexBuildType,
     files: impl IntoIterator<Item = &'a FileMeta>,
 ) -> Result<()> {
-    registry
-        .validate_required_kinds(&snapshot.metadata, files)
-        .with_context(|_| ExternalSnafu {
-            context: "validating index handlers for rebuild".to_string(),
-        })?;
+    // Flush builds only built-in indexes in newly written files. Historical
+    // extension indexes are not part of this operation.
+    if build_type != IndexBuildType::Flush {
+        registry
+            .validate_required_kinds(&snapshot.metadata, files)
+            .with_context(|_| ExternalSnafu {
+                context: "validating index handlers for rebuild".to_string(),
+            })?;
+    }
     let plan = registry.plan(&PlanContext {
         metadata: &snapshot.metadata,
         index_options: &snapshot.index_options,

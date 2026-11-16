@@ -33,7 +33,7 @@ use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, SkippingIndexOptions, SkippingIndexType};
+use datatypes::schema::{ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType};
 use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
@@ -2764,6 +2764,123 @@ impl IndexCreator for RebuildSketchCreator {
     fn memory_usage(&self) -> usize {
         self.rows * std::mem::size_of::<u64>()
     }
+}
+
+#[tokio::test]
+async fn test_async_flush_without_sketch_provider_builds_builtin_indexes() {
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    plugins.insert::<IndexKindProviderRef>(Arc::new(RebuildSketchProvider::default()));
+    let engine = env
+        .create_engine_with_plugins(async_build_mode_config(false), plugins)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build_with_index();
+    request.column_metadatas[0]
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
+    request.column_metadatas[0]
+        .column_schema
+        .set_skipping_options(&SkippingIndexOptions::new_unchecked(
+            1,
+            0.0001,
+            SkippingIndexType::BloomFilter,
+        ))
+        .unwrap();
+    request.column_metadatas[1].column_schema =
+        ColumnSchema::new("field_0", ConcreteDataType::string_datatype(), true);
+    request.column_metadatas[1]
+        .column_schema
+        .set_fulltext_options(&FulltextOptions {
+            enable: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let rows = |start, end| {
+        let mut rows = build_rows(start, end);
+        for row in &mut rows {
+            row.values[1] = api::v1::Value {
+                value_data: Some(api::v1::value::ValueData::StringValue("sample text".into())),
+            };
+        }
+        rows
+    };
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: rows(0, 2),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let mut historical = region.all_manifest_files().await.0.pop().unwrap();
+    historical.available_indexes.push(IndexType::HllIndex);
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![historical.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let historical = region.all_manifest_files().await.0.pop().unwrap();
+
+    // Reopen without the provider. Neither schema options nor an unrelated
+    // historical sketch may prevent built-in indexes on the next flushed file.
+    let engine = env
+        .reopen_engine(engine, async_build_mode_config(true))
+        .await;
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: rows(2, 4),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let files = region.all_manifest_files().await.0;
+            if let Some(file) = files.iter().find(|file| file.file_id != historical.file_id)
+                && [
+                    IndexType::InvertedIndex,
+                    IndexType::FulltextIndex,
+                    IndexType::BloomFilterIndex,
+                ]
+                .iter()
+                .all(|kind| file.available_indexes.contains(kind))
+            {
+                assert_eq!(
+                    files.iter().find(|file| file.file_id == historical.file_id),
+                    Some(&historical)
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("async flush did not publish built-in indexes");
+    engine.stop().await.unwrap();
 }
 
 #[tokio::test]
