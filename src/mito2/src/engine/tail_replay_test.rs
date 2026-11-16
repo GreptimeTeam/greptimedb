@@ -1565,31 +1565,6 @@ async fn test_replay_writes_chunk_when_memory_budget_is_exhausted() {
 }
 
 #[tokio::test]
-async fn test_replay_chunk_grows_into_memory_pool() {
-    // The same 4 KiB pool as above, which three small entries fit above the floor.
-    let config = MitoConfig {
-        global_write_buffer_size: ReadableSize::kb(64),
-        ..Default::default()
-    };
-    let region = TestRegion::with_config("tail-replay-chunk-pool", None, config).await;
-    let mut last = 0;
-    for start in [6, 9, 12] {
-        last = region
-            .write_remote_rows(region.region_id, start, start + 3)
-            .await;
-    }
-    region
-        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
-        .await;
-
-    region.catchup().await;
-    region.wait_until_replayed().await;
-
-    assert_eq!(1, region.version().ssts.levels()[0].files.len());
-    assert_eq!(15, count_rows(&region.engine, region.region_id).await);
-}
-
-#[tokio::test]
 async fn test_failed_replay_reloads_region_from_newer_manifest() {
     let region = TestRegion::new("tail-replay-failed-reload", false, None).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;

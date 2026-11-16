@@ -369,7 +369,7 @@ impl<S: LogStore> TailReplayTask<S> {
             return Ok(Vec::new());
         }
         self.sst_writer
-            .write_ssts(&version, &self.state, uncommitted, "TailReplay")
+            .write_ssts(&version, &self.state, uncommitted, None)
             .await
     }
 

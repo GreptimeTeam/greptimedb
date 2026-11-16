@@ -32,6 +32,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::sst_entry::StorageSstEntry;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
+use strum::IntoStaticStr;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
@@ -60,7 +61,7 @@ pub type AccessLayerRef = Arc<AccessLayer>;
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
 
 /// Write operation type.
-#[derive(Eq, PartialEq, Debug, Clone, Copy)]
+#[derive(Eq, PartialEq, Debug, Clone, Copy, IntoStaticStr)]
 pub enum WriteType {
     /// Writes from flush
     Flush,

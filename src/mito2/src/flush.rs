@@ -464,12 +464,7 @@ impl RegionFlushTask {
         // for consistency as others might already modify the version in the `version_control`.
         let file_metas = self
             .sst_writer
-            .write_ssts(
-                &version_data.version,
-                state,
-                uncommitted,
-                self.reason.as_str(),
-            )
+            .write_ssts(&version_data.version, state, uncommitted, Some(self.reason))
             .await?;
 
         // The manifest may name only a durable entry as flushed. A log store
@@ -586,13 +581,13 @@ impl RegionFlushTask {
 impl MemtableSstWriter {
     /// Writes the immutable memtables of `version` to level 0 SSTs, which `uncommitted`
     /// tracks until a manifest edit references them, and returns their file metas. Its log
-    /// names `reason`, why the memtables are written.
+    /// names the flush `reason`, or the write type when the write is not a flush.
     pub(crate) async fn write_ssts(
         &self,
         version: &VersionRef,
         state: &CancellableTaskState,
         uncommitted: &UncommittedSsts,
-        reason: &str,
+        reason: Option<FlushReason>,
     ) -> Result<Vec<FileMeta>> {
         let timer = self.write_elapsed().start_timer();
 
@@ -631,7 +626,7 @@ impl MemtableSstWriter {
         info!(
             "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, encoded_part_count: {}, metrics: {:?}",
             self.region_id,
-            reason,
+            reason.map_or_else(|| self.write_type.into(), |reason| reason.as_str()),
             file_ids,
             series_count,
             total_rows,
