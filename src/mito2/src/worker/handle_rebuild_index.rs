@@ -259,7 +259,7 @@ impl<S> RegionWorkerLoop<S> {
         let registry = match self.prepare_rebuild_registry(
             &snapshot,
             request.build_type.clone(),
-            manifest.files.values(),
+            manifest.files.values().map(AsRef::as_ref),
         ) {
             Ok(registry) => registry,
             Err(err) => {
