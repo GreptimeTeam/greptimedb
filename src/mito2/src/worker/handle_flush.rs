@@ -24,9 +24,7 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
-use tokio::sync::Semaphore;
 
-use crate::access_layer::WriteType;
 use crate::config::{IndexBuildMode, MitoConfig};
 use crate::error::{FlushRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, MemtableSstWriter, RegionFlushTask};
@@ -285,41 +283,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             request_sender: self.sender.clone(),
             listener: self.listener.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
-            sst_writer: self.new_sst_writer(
+            sst_writer: MemtableSstWriter::new_flush(
                 region,
-                WriteType::Flush,
                 row_group_size,
                 engine_config,
+                self.cache_manager.clone(),
                 self.flush_semaphore.clone(),
             ),
             durability_barrier: self
                 .wal
                 .durability_barrier(region.region_id, &region.provider),
-        }
-    }
-
-    /// Creates a writer of the `region`'s immutable memtables to SSTs for `write_type`.
-    pub(crate) fn new_sst_writer(
-        &self,
-        region: &MitoRegionRef,
-        write_type: WriteType,
-        row_group_size: Option<usize>,
-        engine_config: Arc<MitoConfig>,
-        write_semaphore: Arc<Semaphore>,
-    ) -> MemtableSstWriter {
-        MemtableSstWriter {
-            region_id: region.region_id,
-            write_type,
-            access_layer: region.access_layer.clone(),
-            engine_config,
-            // The request-provided size (e.g. manual flush) takes precedence over the
-            // region option.
-            row_group_size: row_group_size.or(region.version().options.max_row_group_row_count),
-            cache_manager: self.cache_manager.clone(),
-            hook: region.manifest_ctx.hook(),
-            index_options: region.version().options.index_options.clone(),
-            write_semaphore,
-            partition_expr: region.metadata().partition_expr.clone(),
         }
     }
 }

@@ -60,7 +60,7 @@ use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
-use crate::region::{ManifestContextRef, RegionLeaderState, parse_partition_expr};
+use crate::region::{ManifestContextRef, MitoRegion, RegionLeaderState, parse_partition_expr};
 use crate::request::{
     BackgroundNotify, DdlRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx, OutputTx,
     SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
@@ -281,24 +281,40 @@ pub(crate) struct RegionFlushTask {
 
 /// Writes the immutable memtables of a version to level 0 SSTs, for a flush or a tail replay.
 pub(crate) struct MemtableSstWriter {
-    pub(crate) region_id: RegionId,
-    /// Kind of the writes, which selects their metrics. Never `Compaction`.
-    pub(crate) write_type: WriteType,
-    pub(crate) access_layer: AccessLayerRef,
-    pub(crate) engine_config: Arc<MitoConfig>,
-    pub(crate) row_group_size: Option<usize>,
-    pub(crate) cache_manager: CacheManagerRef,
+    region_id: RegionId,
+    /// Kind of the writes, which selects their metrics.
+    kind: MemtableWriteKind,
+    access_layer: AccessLayerRef,
+    engine_config: Arc<MitoConfig>,
+    row_group_size: Option<usize>,
+    cache_manager: CacheManagerRef,
     /// Hook told of the written SSTs.
-    pub(crate) hook: Option<RegionHookRef>,
+    hook: Option<RegionHookRef>,
 
     /// Index options for the region.
-    pub(crate) index_options: IndexOptions,
+    index_options: IndexOptions,
     /// Semaphore to control concurrent SST writes.
-    pub(crate) write_semaphore: Arc<Semaphore>,
+    write_semaphore: Arc<Semaphore>,
     /// Partition expression of the region.
     ///
     /// This is used to generate the file meta.
-    pub(crate) partition_expr: Option<String>,
+    partition_expr: Option<String>,
+}
+
+/// Kind of the writes of a [MemtableSstWriter].
+#[derive(Clone, Copy)]
+enum MemtableWriteKind {
+    Flush,
+    TailReplay,
+}
+
+impl MemtableWriteKind {
+    fn write_type(self) -> WriteType {
+        match self {
+            MemtableWriteKind::Flush => WriteType::Flush,
+            MemtableWriteKind::TailReplay => WriteType::TailReplay,
+        }
+    }
 }
 
 struct FlushTaskWaiters {
@@ -579,6 +595,71 @@ impl RegionFlushTask {
 }
 
 impl MemtableSstWriter {
+    /// Creates a writer of the `region`'s immutable memtables for a flush.
+    pub(crate) fn new_flush(
+        region: &MitoRegion,
+        row_group_size: Option<usize>,
+        engine_config: Arc<MitoConfig>,
+        cache_manager: CacheManagerRef,
+        write_semaphore: Arc<Semaphore>,
+    ) -> Self {
+        Self::new(
+            MemtableWriteKind::Flush,
+            region,
+            row_group_size,
+            engine_config,
+            cache_manager,
+            write_semaphore,
+        )
+    }
+
+    /// Creates a writer of the `region`'s immutable memtables for a tail replay. Only
+    /// [TailReplayLimits::new_sst_writer](crate::tail_replay::TailReplayLimits::new_sst_writer)
+    /// calls it, with the replays' write semaphore.
+    pub(crate) fn new_tail_replay(
+        region: &MitoRegion,
+        engine_config: Arc<MitoConfig>,
+        cache_manager: CacheManagerRef,
+        write_semaphore: Arc<Semaphore>,
+    ) -> Self {
+        Self::new(
+            MemtableWriteKind::TailReplay,
+            region,
+            None,
+            engine_config,
+            cache_manager,
+            write_semaphore,
+        )
+    }
+
+    fn new(
+        kind: MemtableWriteKind,
+        region: &MitoRegion,
+        row_group_size: Option<usize>,
+        engine_config: Arc<MitoConfig>,
+        cache_manager: CacheManagerRef,
+        write_semaphore: Arc<Semaphore>,
+    ) -> Self {
+        Self {
+            region_id: region.region_id,
+            kind,
+            access_layer: region.access_layer.clone(),
+            engine_config,
+            // The request-provided size (e.g. manual flush) takes precedence over the
+            // region option.
+            row_group_size: row_group_size.or(region.version().options.max_row_group_row_count),
+            cache_manager,
+            hook: region.manifest_ctx.hook(),
+            index_options: region.version().options.index_options.clone(),
+            write_semaphore,
+            partition_expr: region.metadata().partition_expr.clone(),
+        }
+    }
+
+    pub(crate) fn cache_manager(&self) -> &CacheManagerRef {
+        &self.cache_manager
+    }
+
     /// Writes the immutable memtables of `version` to level 0 SSTs, which `uncommitted`
     /// tracks until a manifest edit references them, and returns their file metas. Its log
     /// names the flush `reason`, or the write type when the write is not a flush.
@@ -626,7 +707,7 @@ impl MemtableSstWriter {
         info!(
             "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, encoded_part_count: {}, metrics: {:?}",
             self.region_id,
-            reason.map_or_else(|| self.write_type.into(), |reason| reason.as_str()),
+            reason.map_or_else(|| self.kind.write_type().into(), |reason| reason.as_str()),
             file_ids,
             series_count,
             total_rows,
@@ -665,7 +746,7 @@ impl MemtableSstWriter {
         let mut flushed_bytes = 0;
         let mut series_count = 0;
         let mut encoded_part_count = 0;
-        let mut flush_metrics = Metrics::new(self.write_type);
+        let mut flush_metrics = Metrics::new(self.kind.write_type());
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
         let mut all_sst_infos = Vec::new();
         for mem in memtables {
@@ -800,7 +881,7 @@ impl MemtableSstWriter {
             let write_opts = write_opts.clone();
             let semaphore = self.write_semaphore.clone();
             let uncommitted = uncommitted.clone();
-            let write_type = self.write_type;
+            let write_type = self.kind.write_type();
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let mut metrics = Metrics::new(write_type);
@@ -821,7 +902,7 @@ impl MemtableSstWriter {
             let write_buffer_size = write_opts.write_buffer_size;
             let semaphore = self.write_semaphore.clone();
             let uncommitted = uncommitted.clone();
-            let write_type = self.write_type;
+            let write_type = self.kind.write_type();
             let index_build_params = build_index.then(|| EncodedSstIndexBuildParams {
                 metadata: version.metadata.clone(),
                 index_options: self.index_options.clone(),
@@ -834,7 +915,8 @@ impl MemtableSstWriter {
             uncommitted.track_before_upload(encoded.sst_info.file_id, index_build_params.is_some());
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                let metrics = access_layer
+                let mut metrics = Metrics::new(write_type);
+                access_layer
                     .put_sst(
                         &encoded.data,
                         region_id,
@@ -842,7 +924,7 @@ impl MemtableSstWriter {
                         &cache_manager,
                         write_buffer_size,
                         index_build_params,
-                        write_type,
+                        &mut metrics,
                     )
                     .await?;
                 uncommitted.track(std::slice::from_ref(&encoded.sst_info));
@@ -954,29 +1036,29 @@ impl MemtableSstWriter {
         }
     }
 
-    /// Returns the histogram that times [Self::write_ssts] for this writer's write type.
+    /// Returns the histogram that times [Self::write_ssts] for this writer's kind.
     fn write_elapsed(&self) -> Histogram {
-        match self.write_type {
-            WriteType::TailReplay => TAIL_REPLAY_ELAPSED.with_label_values(&["write_chunk"]),
-            WriteType::Flush | WriteType::Compaction => {
-                FLUSH_ELAPSED.with_label_values(&["flush_memtables"])
+        match self.kind {
+            MemtableWriteKind::TailReplay => {
+                TAIL_REPLAY_ELAPSED.with_label_values(&["write_chunk"])
             }
+            MemtableWriteKind::Flush => FLUSH_ELAPSED.with_label_values(&["flush_memtables"]),
         }
     }
 
     /// Returns the counter of SST bytes this writer writes.
     fn bytes_total(&self) -> &'static IntCounter {
-        match self.write_type {
-            WriteType::TailReplay => &TAIL_REPLAY_BYTES_TOTAL,
-            WriteType::Flush | WriteType::Compaction => &FLUSH_BYTES_TOTAL,
+        match self.kind {
+            MemtableWriteKind::TailReplay => &TAIL_REPLAY_BYTES_TOTAL,
+            MemtableWriteKind::Flush => &FLUSH_BYTES_TOTAL,
         }
     }
 
     /// Returns the counter of SST files this writer writes.
     fn file_total(&self) -> &'static IntCounter {
-        match self.write_type {
-            WriteType::TailReplay => &TAIL_REPLAY_FILE_TOTAL,
-            WriteType::Flush | WriteType::Compaction => &FLUSH_FILE_TOTAL,
+        match self.kind {
+            MemtableWriteKind::TailReplay => &TAIL_REPLAY_FILE_TOTAL,
+            MemtableWriteKind::Flush => &FLUSH_FILE_TOTAL,
         }
     }
 }
@@ -1777,7 +1859,7 @@ mod tests {
             manifest_ctx,
             sst_writer: MemtableSstWriter {
                 region_id,
-                write_type: WriteType::Flush,
+                kind: MemtableWriteKind::Flush,
                 access_layer: env.access_layer.clone(),
                 engine_config: Arc::new(MitoConfig::default()),
                 row_group_size: None,

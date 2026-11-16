@@ -1870,8 +1870,8 @@ async fn test_direct_demotion_ends_stalled_replay(#[case] with_lease: bool) {
 }
 
 #[tokio::test]
-async fn test_unwritable_notice_of_replaced_instance_keeps_replay() {
-    let region = TestRegion::new("tail-replay-stale-unwritable", false, None).await;
+async fn test_cannot_replay_notice_of_replaced_instance_keeps_replay() {
+    let region = TestRegion::new("tail-replay-stale-notice", false, None).await;
     region
         .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
         .await;
@@ -1884,7 +1884,7 @@ async fn test_unwritable_notice_of_replaced_instance_keeps_replay() {
     // A demotion notice of the replaced instance arrives late.
     let request = WorkerRequest::Background {
         region_id: region.region_id,
-        notify: BackgroundNotify::RegionBecameUnwritable { region: old },
+        notify: BackgroundNotify::RegionCannotReplay { region: old },
     };
     region
         .engine

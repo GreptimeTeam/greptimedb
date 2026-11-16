@@ -27,8 +27,9 @@ use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::Sender;
 
+use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
-use crate::error::{Error, FlushCancelledSnafu, Result, TailEntryMissingSnafu};
+use crate::error::{Error, FlushCancelledSnafu, Result, TailEntryMissingSnafu, UnexpectedSnafu};
 use crate::flush::MemtableSstWriter;
 use crate::manifest::action::{
     PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, UptoKind, WalRecoveryEdit,
@@ -84,11 +85,11 @@ pub(crate) struct TailReplayTask<S> {
     /// Id of this node, whose tails are read from `wal`.
     pub(crate) node_id: Option<u64>,
     pub(crate) wal: Wal<S>,
-    /// Writes the chunks.
+    /// Writes the chunks, built by [TailReplayLimits::new_sst_writer].
     pub(crate) sst_writer: MemtableSstWriter,
     pub(crate) listener: WorkerListener,
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
-    /// Limits of the node's tail replays. Its write semaphore is the one `sst_writer` holds.
+    /// Limits of the node's tail replays.
     pub(crate) limits: TailReplayLimits,
     pub(crate) state: CancellableTaskState,
 }
@@ -164,8 +165,15 @@ impl<S: LogStore> TailReplayTask<S> {
             Ok(permit) => permit,
             Err(_) => {
                 info!("Region {region_id} waits for a tail replay permit");
-                self.unless_cancelled(async { Ok(replay_semaphore.acquire().await.unwrap()) })
-                    .await?
+                self.unless_cancelled(async {
+                    replay_semaphore.acquire().await.map_err(|error| {
+                        UnexpectedSnafu {
+                            reason: format!("failed to acquire a tail replay permit: {error}"),
+                        }
+                        .build()
+                    })
+                })
+                .await?
             }
         };
         // Keeps no version past this point: it would hold the region's memtables, and their
@@ -177,7 +185,7 @@ impl<S: LogStore> TailReplayTask<S> {
         let uncommitted = UncommittedSsts::new(
             region_id,
             self.region.access_layer.clone(),
-            Some(self.sst_writer.cache_manager.clone()),
+            Some(self.sst_writer.cache_manager().clone()),
         );
         let replayed = self.replay_tails(&tails, &uncommitted).await;
         drop(permit);
@@ -538,7 +546,7 @@ pub(crate) struct TailReplayLimits {
     /// SST writes of the replays, as many as the flushes may run, so a node may write up to
     /// `2 * max_background_flushes` level 0 SSTs at once. Writer buffers are not part of the
     /// replay memory budget.
-    pub(crate) write_semaphore: Arc<Semaphore>,
+    write_semaphore: Arc<Semaphore>,
     /// Memtable memory of the replay chunks.
     memory: Arc<TailReplayMemory>,
 }
@@ -552,6 +560,22 @@ impl TailReplayLimits {
                 config.global_write_buffer_size.as_bytes() as usize / TAIL_REPLAY_MEMORY_FACTOR,
             )),
         }
+    }
+
+    /// Creates a writer of the `region`'s replay chunks, which takes these limits' write
+    /// permits.
+    pub(crate) fn new_sst_writer(
+        &self,
+        region: &MitoRegion,
+        engine_config: Arc<MitoConfig>,
+        cache_manager: CacheManagerRef,
+    ) -> MemtableSstWriter {
+        MemtableSstWriter::new_tail_replay(
+            region,
+            engine_config,
+            cache_manager,
+            self.write_semaphore.clone(),
+        )
     }
 }
 
