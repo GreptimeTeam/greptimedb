@@ -177,7 +177,7 @@ icu_properties = "2.0.1"
 indicatif = "0.17"
 intern-arc = "0.6.2"
 itertools = "0.14"
-jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "5a6472858d860ac034075c17253f41617bdfa956", default-features = false, features = [
+jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "ae1ca9a26c65902dac9b53864bf502843c312ea5", default-features = false, features = [
     "databend",
 ] }
 lazy_static = "1.4"
