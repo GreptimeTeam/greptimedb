@@ -1191,6 +1191,64 @@ async fn real_samples_reconcile_reopen_and_retire(
         })));
     }
     assert!(purges.try_recv().is_err());
+
+    // A successful rebuild replaces the generation it supersedes, and that generation is retired:
+    // the published snapshot keeps its objects alive, so it is purged only once the last reader of
+    // the superseded generation is dropped. This pass also rebuilds the day whose generation the
+    // failed publish above left behind.
+    drop(before);
+    let current = region.series_index_version();
+    let retired = current.samples.values().next().unwrap().clone();
+    let retired_paths: BTreeSet<String> = retired
+        .entry()
+        .artifact
+        .objects
+        .iter()
+        .map(|object| object.path.clone())
+        .collect();
+    store
+        .delete(&retired.entry().artifact.objects[0].path)
+        .await
+        .unwrap();
+    let rebuilt = reconcile().await.unwrap();
+    assert!(rebuilt.built_samples > 0);
+    let next = region.series_index_version();
+    assert!(!Arc::ptr_eq(&current, &next));
+    assert!(
+        next.samples
+            .values()
+            .all(|handle| handle.entry().file_id != retired.entry().file_id)
+    );
+    assert!(next.samples.values().all(|handle| {
+        handle
+            .entry()
+            .artifact
+            .objects
+            .iter()
+            .all(|object| !retired_paths.contains(&object.path))
+    }));
+    // Nothing is released while the superseded snapshot and its handle are still alive.
+    assert!(purges.try_recv().is_err());
+    drop(current);
+    drop(retired);
+    let mut purged = BTreeSet::new();
+    while let Ok(request) = purges.try_recv() {
+        purged.extend(request.objects.unwrap());
+    }
+    assert!(retired_paths.is_subset(&purged));
+    // Only superseded generations are released; nothing the snapshot still points at is purged.
+    assert!(
+        region
+            .series_index_version()
+            .samples
+            .values()
+            .all(|handle| handle
+                .entry()
+                .artifact
+                .objects
+                .iter()
+                .all(|object| !purged.contains(&object.path)))
+    );
     use store_api::region_engine::RegionEngine;
     engine.stop().await.unwrap();
 }
