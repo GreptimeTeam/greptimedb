@@ -1159,10 +1159,10 @@ pub(crate) enum BackgroundNotify {
     },
     /// The region became writable and may have pending tails to replay.
     RegionBecameWritable,
-    /// The region cannot replay its tails (see `MitoRegion::can_replay_tails`) after its role
-    /// was set outside the worker; a running replay is cancelled.
+    /// A role change left the region unable to replay its tails (see
+    /// `MitoRegion::can_replay_tails`); a running replay is cancelled.
     RegionBecameUnwritable {
-        /// The instance whose role was set.
+        /// The instance the role change applied to.
         region: MitoRegionRef,
     },
     /// A tail replay published its result in the manifest.
