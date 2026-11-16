@@ -5047,6 +5047,107 @@ async fn a_later_repeated_source_enqueue_failure_releases_the_input() {
     assert_eq!(batches_at_failure, pulled.load(Ordering::SeqCst));
 }
 
+/// A single-consumer enqueue failure is reported once and releases the input.
+///
+/// One runtime input takes the chunk by value, so its own reservation is what fails: a pool one byte
+/// short of what the chunk charges refuses it. The error is the pool's, yielded once, and the failed
+/// stream releases both the execution's reservations and its upstream while it stays alive.
+#[tokio::test]
+async fn a_single_consumer_enqueue_failure_is_reported_once_and_releases_the_input() {
+    use common_query::series_frame::unpack_raw_series;
+
+    let schema = raw_schema();
+    let chunk = series_chunk("web-1", &series_samples(1.0)[..4], false);
+    let one_frame = frame_of(&schema, &chunk);
+
+    // What one decoded chunk charges, read from a probe: the bounded pool below is that figure.
+    let decoded = unpack_raw_series(
+        Box::pin(RecordBatchStreamAdapter::new(
+            frame_schema(),
+            futures::stream::iter(vec![Ok(one_frame.clone())]),
+        )),
+        Some(Arc::clone(&schema)),
+    )
+    .expect("the frame decodes using the source decoder");
+    let mut decoded = crate::source::materialize_raw_labels(decoded)
+        .expect("the labels materialize as the source does");
+    let decoded_chunk = decoded
+        .next()
+        .await
+        .expect("the decoder returns its frame")
+        .expect("the frame decodes successfully");
+    let probe_pool = Arc::new(GreedyMemoryPool::new(1 << 30));
+    let probe_state = NativeExecutionState::try_new(
+        &rate_tree(),
+        Arc::clone(&probe_pool) as Arc<dyn MemoryPool>,
+        None,
+    )
+    .expect("the one-source runtime builds");
+    let ids = probe_state.input_ids(0).collect::<Vec<_>>();
+    assert_eq!(1, ids.len(), "the tree has one runtime recipient");
+    let mut probe = NativeExecutor::new(probe_state);
+    probe
+        .push_raw(ids[0], decoded_chunk)
+        .expect("the one recipient accepts the decoded chunk");
+    let charge = probe_pool.reserved();
+    assert!(charge > 0, "the decoded chunk reserves memory");
+    drop(probe);
+    assert_eq!(0, probe_pool.reserved(), "the probe releases it");
+
+    // One byte short of the charge: the one recipient's own reservation is refused.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let pulled = Arc::new(AtomicUsize::new(0));
+    let source_schema = frame_schema();
+    let source = staged(source_schema.clone(), {
+        let dropped = Arc::clone(&dropped);
+        let pulled = Arc::clone(&pulled);
+        move || {
+            Box::pin(
+                StagedStream::new(source_schema.clone(), vec![one_frame.clone()])
+                    .dropped(&dropped)
+                    .counted(&pulled),
+            )
+        }
+    });
+    let pool = Arc::new(GreedyMemoryPool::new(charge - 1));
+    let mut stream = plan(rate_tree(), source)
+        .expect("the one-source plan builds")
+        .execute(0, task_context(&pool))
+        .expect("the node executes");
+    let error = match stream.next().await {
+        Some(Ok(batch)) => panic!("a batch before the chunk is queued: {batch:?}"),
+        Some(Err(error)) => error,
+        None => panic!("the enqueue failure was swallowed"),
+    };
+    assert!(
+        error_chain(&error).to_lowercase().contains("memory")
+            || error_chain(&error).to_lowercase().contains("reservation")
+            || error_chain(&error).to_lowercase().contains("resource"),
+        "the failure is the exhausted memory pool: {error}"
+    );
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "failure immediately releases reservations"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "failure releases the upstream stream"
+    );
+    assert!(
+        pulled.load(Ordering::SeqCst) >= 1,
+        "the frame reached the decoder"
+    );
+    assert!(
+        stream.next().await.is_none(),
+        "the failure is yielded once, not repeated"
+    );
+    assert!(
+        stream.next().await.is_none(),
+        "the terminated stream stays ended"
+    );
+}
+
 /// Logical equality distinguishes source field layouts, even when the PromQL and output match.
 #[test]
 fn logical_identity_includes_native_source_field_order() {
@@ -6729,6 +6830,78 @@ async fn a_frame_carries_the_closing_chunk_a_row_table_drops() {
     assert!(
         rows.is_empty(),
         "the row table drops the closing chunk entirely: {rows:?}"
+    );
+}
+
+/// The one runtime input takes the empty closing chunk by value and its frame keeps it.
+///
+/// A single-consumer push moves the chunk into the executor rather than cloning it, so this is the
+/// chunk a move could lose: it carries no grid position at all, and the tree binds exactly one
+/// runtime input to take it.
+#[tokio::test]
+async fn a_single_consumer_keeps_the_empty_closing_chunk_in_its_frame() {
+    let schema = raw_schema();
+    // Every sample is newer than the last grid point, so `rate` decides nothing at any of them and
+    // the series closes with a chunk that carries no position.
+    let late = [(GRID_START + RANGE_MS + SAMPLE_STEP, 1.0)];
+    let chunk = chunk_of(
+        &schema,
+        "late",
+        metric(&[(HOST, "late")], Some(METRIC)),
+        &late.iter().map(|(time, _)| *time).collect::<Vec<_>>(),
+        vec![late.iter().map(|(_, value)| Some(*value)).collect()],
+        true,
+    );
+    let tree = rate_tree();
+    // The shape the push moves for: one source bound to one runtime input.
+    let execution =
+        NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
+            .expect("a rate tree has a runtime");
+    assert_eq!(
+        1,
+        execution.input_ids(0).count(),
+        "one runtime input takes the closing chunk"
+    );
+    drop(execution);
+
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        canonical_frame_schema(&tree),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("a rate tree is evaluated on a grid");
+    let exec = plan_of(node, memory_exec(vec![frame_of(&schema, &chunk)]))
+        .expect("the runtime executes the tree");
+    let declared = exec.schema();
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("the frame runs");
+    let decoded = unpack_evaluated_series(
+        Box::pin(RecordBatchStreamAdapter::new(
+            declared,
+            futures::stream::iter(batches.into_iter().map(Ok)),
+        )),
+        None,
+    )
+    .expect("the node declares the frame it yields")
+    .try_collect::<Vec<_>>()
+    .await
+    .expect("the frame decodes");
+
+    assert_eq!(
+        1,
+        decoded.len(),
+        "the closing chunk is one frame row, not a dropped chunk: {decoded:?}"
+    );
+    let (series, is_last) = &decoded[0];
+    assert!(is_last, "that row is the one that closes the chain");
+    assert!(
+        series.time.is_empty(),
+        "it carries no grid position: {:?}",
+        series.time.positions().collect::<Vec<_>>()
     );
 }
 
