@@ -13,21 +13,22 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashSet;
 
 use common_catalog::format_full_table_name;
 use common_procedure::Status;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
+use snafu::{OptionExt, ensure};
 use table::metadata::{TableId, TableType};
 use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
-use crate::ddl::drop_database::executor::DropDatabaseExecutor;
+use crate::ddl::drop_database::executor::{DropDatabaseBatchExecutor, DropDatabaseExecutor};
 use crate::ddl::drop_database::metadata::DropDatabaseRemoveMetadata;
 use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
-use crate::error::{Result, TableInfoNotFoundSnafu};
+use crate::error::{Result, TableInfoNotFoundSnafu, UnexpectedSnafu};
 use crate::instruction::CacheIdent;
 use crate::key::table_route::TableRouteValue;
 
@@ -40,6 +41,86 @@ impl DropDatabaseCursor {
     /// Returns a new [DropDatabaseCursor].
     pub fn new(target: DropTableTarget) -> Self {
         Self { target }
+    }
+
+    /// Collects a bounded page without mutating metadata. Only the executor's batch is durable.
+    async fn collect_logical_tables(
+        &mut self,
+        ddl_ctx: &DdlContext,
+        ctx: &mut DropDatabaseContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        const MAX_TABLES: usize = 64;
+        const MAX_NAME_BYTES: usize = 32 * 1024;
+
+        let mut page = Vec::new();
+        let mut bytes = 0;
+        while page.len() < MAX_TABLES && bytes < MAX_NAME_BYTES {
+            // The stream is initialized by next().
+            let Some((name, value)) = ctx.tables.as_mut().unwrap().try_next().await? else {
+                break;
+            };
+            bytes +=
+                name.len() + ctx.catalog.len() + ctx.schema.len() + std::mem::size_of::<TableId>();
+            page.push((name, value.table_id()));
+        }
+        if page.is_empty() {
+            return self.handle_reach_end(ctx);
+        }
+
+        let manager = &ddl_ctx.table_metadata_manager;
+        let ids = page.iter().map(|(_, id)| *id).collect::<Vec<_>>();
+        let infos = manager.table_info_manager().batch_get(&ids).await?;
+        let routes = manager
+            .table_route_manager()
+            .table_route_storage()
+            .batch_get(&ids)
+            .await?;
+        let physical_ids = routes
+            .iter()
+            .filter_map(|route| match route {
+                Some(TableRouteValue::Logical(route)) => Some(route.physical_table_id()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let physical_infos = manager
+            .table_info_manager()
+            .batch_get(&physical_ids)
+            .await?;
+        let mut tables = Vec::new();
+        for ((name, id), route) in page.into_iter().zip(routes) {
+            let info = infos.get(&id).with_context(|| TableInfoNotFoundSnafu {
+                table: format_full_table_name(&ctx.catalog, &ctx.schema, &name),
+            })?;
+            if info.table_info.table_type == TableType::View {
+                // Views are handled in the physical phase so collecting a batch has no side effects.
+                continue;
+            }
+            if let Some(TableRouteValue::Logical(route)) = route {
+                let physical = physical_infos
+                    .get(&route.physical_table_id())
+                    .with_context(|| TableInfoNotFoundSnafu {
+                        table: route.physical_table_id().to_string(),
+                    })?;
+                // Metadata-only deletion is safe only when the backing table is dropped with us.
+                ensure!(
+                    physical.table_info.catalog_name == ctx.catalog
+                        && physical.table_info.schema_name == ctx.schema,
+                    UnexpectedSnafu {
+                        err_msg: "Logical table belongs to a physical table outside the dropped database",
+                    }
+                );
+                tables.push((id, TableName::new(&ctx.catalog, &ctx.schema, name)));
+            }
+        }
+        if tables.is_empty() {
+            return Ok((Box::new(Self::new(self.target)), Status::executing(false)));
+        }
+        Ok((
+            Box::new(DropDatabaseBatchExecutor { tables }),
+            Status::executing(true),
+        ))
     }
 
     fn handle_reach_end(
@@ -62,32 +143,12 @@ impl DropDatabaseCursor {
 
     async fn handle_table(
         &mut self,
-        ddl_ctx: &DdlContext,
         ctx: &mut DropDatabaseContext,
         table_name: String,
         table_id: TableId,
         table_route_value: TableRouteValue,
     ) -> Result<(Box<dyn State>, Status)> {
         match (self.target, table_route_value) {
-            (DropTableTarget::Logical, TableRouteValue::Logical(route)) => {
-                let physical_table_id = route.physical_table_id();
-
-                let (_, table_route) = ddl_ctx
-                    .table_metadata_manager
-                    .table_route_manager()
-                    .get_physical_table_route(physical_table_id)
-                    .await?;
-                Ok((
-                    Box::new(DropDatabaseExecutor::new(
-                        table_id,
-                        table_id,
-                        TableName::new(&ctx.catalog, &ctx.schema, &table_name),
-                        table_route.region_routes,
-                        self.target,
-                    )),
-                    Status::executing(true),
-                ))
-            }
             (DropTableTarget::Physical, TableRouteValue::Physical(table_route)) => Ok((
                 Box::new(DropDatabaseExecutor::new(
                     table_id,
@@ -155,6 +216,14 @@ impl State for DropDatabaseCursor {
                 .tables(&ctx.catalog, &ctx.schema);
             ctx.tables = Some(tables);
         }
+        if self.target == DropTableTarget::Logical {
+            let result = self.collect_logical_tables(ddl_ctx, ctx).await;
+            if result.is_err() {
+                // The page was consumed but no deletion plan was persisted. Rescan on retry.
+                ctx.tables.take();
+            }
+            return result;
+        }
         // Safety: must exist
         match ctx.tables.as_mut().unwrap().try_next().await? {
             Some((table_name, table_name_value)) => {
@@ -181,7 +250,7 @@ impl State for DropDatabaseCursor {
                     .await?
                 {
                     Some(table_route_value) => {
-                        self.handle_table(ddl_ctx, ctx, table_name, table_id, table_route_value)
+                        self.handle_table(ctx, table_name, table_id, table_route_value)
                             .await
                     }
                     None => Ok((
@@ -206,7 +275,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
     use crate::ddl::drop_database::cursor::DropDatabaseCursor;
-    use crate::ddl::drop_database::executor::DropDatabaseExecutor;
+    use crate::ddl::drop_database::executor::{DropDatabaseBatchExecutor, DropDatabaseExecutor};
     use crate::ddl::drop_database::metadata::DropDatabaseRemoveMetadata;
     use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
     use crate::ddl::test_util::{create_logical_table, create_physical_table};
@@ -267,16 +336,10 @@ mod tests {
         assert!(status.need_persist());
         let executor = state
             .as_any()
-            .downcast_ref::<DropDatabaseExecutor>()
+            .downcast_ref::<DropDatabaseBatchExecutor>()
             .unwrap();
-        let (_, table_route) = ddl_context
-            .table_metadata_manager
-            .table_route_manager()
-            .get_physical_table_route(physical_table_id)
-            .await
-            .unwrap();
-        assert_eq!(table_route.region_routes, executor.physical_region_routes);
-        assert_eq!(executor.target, DropTableTarget::Logical);
+        assert_eq!(executor.tables.len(), 1);
+        assert_eq!(executor.tables[0].1.table_name, "metric_0");
     }
 
     #[tokio::test]

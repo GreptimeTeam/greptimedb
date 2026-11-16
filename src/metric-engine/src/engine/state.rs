@@ -263,6 +263,7 @@ impl MetricEngineState {
 
         for logical_region in logical_regions {
             self.logical_regions.remove(logical_region);
+            self.logical_columns.remove(logical_region);
         }
         self.physical_regions.remove(&physical_region_id);
         Ok(())

@@ -141,6 +141,17 @@ impl RegionEngine for MetricEngine {
         METRIC_ENGINE_NAME
     }
 
+    fn dependent_regions(&self, region_id: RegionId) -> Vec<RegionId> {
+        self.inner
+            .state
+            .read()
+            .unwrap()
+            .physical_region_states()
+            .get(&utils::to_data_region_id(region_id))
+            .map(|state| state.logical_regions().iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     async fn handle_batch_open_requests(
         &self,
         parallelism: usize,

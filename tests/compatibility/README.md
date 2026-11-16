@@ -23,6 +23,12 @@ including exact integer counts, custom bounds, and NaN payloads:
 cargo nextest run -p servers -E 'test(native_histogram_remote_read_wire_fixture)'
 ```
 
+## Procedure fixtures
+
+The [DROP DATABASE fixture](procedure/drop_database/README.md) checks recovery of
+legacy single-table executors with the `common-meta` Rust tests. New logical
+batches use a separate state tag; drain these procedures before downgrading metasrv.
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of
