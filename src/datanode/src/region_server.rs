@@ -498,6 +498,7 @@ impl RegionServer {
         role: RegionRole,
         sent_at: std::time::Instant,
         deadline: std::time::Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool> {
         let engine = self
             .inner
@@ -505,7 +506,7 @@ impl RegionServer {
             .get(&region_id)
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
-            .set_region_role_with_lease(region_id, role, sent_at, deadline)
+            .set_region_role_with_lease(region_id, role, sent_at, deadline, candidate_lease_id)
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
