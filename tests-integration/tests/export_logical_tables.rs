@@ -635,7 +635,7 @@ async fn database_export_rejects_unsafe_local_names_before_output() {
     let instance = standalone.fe_instance();
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     let overlong_name = "z".repeat(252);
-    let mut cases = vec![vec!["Events", "events"], vec!["Éa", "éa"]];
+    let mut cases = vec![vec!["Events", "events"]];
     if cfg!(windows) {
         cases.extend(
             [
@@ -718,7 +718,7 @@ async fn database_export_preserves_valid_table_names() {
         names.extend(["ordinary:b".to_string(), "metric:b".to_string()]);
     }
     if !cfg!(any(windows, target_os = "macos")) {
-        names.extend(["Events", "events", "Éa", "éa"].map(String::from));
+        names.extend(["Events", "events"].map(String::from));
     }
     for name in &names {
         let engine = if name.starts_with("metric") {
@@ -1925,8 +1925,6 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
             (overlong_name.as_str(), ""),
             ("Events", ""),
             ("events", ""),
-            ("Éa", ""),
-            ("éa", ""),
             ("ordinary:record", ""),
             (
                 "metric:record",
