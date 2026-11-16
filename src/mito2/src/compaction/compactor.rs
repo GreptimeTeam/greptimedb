@@ -486,9 +486,13 @@ impl CompactionContext {
 
     /// Checks each physical input once before output tasks begin. Missing inputs
     /// disable imported summaries without changing the reader's tolerant behavior.
-    async fn prepare_index_inputs<'a>(&mut self, inputs: impl Iterator<Item = &'a FileHandle>) {
+    async fn prepare_index_inputs<'a>(
+        &mut self,
+        inputs: impl Iterator<Item = &'a FileHandle>,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
         if !self.index_plan.needs_input_reuse() {
-            return;
+            return Ok(());
         }
         let ids: HashSet<_> = inputs.map(FileHandle::file_id).collect();
         let access_layer = &self.access_layer;
@@ -503,10 +507,16 @@ impl CompactionContext {
             })
             .buffer_unordered(8)
             .filter_map(|id| async move { id })
-            .collect::<HashSet<_>>()
-            .await;
+            .collect::<HashSet<_>>();
+        // Read-only probes can be dropped without waiting for writer cleanup.
+        let existing = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
+            existing = existing => existing,
+        };
         // FileHandles protect ordinary purge; external object-store deletion can race.
         self.existing_index_inputs = Some(Arc::new(existing));
+        Ok(())
     }
 
     /// Reports this unit's output metadata before publishing its manifest edit.
@@ -973,11 +983,11 @@ impl<M: SstMerger> DefaultCompactor<M> {
         context.warn_missing_index_handlers(unit.inputs.iter());
         let mut context = context.clone();
         context
-            .prepare_index_inputs(reusable_index_inputs(
-                &unit.outputs,
-                unit.max_file_size.is_some(),
-            ))
-            .await;
+            .prepare_index_inputs(
+                reusable_index_inputs(&unit.outputs, unit.max_file_size.is_some()),
+                &self.cancel_token,
+            )
+            .await?;
         let mut result = MergeOutput {
             files_to_remove: unit.inputs.iter().map(|f| f.meta_ref().clone()).collect(),
             compaction_time_window: Some(unit.time_window_size),
@@ -1058,11 +1068,14 @@ where
                 .flat_map(|output| output.inputs.iter()),
         );
         context
-            .prepare_index_inputs(reusable_index_inputs(
-                &picker_output.outputs,
-                picker_output.max_file_size.is_some(),
-            ))
-            .await;
+            .prepare_index_inputs(
+                reusable_index_inputs(
+                    &picker_output.outputs,
+                    picker_output.max_file_size.is_some(),
+                ),
+                &self.cancel_token,
+            )
+            .await?;
 
         // Build tasks along with their input file metas so we can track which
         // inputs correspond to each task.
@@ -1381,6 +1394,91 @@ mod tests {
         }
     }
 
+    impl IndexKindProvider for InputReusePlan {
+        fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+            vec![Arc::new(Self)]
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::unit(true)]
+    #[case::outputs(false)]
+    #[tokio::test]
+    async fn test_index_input_probes_observe_cancellation(
+        #[case] merge_unit: bool,
+        #[values(false, true)] cancelled_before_start: bool,
+    ) {
+        let mut region = new_test_compaction_region().await;
+        region
+            .plugins
+            .insert::<IndexKindProviderRef>(Arc::new(InputReusePlan));
+        let started = Arc::new(Notify::new());
+        let probes = Arc::new(AtomicUsize::new(0));
+        let signal = started.clone();
+        let observed = probes.clone();
+        let layer = MockLayerBuilder::default()
+            .stat_interceptor(Arc::new(move |_| {
+                let signal = signal.clone();
+                let observed = observed.clone();
+                Box::pin(async move {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    signal.notify_one();
+                    std::future::pending().await
+                })
+            }))
+            .build()
+            .unwrap();
+        let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let access = &region.access_layer;
+        region.access_layer = Arc::new(AccessLayer::new(
+            access.table_dir(),
+            access.path_type(),
+            store,
+            access.puffin_manager_factory().clone(),
+            access.intermediate_manager().clone(),
+        ));
+        let picker_output = PickerOutput {
+            outputs: vec![CompactionOutput {
+                output_level: 1,
+                inputs: vec![new_file_handle(dummy_file_meta())],
+                filter_deleted: false,
+                output_time_range: None,
+            }],
+            ..Default::default()
+        };
+        let compactor = DefaultCompactor::with_merger(DefaultSstMerger);
+        let context = CompactionContext::try_from(&region).unwrap();
+        let mut merge = Box::pin(async {
+            if merge_unit {
+                let unit = CompactionUnit::from_picker(picker_output)
+                    .unwrap()
+                    .pop()
+                    .unwrap();
+                compactor.merge_unit(&context, &unit).await
+            } else {
+                compactor.merge_ssts(&region, picker_output).await
+            }
+        });
+        if !cancelled_before_start {
+            tokio::select! {
+                _ = started.notified() => {},
+                result = &mut merge => panic!("merge returned before cancellation: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_secs(10)) => panic!("merge did not reach input probes"),
+            }
+        }
+        compactor.cancel_token.cancel();
+        let result = timeout(Duration::from_secs(10), merge).await.unwrap();
+        assert!(matches!(
+            result,
+            Err(error::Error::CompactionCancelled { .. })
+        ));
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            usize::from(!cancelled_before_start)
+        );
+        assert!(context.existing_index_inputs.is_none());
+    }
+
     #[derive(Debug)]
     struct DuplicateIndexProvider;
 
@@ -1468,7 +1566,10 @@ mod tests {
         let mut context = CompactionContext::try_from(&region).unwrap();
         assert!(context.existing_index_inputs.is_none());
         // Builtin plans do not probe physical inputs solely for optional reuse.
-        context.prepare_index_inputs(std::iter::empty()).await;
+        context
+            .prepare_index_inputs(std::iter::empty(), &CancellationToken::new())
+            .await
+            .unwrap();
         assert!(context.existing_index_inputs.is_none());
         let mut registry =
             IndexRegistry::new(Default::default(), Default::default(), Default::default());
@@ -1495,8 +1596,12 @@ mod tests {
         // Duplicate references are checked as one physical input. Only successfully
         // probed files can contribute imported summaries to an output.
         context
-            .prepare_index_inputs([&present, &missing, &present].into_iter())
-            .await;
+            .prepare_index_inputs(
+                [&present, &missing, &present].into_iter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         assert_eq!(
             context.existing_index_inputs.as_deref(),
             Some(&HashSet::from([present.file_id()]))
