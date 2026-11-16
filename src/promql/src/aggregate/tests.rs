@@ -3412,6 +3412,296 @@ fn merged_histogram_evidence(op: AggregateOp, partials: &[PartialAggregate]) -> 
     evidence_summary(&merged_histogram_groups(op, partials))
 }
 
+/// One empty histogram row: the placeholder of the component's type a field with no state needs
+/// beside its null item, and the one-row struct a null histogram column is padded with.
+fn placeholder_histogram() -> Arc<HistogramBatch> {
+    let empty = BucketSideView {
+        span_offsets: &[],
+        span_lengths: &[],
+        buckets: &[],
+    };
+    let mut builder = HistogramBatchBuilder::new();
+    builder
+        .push(HistogramView {
+            schema: 0,
+            zero_threshold: 0.0,
+            sum: 0.0,
+            count: 0.0,
+            zero_count: 0.0,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: &[],
+            positive: empty,
+            negative: empty,
+        })
+        .unwrap();
+    builder.finish().unwrap()
+}
+
+/// One partition's histogram state at the grid's first position, encoded as the Arrow-backed row the
+/// executor hands the merge: one list item per field, whose columns are the kind's own components in
+/// [`AggregateStateKind::components`] order, and a null item where that field contributed nothing.
+///
+/// The two payload components are the payload's own one-row batches, which is what a frame writes
+/// back out, so the row carries the state a partition exported rather than a second encoding of it.
+/// This is the histogram counterpart of [`state_row_of`], which keeps refusing a histogram payload:
+/// a numeric fold never produces one, so only a fixture that *decodes* such a row may build one.
+fn histogram_state_row(
+    kind: AggregateStateKind,
+    schema: &Arc<SeriesSchema>,
+    metric: SeriesLabels,
+    states: &[Option<&HistogramState>],
+) -> StateRow {
+    let state_schema = AggregateStateSchema::try_new(kind, kind.components().to_vec()).unwrap();
+    let item_fields: datatypes::arrow::datatypes::Fields = kind
+        .components()
+        .iter()
+        .map(|component| {
+            let ty = match component {
+                StateComponent::HistogramValue | StateComponent::HistogramCompensation => {
+                    placeholder_histogram().as_arrow().data_type().clone()
+                }
+                StateComponent::Count => DataType::Float64,
+                _ => DataType::Boolean,
+            };
+            Field::new(component.as_str(), ty, true)
+        })
+        .collect();
+    let mut lists: Vec<Arc<dyn Array>> = Vec::with_capacity(states.len());
+    for state in states {
+        let columns = kind
+            .components()
+            .iter()
+            .map(|component| match component {
+                StateComponent::HistogramValue => Arc::new(
+                    state
+                        .map_or_else(placeholder_histogram, |state| state.value.clone())
+                        .as_arrow()
+                        .clone(),
+                ) as Arc<dyn Array>,
+                StateComponent::HistogramCompensation => Arc::new(
+                    state
+                        .map_or_else(placeholder_histogram, |state| state.compensation.clone())
+                        .as_arrow()
+                        .clone(),
+                ) as Arc<dyn Array>,
+                StateComponent::Count => {
+                    Arc::new(Float64Array::from(vec![state.map(|state| state.count)]))
+                        as Arc<dyn Array>
+                }
+                _ => Arc::new(BooleanArray::from(vec![
+                    state.and_then(|state| state.bool_component(*component)),
+                ])) as Arc<dyn Array>,
+            })
+            .collect::<Vec<_>>();
+        let items = StructArray::new(
+            item_fields.clone(),
+            columns,
+            Some(NullBuffer::from(vec![state.is_some()])),
+        );
+        lists.push(Arc::new(ListArray::new(
+            Arc::new(Field::new(
+                "item",
+                DataType::Struct(item_fields.clone()),
+                true,
+            )),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0i32, 1])),
+            Arc::new(items),
+            None,
+        )));
+    }
+    let fields: datatypes::arrow::datatypes::Fields = lists
+        .iter()
+        .enumerate()
+        .map(|(index, list)| Field::new(format!("f{index}"), list.data_type().clone(), false))
+        .collect();
+    let batch =
+        StateFieldsBatch::try_from_arrow(StructArray::new(fields, lists, None), &state_schema)
+            .unwrap();
+    StateRow {
+        metric,
+        time: TimeAxis::Grid(GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 1).unwrap()),
+        fields: batch,
+        kind,
+    }
+}
+
+/// The same row with one component replaced by an all-null column: an item that is present while the
+/// column the decoder reads from it is not, which is the state a writer that dropped a component
+/// leaves behind.
+fn row_without_component(row: &StateRow, component: StateComponent) -> StateRow {
+    let dropped = row
+        .fields
+        .components()
+        .iter()
+        .position(|declared| *declared == component)
+        .expect("the row declares the component");
+    let mut lists: Vec<Arc<dyn Array>> = Vec::new();
+    for field in 0..row.fields.len() {
+        let items = row.fields.field(field).expect("the row has this field");
+        let columns = items
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                if index == dropped {
+                    datatypes::arrow::array::new_null_array(column.data_type(), column.len())
+                } else {
+                    column.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let item_fields = items.fields().clone();
+        lists.push(Arc::new(ListArray::new(
+            Arc::new(Field::new(
+                "item",
+                DataType::Struct(item_fields.clone()),
+                true,
+            )),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0i32, items.len() as i32])),
+            Arc::new(StructArray::new(
+                item_fields,
+                columns,
+                items.nulls().cloned(),
+            )),
+            None,
+        )));
+    }
+    let fields: datatypes::arrow::datatypes::Fields = lists
+        .iter()
+        .enumerate()
+        .map(|(index, list)| Field::new(format!("f{index}"), list.data_type().clone(), false))
+        .collect();
+    let state_schema =
+        AggregateStateSchema::try_new(row.kind, row.fields.components().to_vec()).unwrap();
+    StateRow {
+        metric: row.metric.clone(),
+        time: row.time.clone(),
+        fields: StateFieldsBatch::try_from_arrow(
+            StructArray::new(fields, lists, None),
+            &state_schema,
+        )
+        .unwrap(),
+        kind: row.kind,
+    }
+}
+
+/// The merge of `rows`, as the executor runs it: one partition's row after another.
+fn merge_histogram_rows(
+    schema: &Arc<SeriesSchema>,
+    op: AggregateOp,
+    rows: &[StateRow],
+) -> FloatMerger {
+    let mut merger = FloatMerger::try_new(schema, op).unwrap();
+    for row in rows {
+        merger.merge_row(row, |_| Ok(())).unwrap();
+    }
+    merger
+}
+
+/// The answer [`HistogramAccumulator`]'s own state gives for `payloads`, in the order the merge folds
+/// them: the same state without the row decoder in between.
+fn accumulated_answer(op: AggregateOp, payloads: &[&HistogramState]) -> Option<FloatHistogram> {
+    let mut accumulator = HistogramAccumulator::from_payload(op, payloads[0]).unwrap();
+    for payload in &payloads[1..] {
+        accumulator.merge_state(op, payload).unwrap();
+    }
+    finished_histogram(op, &accumulator).unwrap()
+}
+
+/// The evidence [`HistogramAccumulator`]'s own state reports for `payloads`, read through the same
+/// summary a merge's groups are read through.
+fn accumulated_evidence(op: AggregateOp, payloads: &[&HistogramState]) -> HistogramEvidence {
+    let mut accumulator = HistogramAccumulator::from_payload(op, payloads[0]).unwrap();
+    for payload in &payloads[1..] {
+        accumulator.merge_state(op, payload).unwrap();
+    }
+    evidence_summary(&[Group {
+        metric: SeriesLabels::try_new(Some("m".into()), Vec::new()).unwrap(),
+        blocks: BTreeMap::new(),
+        histograms: BTreeMap::from([((0, 0), accumulator)]),
+    }])
+}
+
+/// Compares two answers bit for bit: every scalar, every custom bound, and every bucket's index and
+/// count.
+///
+/// A decode that drops a position, or that reads a component out of the wrong column, changes a count
+/// or a bucket; a merge that reassociates an addition differently changes a `to_bits()`. Nothing
+/// short of the same bits passes.
+fn assert_histogram_bits(actual: &HistogramView<'_>, expected: &HistogramView<'_>) {
+    let bits = |values: &[f64]| {
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(actual.schema, expected.schema, "schema");
+    assert_eq!(
+        actual.zero_threshold.to_bits(),
+        expected.zero_threshold.to_bits(),
+        "zero threshold"
+    );
+    assert_eq!(
+        actual.sum.to_bits(),
+        expected.sum.to_bits(),
+        "sum {} != {}",
+        actual.sum,
+        expected.sum
+    );
+    assert_eq!(
+        actual.count.to_bits(),
+        expected.count.to_bits(),
+        "count {} != {}",
+        actual.count,
+        expected.count
+    );
+    assert_eq!(
+        actual.zero_count.to_bits(),
+        expected.zero_count.to_bits(),
+        "zero count"
+    );
+    assert_eq!(actual.reset_hint, expected.reset_hint, "reset hint");
+    assert_eq!(
+        actual.start_timestamp, expected.start_timestamp,
+        "start timestamp"
+    );
+    assert_eq!(
+        bits(actual.custom_values),
+        bits(expected.custom_values),
+        "custom bounds"
+    );
+    for (side, actual, expected) in [
+        ("positive", actual.positive, expected.positive),
+        ("negative", actual.negative, expected.negative),
+    ] {
+        let actual = side_buckets(&actual);
+        let expected = side_buckets(&expected);
+        let indices =
+            |buckets: &[(i32, f64)]| buckets.iter().map(|&(index, _)| index).collect::<Vec<_>>();
+        assert_eq!(
+            indices(&actual),
+            indices(&expected),
+            "{side} bucket indices"
+        );
+        for ((index, actual), (_, expected)) in actual.iter().zip(&expected) {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{side} bucket {index}: {actual} != {expected}"
+            );
+        }
+    }
+}
+
+/// The payload one partition of a one-group, one-field fold exported at its first point.
+fn only_payload(partial: &PartialAggregate) -> &HistogramState {
+    partial.groups[0].states[0][0]
+        .as_ref()
+        .and_then(StatePayload::histogram)
+        .expect("the fold exported a histogram state")
+}
+
 /// One answer encoded as the row a series holds it in, so a merged answer and a serial fold's answer
 /// compare through the same view.
 fn answered_row(histogram: &FloatHistogram) -> Arc<HistogramBatch> {
@@ -4098,4 +4388,465 @@ fn merging_a_compensation_partial_answers_the_one_fold() {
         answer.sum, 1.0,
         "the merged sum folds the right partial's compensation in"
     );
+}
+
+/// Two partitions' histogram rows merge into the answer `HistogramAccumulator` gives for the same
+/// two states, bit for bit.
+///
+/// This is the row path a distributed `sum` takes: `merge_row` decodes each row's components back
+/// into the payload an accumulator folds, so a component it reads out of the wrong column -- or a
+/// position it drops -- answers something other than the state's own merge does.
+#[test]
+fn merging_histogram_rows_answers_the_sum_the_accumulator_answers() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let sample =
+        |sum: f64| histogram_sample(0, &[(0, 1.0)], &[], 1.0, sum, CounterResetHint::Unknown);
+    let first = [
+        histogram_series(&schema, "a", vec![(0, sample(1.0))]),
+        histogram_series(&schema, "b", vec![(0, sample(2.0))]),
+    ];
+    let second = [
+        histogram_series(&schema, "c", vec![(0, sample(3.0))]),
+        histogram_series(&schema, "d", vec![(0, sample(4.0))]),
+    ];
+    let left = partial_state(AggregateOp::Sum, &schema, &first);
+    let right = partial_state(AggregateOp::Sum, &schema, &second);
+    let (left_payload, right_payload) = (only_payload(&left), only_payload(&right));
+
+    let rows = [
+        histogram_state_row(
+            AggregateStateKind::HistogramSum,
+            &schema,
+            metric("m", &[]),
+            &[Some(left_payload)],
+        ),
+        histogram_state_row(
+            AggregateStateKind::HistogramSum,
+            &schema,
+            metric("m", &[]),
+            &[Some(right_payload)],
+        ),
+    ];
+    let merger = merge_histogram_rows(&schema, AggregateOp::Sum, &rows);
+    let evidence = merger.evidence_summary();
+    let merged = merger.finish().unwrap();
+    assert_eq!(merged.len(), 1, "one group");
+    let answer = answered_histogram(&merged[0], 0, 0);
+    // The samples `1 + 2` in one partition and `3 + 4` in the other: four observations, each
+    // partition having folded two of them into one bucket.
+    assert_eq!(answer.sum, 10.0);
+    assert_eq!(answer.count, 4.0);
+    assert_eq!(side_buckets(&answer.positive), vec![(0, 4.0)]);
+
+    // The same two states merged without the row decoder in between.
+    let direct = accumulated_answer(AggregateOp::Sum, &[left_payload, right_payload])
+        .expect("the states answer a sum");
+    let expected = answered_row(&direct);
+    assert_histogram_bits(&answer, &expected.view(0).expect("one answer row"));
+    assert_eq!(
+        evidence,
+        accumulated_evidence(AggregateOp::Sum, &[left_payload, right_payload])
+    );
+}
+
+/// A row path average weights each partition by its own count, exactly as the accumulator's own merge
+/// does: a mean-mode partition and a summing one meet in the mean path, and every bit of the answer
+/// matches the state merge's.
+///
+/// Both partitions fold only `2^1023` and `2^1021`, which keeps every step exact. The left one
+/// overflows into a mean of `2^1023` over 2 samples, the right one keeps summing six samples of
+/// `2^1021`, so the answer is `2^1023 * 2/8 + 2^1021 * 6/8 = 7 * 2^1019` -- an average of the two
+/// means, `13 * 2^1019`, or the merged sums, `+Inf`, are all different values.
+#[test]
+fn merging_histogram_rows_weights_the_avg_by_each_partitions_count() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let large = || {
+        histogram_sample(
+            0,
+            &[(0, 1.0)],
+            &[],
+            1.0,
+            2f64.powi(1023),
+            CounterResetHint::Unknown,
+        )
+    };
+    let small = || {
+        histogram_sample(
+            0,
+            &[(0, 1.0)],
+            &[],
+            1.0,
+            2f64.powi(1021),
+            CounterResetHint::Unknown,
+        )
+    };
+    let left_input: Vec<Series> = (0..2)
+        .map(|index| histogram_series(&schema, &format!("a{index}"), vec![(0, large())]))
+        .collect();
+    let right_input: Vec<Series> = (0..6)
+        .map(|index| histogram_series(&schema, &format!("b{index}"), vec![(0, small())]))
+        .collect();
+    let left = partial_state(AggregateOp::Avg, &schema, &left_input);
+    let right = partial_state(AggregateOp::Avg, &schema, &right_input);
+    let (left_payload, right_payload) = (only_payload(&left), only_payload(&right));
+    // The row carries both components the mean path reads: the count and the mode flag.
+    assert_eq!(left_payload.count, 2.0);
+    assert!(left_payload.incremental_mean, "the left partition switched");
+    assert_eq!(right_payload.count, 6.0);
+    assert!(!right_payload.incremental_mean);
+
+    let rows = [
+        histogram_state_row(
+            AggregateStateKind::HistogramAvg,
+            &schema,
+            metric("m", &[]),
+            &[Some(left_payload)],
+        ),
+        histogram_state_row(
+            AggregateStateKind::HistogramAvg,
+            &schema,
+            metric("m", &[]),
+            &[Some(right_payload)],
+        ),
+    ];
+    let merger = merge_histogram_rows(&schema, AggregateOp::Avg, &rows);
+    let evidence = merger.evidence_summary();
+    let merged = merger.finish().unwrap();
+    assert_eq!(merged.len(), 1, "one group");
+    let answer = answered_histogram(&merged[0], 0, 0);
+    assert_eq!(answer.sum, 7.0 * 2f64.powi(1019));
+    assert_eq!(answer.count, 1.0);
+    assert_eq!(side_buckets(&answer.positive), vec![(0, 1.0)]);
+
+    let direct = accumulated_answer(AggregateOp::Avg, &[left_payload, right_payload])
+        .expect("the states answer an average");
+    let expected = answered_row(&direct);
+    assert_histogram_bits(&answer, &expected.view(0).expect("one answer row"));
+    assert_eq!(
+        evidence,
+        accumulated_evidence(AggregateOp::Avg, &[left_payload, right_payload])
+    );
+}
+
+/// A poisoned partition poisons the merged point through the row path too: the row's poison bit is
+/// read back and merged, so the point answers nothing whichever side carrying it arrived first, and
+/// the merge reports the same evidence the state merge reports.
+#[test]
+fn a_poisoned_histogram_row_poisons_the_merged_point() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let exponential = || histogram_sample(0, &[(0, 1.0)], &[], 1.0, 2.0, CounterResetHint::Unknown);
+    let custom = || {
+        histogram_sample(
+            CUSTOM_BUCKETS,
+            &[(0, 1.0)],
+            &[1.0],
+            1.0,
+            3.0,
+            CounterResetHint::Unknown,
+        )
+    };
+    for (kind, op) in [
+        (AggregateStateKind::HistogramSum, AggregateOp::Sum),
+        (AggregateStateKind::HistogramAvg, AggregateOp::Avg),
+    ] {
+        // One partition folds both layouts, which removes its point and marks it poisoned; the other
+        // partition is an ordinary answer.
+        let poisoned = partial_state(
+            op,
+            &schema,
+            &[
+                histogram_series(&schema, "a", vec![(0, exponential())]),
+                histogram_series(&schema, "b", vec![(0, custom())]),
+            ],
+        );
+        let legal = partial_state(
+            op,
+            &schema,
+            &[histogram_series(&schema, "c", vec![(0, exponential())])],
+        );
+        assert!(only_payload(&poisoned).poisoned);
+        assert!(!only_payload(&legal).poisoned);
+        for order in [[&poisoned, &legal], [&legal, &poisoned]] {
+            let rows = order.map(|partial| {
+                histogram_state_row(
+                    kind,
+                    &schema,
+                    metric("m", &[]),
+                    &[Some(only_payload(partial))],
+                )
+            });
+            let merger = merge_histogram_rows(&schema, op, &rows);
+            let evidence = merger.evidence_summary();
+            let merged = merger.finish().unwrap();
+            assert!(
+                merged.is_empty(),
+                "{op:?} answered {} series for a poisoned point",
+                merged.len()
+            );
+            assert!(evidence.poisoned, "{op:?}: {evidence:?}");
+            assert!(evidence.incompatible_layout, "{op:?}: {evidence:?}");
+            let payloads = [only_payload(&poisoned), only_payload(&legal)];
+            assert_eq!(evidence, accumulated_evidence(op, &payloads), "{op:?}");
+            assert!(
+                accumulated_answer(op, &payloads).is_none(),
+                "{op:?}: the states answer nothing either"
+            );
+        }
+    }
+}
+
+/// Each field of a row decodes into its own slot: the state one field carries at a position never
+/// reaches its sibling, a sibling that is a hole at that position decodes to no payload rather than
+/// to a zero-observation histogram, and the merge of a second partition adds to the field it names.
+///
+/// Field 0 is carried by both partitions and field 1 by the second one only, so the hole in the first
+/// partition's field 1 must leave field 1 to the second partition's own state -- a zero there would
+/// both invent an observation and a bucket.
+#[test]
+fn merging_histogram_rows_keeps_each_field_in_its_own_state() {
+    let value_schema = schema_with_grid_len(&["value"], 1);
+    let schema = schema_with_grid_len(&["a", "b"], 1);
+    let fold = |samples: Vec<GridSample>| {
+        let input: Vec<Series> = samples
+            .into_iter()
+            .enumerate()
+            .map(|(index, sample)| {
+                histogram_series(&value_schema, &format!("s{index}"), vec![(0, sample)])
+            })
+            .collect();
+        partial_state(AggregateOp::Sum, &value_schema, &input)
+    };
+    // Two samples of `1` and `2` fold into a sum of `3`: the first partition's field 0.
+    let left = fold(vec![
+        histogram_sample(0, &[(0, 1.0)], &[], 1.0, 1.0, CounterResetHint::Unknown),
+        histogram_sample(0, &[(0, 1.0)], &[], 1.0, 2.0, CounterResetHint::Unknown),
+    ]);
+    // The second partition's field 0 adds `3` more, and its field 1 is a state of its own.
+    let right = fold(vec![histogram_sample(
+        0,
+        &[(0, 1.0)],
+        &[],
+        1.0,
+        3.0,
+        CounterResetHint::Unknown,
+    )]);
+    let other = fold(vec![histogram_sample(
+        0,
+        &[(0, 1.0), (1, 2.0)],
+        &[],
+        3.0,
+        9.0,
+        CounterResetHint::Unknown,
+    )]);
+    let (left, right, other) = (
+        only_payload(&left),
+        only_payload(&right),
+        only_payload(&other),
+    );
+    let rows = [
+        histogram_state_row(
+            AggregateStateKind::HistogramSum,
+            &schema,
+            metric("m", &[]),
+            &[Some(left), None],
+        ),
+        histogram_state_row(
+            AggregateStateKind::HistogramSum,
+            &schema,
+            metric("m", &[]),
+            &[Some(right), Some(other)],
+        ),
+    ];
+    let merger = merge_histogram_rows(&schema, AggregateOp::Sum, &rows);
+    let merged = merger.finish().unwrap();
+    assert_eq!(merged.len(), 1, "one group, one series");
+
+    let first = answered_histogram(&merged[0], 0, 0);
+    assert_eq!(first.sum, 6.0, "1 + 2 + 3");
+    assert_eq!(first.count, 3.0);
+    assert_eq!(side_buckets(&first.positive), vec![(0, 3.0)]);
+    let expected = answered_row(&accumulated_answer(AggregateOp::Sum, &[left, right]).unwrap());
+    assert_histogram_bits(&first, &expected.view(0).expect("one answer row"));
+
+    // The hole in the first partition did not become a zero: field 1 is the second partition's own
+    // state, in its sum, its count and its buckets.
+    let second = answered_histogram(&merged[0], 1, 0);
+    assert_eq!(second.sum, 9.0);
+    assert_eq!(second.count, 3.0);
+    assert_eq!(side_buckets(&second.positive), vec![(0, 1.0), (1, 2.0)]);
+    let expected = answered_row(&accumulated_answer(AggregateOp::Sum, &[other]).unwrap());
+    assert_histogram_bits(&second, &expected.view(0).expect("one answer row"));
+}
+
+/// A row whose item claims a state its columns cannot fill is refused rather than read as a zero:
+/// a present position with a null histogram component, and an average's null count, both fail the
+/// decode, and a position whose every field is a hole names a contribution that is not there.
+#[test]
+fn a_histogram_row_with_a_missing_component_is_refused() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let sample = || histogram_sample(0, &[(0, 1.0)], &[], 1.0, 2.0, CounterResetHint::Unknown);
+    let input = || [histogram_series(&schema, "a", vec![(0, sample())])];
+
+    let sum_partial = partial_state(AggregateOp::Sum, &schema, &input());
+    let sum_row = histogram_state_row(
+        AggregateStateKind::HistogramSum,
+        &schema,
+        metric("m", &[]),
+        &[Some(only_payload(&sum_partial))],
+    );
+    let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+    let error = merger
+        .merge_row(
+            &row_without_component(&sum_row, StateComponent::HistogramCompensation),
+            |_| Ok(()),
+        )
+        .expect_err("a present state with a null compensation");
+    assert!(
+        error
+            .to_string()
+            .contains("present aggregate state has a missing component"),
+        "{error}"
+    );
+
+    let avg_partial = partial_state(AggregateOp::Avg, &schema, &input());
+    let avg_row = histogram_state_row(
+        AggregateStateKind::HistogramAvg,
+        &schema,
+        metric("m", &[]),
+        &[Some(only_payload(&avg_partial))],
+    );
+    let mut merger = FloatMerger::try_new(&schema, AggregateOp::Avg).unwrap();
+    let error = merger
+        .merge_row(
+            &row_without_component(&avg_row, StateComponent::Count),
+            |_| Ok(()),
+        )
+        .expect_err("a present average with a null count");
+    assert!(
+        error
+            .to_string()
+            .contains("present aggregate state has a missing component"),
+        "{error}"
+    );
+
+    let empty = histogram_state_row(
+        AggregateStateKind::HistogramSum,
+        &schema,
+        metric("m", &[]),
+        &[None],
+    );
+    let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+    let error = merger
+        .merge_row(&empty, |_| Ok(()))
+        .expect_err("a position no field carries");
+    assert!(
+        error
+            .to_string()
+            .contains("aggregate state names a position with no contribution"),
+        "{error}"
+    );
+}
+
+/// The row decoder reads the compensation as the payload's own second component; it does not re-check
+/// the layout `HistogramState::validate_layout` pins to the live value at the producer, so a row that
+/// disagrees never shifts the value's counts: the bucket family clash is refused where the two
+/// histograms are added, and an extra empty bucket is added, and then dropped, in its own place.
+///
+/// The fixture's value carries one bucket `(0, 1.0)` and a sum of `2`, and the compensation's extra
+/// bucket sits at an index the value does not use: a decode that indexed the compensation's counts by
+/// position rather than by bucket index would shift the value's count into that bucket, and one that
+/// let the family clash through would answer a histogram where the kernel refuses the add.
+#[test]
+fn a_histogram_row_whose_compensation_carries_another_layout_never_shifts_the_value() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let partial = partial_state(
+        AggregateOp::Sum,
+        &schema,
+        &[histogram_series(
+            &schema,
+            "a",
+            vec![(
+                0,
+                histogram_sample(0, &[(0, 1.0)], &[], 1.0, 2.0, CounterResetHint::Unknown),
+            )],
+        )],
+    );
+    let payload = only_payload(&partial);
+    let empty = BucketSideView {
+        span_offsets: &[],
+        span_lengths: &[],
+        buckets: &[],
+    };
+    let compensation_batch = |schema: i32, custom: &[f64], indices: &[i32], counts: &[f64]| {
+        let (offsets, lengths) = spans_of(indices);
+        let mut builder = HistogramBatchBuilder::new();
+        builder
+            .push(HistogramView {
+                schema,
+                zero_threshold: 0.0,
+                sum: 0.0,
+                count: 0.0,
+                zero_count: 0.0,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp: None,
+                custom_values: custom,
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: counts,
+                },
+                negative: empty,
+            })
+            .unwrap();
+        builder.finish().unwrap()
+    };
+    let row_of = |compensation: Arc<HistogramBatch>| {
+        let state = HistogramState {
+            compensation,
+            ..payload.clone()
+        };
+        histogram_state_row(
+            AggregateStateKind::HistogramSum,
+            &schema,
+            metric("m", &[]),
+            &[Some(&state)],
+        )
+    };
+
+    // A compensation of the other bucket family decodes, so the row is accepted; the refusal is the
+    // kernel's, where the two layouts would be indexed together.
+    let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+    merger
+        .merge_row(
+            &row_of(compensation_batch(CUSTOM_BUCKETS, &[1.0], &[0], &[0.0])),
+            |_| Ok(()),
+        )
+        .expect("the decoder does not validate the layout");
+    let error = merger
+        .finish()
+        .expect_err("exponential and custom buckets cannot be added");
+    assert!(
+        error.to_string().contains(
+            "cannot apply this operation to histograms with exponential and custom buckets"
+        ),
+        "{error}"
+    );
+
+    // A compensation that only carries one more, empty, bucket: the counts add by bucket index, so
+    // the value's bucket keeps its count and the empty one is dropped from the answer.
+    let row = row_of(compensation_batch(0, &[], &[0, 1], &[0.0, 0.0]));
+    let merger = merge_histogram_rows(&schema, AggregateOp::Sum, &[row]);
+    let merged = merger.finish().unwrap();
+    let answer = answered_histogram(&merged[0], 0, 0);
+    assert_eq!(answer.sum, 2.0);
+    assert_eq!(answer.count, 1.0);
+    assert_eq!(
+        side_buckets(&answer.positive),
+        vec![(0, 1.0)],
+        "the empty bucket is dropped where it is, not merged into its neighbour"
+    );
+    // The same state with its own compensation: the extra empty bucket changed no bit.
+    let direct = accumulated_answer(AggregateOp::Sum, &[payload]).expect("the state answers a sum");
+    let expected = answered_row(&direct);
+    assert_histogram_bits(&answer, &expected.view(0).expect("one answer row"));
 }
