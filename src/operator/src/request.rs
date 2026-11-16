@@ -27,7 +27,7 @@ use common_catalog::consts::METRIC_ENGINE;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{debug, error, info};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit as TimestampUnit;
 use futures_util::future;
@@ -326,8 +326,8 @@ impl Requester {
     }
 
     /// Discards the pending WAL tails that datanode `node_id` wrote in every region of the
-    /// table. If a region fails, the tails discarded in the other regions are logged before
-    /// the first error is returned.
+    /// table. If a region fails, the error is logged with the number of tails the other regions
+    /// discarded, and returned.
     pub async fn handle_discard_pending_tails_by_table(
         &self,
         table_name: TableName,
@@ -358,9 +358,7 @@ impl Requester {
             .await?;
         let discarded = results.iter().flatten().sum::<AffectedRows>();
         if let Some(Err(e)) = results.into_iter().find(Result::is_err) {
-            warn!(
-                "Discarded {discarded} pending tails from node {node_id} in table {table_name} before a region failed"
-            );
+            error!(e; "Failed to discard the pending tails from node {node_id} in a region of table {table_name}, other regions discarded {discarded}");
             return Err(e);
         }
         if discarded == 0 {

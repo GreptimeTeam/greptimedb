@@ -26,7 +26,9 @@ use crate::error::{RegionBusySnafu, RegionStateSnafu};
 use crate::manifest::action::{
     PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, WalRecoveryEdit,
 };
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState, TailPublication};
+use crate::region::{
+    MitoRegionRef, RegionLeaderState, RegionRoleState, TailPublication, TailsEditor,
+};
 use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
 use crate::schedule::CancellableTaskState;
 use crate::sst::index::IndexBuildType;
@@ -84,11 +86,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ///
     /// The edit is committed outside the worker against the tails the version records now, so
     /// a replay or a sync that changed them first makes it fail as busy, and a running replay
-    /// of the region is left to find the tails changed. It also fails as busy while the
-    /// region's last manifest update has an unknown result, which a replay of the tails could
-    /// have saved (see
-    /// [RegionManifestManager::has_unconfirmed_update](crate::manifest::manager::RegionManifestManager::has_unconfirmed_update));
-    /// the next manifest update that succeeds, such as a flush, clears it.
+    /// of the region is left to find the tails changed. It also fails as busy while a replay's
+    /// update has an uncertain result, until the replay learns whether it was saved.
     pub(crate) fn handle_discard_pending_tails(
         &mut self,
         region_id: RegionId,
@@ -130,22 +129,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let wal = self.wal.clone();
         let local_node_id = self.file_ref_manager.node_id();
         let request_sender = self.sender.clone();
+        let listener = self.listener.clone();
         common_runtime::spawn_global(async move {
             let action_list =
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
             match region
                 .manifest_ctx
-                .update_manifest_for_tails(&tails, action_list, |manager| {
-                    !manager.has_unconfirmed_update()
-                })
+                .update_manifest_for_tails(&tails, action_list, TailsEditor::Discard)
                 .await
             {
                 Ok(TailPublication::Committed(manifest_version)) => {
                     info!(
                         "Discarded the pending WAL tails of region {region_id} from node {node_id} in manifest version {manifest_version}"
                     );
-                    // The worker applies the edit before a replay that found the tails changed
-                    // can restart from the old ones.
+                    // Notifies first: the release is storage I/O, and a replay that ends
+                    // meanwhile restarts from the old tails until the worker applies the edit.
                     let notify = BackgroundNotify::PendingTailsDiscarded {
                         region: region.clone(),
                         edit,
@@ -155,16 +153,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     };
                     notify_worker(&request_sender, region_id, notify).await;
                     release_wal_after_tails_edit(&region, &wal, local_node_id).await;
-                }
-                Ok(TailPublication::Unconfirmed) => {
-                    info!(
-                        "An earlier manifest update of region {region_id} is unconfirmed, not discarding the tails from node {node_id}"
-                    );
-                    sender.send(RegionBusySnafu { region_id }.fail());
+                    listener.on_discarded_tails_wal_released(region_id);
                 }
                 Ok(TailPublication::Busy) => {
                     info!(
-                        "Region {region_id} is altering or editing, not discarding the tails from node {node_id}"
+                        "Region {region_id} is altering or editing, or a tail replay's update has an uncertain result, not discarding the tails from node {node_id}"
                     );
                     sender.send(RegionBusySnafu { region_id }.fail());
                 }

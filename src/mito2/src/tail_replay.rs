@@ -39,7 +39,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::metrics::TAIL_REPLAY_FAILURE_TOTAL;
 use crate::region::opener::replay_entry;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
-use crate::region::{MitoRegion, MitoRegionRef, TailPublication};
+use crate::region::{MitoRegion, MitoRegionRef, TailPublication, TailsEditor};
 use crate::request::{BackgroundNotify, WorkerRequest, WorkerRequestWithTime};
 use crate::schedule::CancellableTaskState;
 use crate::sst::file::{FileMeta, UncommittedSsts};
@@ -429,7 +429,7 @@ impl<S: LogStore> TailReplayTask<S> {
             match self
                 .region
                 .manifest_ctx
-                .update_manifest_for_tails(tails, action_list.clone(), |_| true)
+                .update_manifest_for_tails(tails, action_list.clone(), TailsEditor::Replay)
                 .await
             {
                 Ok(TailPublication::Committed(manifest_version)) => {
@@ -449,8 +449,7 @@ impl<S: LogStore> TailReplayTask<S> {
                     notify_worker(&self.request_sender, region_id, notify).await;
                     return Ok(true);
                 }
-                // A replay commits its own unknown update again, so it accepts every manifest.
-                Ok(TailPublication::Busy | TailPublication::Unconfirmed) => {}
+                Ok(TailPublication::Busy) => {}
                 Ok(TailPublication::Stale) => {
                     info!("Region {region_id} changed its role or tails, dropping the replay");
                     uncommitted.cleanup().await;

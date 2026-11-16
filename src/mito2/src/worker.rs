@@ -1997,6 +1997,14 @@ impl WorkerListener {
         }
     }
 
+    /// A discard of pending tails released the region's WAL.
+    pub(crate) fn on_discarded_tails_wal_released(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_discarded_tails_wal_released(_region_id);
+        }
+    }
+
     /// A tail replay checks for a Leader lease while it waits.
     pub(crate) fn on_tail_lease_check(&self, _region_id: RegionId) {
         #[cfg(any(test, feature = "test"))]

@@ -39,3 +39,6 @@ ADMIN discard_pending_tails('discard_pending_tails_logical', 1);
 DROP TABLE discard_pending_tails_logical;
 
 DROP TABLE discard_pending_tails_physical;
+
+-- A region id reaches the region path; this one belongs to no table.
+ADMIN discard_pending_tails(4398046511104, 1);
