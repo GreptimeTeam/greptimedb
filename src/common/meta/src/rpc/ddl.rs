@@ -768,11 +768,9 @@ pub struct CreateTableTask {
 impl fmt::Debug for CreateTableTask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut create_table = self.create_table.clone();
-        if let Some(encoded) = create_table
-            .table_options
-            .get_mut(table::requests::RELATIONAL_META_KEY)
-        {
-            *encoded = table::requests::redact_relational_options(encoded.as_str());
+        for (key, value) in create_table.table_options.iter_mut() {
+            let redacted = table::requests::redact_option_value(key, value.as_str());
+            *value = redacted;
         }
         f.debug_struct("CreateTableTask")
             .field("create_table", &create_table)
@@ -1983,7 +1981,25 @@ mod tests {
         let task = CreateTableTask::new(create_table, Vec::new(), table_info);
         let debug = format!("{task:?}");
         assert!(!debug.contains("secret"));
-        assert!(debug.contains("mysql://user:REDACTED@127.0.0.1:3306/db"));
+        assert!(debug.contains("mysql://user:******@127.0.0.1:3306/db"));
+    }
+
+    #[test]
+    fn test_create_table_task_debug_redacts_credential() {
+        let schema = SchemaBuilder::default().build().unwrap();
+        let table_info = test_table_info(1026, "foo", "bar", "baz", Arc::new(schema));
+        let mut create_table = CreateTableExpr::default();
+        create_table
+            .table_options
+            .insert("secret_access_key".to_string(), "my-secret".to_string());
+        create_table
+            .table_options
+            .insert("session_token".to_string(), "my-token".to_string());
+        let task = CreateTableTask::new(create_table, Vec::new(), table_info);
+        let debug = format!("{task:?}");
+        assert!(!debug.contains("my-secret"));
+        assert!(!debug.contains("my-token"));
+        assert!(debug.contains("******"));
     }
 
     #[test]

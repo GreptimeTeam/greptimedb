@@ -2934,6 +2934,7 @@ dependencies = [
  "greptime-proto",
  "humantime-serde",
  "lazy_static",
+ "log",
  "once_cell",
  "opentelemetry",
  "opentelemetry-otlp",

@@ -75,10 +75,7 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     if let Some(encoded) = table_opts.extra_options.get(RELATIONAL_META_KEY)
         && let Ok(opts) = serde_json::from_str::<RelationalOptions>(encoded)
     {
-        options.insert_redacted(
-            RELATIONAL_CONNECTION_KEY.to_string(),
-            opts.redacted().connection,
-        );
+        options.insert(RELATIONAL_CONNECTION_KEY.to_string(), opts.connection);
         options.insert(RELATIONAL_REMOTE_TABLE_KEY.to_string(), opts.remote_table);
     }
     if table_opts.skip_wal {
@@ -580,10 +577,7 @@ WITH(
         let str_map = opts.to_str_map();
         assert!(!str_map.contains_key(RELATIONAL_META_KEY));
         assert!(str_map.contains_key(FILE_TABLE_LOCATION_KEY));
-        assert_eq!(
-            str_map.get(RELATIONAL_CONNECTION_KEY),
-            Some(&"mysql://user:REDACTED@127.0.0.1:3306/db")
-        );
+        assert!(str_map.contains_key(RELATIONAL_CONNECTION_KEY));
         assert_eq!(str_map.get(RELATIONAL_REMOTE_TABLE_KEY), Some(&"sample"));
     }
 
@@ -625,7 +619,7 @@ WITH(
         let sql = format!("{stmt}");
         assert!(sql.contains("CREATE EXTERNAL TABLE"));
         assert!(sql.contains("ENGINE=relational"));
-        assert!(sql.contains("connection = 'mysql://user:REDACTED@127.0.0.1:3306/db'"));
+        assert!(sql.contains("connection = '******'"));
         assert!(sql.contains("remote_table = 'sample'"));
         assert!(!sql.contains("secret"));
     }

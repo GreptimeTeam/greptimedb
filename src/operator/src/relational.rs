@@ -16,8 +16,10 @@
 //! remote MySQL database and maps its column types to GreptimeDB
 //! [`ConcreteDataType`]s at `CREATE EXTERNAL TABLE` time.
 //!
-//! Types that cannot be mapped faithfully (e.g. `BIT`, spatial types, or a
-//! `DECIMAL` wider than 38 digits) are rejected rather than silently degraded.
+//! Types that cannot be mapped faithfully (e.g. `BIT`, spatial types, a
+//! `DECIMAL` wider than 38 digits, or `TIME`) are rejected rather than
+//! silently degraded. A few types map with documented caveats — `DATETIME`
+//! and `TIMESTAMP` lose their timezone semantics (see `map_timestamp`).
 
 use std::collections::HashSet;
 use std::net::{IpAddr, ToSocketAddrs};
@@ -141,7 +143,6 @@ pub fn map_mysql_column_type(col: &MySqlColumnType) -> Result<ConcreteDataType> 
             Ok(ConcreteDataType::binary_datatype())
         }
         "date" => Ok(ConcreteDataType::date_datatype()),
-        "time" => Ok(map_time(col.fsp)),
         "datetime" | "timestamp" => Ok(map_timestamp(col.fsp)),
         "year" => Ok(ConcreteDataType::int16_datatype()),
         "json" => Ok(ConcreteDataType::json_datatype()),
@@ -163,20 +164,6 @@ fn map_decimal(precision: Option<u64>, scale: Option<i64>) -> Result<ConcreteDat
         precision as u8,
         scale as i8,
     ))
-}
-
-fn map_time(fsp: Option<u8>) -> ConcreteDataType {
-    // NOTE: MySQL `TIME` ranges over `-838:59:59 ..= 838:59:59` (negative and
-    // >24h values are legal), but GreptimeDB's `Time` is a time within a single
-    // day. Such out-of-range values will fail or be distorted on read; callers
-    // whose tables contain them should treat the column as unsupported.
-    //
-    // MySQL `TIME`/`DATETIME`/`TIMESTAMP` default to `fsp = 0`.
-    match fsp.unwrap_or(0) {
-        0 => ConcreteDataType::time_second_datatype(),
-        1..=3 => ConcreteDataType::time_millisecond_datatype(),
-        _ => ConcreteDataType::time_microsecond_datatype(),
-    }
 }
 
 fn map_timestamp(fsp: Option<u8>) -> ConcreteDataType {
@@ -293,6 +280,14 @@ type RawColumnRow = (
 /// driver-reported type, so callers decide which columns to map to a
 /// GreptimeDB [`ConcreteDataType`].
 pub async fn fetch_mysql_columns(connection: &str, remote_table: &str) -> Result<Vec<MySqlColumn>> {
+    let (schema, table) = split_remote_table(remote_table);
+    ensure!(
+        !table.is_empty(),
+        InvalidRemoteTableSnafu {
+            remote_table: remote_table.to_string(),
+        }
+    );
+
     let opts = build_mysql_opts(connection).await?;
     let default_schema = opts.db_name().map(str::to_string);
     let mut conn = tokio::time::timeout(CONNECT_TIMEOUT, mysql_async::Conn::new(opts))
@@ -302,14 +297,6 @@ pub async fn fetch_mysql_columns(connection: &str, remote_table: &str) -> Result
         .with_context(|_| ConnectRemoteSnafu {
             connection: redact_connection(connection),
         })?;
-
-    let (schema, table) = split_remote_table(remote_table);
-    ensure!(
-        !table.is_empty(),
-        InvalidRemoteTableSnafu {
-            remote_table: remote_table.to_string(),
-        }
-    );
     let schema = schema
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -562,10 +549,7 @@ mod tests {
             map_mysql_column_type(&MySqlColumnType::new("timestamp")).unwrap(),
             ConcreteDataType::timestamp_second_datatype()
         );
-        assert_eq!(
-            map_mysql_column_type(&MySqlColumnType::new("time")).unwrap(),
-            ConcreteDataType::time_second_datatype()
-        );
+        assert!(map_mysql_column_type(&MySqlColumnType::new("time")).is_err());
         assert_eq!(
             map_mysql_column_type(&MySqlColumnType::new("year")).unwrap(),
             ConcreteDataType::int16_datatype()

@@ -75,7 +75,7 @@ pub struct RelationalOptions {
 
 impl RelationalOptions {
     /// Returns a copy with the password in `connection` replaced by
-    /// `REDACTED`, safe to surface in error messages and logs. The persisted
+    /// `REDACTED_OPTION_VALUE`, safe to surface in error messages and logs. The persisted
     /// manifest keeps the plaintext `connection` so the datanode can reconnect
     /// to the remote database when serving queries.
     pub fn redacted(&self) -> Self {
@@ -88,17 +88,16 @@ impl RelationalOptions {
 
 /// Redacts the password of a connection DSN, preserving the other fields
 /// (scheme, host, port, user, database). On a parse failure the whole string is
-/// replaced with `REDACTED` (best-effort).
+/// replaced with `REDACTED_OPTION_VALUE` (best-effort).
 pub fn redact_connection(connection: &str) -> String {
-    const REDACTED: &str = "REDACTED";
     match url::Url::parse(connection) {
         Ok(mut url) => {
             if url.password().is_some() {
-                let _ = url.set_password(Some(REDACTED));
+                let _ = url.set_password(Some(REDACTED_OPTION_VALUE));
             }
             url.to_string()
         }
-        Err(_) => REDACTED.to_string(),
+        Err(_) => REDACTED_OPTION_VALUE.to_string(),
     }
 }
 
@@ -108,7 +107,17 @@ pub fn redact_relational_options(encoded: &str) -> String {
     serde_json::from_str::<RelationalOptions>(encoded)
         .ok()
         .and_then(|opts| serde_json::to_string(&opts.redacted()).ok())
-        .unwrap_or_else(|| "REDACTED".to_string())
+        .unwrap_or_else(|| REDACTED_OPTION_VALUE.to_string())
+}
+
+pub fn redact_option_value(key: &str, value: &str) -> String {
+    if is_credential_option(key) {
+        REDACTED_OPTION_VALUE.to_string()
+    } else if key == RELATIONAL_META_KEY {
+        redact_relational_options(value)
+    } else {
+        value.to_string()
+    }
 }
 
 impl std::fmt::Debug for RelationalOptions {
@@ -404,13 +413,7 @@ impl fmt::Display for TableOptions {
         // Sort by key so `create_options` is stable across queries; `HashMap` order is not.
         let extra_options: BTreeMap<_, _> = self.extra_options.iter().collect();
         for (k, v) in extra_options {
-            let value = if is_credential_option(k) {
-                REDACTED_OPTION_VALUE.to_string()
-            } else if k == RELATIONAL_META_KEY {
-                redact_relational_options(v)
-            } else {
-                (*v).clone()
-            };
+            let value = redact_option_value(k, v);
             key_vals.push(format!("{}={}", k, value));
         }
 
@@ -420,10 +423,11 @@ impl fmt::Display for TableOptions {
 
 impl fmt::Debug for TableOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut extra_options = self.extra_options.clone();
-        if let Some(encoded) = extra_options.get_mut(RELATIONAL_META_KEY) {
-            *encoded = redact_relational_options(encoded);
-        }
+        let extra_options = self
+            .extra_options
+            .iter()
+            .map(|(key, value)| (key.clone(), redact_option_value(key, value)))
+            .collect::<HashMap<_, _>>();
         f.debug_struct("TableOptions")
             .field("write_buffer_size", &self.write_buffer_size)
             .field("ttl", &self.ttl)
@@ -975,7 +979,7 @@ mod tests {
     fn test_redact_connection() {
         assert_eq!(
             redact_connection("mysql://user:secret@127.0.0.1:3306/db"),
-            "mysql://user:REDACTED@127.0.0.1:3306/db"
+            "mysql://user:******@127.0.0.1:3306/db"
         );
         // A DSN without a password is left unchanged.
         assert_eq!(
@@ -983,7 +987,7 @@ mod tests {
             "mysql://user@127.0.0.1:3306/db"
         );
         // Unparsable input is fully redacted.
-        assert_eq!(redact_connection("not-a-url"), "REDACTED");
+        assert_eq!(redact_connection("not-a-url"), "******");
     }
 
     #[test]
@@ -1028,10 +1032,7 @@ mod tests {
             remote_table: "sample".to_string(),
         };
         let redacted = options.redacted();
-        assert_eq!(
-            redacted.connection,
-            "mysql://user:REDACTED@127.0.0.1:3306/db"
-        );
+        assert_eq!(redacted.connection, "mysql://user:******@127.0.0.1:3306/db");
         assert_eq!(redacted.remote_table, "sample");
     }
 
@@ -1043,7 +1044,7 @@ mod tests {
         };
         let debug = format!("{options:?}");
         assert!(!debug.contains("secret"));
-        assert!(debug.contains("REDACTED"));
+        assert!(debug.contains("******"));
         assert!(debug.contains("sample"));
     }
 
@@ -1059,7 +1060,7 @@ mod tests {
         };
         let rendered = options.to_string();
         assert!(!rendered.contains("secret"));
-        assert!(rendered.contains("REDACTED"));
+        assert!(rendered.contains("******"));
     }
 
     #[test]
@@ -1074,7 +1075,24 @@ mod tests {
         };
         let rendered = format!("{options:?}");
         assert!(!rendered.contains("secret"));
-        assert!(rendered.contains("REDACTED"));
+        assert!(rendered.contains("******"));
+    }
+
+    #[test]
+    fn test_table_options_debug_redacts_credential() {
+        let options = TableOptions {
+            extra_options: HashMap::from([
+                ("secret_access_key".to_string(), "my-secret".to_string()),
+                ("session_token".to_string(), "my-token".to_string()),
+                ("location".to_string(), "s3://bucket/file.csv".to_string()),
+            ]),
+            ..Default::default()
+        };
+        let rendered = format!("{options:?}");
+        assert!(!rendered.contains("my-secret"));
+        assert!(!rendered.contains("my-token"));
+        assert!(rendered.contains("******"));
+        assert!(rendered.contains("s3://bucket/file.csv"));
     }
 
     #[test]

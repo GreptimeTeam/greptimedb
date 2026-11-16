@@ -140,3 +140,53 @@ where
         writer.write_str(&redact_connection_in_text(&buf))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn test_redacting_formatter_redacts_sqlparser_dsn() {
+        let _ = tracing_log::LogTracer::init();
+
+        let writer = BufWriter(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .event_format(RedactingFormatter::new(
+                tracing_subscriber::fmt::format::Format::default(),
+            ))
+            .with_writer(writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log::debug!(target: "sqlparser::parser", "CREATE EXTERNAL TABLE t ENGINE=relational WITH (connection='mysql://user:secret@127.0.0.1:3306/db')");
+        });
+
+        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        assert!(!output.contains("secret"));
+        assert!(output.contains("mysql://user:REDACTED@127.0.0.1:3306/db"));
+    }
+}

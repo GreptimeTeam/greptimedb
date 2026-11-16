@@ -179,21 +179,46 @@ async fn create_relational_expr(
     schema_name: String,
     table_name: String,
 ) -> Result<CreateTableExpr> {
-    let mut table_options = create.options.into_map();
-    let connection = table_options
+    let connection = create
+        .options
         .get(RELATIONAL_CONNECTION_KEY)
-        .cloned()
         .context(MissingRelationalOptionSnafu {
             name: RELATIONAL_CONNECTION_KEY,
-        })?;
-    let remote_table = table_options
+        })?
+        .to_string();
+    let remote_table = create
+        .options
         .get(RELATIONAL_REMOTE_TABLE_KEY)
-        .cloned()
         .context(MissingRelationalOptionSnafu {
             name: RELATIONAL_REMOTE_TABLE_KEY,
-        })?;
+        })?
+        .to_string();
 
     let remote_columns = crate::relational::fetch_mysql_columns(&connection, &remote_table).await?;
+    build_relational_expr(
+        create,
+        query_ctx,
+        catalog_name,
+        schema_name,
+        table_name,
+        RelationalOptions {
+            connection,
+            remote_table,
+        },
+        &remote_columns,
+    )
+}
+
+fn build_relational_expr(
+    create: CreateExternalTable,
+    query_ctx: &QueryContextRef,
+    catalog_name: String,
+    schema_name: String,
+    table_name: String,
+    options: RelationalOptions,
+    remote_columns: &[crate::relational::MySqlColumn],
+) -> Result<CreateTableExpr> {
+    let mut table_options = create.options.into_map();
     let remote_names = remote_columns
         .iter()
         .map(|column| column.name.as_str())
@@ -217,6 +242,12 @@ async fn create_relational_expr(
             .map(|column| column.name.as_str())
             .collect::<HashSet<_>>();
         for column in &table_column_schemas {
+            let is_synthetic_time_index = column.is_time_index()
+                && column.name == greptime_timestamp()
+                && !remote_names.contains(column.name.as_str());
+            if is_synthetic_time_index {
+                continue;
+            }
             ensure!(
                 remote_names.contains(column.name.as_str()),
                 InvalidSqlSnafu {
@@ -227,7 +258,7 @@ async fn create_relational_expr(
         // `INFORMATION_SCHEMA.COLUMNS` nullability is not (yet) read, so
         // treat every remote column as nullable.
         let remote_column_schemas: Vec<ColumnSchema> =
-            crate::relational::map_mysql_columns(&remote_columns, Some(&declared_names))?
+            crate::relational::map_mysql_columns(remote_columns, Some(&declared_names))?
                 .into_iter()
                 .map(|column| ColumnSchema::new(column.name, column.data_type, true))
                 .collect();
@@ -244,7 +275,7 @@ async fn create_relational_expr(
         // column with the same name must be rejected rather than silently
         // replaced.
         let remote_column_schemas: Vec<ColumnSchema> =
-            crate::relational::map_mysql_columns(&remote_columns, None)?
+            crate::relational::map_mysql_columns(remote_columns, None)?
                 .into_iter()
                 .map(|column| ColumnSchema::new(column.name, column.data_type, true))
                 .collect();
@@ -274,10 +305,7 @@ async fn create_relational_expr(
 
     let column_defs = column_schemas_to_defs(table_column_schemas, &primary_keys)?;
 
-    let meta = RelationalOptions {
-        connection,
-        remote_table,
-    };
+    let meta = options;
     table_options.insert(
         RELATIONAL_META_KEY.to_string(),
         serde_json::to_string(&meta).context(EncodeJsonSnafu)?,
@@ -1364,6 +1392,8 @@ fn sanitize_flow_name(mut flow_name: ObjectName) -> Result<String> {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::error::Error;
+    use crate::relational::{MySqlColumn, MySqlColumnType};
     use api::v1::{SetDatabaseOptions, UnsetDatabaseOptions};
     use datatypes::extension::json::is_json2_extension_type;
     use datatypes::json::{JsonSettings, JsonTypeHint};
@@ -2394,5 +2424,137 @@ WITH(
         let create_table = expr_to_create(&expr, Some('`')).unwrap();
         let new_sql = format!("{:#}", create_table);
         assert_eq!(sql, new_sql);
+    }
+
+    fn build_relational_expr_from_sql(
+        sql: &str,
+        remote_columns: &[MySqlColumn],
+    ) -> Result<CreateTableExpr> {
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateExternalTable(create) = stmt else {
+            unreachable!()
+        };
+        build_relational_expr(
+            create,
+            &QueryContext::arc(),
+            "greptime".to_string(),
+            "public".to_string(),
+            "external_t".to_string(),
+            RelationalOptions {
+                connection: "mysql://root:secret@127.0.0.1:3306/testdb".to_string(),
+                remote_table: "testdb.sample".to_string(),
+            },
+            remote_columns,
+        )
+    }
+
+    #[test]
+    fn test_build_relational_expr_inferred() {
+        let sql = "CREATE EXTERNAL TABLE external_t ENGINE=relational WITH (connection='mysql://root:secret@127.0.0.1:3306/testdb', remote_table='testdb.sample')";
+        let remote_columns = vec![
+            MySqlColumn {
+                name: "id".into(),
+                column_type: MySqlColumnType::new("int"),
+            },
+            MySqlColumn {
+                name: "name".into(),
+                column_type: MySqlColumnType::new("varchar"),
+            },
+        ];
+        let expr = build_relational_expr_from_sql(sql, &remote_columns).unwrap();
+        let names: Vec<&str> = expr
+            .column_defs
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        assert_eq!(names, ["id", "name", "greptime_timestamp"]);
+        assert_eq!(expr.time_index, "greptime_timestamp");
+        assert!(expr.primary_keys.is_empty());
+    }
+
+    #[test]
+    fn test_build_relational_expr_inferred_reserved_timestamp() {
+        let sql = "CREATE EXTERNAL TABLE external_t ENGINE=relational WITH (connection='mysql://root:secret@127.0.0.1:3306/testdb', remote_table='testdb.sample')";
+        let remote_columns = vec![
+            MySqlColumn {
+                name: "id".into(),
+                column_type: MySqlColumnType::new("int"),
+            },
+            MySqlColumn {
+                name: "greptime_timestamp".into(),
+                column_type: MySqlColumnType::new("timestamp"),
+            },
+        ];
+        let err = build_relational_expr_from_sql(sql, &remote_columns).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::ReservedTimeIndexColumn { ref name, .. } if name.as_str() == "greptime_timestamp"
+        ));
+    }
+
+    #[test]
+    fn test_build_relational_expr_declared() {
+        let sql = "CREATE EXTERNAL TABLE external_t (host INT, ts TIMESTAMP, TIME INDEX(ts)) ENGINE=relational WITH (connection='mysql://root:secret@127.0.0.1:3306/testdb', remote_table='testdb.sample')";
+        let remote_columns = vec![
+            MySqlColumn {
+                name: "host".into(),
+                column_type: MySqlColumnType::new("int"),
+            },
+            MySqlColumn {
+                name: "ts".into(),
+                column_type: MySqlColumnType::new("timestamp").with_fsp(3),
+            },
+            MySqlColumn {
+                name: "name".into(),
+                column_type: MySqlColumnType::new("varchar"),
+            },
+        ];
+        let expr = build_relational_expr_from_sql(sql, &remote_columns).unwrap();
+        let names: Vec<&str> = expr
+            .column_defs
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        assert_eq!(names, ["host", "ts"]);
+        assert_eq!(expr.time_index, "ts");
+        assert!(expr.primary_keys.is_empty());
+    }
+
+    #[test]
+    fn test_build_relational_expr_declared_missing_column() {
+        let sql = "CREATE EXTERNAL TABLE external_t (host INT, missing INT, ts TIMESTAMP, TIME INDEX(ts)) ENGINE=relational WITH (connection='mysql://root:secret@127.0.0.1:3306/testdb', remote_table='testdb.sample')";
+        let remote_columns = vec![
+            MySqlColumn {
+                name: "host".into(),
+                column_type: MySqlColumnType::new("int"),
+            },
+            MySqlColumn {
+                name: "ts".into(),
+                column_type: MySqlColumnType::new("timestamp").with_fsp(3),
+            },
+        ];
+        let err = build_relational_expr_from_sql(sql, &remote_columns).unwrap_err();
+        assert!(matches!(err, Error::InvalidSql { .. }));
+    }
+
+    #[test]
+    fn test_build_relational_expr_declared_synthetic_time_index() {
+        let sql = "CREATE EXTERNAL TABLE external_t (host INT, greptime_timestamp TIMESTAMP DEFAULT '1970-01-01 00:00:00+0000', TIME INDEX(greptime_timestamp)) ENGINE=relational WITH (connection='mysql://root:secret@127.0.0.1:3306/testdb', remote_table='testdb.sample')";
+        let remote_columns = vec![MySqlColumn {
+            name: "host".into(),
+            column_type: MySqlColumnType::new("int"),
+        }];
+        let expr = build_relational_expr_from_sql(sql, &remote_columns).unwrap();
+        let names: Vec<&str> = expr
+            .column_defs
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        assert_eq!(names, ["host", "greptime_timestamp"]);
+        assert_eq!(expr.time_index, "greptime_timestamp");
     }
 }
