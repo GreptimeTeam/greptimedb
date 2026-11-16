@@ -308,19 +308,23 @@ enum CountdownCommand {
     /// 4 * `heartbeat_interval_millis`
     Start(u64),
     /// Reset countdown deadline to the given instance.
-    /// (NextRole, HeartbeatSentAt, Deadline, CandidateLeaseId, ExtensionInfo)
-    Reset(
-        (
-            RegionRole,
-            Instant,
-            Instant,
-            Option<u64>,
-            HashMap<String, Vec<u8>>,
-        ),
-    ),
+    Reset(GrantedLease),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
+}
+
+/// A region lease received in a heartbeat response.
+#[derive(Debug)]
+struct GrantedLease {
+    /// The role the region is granted.
+    role: RegionRole,
+    /// When the heartbeat was sent.
+    sent_at: Instant,
+    /// The new countdown deadline.
+    deadline: Instant,
+    candidate_lease_id: Option<u64>,
+    extensions: HashMap<String, Vec<u8>>,
 }
 
 pub type CountdownTaskHandlerExtRef = Arc<dyn CountdownTaskHandlerExt>;
@@ -404,13 +408,13 @@ impl CountdownTaskHandle {
     ) {
         if let Err(e) = self
             .tx
-            .send(CountdownCommand::Reset((
+            .send(CountdownCommand::Reset(GrantedLease {
                 role,
                 sent_at,
                 deadline,
                 candidate_lease_id,
-                extension_info,
-            )))
+                extensions: extension_info,
+            }))
             .await
         {
             warn!(
@@ -464,7 +468,7 @@ impl CountdownTask {
                                 started = true;
                             }
                         },
-                        Some(CountdownCommand::Reset((role, sent_at, deadline, candidate_lease_id, extension_info))) => {
+                        Some(CountdownCommand::Reset(GrantedLease { role, sent_at, deadline, candidate_lease_id, extensions: extension_info })) => {
                             let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
                             let applied = match self.region_server.set_region_role_with_lease(self.region_id, role, sent_at.into_std(), deadline.into_std(), candidate_lease_id) {
                                 Ok(applied) => applied,

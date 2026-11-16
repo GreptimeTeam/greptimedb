@@ -394,10 +394,9 @@ impl RegionEngine for MetricEngine {
     ) -> Result<bool, BoxedError> {
         // The metadata region goes first. If it ignores the grant, the data region, whose role the
         // engine reports, must not take it either. A region that is not found is ignored.
-        for x in [
-            utils::to_metadata_region_id(region_id),
-            utils::to_data_region_id(region_id),
-        ] {
+        let metadata_region_id = utils::to_metadata_region_id(region_id);
+        let data_region_id = utils::to_data_region_id(region_id);
+        for x in [metadata_region_id, data_region_id] {
             match self.inner.mito.set_region_role_with_lease(
                 x,
                 role,
@@ -407,12 +406,15 @@ impl RegionEngine for MetricEngine {
             ) {
                 Ok(true) => {}
                 Ok(false) => {
-                    // The data region does not take the grant but has received it.
-                    self.inner.mito.record_granted_lease(
-                        utils::to_data_region_id(region_id),
-                        candidate_lease_id,
-                        sent_at,
-                    );
+                    // The physical region received the grant, so record it for the data region,
+                    // which is not given the grant. The data region records its own grants.
+                    if x == metadata_region_id {
+                        self.inner.mito.record_granted_lease(
+                            data_region_id,
+                            candidate_lease_id,
+                            sent_at,
+                        );
+                    }
                     return Ok(false);
                 }
                 Err(e) if e.status_code() != StatusCode::RegionNotFound => return Err(e),

@@ -352,8 +352,9 @@ impl MitoEngine {
     }
 
     /// Records a lease of a heartbeat sent at `sent_at` as the latest one the region received, if
-    /// it is the latest. Only records it: the region's role does not change. Does nothing if the
-    /// region is not open.
+    /// it is the latest. The region may also be a region of a group that received the lease as a
+    /// whole, such as the data region of a metric engine region. Only records it: the region's role
+    /// does not change. Does nothing if the region is not open.
     pub fn record_granted_lease(
         &self,
         region_id: RegionId,
