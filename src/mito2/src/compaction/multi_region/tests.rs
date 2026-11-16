@@ -2471,6 +2471,10 @@ impl IndexKindProvider for InvalidOptionalIndexHandler {
 }
 
 impl IndexKindHandler for InvalidOptionalIndexHandler {
+    fn validate(&self, context: &PlanContext<'_>) -> std::result::Result<(), BoxedError> {
+        self.plan(context).map(|_| ())
+    }
+
     fn kinds(&self) -> &[IndexKind] {
         &[IndexKind::Extension(ExtensionIndexKind::Hll)]
     }
