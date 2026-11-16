@@ -2206,11 +2206,8 @@ async fn test_discard_over_uncertain_replay_commit_is_busy() {
 
     assert_eq!(StatusCode::RegionBusy, error.status_code());
     // A flush that commits meanwhile leaves the replay's update uncertain.
-    let rows = Rows {
-        schema: rows_schema(&CreateRequestBuilder::new().build()),
-        rows: build_rows(9, 12),
-    };
-    put_rows(&region.engine, region.region_id, rows).await;
+    let schema = rows_schema(&CreateRequestBuilder::new().build());
+    put_range(&region.engine, region.region_id, &schema, 9, 12).await;
     flush_region(&region.engine, region.region_id, None).await;
     let error = region
         .discard_pending_tails(REMOTE_NODE_ID)
@@ -2224,9 +2221,10 @@ async fn test_discard_over_uncertain_replay_commit_is_busy() {
     assert_eq!(12, count_rows(&region.engine, region.region_id).await);
 }
 
-/// A replay that commits after a discard whose result is unknown replays every tail once.
+/// A replay that commits after a discard whose result is uncertain replays every tail, so no
+/// row is lost and no tail is left.
 #[tokio::test]
-async fn test_replay_commit_over_uncertain_discard_keeps_rows_once() {
+async fn test_replay_commit_over_uncertain_discard_replays_every_tail() {
     let version = Arc::new(AtomicU64::new(u64::MAX));
     let region = TestRegion::new(
         "tail-replay-uncertain-discard",
@@ -2265,6 +2263,7 @@ async fn test_discard_demoted_before_its_commit_reports_region_state() {
     region.promote();
     wait_until(|| region.listener.commits() == 1).await;
     let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = next_manifest_version(&mito_region).await;
     let manager = &mito_region.manifest_ctx.manifest_manager;
     let reading = manager.read().await;
 
@@ -2281,4 +2280,147 @@ async fn test_discard_demoted_before_its_commit_reports_region_state() {
     let error = discarded.unwrap_err();
     assert_eq!(StatusCode::RegionNotReady, error.status_code());
     assert_eq!(tails, region.version().pending_tails);
+    assert_eq!(version, next_manifest_version(&mito_region).await);
+}
+
+/// Lets the first write of the manifest delta `version` land as if its response was lost, and
+/// fails the write of the next delta before it stores anything.
+fn lose_delta_response_then_reject(version: Arc<AtomicU64>) -> MockLayer {
+    let armed = Arc::new(AtomicBool::new(true));
+    MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _args, inner| {
+            let target = version.load(Ordering::Relaxed);
+            if target == u64::MAX {
+                return inner;
+            }
+            let (lost, rejected) = (delta_file(target), delta_file(target + 1));
+            if path.contains(&lost) && armed.swap(false, Ordering::Relaxed) {
+                Box::new(LostResponseWriter { inner })
+            } else if path.contains(&rejected) {
+                Box::new(RejectingWriter)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap()
+}
+
+struct RejectingWriter;
+
+impl Write for RejectingWriter {
+    async fn write(&mut self, _bs: Buffer) -> MockResult<()> {
+        Err(MockError::new(ErrorKind::ConfigInvalid, "rejected"))
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        Err(MockError::new(ErrorKind::ConfigInvalid, "rejected"))
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        Ok(())
+    }
+}
+
+/// A replay retry that fails without storing anything keeps the earlier attempt's uncertain
+/// result, so a discard stays busy.
+#[tokio::test]
+async fn test_discard_stays_busy_after_a_rejected_replay_retry() {
+    let version = Arc::new(AtomicU64::new(u64::MAX));
+    let region = TestRegion::new(
+        "tail-discard-rejected-retry",
+        false,
+        Some(lose_delta_response_then_reject(version.clone())),
+    )
+    .await;
+    region.reopen_with_own_and_remote_tails().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    version.store(next_manifest_version(&mito_region).await, Ordering::Relaxed);
+    region.listener.hold_from(3);
+    region.catchup().await;
+    // The first commit lands but reports an error, the second is rejected, the third waits.
+    wait_until(|| region.listener.commits() == 3).await;
+
+    let error = region
+        .discard_pending_tails(REMOTE_NODE_ID)
+        .await
+        .unwrap_err();
+
+    assert_eq!(StatusCode::RegionBusy, error.status_code());
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+    region.reopen().await;
+    assert!(!region.has_pending_tails());
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
+}
+
+/// The uncertain result of a cancelled replay keeps discards busy until a later replay of the
+/// same instance publishes.
+#[tokio::test]
+async fn test_discard_stays_busy_after_an_uncertain_replay_ends() {
+    let version = Arc::new(AtomicU64::new(u64::MAX));
+    let region = TestRegion::new(
+        "tail-discard-ended-uncertain",
+        false,
+        Some(lose_delta_response(version.clone())),
+    )
+    .await;
+    region.reopen_with_own_and_remote_tails().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    version.store(next_manifest_version(&mito_region).await, Ordering::Relaxed);
+    region.listener.hold_from(2);
+    region.catchup().await;
+    wait_until(|| region.listener.commits() == 2).await;
+    // A demotion ends the replay while its update is uncertain.
+    region
+        .engine
+        .set_region_role(region.region_id, RegionRole::Follower)
+        .unwrap();
+    region.listener.hold_from(3);
+    wait_until(|| region.listener.ended() == 1).await;
+    region.promote();
+    wait_until(|| region.listener.commits() == 3).await;
+
+    let error = region
+        .discard_pending_tails(REMOTE_NODE_ID)
+        .await
+        .unwrap_err();
+
+    assert_eq!(StatusCode::RegionBusy, error.status_code());
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+    assert_eq!(
+        0,
+        region.discard_pending_tails(REMOTE_NODE_ID).await.unwrap()
+    );
+}
+
+/// With conditional publication, a discard over a replay's update that was saved but reported
+/// an error conflicts with it, and the region reloads from storage without the tails.
+#[tokio::test]
+async fn test_conditional_discard_over_uncertain_replay_reloads_region() {
+    let version = Arc::new(AtomicU64::new(u64::MAX));
+    let region = TestRegion::new(
+        "tail-discard-conditional-uncertain",
+        true,
+        Some(lose_delta_response(version.clone())),
+    )
+    .await;
+    region.reopen_with_own_and_remote_tails().await;
+    let old = region.engine.get_region(region.region_id).unwrap();
+    version.store(next_manifest_version(&old).await, Ordering::Relaxed);
+    region.listener.hold_from(2);
+    region.promote_with_lease();
+    wait_until(|| region.listener.commits() == 2).await;
+
+    let error = region
+        .discard_pending_tails(REMOTE_NODE_ID)
+        .await
+        .unwrap_err();
+
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    wait_until(|| is_replaced(&region.engine, &old)).await;
+    assert!(!region.has_pending_tails());
+    region.listener.hold_from(0);
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
 }

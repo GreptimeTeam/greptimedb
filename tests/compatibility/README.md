@@ -43,6 +43,14 @@ as before the field existed:
 cargo nextest run -p store-api -E 'test(test_legacy_granted_region_wire)'
 ```
 
+The [truncate request fixtures](wire/truncate_pending_tails/README.md) check that a
+truncate request of an existing kind keeps its encoding, and that the
+`pending_tails` kind stays at field 5:
+
+```shell
+cargo nextest run -p store-api -E 'test(test_truncate_request_wire)'
+```
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of

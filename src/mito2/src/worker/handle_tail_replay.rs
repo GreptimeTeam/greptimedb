@@ -86,8 +86,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ///
     /// The edit is committed outside the worker against the tails the version records now, so
     /// a replay or a sync that changed them first makes it fail as busy, and a running replay
-    /// of the region is left to find the tails changed. It also fails as busy while a replay's
-    /// update has an uncertain result, until the replay learns whether it was saved.
+    /// of the region is left to find the tails changed. Without conditional publication it also
+    /// fails as busy while a replay's update has an uncertain result, see
+    /// [ManifestContext::update_manifest_for_tails](crate::region::ManifestContext::update_manifest_for_tails).
     pub(crate) fn handle_discard_pending_tails(
         &mut self,
         region_id: RegionId,

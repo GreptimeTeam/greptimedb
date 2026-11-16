@@ -807,13 +807,32 @@ mod test {
         env.init_metric_region().await;
         let request =
             || RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 1 });
-        // A physical region accepts the request; neither of its Mito regions has pending tails.
+        let data_region_id = utils::to_data_region_id(env.default_physical_region_id());
+        env.metric()
+            .handle_request(
+                env.default_logical_region_id(),
+                RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
+                    rows: Rows {
+                        schema: row_schema_with_tags(&["job"]),
+                        rows: build_rows(1, 5),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        // A physical region accepts the request; neither of its Mito regions has pending tails,
+        // and the data region keeps its unflushed rows.
         let response = env
             .metric()
             .handle_request(env.default_physical_region_id(), request())
             .await
             .unwrap();
         assert_eq!(response.affected_rows, 0);
+        let data_stat = env.mito().region_statistic(data_region_id).unwrap();
+        assert!(data_stat.memtable_size > 0);
 
         let error = env
             .metric()

@@ -301,7 +301,7 @@ impl Requester {
     }
 
     /// Discards the region's pending WAL tails that datanode `node_id` wrote.
-    pub async fn handle_discard_pending_tails(
+    pub(crate) async fn handle_discard_pending_tails(
         &self,
         region_id: RegionId,
         node_id: u64,
@@ -328,7 +328,7 @@ impl Requester {
     /// Discards the pending WAL tails that datanode `node_id` wrote in every region of the
     /// table. If a region fails, the error is logged with the number of tails the other regions
     /// discarded, and returned.
-    pub async fn handle_discard_pending_tails_by_table(
+    pub(crate) async fn handle_discard_pending_tails_by_table(
         &self,
         table_name: TableName,
         node_id: u64,

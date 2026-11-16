@@ -2288,22 +2288,43 @@ mod tests {
     }
 
     #[test]
-    fn test_make_region_truncate_pending_tails() {
-        let region_id = RegionId::new(42, 3);
-        let requests =
-            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
-                region_id: region_id.as_u64(),
-                kind: Some(truncate_request::Kind::PendingTails(
-                    api::v1::region::PendingTails { node_id: 7 },
-                )),
-            }))
-            .unwrap();
+    fn test_truncate_request_wire() {
+        use prost::Message;
 
-        assert_eq!(region_id, requests[0].0);
-        assert!(matches!(
-            requests[0].1,
-            RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 7 })
-        ));
+        let region_id = RegionId::new(1024, 1);
+        let fixtures: [(&[u8], fn(&RegionRequest) -> bool); 2] = [
+            (
+                include_bytes!(
+                    "../../../tests/compatibility/wire/truncate_pending_tails/legacy_truncate_unflushed.pb"
+                ),
+                |request| {
+                    matches!(
+                        request,
+                        RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
+                    )
+                },
+            ),
+            (
+                include_bytes!(
+                    "../../../tests/compatibility/wire/truncate_pending_tails/truncate_pending_tails.pb"
+                ),
+                |request| {
+                    matches!(
+                        request,
+                        RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 7 })
+                    )
+                },
+            ),
+        ];
+        for (bytes, expected) in fixtures {
+            let truncate = TruncateRequest::decode(bytes).unwrap();
+            assert_eq!(truncate.encode_to_vec(), bytes);
+            let requests =
+                RegionRequest::try_from_request_body(region_request::Body::Truncate(truncate))
+                    .unwrap();
+            assert_eq!(region_id, requests[0].0);
+            assert!(expected(&requests[0].1), "{:?}", requests[0].1);
+        }
     }
 
     #[test]
