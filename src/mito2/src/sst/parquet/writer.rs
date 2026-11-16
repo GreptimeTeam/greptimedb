@@ -15,6 +15,7 @@
 //! Parquet writer.
 
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::future::Future;
 use std::mem;
 use std::sync::Arc;
@@ -911,13 +912,16 @@ where
     }
 }
 
-/// Keeps encoder cancellation inside the SST write error contract.
+/// Keeps cancellation inside the SST write error contract, including nested encoder errors.
 fn map_write_error(error: ParquetError) -> Error {
-    match error {
-        ParquetError::External(ref source) if source.is::<Cancelled>() => {
-            crate::error::SstWriteCancelledSnafu.build()
-        }
-        error => WriteParquetSnafu.into_error(error),
+    let cancelled = std::iter::successors(Some(&error as &(dyn StdError + 'static)), |source| {
+        (*source).source()
+    })
+    .any(|source| source.is::<Cancelled>());
+    if cancelled {
+        crate::error::SstWriteCancelledSnafu.build()
+    } else {
+        WriteParquetSnafu.into_error(error)
     }
 }
 
@@ -1055,12 +1059,13 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
+    use common_base::readable_size::ReadableSize;
     use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
     use object_store::layers::mock::{
         Metadata, MockLayerBuilder, ObservedWriter, WriterObservations, oio,
     };
     use object_store::services::Memory;
-    use object_store::{Buffer, Result as ObjectStoreResult};
+    use object_store::{Buffer, Error as ObjectStoreError, ErrorKind, Result as ObjectStoreResult};
     use parquet::arrow::ArrowWriter;
     use parquet::errors::ParquetError;
     use store_api::region_request::PathType;
@@ -1080,6 +1085,7 @@ mod tests {
         started: Option<oneshot::Sender<()>>,
         release: Option<oneshot::Receiver<()>>,
         completed: Arc<AtomicUsize>,
+        write_error: Option<ObjectStoreError>,
     }
 
     impl oio::Write for GatedObjectStoreWriter {
@@ -1087,6 +1093,9 @@ mod tests {
             if let Some(started) = self.started.take() {
                 started.send(()).unwrap();
                 self.release.take().unwrap().await.unwrap();
+            }
+            if let Some(error) = self.write_error.take() {
+                return Err(error);
             }
             self.inner.write(bytes).await?;
             self.completed.fetch_add(1, Ordering::Relaxed);
@@ -1124,6 +1133,7 @@ mod tests {
                         started: Some(started),
                         release: Some(release),
                         completed: completed_writes.clone(),
+                        write_error: None,
                     }),
                     observed.clone(),
                 ))
@@ -1176,6 +1186,117 @@ mod tests {
             assert_eq!(0, observed.abort_calls);
             assert_eq!(vec![4; 8], observed.write_sizes);
         }
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn test_parquet_write_error_aborts_upload(
+        #[values(1, 2)] parallelism: usize,
+        #[values(false, true)] cancel_during_write: bool,
+    ) {
+        let cancellation = CancellationToken::new();
+        let observations = Arc::new(Mutex::new(WriterObservations::default()));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let gate = Mutex::new(Some((started_tx, release_rx)));
+        let observed = observations.clone();
+        let completed_writes = completed.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |_, _, inner| {
+                let (started, release) = gate.lock().unwrap().take().unwrap();
+                Box::new(ObservedWriter::new(
+                    Box::new(GatedObjectStoreWriter {
+                        inner,
+                        started: Some(started),
+                        release: Some(release),
+                        completed: completed_writes.clone(),
+                        write_error: (!cancel_during_write).then(|| {
+                            ObjectStoreError::new(
+                                ErrorKind::PermissionDenied,
+                                "injected upload failure",
+                            )
+                        }),
+                    }),
+                    observed.clone(),
+                ))
+            }))
+            .build()
+            .unwrap();
+        let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let metadata = Arc::new(sst_region_metadata());
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            store,
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new(String::new(), PathType::Bare),
+            &mut metrics,
+        )
+        .await
+        .with_write_concurrency(1)
+        .with_cancellation(Some(cancellation.clone()));
+        let batch = new_record_batch_by_range(&["a", "b"], 0, 8);
+        let opts = WriteOptions {
+            // A partial group reaches the upload through finish_current_file.
+            row_group_size: batch.num_rows() + 1,
+            write_buffer_size: ReadableSize(1),
+            encode_parallelism: parallelism,
+            ..Default::default()
+        };
+        let source_finished = Arc::new(AtomicBool::new(false));
+        let finished = source_finished.clone();
+        let source = FlatSource::new_stream(
+            batch.schema(),
+            Box::pin(async_stream::try_stream! {
+                yield batch;
+                finished.store(true, Ordering::Relaxed);
+            }),
+        );
+        let mut write = Box::pin(writer.write_all_flat(source, None, &opts));
+        tokio::select! {
+            started = started_rx => started.unwrap(),
+            result = &mut write => panic!("writer returned before the upload gate: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("writer did not reach the upload gate"),
+        }
+        assert!(source_finished.load(Ordering::Relaxed));
+        if cancel_during_write {
+            cancellation.cancel();
+        }
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        assert_eq!(0, observations.lock().unwrap().abort_calls);
+        release_tx.send(()).unwrap();
+        let error = timeout(Duration::from_secs(5), write)
+            .await
+            .unwrap()
+            .unwrap_err();
+        if cancel_during_write {
+            assert!(
+                matches!(error, Error::SstWriteCancelled { .. }),
+                "{error:?}"
+            );
+        } else {
+            assert!(matches!(error, Error::WriteParquet { .. }), "{error:?}");
+            let source =
+                std::iter::successors(Some(&error as &(dyn StdError + 'static)), |error| {
+                    (*error).source()
+                })
+                .find_map(|error| error.downcast_ref::<ObjectStoreError>())
+                .unwrap();
+            assert_eq!(ErrorKind::PermissionDenied, source.kind());
+            assert!(source.to_string().contains("injected upload failure"));
+        }
+        assert_eq!(
+            usize::from(cancel_during_write),
+            completed.load(Ordering::Relaxed)
+        );
+        let observed = observations.lock().unwrap();
+        assert_eq!(vec![1], observed.write_sizes);
+        assert_eq!(1, observed.abort_calls);
+        assert_eq!(0, observed.close_calls);
+        assert!(writer.writer.is_none());
+        assert!(writer.current_indexer.is_none());
     }
 
     #[rstest::rstest]

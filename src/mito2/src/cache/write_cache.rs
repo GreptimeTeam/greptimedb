@@ -789,17 +789,21 @@ mod tests {
     struct FailingUploadWriter {
         inner: object_store::layers::mock::oio::Writer,
         fail_close: bool,
+        fail_abort: bool,
+        successful_writes: usize,
     }
 
     impl object_store::layers::mock::oio::Write for FailingUploadWriter {
         async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
-            if !self.fail_close {
+            if !self.fail_close && self.successful_writes == 1 {
                 return Err(object_store::Error::new(
                     object_store::ErrorKind::NotFound,
                     "injected write failure",
                 ));
             }
-            self.inner.write(bytes).await
+            self.inner.write(bytes).await?;
+            self.successful_writes += 1;
+            Ok(())
         }
 
         async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
@@ -810,15 +814,25 @@ mod tests {
         }
 
         async fn abort(&mut self) -> object_store::Result<()> {
+            if self.fail_abort {
+                return Err(object_store::Error::new(
+                    object_store::ErrorKind::Unexpected,
+                    "injected abort failure",
+                ));
+            }
             self.inner.abort().await
         }
     }
 
     #[rstest::rstest]
-    #[case::write(false)]
-    #[case::close(true)]
+    #[case::write(false, false)]
+    #[case::close(true, false)]
+    #[case::write_and_abort(false, true)]
     #[tokio::test]
-    async fn test_upload_error_preserves_file_context(#[case] fail_close: bool) {
+    async fn test_upload_error_preserves_file_context(
+        #[case] fail_close: bool,
+        #[case] fail_abort: bool,
+    ) {
         use object_store::layers::mock::{MockLayerBuilder, ObservedWriter, WriterObservations};
 
         let env = TestEnv::new().await;
@@ -828,7 +842,12 @@ mod tests {
         let layer = MockLayerBuilder::default()
             .writer_factory(Arc::new(move |_, _, inner| {
                 Box::new(ObservedWriter::new(
-                    Box::new(FailingUploadWriter { inner, fail_close }),
+                    Box::new(FailingUploadWriter {
+                        inner,
+                        fail_close,
+                        fail_abort,
+                        successful_writes: 0,
+                    }),
                     observed.clone(),
                 ))
             }))
@@ -843,6 +862,7 @@ mod tests {
             .write(&cache.file_cache.cache_file_path(key), vec![42; 4096])
             .await
             .unwrap();
+        assert!(!cache.file_cache.contains_key(&key));
         let err = cache
             .upload(
                 key,
@@ -869,10 +889,23 @@ mod tests {
                 assert_eq!(key.file_id, file_id);
                 assert_eq!(key.file_type, file_type);
                 assert_eq!(std::io::ErrorKind::NotFound, error.kind());
+                let message = if fail_close {
+                    "injected close failure"
+                } else {
+                    "injected write failure"
+                };
+                assert!(error.to_string().contains(message));
             }
             err => panic!("expected Upload error, got {err:?}"),
         }
+        assert!(!cache.file_cache.contains_key(&key));
+        assert!(!remote_store.exists("failed.parquet").await.unwrap());
         let observations = observations.lock().unwrap();
+        // The write failure follows one completed chunk, so partial progress is exercised.
+        assert_eq!(
+            vec![1024; if fail_close { 4 } else { 2 }],
+            observations.write_sizes
+        );
         assert_eq!(1, observations.abort_calls);
         assert_eq!(usize::from(fail_close), observations.close_calls);
     }
