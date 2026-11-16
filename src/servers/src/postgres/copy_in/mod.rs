@@ -341,12 +341,12 @@ impl CopyInState {
     /// State for the OTLP format: the whole binary payload is buffered
     /// and completed once at `CopyDone` through the matching OTLP
     /// pipeline. Binary: the advertised wire format code is 1.
-    fn new_otlp(options: &OtlpOptions, query_ctx: QueryContextRef) -> Self {
+    fn new_otlp(options: OtlpOptions, query_ctx: QueryContextRef) -> Self {
         Self {
             query_ctx,
             payload: Payload::Otlp {
                 data: Vec::new(),
-                options: options.clone(),
+                options,
             },
             codec_name: "otlp",
             codec_format_code: 1,
@@ -602,24 +602,37 @@ impl PostgresServerHandlerInner {
                 if !stmt.columns.is_empty() {
                     return Err(unsupported("format otlp does not support a column list"));
                 }
-                let (options, target_ctx) =
-                    resolve_otlp_target(options, &stmt.table, query_ctx.clone())?;
-                if (target_ctx.current_catalog() != query_ctx.current_catalog()
-                    || target_ctx.current_schema() != query_ctx.current_schema())
-                    && let Some(source) = &self.auth_source
-                {
-                    source
-                        .authorize_database(
-                            target_ctx.current_catalog(),
-                            &target_ctx.current_schema(),
-                            &query_ctx.current_user(),
-                        )
-                        .await?;
-                }
                 if self.otlp_handler.is_none() {
                     return Err(unsupported("this server is not wired for the otlp format"));
                 }
-                CopyInState::new_otlp(&options, target_ctx)
+                let (options, target_ctx) =
+                    resolve_otlp_target(options, &stmt.table, query_ctx.clone())?;
+                if target_ctx.current_catalog() != query_ctx.current_catalog()
+                    || target_ctx.current_schema() != query_ctx.current_schema()
+                {
+                    // The same cross-catalog restriction SQL INSERT and
+                    // the csv format enforce — must run against the
+                    // ORIGINAL session context, before the user-provider
+                    // scope check and before any data is transferred.
+                    self.copy_in_handler
+                        .copy_in_validate_scope(
+                            target_ctx.current_catalog(),
+                            &target_ctx.current_schema(),
+                            query_ctx.clone(),
+                        )
+                        .await
+                        .map_err(convert_err)?;
+                    if let Some(source) = &self.auth_source {
+                        source
+                            .authorize_database(
+                                target_ctx.current_catalog(),
+                                &target_ctx.current_schema(),
+                                &query_ctx.current_user(),
+                            )
+                            .await?;
+                    }
+                }
+                CopyInState::new_otlp(options, target_ctx)
             }
         };
         let num_columns = match &state.payload {
@@ -860,7 +873,7 @@ fn resolve_otlp_target(
     let table_name = match &mut options.signal {
         OtlpSignal::Metrics { .. } => {
             return Err(unsupported(format!(
-                "format otlp with signal metrics routes each record to its own table; \"COPY {} FROM STDIN\" must not name one",
+                "format otlp routes each metric to its own table; \"COPY {} FROM STDIN\" must not name one",
                 parts.join(".")
             )));
         }

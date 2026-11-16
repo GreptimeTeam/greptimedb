@@ -5348,4 +5348,70 @@ mod tests {
 
         Ok(())
     }
+
+    /// Scope-targeted COPY formats (OTLP logs/traces) run the same
+    /// cross-catalog restriction through `copy_in_validate_scope` before
+    /// any data is streamed.
+    #[tokio::test]
+    async fn test_copy_in_validate_scope_cross_catalog_restriction() -> TestResult<()> {
+        use catalog::memory::MemoryCatalogManager;
+        use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+        use servers::query_handler::CopyInHandler;
+
+        let catalog = MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let executor = Arc::new(MockProcedureExecutor::new(catalog.clone()));
+        let plugins = Plugins::new();
+        plugins.insert(QueryOptions {
+            disallow_cross_catalog_query: true,
+        });
+        let instance = test_instance_with_catalog_manager(
+            catalog,
+            test_table(1025, "target")?,
+            plugins,
+            None,
+            executor,
+        )
+        .await?;
+
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+
+        // A target outside the session's catalog is rejected before any
+        // data is streamed; a same-catalog schema is not.
+        let err = instance
+            .copy_in_validate_scope("other", DEFAULT_SCHEMA_NAME, ctx.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("Illegal access to catalog"),
+            "{err}"
+        );
+        instance
+            .copy_in_validate_scope(DEFAULT_CATALOG_NAME, "other_schema", ctx.clone())
+            .await
+            .unwrap();
+
+        // Without the restriction every scope validates.
+        let plugins = Plugins::new();
+        plugins.insert(QueryOptions {
+            disallow_cross_catalog_query: false,
+        });
+        let catalog = MemoryCatalogManager::new_with_table(test_table(1026, "source")?);
+        let instance = test_instance_with_catalog_manager(
+            catalog.clone(),
+            test_table(1027, "target")?,
+            plugins,
+            None,
+            Arc::new(MockProcedureExecutor::new(catalog)),
+        )
+        .await?;
+        instance
+            .copy_in_validate_scope("other", DEFAULT_SCHEMA_NAME, ctx)
+            .await
+            .unwrap();
+
+        Ok(())
+    }
 }

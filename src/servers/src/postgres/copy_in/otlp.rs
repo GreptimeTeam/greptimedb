@@ -25,6 +25,11 @@
 //! target sets the catalog/schema even when `table_name` overrides its
 //! table name. Targets need not exist before ingestion. Column lists
 //! are not supported: the payload determines the ingested columns.
+//! A target that leaves the session's catalog/schema is subject to the
+//! same `disallow_cross_catalog_query` restriction as SQL INSERT and the
+//! csv format, and the user provider must authorize the target scope —
+//! the same `UserProvider::authorize` check a login to that database
+//! would run — before any data is transferred.
 //!
 //! This format does not decode here: the whole payload is buffered
 //! until `CopyDone` — exactly like an

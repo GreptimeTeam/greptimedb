@@ -49,6 +49,148 @@ mod mysql;
 mod postgres;
 mod prom_remote_write_v2_test;
 
+/// An [`OpenTelemetryProtocolHandler`] test double that counts signal
+/// invocations and never ingests anything: flushed OTLP copies complete
+/// immediately, and tests can assert whether ingestion was reached at
+/// all.
+pub struct CountingOtlpHandler {
+    calls: std::sync::atomic::AtomicUsize,
+    pipeline_options: pipeline::PipelineOptions,
+}
+
+impl CountingOtlpHandler {
+    pub fn new() -> Self {
+        Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            pipeline_options: pipeline::PipelineOptions::default(),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn invoked(&self) {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Default for CountingOtlpHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl servers::query_handler::PipelineHandler for CountingOtlpHandler {
+    async fn insert(&self, _input: RowInsertRequests, _ctx: QueryContextRef) -> Result<Output> {
+        unimplemented!("not part of this test double")
+    }
+
+    async fn insert_all(
+        &self,
+        _inputs: Vec<(QueryContextRef, RowInsertRequests)>,
+    ) -> Result<Vec<Result<Output>>> {
+        unimplemented!("not part of this test double")
+    }
+
+    fn check_pipeline_query_permission(&self, _query_ctx: &QueryContextRef) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_pipeline(
+        &self,
+        _name: &str,
+        _version: pipeline::PipelineVersion,
+        _query_ctx: QueryContextRef,
+    ) -> Result<std::sync::Arc<pipeline::Pipeline>> {
+        unimplemented!("not part of this test double")
+    }
+
+    async fn insert_pipeline(
+        &self,
+        _name: &str,
+        _content_type: &str,
+        _pipeline: &str,
+        _query_ctx: QueryContextRef,
+    ) -> Result<pipeline::PipelineInfo> {
+        unimplemented!("not part of this test double")
+    }
+
+    async fn delete_pipeline(
+        &self,
+        _name: &str,
+        _version: pipeline::PipelineVersion,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Option<()>> {
+        unimplemented!("not part of this test double")
+    }
+
+    async fn get_table(
+        &self,
+        _table: &str,
+        _query_ctx: &session::context::QueryContext,
+    ) -> std::result::Result<Option<std::sync::Arc<table::Table>>, catalog::error::Error> {
+        Ok(None)
+    }
+
+    fn pipeline_options(&self) -> &pipeline::PipelineOptions {
+        &self.pipeline_options
+    }
+
+    fn build_pipeline(&self, _pipeline: &str) -> Result<pipeline::Pipeline> {
+        unimplemented!("not part of this test double")
+    }
+
+    async fn get_pipeline_str(
+        &self,
+        _name: &str,
+        _version: pipeline::PipelineVersion,
+        _query_ctx: QueryContextRef,
+    ) -> Result<(String, datatypes::timestamp::TimestampNanosecond)> {
+        unimplemented!("not part of this test double")
+    }
+}
+
+#[async_trait]
+impl servers::query_handler::OpenTelemetryProtocolHandler for CountingOtlpHandler {
+    async fn metrics(
+        &self,
+        _request: otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest,
+        _ctx: QueryContextRef,
+        _memory_limiter: Option<(servers::request_memory_limiter::ServerMemoryLimiter, u64)>,
+    ) -> Result<servers::query_handler::MetricsIngestOutcome> {
+        self.invoked();
+        Ok(Default::default())
+    }
+
+    async fn traces(
+        &self,
+        _pipeline_handler: servers::query_handler::PipelineHandlerRef,
+        _request: opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest,
+        _pipeline: pipeline::PipelineWay,
+        _pipeline_params: pipeline::GreptimePipelineParams,
+        _table_name: String,
+        _ctx: QueryContextRef,
+    ) -> Result<servers::query_handler::TraceIngestOutcome> {
+        self.invoked();
+        Ok(Default::default())
+    }
+
+    async fn logs(
+        &self,
+        _pipeline_handler: servers::query_handler::PipelineHandlerRef,
+        _request: opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest,
+        _pipeline: pipeline::PipelineWay,
+        _pipeline_params: pipeline::GreptimePipelineParams,
+        _table_name: String,
+        _ctx: QueryContextRef,
+    ) -> Result<Vec<Output>> {
+        self.invoked();
+        Ok(vec![Output::new_with_affected_rows(0)])
+    }
+}
+
 pub struct DummyInstance {
     query_engine: QueryEngineRef,
 }
@@ -81,6 +223,17 @@ impl RecordingCopyInHandler {
 
 #[async_trait]
 impl CopyInHandler for RecordingCopyInHandler {
+    // The catalog restriction is an Instance concern; this test double
+    // records writes and accepts every scope.
+    async fn copy_in_validate_scope(
+        &self,
+        _catalog: &str,
+        _schema: &str,
+        _query_ctx: QueryContextRef,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn copy_in_table(
         &self,
         catalog: &str,

@@ -88,17 +88,34 @@ impl PgUserProviderSource {
         Self { user_provider }
     }
 
-    /// Authorizes a request that changes the connection's catalog/schema scope.
+    /// Authorizes a request that changes the connection's catalog/schema
+    /// scope (a qualified COPY target). Denials are metered and logged
+    /// like startup authorization, minus the client address which is not
+    /// reachable here.
     pub(crate) async fn authorize_database(
         &self,
         catalog: &str,
         schema: &str,
         user_info: &UserInfoRef,
     ) -> PgWireResult<()> {
-        self.user_provider
+        match self
+            .user_provider
             .authorize(catalog, schema, user_info)
             .await
-            .map_err(|e| PgWireError::ApiError(Box::new(AuthSnafu.into_error(e))))
+        {
+            Err(e) => {
+                record_auth_failure(e.status_code());
+                if e.status_code().should_log_error() {
+                    error!(e; user = user_info.username(), protocol = "postgres", catalog = %catalog,
+                        schema = %schema, reason = %e.status_code(), "COPY target authorization failed");
+                } else {
+                    warn!(user = user_info.username(), protocol = "postgres", catalog = %catalog,
+                        schema = %schema, reason = %e.status_code(), "COPY target authorization denied");
+                }
+                Err(PgWireError::ApiError(Box::new(AuthSnafu.into_error(e))))
+            }
+            Ok(()) => Ok(()),
+        }
     }
 
     /// (user, catalog, schema) of this login. Catalog/schema are parsed from
