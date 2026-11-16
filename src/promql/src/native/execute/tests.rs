@@ -12500,6 +12500,91 @@ fn a_quantile_bills_a_shared_buffer_once() {
     assert_eq!(groups_of(&quantile), groups_of(&minimum));
 }
 
+/// A `quantile` bills the allocation its chunks' slices point into, once, and not the rows it holds of
+/// it.
+///
+/// A one-row chunk of a 100 000-row batch keeps that batch's whole 800 KB buffer resident, so that is
+/// what retaining it costs: its row is eight bytes, and a figure that stopped at the rows would leave
+/// the buffer the chunk pins to nothing -- a chunk holding a small slice of a large batch under-billed
+/// by everything the batch holds. One allocation is also one however many chunks slice it, so a second
+/// one-row chunk of the same batch is charged its descriptors and not the buffer again: billing every
+/// chunk for the buffer it slices would refuse an input whose buffer fits the pool.
+#[test]
+fn a_quantile_bills_the_allocation_its_slices_point_into_once() {
+    const ROWS: usize = 100_000;
+    // What the batch's values occupy, and so what one chunk of it keeps alive however few rows it
+    // holds of it.
+    let residency = ROWS * std::mem::size_of::<f64>();
+    let grid = grid(0, 1, ROWS as u64);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let batch = Float64Array::from((0..ROWS).map(|row| row as f64).collect::<Vec<f64>>());
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        BoundAggregate {
+            kind: AggregateKind::Quantile { quantile: 0.5 },
+            group: Grouping::By(Arc::new([])),
+            stage: AggregateStage::Complete,
+        },
+    ))
+    .unwrap();
+    let pool = bounded_pool(16 * residency);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+
+    // The first row of the batch, which is a slice of the whole buffer.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_array_chunk_of(&schema, metric(), 0, batch.slice(0, 1), false),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the quantile answered before its input ended"
+    );
+    let one = execution.state().reserved_bytes();
+    assert!(
+        one >= residency,
+        "a retained chunk holding one row of a {residency}-byte buffer is charged {one} bytes, less \
+         than the buffer it keeps alive"
+    );
+
+    // A second row of the same buffer: the same allocation, sliced again.
+    let second = evaluated_array_chunk_of(&schema, metric(), 1, batch.slice(1, 1), true);
+    execution
+        .push_evaluated(InputId::new(0), second.clone())
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the quantile answered before its input ended"
+    );
+    let both = execution.state().reserved_bytes();
+    assert!(
+        both < residency + residency / 2,
+        "two chunks slicing one {residency}-byte buffer are charged {both} bytes, so the buffer is \
+         counted once per chunk rather than once"
+    );
+    // What the second chunk cost is its own descriptors and the slot it takes in the vector: the
+    // allocation it slices is already billed, and its `Series` is that slot rather than a second
+    // figure beside it. The delta is exact, because the settle reads back the capacity the vector
+    // really holds, so a chunk billed twice -- or a buffer billed again -- shows up here.
+    let second_cost = both.saturating_sub(one);
+    let expected = super::chunk_bytes_beside_samples(&second.series)
+        .saturating_add(std::mem::size_of::<Series>());
+    assert!(
+        second_cost <= expected,
+        "the second chunk of one allocation cost {second_cost} bytes, more than the {expected} its \
+         own descriptors and one slot hold"
+    );
+
+    // Both rows are one member of the one group, so each point answers from its own row.
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        groups_of(&output),
+        vec![unlabelled(vec![(0, Some(0.0)), (1, Some(1.0))])]
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
 /// A `quantile` skips a histogram sample and says so, exactly as `min` does.
 ///
 /// The φ-quantile orders the values of its group and a native histogram is not one it can order, so
