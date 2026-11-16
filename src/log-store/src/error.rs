@@ -93,6 +93,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Object store WAL I/O permit is already installed"))]
+    WalIoPermitAlreadyInstalled {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Log store not started yet"))]
     IllegalState {
         #[snafu(implicit)]
@@ -562,13 +568,14 @@ impl ErrorExt for Error {
             | WalObjectConflict { .. }
             | WalObjectSequenceExhausted { .. }
             | WalEntryPositionExhausted { .. } => StatusCode::Unexpected,
-            WalObjectSequenceUnsettled { .. } => StatusCode::IllegalState,
+            WalObjectSequenceUnsettled { .. } | WalIoPermitAlreadyInstalled { .. } => {
+                StatusCode::IllegalState
+            }
 
             InvalidWalObject { source, .. } => source.status_code(),
             ObjectStoreWal { source, .. } => source.status_code(),
-            ObjectStoreWalFailing { .. } | ObjectStoreWalLeaseExpired { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            ObjectStoreWalFailing { .. } => StatusCode::StorageUnavailable,
+            ObjectStoreWalLeaseExpired { .. } => StatusCode::RegionNotReady,
 
             // Object store related errors
             WalObjectStore { .. }
@@ -609,8 +616,8 @@ impl ErrorExt for Error {
             | WalObjectSequenceUnsettled { .. }
             | StaleWalObject { .. }
             | UnconfirmedWalEpochStart { .. }
-            | ObjectStoreWalFailing { .. }
-            | ObjectStoreWalLeaseExpired { .. } => RetryHint::Retryable,
+            | ObjectStoreWalFailing { .. } => RetryHint::Retryable,
+            ObjectStoreWalLeaseExpired { .. } => RetryHint::RetryAfterRouteRefresh,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)

@@ -625,14 +625,23 @@ async fn test_node_lease_fences_wal_and_renews_without_region_grants() {
         .create_engine_with_object_store_wal(MitoConfig::default(), &held_wal_config())
         .await;
     engine.require_write_lease();
-    log_store.set_io_permit(engine.object_store_wal_io_permit());
+    log_store
+        .set_io_permit(engine.object_store_wal_io_permit())
+        .unwrap();
     let region_id = RegionId::new(1, 1);
     let (_, schema, deadline) = create_leased_region_on(&engine, region_id).await;
     engine.renew_node_lease(deadline);
     put_range(&engine, region_id, &schema, 0, 3).await;
     engine.freeze_lease_clock(deadline);
     let error = log_store.seal_open_batch().await.unwrap_err();
-    assert!(error.retry_hint().is_retryable());
+    assert_eq!(
+        common_error::status_code::StatusCode::RegionNotReady,
+        error.status_code()
+    );
+    assert_eq!(
+        common_error::ext::RetryHint::RetryAfterRouteRefresh,
+        error.retry_hint()
+    );
     assert!(stored_entry_ids(&log_store, region_id).await.is_empty());
 
     // Node renewal, including an empty heartbeat grant list, unblocks WAL I/O

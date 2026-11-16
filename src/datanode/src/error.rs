@@ -331,7 +331,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Object store WAL requires the cluster acceptance plugin when controlled by metasrv"
+        "Object store WAL supports standalone only in this build; metasrv-controlled deployment requires a build with distributed object-store WAL integration"
     ))]
     ObjectStoreWalNotStandalone {
         #[snafu(implicit)]

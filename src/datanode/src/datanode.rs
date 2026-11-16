@@ -412,7 +412,10 @@ impl DatanodeBuilder {
         if controlled_by_metasrv && let Some(mito) = region_server.mito_engine() {
             mito.require_write_lease();
             if let Some(log_store) = &self.object_store_log_store {
-                log_store.set_io_permit(mito.object_store_wal_io_permit());
+                log_store
+                    .set_io_permit(mito.object_store_wal_io_permit())
+                    .map_err(Box::new)
+                    .context(OpenLogStoreSnafu)?;
             }
         }
 
