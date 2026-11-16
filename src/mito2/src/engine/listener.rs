@@ -145,8 +145,8 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener that the index build task is aborted.
     async fn on_index_build_abort(&self, _region_file_id: RegionFileId) {}
 
-    /// Notifies the listener that the worker learned an index build task stopped. The worker
-    /// applied an index the task committed before it learned of the stop.
+    /// Notifies the listener that the worker learned an index build task stopped, after it
+    /// handled any completion the task reported before.
     async fn on_index_build_stopped(&self, _region_file_id: RegionFileId) {}
 
     /// Notifies the listener after the final source check and before manifest publication.

@@ -1328,21 +1328,24 @@ impl EngineInner {
         let region = self.find_region(region_id)?;
         let was_leader = region.region_role() == RegionRole::Leader;
         let was_writable = region.is_writable();
-        let could_replay = region.can_replay_tails();
         region.set_role(role);
         if role == RegionRole::Leader && !was_leader {
             // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
             region.manifest_ctx.record_leader_lease(Instant::now());
         }
-        self.notify_if_became_unwritable(&region, could_replay);
+        self.notify_if_unwritable(&region);
         self.notify_if_became_writable(&region, was_writable);
         Ok(())
     }
 
-    /// Asks the worker to cancel the tail replay of `region` if a role change left it unable to
-    /// replay. A replay may wait on I/O that never notices the role change.
-    fn notify_if_became_unwritable(&self, region: &MitoRegionRef, could_replay: bool) {
-        if could_replay && !region.can_replay_tails() {
+    /// Asks the worker to cancel the tail replay of `region` if, after a role change, it cannot
+    /// replay its tails. A replay may wait on I/O that never notices the role change. It does
+    /// not compare with the role before the change, which a concurrent promotion may have
+    /// changed meanwhile. A notice no replay needs does nothing: [WorkerGroup::notify_unwritable]
+    /// skips a region without pending tails, and the worker skips a replaced instance and a
+    /// region without a running replay.
+    fn notify_if_unwritable(&self, region: &MitoRegionRef) {
+        if !region.can_replay_tails() {
             self.workers.notify_unwritable(region);
         }
     }
@@ -1707,10 +1710,8 @@ impl RegionEngine for MitoEngine {
             self.inner.notify_if_became_writable(&region, was_writable);
             return Ok(promoted);
         }
-        let could_replay = region.can_replay_tails();
         region.set_role(role);
-        self.inner
-            .notify_if_became_unwritable(&region, could_replay);
+        self.inner.notify_if_unwritable(&region);
         Ok(true)
     }
 

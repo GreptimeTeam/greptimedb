@@ -44,7 +44,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     PathType, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest, RegionDropRequest,
-    RegionRequest, RegionTruncateRequest,
+    RegionFlushRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -1814,7 +1814,7 @@ async fn test_fence_for_reload_rechecks_version_and_role(
     let mito_region = region.engine.get_region(region.region_id).unwrap();
     let manifest_ctx = &mito_region.manifest_ctx;
     let mut manager = manifest_ctx.manifest_manager.write().await;
-    let installed = manager.last_version() + u64::from(version_changed);
+    let installed = manager.manifest().manifest_version + u64::from(version_changed);
 
     let fenced = manifest_ctx
         .fence_for_reload_if_unchanged(&mut manager, region.region_id, installed)
@@ -1899,4 +1899,89 @@ async fn test_unwritable_notice_of_replaced_instance_keeps_replay() {
     region.wait_until_replayed().await;
 
     assert_eq!(1, region.listener.commits());
+}
+
+/// Fails the first write of a manifest delta before anything is stored.
+fn fail_delta_write(version: Arc<AtomicU64>) -> MockLayer {
+    let armed = Arc::new(AtomicBool::new(true));
+    MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _args, inner| {
+            let target = delta_file(version.load(Ordering::Relaxed));
+            if path.contains(&target) && armed.swap(false, Ordering::Relaxed) {
+                Box::new(FailedWriter)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap()
+}
+
+struct FailedWriter;
+
+impl Write for FailedWriter {
+    async fn write(&mut self, _bs: Buffer) -> MockResult<()> {
+        Err(MockError::new(ErrorKind::Unexpected, "write failed"))
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        Err(MockError::new(ErrorKind::Unexpected, "write failed"))
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_failed_replay_reloads_region_after_failed_commit() {
+    let version = Arc::new(AtomicU64::new(u64::MAX));
+    let region = TestRegion::new(
+        "tail-replay-failed-commit-reload",
+        false,
+        Some(fail_delta_write(version.clone())),
+    )
+    .await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    region.delete_remote_objects().await;
+    region.catchup().await;
+    wait_until(|| region.listener.failed()).await;
+
+    // A failed flush commit takes the next version number without installing it.
+    let old = region.engine.get_region(region.region_id).unwrap();
+    let next = next_manifest_version(&old).await;
+    version.store(next, Ordering::Relaxed);
+    let flush = RegionRequest::Flush(RegionFlushRequest::default());
+    assert!(
+        region
+            .engine
+            .handle_request(region.region_id, flush)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        next,
+        old.manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .last_version()
+    );
+
+    // Another writer then publishes that version, clearing the tails.
+    let action_list =
+        RegionMetaActionList::with_action(RegionMetaAction::Edit(pending_tails_edit(vec![])));
+    publish_delta(
+        &region.env.get_object_store().unwrap(),
+        &region.region_dir(),
+        next,
+        encode_delta(action_list).await,
+    )
+    .await;
+    wait_until(|| is_replaced(&region.engine, &old)).await;
+
+    assert!(!region.has_pending_tails());
 }

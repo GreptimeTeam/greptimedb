@@ -1545,11 +1545,12 @@ impl ManifestContext {
 
     /// Returns the installed manifest version if the storage holds a newer one. The version is
     /// read under the manifest read lock, which is not held across the listing, so a caller
-    /// rechecks it under the write lock before acting on it.
+    /// rechecks it under the write lock before acting on it. It is the installed version, not
+    /// `last_version`, which a failed commit leaves ahead of it.
     pub(crate) async fn installed_version_if_updated(&self) -> Result<Option<ManifestVersion>> {
         let (store, installed) = {
             let manager = self.manifest_manager.read().await;
-            (manager.store(), manager.last_version())
+            (manager.store(), manager.manifest().manifest_version)
         };
         // Lists without the read lock: held across the listing, it would let a queued writer
         // block every later reader.
@@ -1568,7 +1569,7 @@ impl ManifestContext {
         expected_version: ManifestVersion,
     ) -> bool {
         let state = self.state.load();
-        let version = manager.last_version();
+        let version = manager.manifest().manifest_version;
         if state != RegionRoleState::Leader(RegionLeaderState::Writable)
             || version != expected_version
         {
