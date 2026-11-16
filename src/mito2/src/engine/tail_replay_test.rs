@@ -1826,10 +1826,14 @@ async fn test_fence_for_reload_rechecks_version_and_role(
 }
 
 #[rstest]
-#[case::set_role(false)]
-#[case::set_role_with_lease(true)]
+#[case::set_role(false, false)]
+#[case::set_role_with_lease(true, false)]
+#[case::set_role_of_follower(false, true)]
 #[tokio::test]
-async fn test_direct_demotion_ends_stalled_replay(#[case] with_lease: bool) {
+async fn test_direct_demotion_ends_stalled_replay(
+    #[case] with_lease: bool,
+    #[case] already_follower: bool,
+) {
     let stall = Arc::new(AtomicBool::new(false));
     let stalled = Arc::new(AtomicUsize::new(0));
     let layer = stall_remote_listings(stall.clone(), stalled.clone());
@@ -1842,6 +1846,14 @@ async fn test_direct_demotion_ends_stalled_replay(#[case] with_lease: bool) {
     stall.store(true, Ordering::Relaxed);
     region.catchup().await;
     wait_until(|| stalled.load(Ordering::Relaxed) > 0).await;
+    if already_follower {
+        // Demotes without telling the worker, as a role change racing the setter would.
+        region
+            .engine
+            .get_region(region.region_id)
+            .unwrap()
+            .set_role(RegionRole::Follower);
+    }
 
     if with_lease {
         let now = Instant::now();

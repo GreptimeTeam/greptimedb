@@ -113,8 +113,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.schedule_compaction(&region).await;
     }
 
-    /// Cancels the tail replay of the region unless `region`, the instance a role change made
-    /// unable to replay, was replaced since.
+    /// Cancels the tail replay of the region unless `region`, the instance that could not replay
+    /// its tails after its role was set outside the worker, was replaced since.
     pub(crate) fn handle_region_became_unwritable(
         &self,
         region_id: RegionId,
@@ -147,8 +147,8 @@ pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &M
     });
 }
 
-/// Asks the worker to cancel the tail replay of a region that a role change outside the worker
-/// made unable to replay, if it has pending tails, without waiting. A replay the cancel reaches
+/// Asks the worker to cancel the tail replay of a region that cannot replay its tails after its
+/// role was set outside the worker, if it has pending tails, without waiting. A replay the cancel reaches
 /// after the region became writable again ends and the worker starts another.
 pub(crate) fn notify_unwritable(sender: &Sender<WorkerRequestWithTime>, region: &MitoRegionRef) {
     if !region.version().has_pending_tails() {
