@@ -27,8 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{
     EncodedSstIndexBuildParams, FilePathProvider, Metrics, OperationType, RegionFilePathFactory,
-    SstInfoArray, SstWriteRequest, TempFileCleaner, WriteCachePathProvider, WriteType,
-    new_fs_cache_store,
+    SstInfoArray, SstWriteRequest, TempFileCleaner, WriteCachePathProvider, new_fs_cache_store,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::cache::manifest_cache::ManifestCache;
@@ -179,6 +178,7 @@ impl WriteCache {
     ///
     /// Builds the SST's indexes from `data` when `index_build_params` is set and uploads them
     /// with the SST.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn put_and_upload_sst(
         &self,
         data: &bytes::Bytes,
@@ -187,10 +187,10 @@ impl WriteCache {
         upload_request: SstUploadRequest,
         write_buffer_size: ReadableSize,
         index_build_params: Option<EncodedSstIndexBuildParams>,
-    ) -> Result<Metrics> {
+        metrics: &mut Metrics,
+    ) -> Result<()> {
         let file_id = sst_info.file_id;
         let region_file_id = RegionFileId::new(region_id, file_id);
-        let mut metrics = Metrics::new(WriteType::Flush);
 
         // Create index key for the SST file
         let parquet_key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -276,7 +276,7 @@ impl WriteCache {
                 .await;
             return Err(e);
         }
-        Ok(metrics)
+        Ok(())
     }
 
     /// Returns the intermediate manager of the write cache.
@@ -685,7 +685,7 @@ mod tests {
     use store_api::storage::FileId;
 
     use super::*;
-    use crate::access_layer::OperationType;
+    use crate::access_layer::{OperationType, WriteType};
     use crate::cache::file_cache::IndexValue;
     use crate::cache::test_util::{assert_parquet_metadata_equal, new_fs_store};
     use crate::cache::{CacheManager, CacheStrategy};

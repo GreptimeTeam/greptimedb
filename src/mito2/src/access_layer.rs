@@ -26,12 +26,14 @@ use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
 use object_store::{ATOMIC_WRITE_DIR, ErrorKind, OLD_ATOMIC_WRITE_DIR, ObjectStore};
 use parquet::file::metadata::PageIndexPolicy;
+use prometheus::HistogramVec;
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::sst_entry::StorageSstEntry;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
+use strum::IntoStaticStr;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
@@ -40,7 +42,7 @@ use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, Inverte
 use crate::error::{
     CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
 };
-use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
+use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED, TAIL_REPLAY_ELAPSED};
 use crate::read::FlatSource;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
@@ -60,12 +62,14 @@ pub type AccessLayerRef = Arc<AccessLayer>;
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
 
 /// Write operation type.
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone, Copy, IntoStaticStr)]
 pub enum WriteType {
     /// Writes from flush
     Flush,
     /// Writes from compaction.
     Compaction,
+    /// Writes from the replay of pending WAL tails.
+    TailReplay,
 }
 
 #[derive(Debug)]
@@ -104,47 +108,28 @@ impl Metrics {
     }
 
     pub(crate) fn observe(self) {
-        match self.write_type {
-            WriteType::Flush => {
-                FLUSH_ELAPSED
-                    .with_label_values(&["iter_source"])
-                    .observe(self.iter_source.as_secs_f64());
-                FLUSH_ELAPSED
-                    .with_label_values(&["write_batch"])
-                    .observe(self.write_batch.as_secs_f64());
-                FLUSH_ELAPSED
-                    .with_label_values(&["update_index"])
-                    .observe(self.update_index.as_secs_f64());
-                FLUSH_ELAPSED
-                    .with_label_values(&["upload_parquet"])
-                    .observe(self.upload_parquet.as_secs_f64());
-                FLUSH_ELAPSED
-                    .with_label_values(&["upload_puffin"])
-                    .observe(self.upload_puffin.as_secs_f64());
-                if !self.compact_memtable.is_zero() {
-                    FLUSH_ELAPSED
-                        .with_label_values(&["compact_memtable"])
-                        .observe(self.upload_puffin.as_secs_f64());
-                }
-            }
-            WriteType::Compaction => {
-                COMPACTION_STAGE_ELAPSED
-                    .with_label_values(&["iter_source"])
-                    .observe(self.iter_source.as_secs_f64());
-                COMPACTION_STAGE_ELAPSED
-                    .with_label_values(&["write_batch"])
-                    .observe(self.write_batch.as_secs_f64());
-                COMPACTION_STAGE_ELAPSED
-                    .with_label_values(&["update_index"])
-                    .observe(self.update_index.as_secs_f64());
-                COMPACTION_STAGE_ELAPSED
-                    .with_label_values(&["upload_parquet"])
-                    .observe(self.upload_parquet.as_secs_f64());
-                COMPACTION_STAGE_ELAPSED
-                    .with_label_values(&["upload_puffin"])
-                    .observe(self.upload_puffin.as_secs_f64());
-            }
+        let elapsed: &HistogramVec = match self.write_type {
+            WriteType::Flush => &FLUSH_ELAPSED,
+            WriteType::Compaction => &COMPACTION_STAGE_ELAPSED,
+            WriteType::TailReplay => &TAIL_REPLAY_ELAPSED,
         };
+        let stages = [
+            ("iter_source", self.iter_source),
+            ("write_batch", self.write_batch),
+            ("update_index", self.update_index),
+            ("upload_parquet", self.upload_parquet),
+            ("upload_puffin", self.upload_puffin),
+        ];
+        for (stage, duration) in stages {
+            elapsed
+                .with_label_values(&[stage])
+                .observe(duration.as_secs_f64());
+        }
+        if !self.compact_memtable.is_zero() {
+            elapsed
+                .with_label_values(&["compact_memtable"])
+                .observe(self.compact_memtable.as_secs_f64());
+        }
     }
 }
 
@@ -553,6 +538,7 @@ impl AccessLayer {
     ///
     /// Builds the SST's indexes from `data` into `sst_info.index_metadata` when
     /// `index_build_params` is set.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn put_sst(
         &self,
         data: &bytes::Bytes,
@@ -561,7 +547,8 @@ impl AccessLayer {
         cache_manager: &CacheManagerRef,
         write_buffer_size: ReadableSize,
         index_build_params: Option<EncodedSstIndexBuildParams>,
-    ) -> Result<Metrics> {
+        metrics: &mut Metrics,
+    ) -> Result<()> {
         let region_file_id = RegionFileId::new(region_id, sst_info.file_id);
         if let Some(write_cache) = cache_manager.write_cache() {
             // Write to cache and upload to remote store
@@ -580,6 +567,7 @@ impl AccessLayer {
                     upload_request,
                     write_buffer_size,
                     index_build_params,
+                    metrics,
                 )
                 .await
         } else {
@@ -603,7 +591,6 @@ impl AccessLayer {
                 cleaner.clean_by_file_id(region_file_id.file_id()).await;
                 return Err(err);
             }
-            let mut metrics = Metrics::new(WriteType::Flush);
             metrics.write_batch = start.elapsed();
 
             if let Some(params) = index_build_params {
@@ -618,7 +605,7 @@ impl AccessLayer {
                     build_index_from_parquet_bytes(&builder, region_file_id, data).await;
                 metrics.update_index = start.elapsed();
             }
-            Ok(metrics)
+            Ok(())
         }
     }
 
@@ -972,6 +959,7 @@ mod tests {
                 &cache_manager,
                 ReadableSize(chunk_size as u64),
                 None,
+                &mut Metrics::new(WriteType::Flush),
             )
             .await
             .unwrap();
