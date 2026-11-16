@@ -1847,6 +1847,7 @@ async fn test_direct_demotion_ends_stalled_replay(#[case] with_lease: bool) {
                 RegionRole::Follower,
                 now,
                 now + Duration::from_secs(10),
+                None,
             )
             .unwrap();
     } else {
