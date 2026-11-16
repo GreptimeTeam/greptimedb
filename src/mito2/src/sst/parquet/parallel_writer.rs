@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use common_base::cancellation::Cancelled;
 use common_runtime::JoinHandle;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -31,6 +32,7 @@ use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
+use tokio_util::sync::CancellationToken;
 
 /// Runtime whose blocking pool encodes the columns of a writer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -90,6 +92,7 @@ pub struct ParallelArrowWriter<W> {
     /// Tasks encoding the previous row group.
     encoding: Vec<JoinHandle<Result<EncodedFields>>>,
     num_row_groups: usize,
+    cancellation: Option<CancellationToken>,
 }
 
 impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
@@ -137,13 +140,20 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
             buffered_rows: 0,
             encoding: Vec::new(),
             num_row_groups: 0,
+            cancellation: None,
         })
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: Option<CancellationToken>) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     /// Buffers `batch`, starting to encode each row group once it is full.
     pub async fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         let mut offset = 0;
         while offset < batch.num_rows() {
+            check_cancelled(self.cancellation.as_ref())?;
             let len = (self.max_row_group_rows - self.buffered_rows).min(batch.num_rows() - offset);
             self.buffered.push(batch.slice(offset, len));
             self.buffered_rows += len;
@@ -165,6 +175,11 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
 
     /// Writes the remaining rows and the footer, then completes the async writer.
     pub async fn close(mut self) -> Result<ParquetMetaData> {
+        self.finish().await
+    }
+
+    /// Finalizes the file while retaining the upload for abort if it fails.
+    pub(crate) async fn finish(&mut self) -> Result<ParquetMetaData> {
         self.flush().await?;
         let metadata = self.file_writer.finish()?;
         self.write_buffered_bytes().await?;
@@ -173,9 +188,10 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
     }
 
     /// Discards buffered input and waits for encoders without writing a failed SST.
-    pub(crate) async fn abort(mut self) {
+    pub(crate) async fn abort(mut self) -> W {
         self.buffered.clear();
         abort_encoding_tasks(&mut self.encoding).await;
+        self.async_writer
     }
 
     /// Installs controlled tasks to test SST write-error cleanup independently of codec timing.
@@ -191,6 +207,7 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
     /// Starts encoding the buffered rows once the previous row group is written.
     async fn encode_buffered(&mut self) -> Result<()> {
         self.finish_encoding().await?;
+        check_cancelled(self.cancellation.as_ref())?;
 
         let batches: Arc<[RecordBatch]> = mem::take(&mut self.buffered).into();
         self.buffered_rows = 0;
@@ -209,8 +226,9 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
             .map(|fields| {
                 let batches = batches.clone();
                 let schema = self.arrow_schema.clone();
+                let cancellation = self.cancellation.clone();
                 self.runtime
-                    .spawn(move || encode_fields(&schema, &batches, fields))
+                    .spawn(move || encode_fields(&schema, &batches, fields, cancellation.as_ref()))
             })
             .collect();
         Ok(())
@@ -301,17 +319,26 @@ fn assign_fields(
         .collect()
 }
 
+fn check_cancelled(cancellation: Option<&CancellationToken>) -> Result<()> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(ParquetError::External(Box::new(Cancelled)));
+    }
+    Ok(())
+}
+
 /// Encodes `fields` of all `batches` and closes their column writers.
 fn encode_fields(
     schema: &SchemaRef,
     batches: &[RecordBatch],
     fields: Vec<FieldWriters>,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<EncodedFields> {
     let mut chunks = Vec::new();
     let mut costs = Vec::with_capacity(fields.len());
     for (field, mut writers) in fields {
         let start = Instant::now();
         for batch in batches {
+            check_cancelled(cancellation)?;
             let leaves = compute_leaves(schema.field(field), batch.column(field))?;
             if leaves.len() != writers.len() {
                 return Err(ParquetError::General(format!(
@@ -322,10 +349,12 @@ fn encode_fields(
                 )));
             }
             for (leaf, (_, writer)) in leaves.iter().zip(writers.iter_mut()) {
+                check_cancelled(cancellation)?;
                 writer.write(leaf)?;
             }
         }
         for (leaf, writer) in writers {
+            check_cancelled(cancellation)?;
             chunks.push((leaf, writer.close()?));
         }
         costs.push((field, start.elapsed()));
@@ -534,8 +563,12 @@ mod tests {
         let running = runtime.spawn_blocking(move || {
             started_tx.send(()).unwrap();
             release_rx.blocking_recv().unwrap();
-            let _encoded =
-                encode_fields(&schema(), &running_batches, vec![(0, vec![(0, column)])])?;
+            let _encoded = encode_fields(
+                &schema(),
+                &running_batches,
+                vec![(0, vec![(0, column)])],
+                None,
+            )?;
             Err(ParquetError::General("later encoding failure".to_string()))
         });
         // With one blocking thread, this also proves the first task has ended.

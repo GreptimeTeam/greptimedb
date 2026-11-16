@@ -21,7 +21,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
-use common_base::cancellation::CancellableFuture;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
@@ -537,11 +536,11 @@ impl RegionFlushTask {
         // that acknowledges appends before their entries are durable can have
         // handed out `last_entry_id` for an entry that is still in its backlog.
         // A DDL that cancels the flush must not wait behind that upload.
-        let durable = self.durability_barrier.wait(version_data.last_entry_id);
-        tokio::pin!(durable);
-        match CancellableFuture::new(durable.as_mut(), state.cancel_handle()).await {
-            Ok(result) => result?,
-            Err(_) => return FlushCancelledSnafu.fail(),
+        let cancellation = state.cancel_token();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return FlushCancelledSnafu.fail(),
+            result = self.durability_barrier.wait(version_data.last_entry_id) => result?,
         }
 
         let edit = RegionEdit {
@@ -803,12 +802,17 @@ impl RegionFlushTask {
             .collect::<Vec<_>>();
         let join_all = futures::future::join_all(tasks);
         tokio::pin!(join_all);
-        let results = match CancellableFuture::new(join_all.as_mut(), state.cancel_handle()).await {
-            Ok(results) => results
+        let cancellation = state.cancel_token();
+        let results = match tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            results = join_all.as_mut() => Some(results),
+        } {
+            Some(results) => results
                 .into_iter()
                 .map(|result| result.context(JoinSnafu))
                 .collect::<Result<Vec<_>>>()?,
-            Err(_) => {
+            None => {
                 for handle in abort_handles {
                     handle.abort();
                 }
