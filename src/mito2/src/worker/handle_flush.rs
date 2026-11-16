@@ -285,6 +285,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             manifest_ctx: region.manifest_ctx.clone(),
             sst_writer: MemtableSstWriter::new_flush(
                 region,
+                reason,
                 row_group_size,
                 engine_config,
                 self.cache_manager.clone(),

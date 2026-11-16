@@ -77,8 +77,8 @@ use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
-    CatchupRegions, CatchupRegionsRef, MitoRegion, MitoRegionRef, OpeningRegions,
-    OpeningRegionsRef, RegionMap, RegionMapRef,
+    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
+    RegionMapRef,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
@@ -428,7 +428,7 @@ impl WorkerGroup {
     }
 
     /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
-    pub(crate) fn notify_writable(&self, region: &MitoRegion) {
+    pub(crate) fn notify_writable(&self, region: &MitoRegionRef) {
         handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
     }
 

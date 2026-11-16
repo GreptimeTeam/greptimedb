@@ -87,7 +87,9 @@ pub(crate) struct TailReplayTask<S> {
     pub(crate) wal: Wal<S>,
     /// Writes the chunks, built by [TailReplayLimits::new_sst_writer].
     pub(crate) sst_writer: MemtableSstWriter,
+    /// Told of the task's steps.
     pub(crate) listener: WorkerListener,
+    /// Sends the task's results and its end to the worker.
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
     /// Limits of the node's tail replays.
     pub(crate) limits: TailReplayLimits,
@@ -377,7 +379,7 @@ impl<S: LogStore> TailReplayTask<S> {
             return Ok(Vec::new());
         }
         self.sst_writer
-            .write_ssts(&version, &self.state, uncommitted, None)
+            .write_ssts(&version, &self.state, uncommitted)
             .await
     }
 
@@ -552,6 +554,9 @@ pub(crate) struct TailReplayLimits {
 }
 
 impl TailReplayLimits {
+    /// Creates the limits of a node from `config`: [MAX_CONCURRENT_TAIL_REPLAYS] replays,
+    /// `max_background_flushes` SST writes and `global_write_buffer_size /`
+    /// [TAIL_REPLAY_MEMORY_FACTOR] bytes of chunk memory.
     pub(crate) fn new(config: &MitoConfig) -> Self {
         Self {
             replay_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TAIL_REPLAYS)),
@@ -583,12 +588,16 @@ impl TailReplayLimits {
 /// half the budget above their floors, and each of the [MAX_CONCURRENT_TAIL_REPLAYS] replays may
 /// always use a floor of an equal share of the other half.
 struct TailReplayMemory {
+    /// Bytes each replay's chunk may always use without a reservation.
     floor: usize,
+    /// Bytes the chunks share above their floors.
     pool: usize,
+    /// Bytes of the pool the chunks hold.
     reserved: AtomicUsize,
 }
 
 impl TailReplayMemory {
+    /// Splits `budget` into the floors and the pool.
     fn new(budget: usize) -> Self {
         Self {
             floor: budget / (2 * MAX_CONCURRENT_TAIL_REPLAYS),
@@ -614,6 +623,7 @@ impl TailReplayMemory {
             .is_ok()
     }
 
+    /// Returns `bytes` to the pool.
     fn release(&self, bytes: usize) {
         self.reserved.fetch_sub(bytes, Ordering::Relaxed);
     }
@@ -621,7 +631,9 @@ impl TailReplayMemory {
 
 /// The pool memory a chunk uses above its floor. It is released on drop.
 struct ChunkReservation<'a> {
+    /// Memory the reservation is taken from.
     memory: &'a TailReplayMemory,
+    /// Bytes of the pool the chunk holds.
     bytes: usize,
 }
 

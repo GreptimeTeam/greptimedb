@@ -23,7 +23,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::config::IndexBuildMode;
 use crate::manifest::action::{PendingTail, RegionEdit};
-use crate::region::{MitoRegion, MitoRegionRef};
+use crate::region::MitoRegionRef;
 use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
 use crate::schedule::CancellableTaskState;
 use crate::sst::index::IndexBuildType;
@@ -129,7 +129,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 /// Asks the worker to replay the pending tails of a region that became writable, if it has
 /// any, without waiting.
-pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &MitoRegion) {
+pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &MitoRegionRef) {
     if !region.version().has_pending_tails() {
         return;
     }

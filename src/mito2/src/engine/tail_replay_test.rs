@@ -73,8 +73,8 @@ use crate::request::{BackgroundNotify, WorkerRequest};
 use crate::sst::file::RegionFileId;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, nop_action,
-    put_rows, reopen_region, rows_schema,
+    CreateRequestBuilder, DeltaFaults, TestEnv, build_rows, build_rows_for_key, flush_region,
+    nop_action, put_rows, reopen_region, rows_schema,
 };
 use crate::time_provider::StdTimeProvider;
 use crate::wal::{EntryId, Wal};
@@ -378,6 +378,16 @@ impl TestRegion {
         let response = writer.write_to_wal().await.unwrap();
         store.stop().await.unwrap();
         response.last_entry_ids[&region_id]
+    }
+
+    /// Reopens the region with a tail in the WAL of [REMOTE_NODE_ID], deletes that WAL and
+    /// promotes the region, so its replay keeps failing.
+    async fn start_failing_remote_replay(&self) {
+        let last = self.write_remote_rows(self.region_id, 6, 9).await;
+        self.reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+            .await;
+        self.delete_remote_objects().await;
+        self.catchup().await;
     }
 
     /// Deletes every object of the WAL of [REMOTE_NODE_ID], so reading it fails.
@@ -1282,11 +1292,15 @@ async fn test_late_tail_commit_notice_keeps_synced_tails() {
     assert!(!region.has_pending_tails());
 }
 
-/// Parks every listing of the WAL of [REMOTE_NODE_ID] once `stall` is set, and counts them.
-fn stall_remote_listings(stall: Arc<AtomicBool>, stalled: Arc<AtomicUsize>) -> MockLayer {
+/// Parks every listing of a path `is_target` accepts once `stall` is set, and counts them.
+fn stall_listings(
+    is_target: fn(&str) -> bool,
+    stall: Arc<AtomicBool>,
+    stalled: Arc<AtomicUsize>,
+) -> MockLayer {
     MockLayerBuilder::default()
         .lister_factory(Arc::new(move |path, _args, inner| {
-            if path.starts_with(&remote_prefix()) && stall.load(Ordering::Relaxed) {
+            if is_target(path) && stall.load(Ordering::Relaxed) {
                 stalled.fetch_add(1, Ordering::Relaxed);
                 Box::new(StalledLister)
             } else {
@@ -1295,6 +1309,16 @@ fn stall_remote_listings(stall: Arc<AtomicBool>, stalled: Arc<AtomicUsize>) -> M
         }))
         .build()
         .unwrap()
+}
+
+/// Whether `path` is in the WAL of [REMOTE_NODE_ID].
+fn is_remote_wal(path: &str) -> bool {
+    path.starts_with(&remote_prefix())
+}
+
+/// Whether `path` is in a manifest directory.
+fn is_manifest(path: &str) -> bool {
+    path.contains("/manifest/")
 }
 
 struct StalledLister;
@@ -1312,7 +1336,7 @@ impl List for StalledLister {
 async fn test_stalled_remote_read_ends_when_region_stops(#[case] stop_engine: bool) {
     let stall = Arc::new(AtomicBool::new(false));
     let stalled = Arc::new(AtomicUsize::new(0));
-    let layer = stall_remote_listings(stall.clone(), stalled.clone());
+    let layer = stall_listings(is_remote_wal, stall.clone(), stalled.clone());
     let region =
         TestRegion::with_wal_layer("tail-replay-stalled-read", false, None, Some(layer)).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;
@@ -1342,7 +1366,7 @@ async fn test_stalled_remote_read_ends_when_region_stops(#[case] stop_engine: bo
 async fn test_replacing_region_cancels_its_replay() {
     let stall = Arc::new(AtomicBool::new(false));
     let stalled = Arc::new(AtomicUsize::new(0));
-    let layer = stall_remote_listings(stall.clone(), stalled.clone());
+    let layer = stall_listings(is_remote_wal, stall.clone(), stalled.clone());
     let region = TestRegion::with_wal_layer("tail-replay-replaced", false, None, Some(layer)).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;
     region
@@ -1567,12 +1591,7 @@ async fn test_replay_writes_chunk_when_memory_budget_is_exhausted() {
 #[tokio::test]
 async fn test_failed_replay_reloads_region_from_newer_manifest() {
     let region = TestRegion::new("tail-replay-failed-reload", false, None).await;
-    let last = region.write_remote_rows(region.region_id, 6, 9).await;
-    region
-        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
-        .await;
-    region.delete_remote_objects().await;
-    region.catchup().await;
+    region.start_failing_remote_replay().await;
     wait_until(|| region.listener.failed()).await;
 
     // Another writer clears the tails, which nothing can replay any more.
@@ -1639,33 +1658,13 @@ async fn test_replayed_ssts_build_index_as_flushed(#[case] create_on_flush: bool
     assert_eq!(create_on_flush, has_index);
 }
 
-/// Parks every listing of a manifest directory once `stall` is set, and counts them.
-fn stall_manifest_listings(stall: Arc<AtomicBool>, stalled: Arc<AtomicUsize>) -> MockLayer {
-    MockLayerBuilder::default()
-        .lister_factory(Arc::new(move |path, _args, inner| {
-            if path.contains("/manifest/") && stall.load(Ordering::Relaxed) {
-                stalled.fetch_add(1, Ordering::Relaxed);
-                Box::new(StalledLister)
-            } else {
-                inner
-            }
-        }))
-        .build()
-        .unwrap()
-}
-
 #[tokio::test]
 async fn test_stalled_manifest_check_ends_when_region_closes() {
     let stall = Arc::new(AtomicBool::new(false));
     let stalled = Arc::new(AtomicUsize::new(0));
-    let layer = stall_manifest_listings(stall.clone(), stalled.clone());
+    let layer = stall_listings(is_manifest, stall.clone(), stalled.clone());
     let region = TestRegion::new("tail-replay-stalled-check", false, Some(layer)).await;
-    let last = region.write_remote_rows(region.region_id, 6, 9).await;
-    region
-        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
-        .await;
-    region.delete_remote_objects().await;
-    region.catchup().await;
+    region.start_failing_remote_replay().await;
     // A failed round checks the manifest for an update, which stalls.
     stall.store(true, Ordering::Relaxed);
     wait_until(|| stalled.load(Ordering::Relaxed) > 0).await;
@@ -1758,12 +1757,7 @@ async fn test_flush_runs_while_replay_writes_are_saturated() {
 #[tokio::test]
 async fn test_replay_waiting_to_fence_ends_when_demoted() {
     let region = TestRegion::new("tail-replay-fence-wait", false, None).await;
-    let last = region.write_remote_rows(region.region_id, 6, 9).await;
-    region
-        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
-        .await;
-    region.delete_remote_objects().await;
-    region.catchup().await;
+    region.start_failing_remote_replay().await;
     wait_until(|| region.listener.failed()).await;
 
     // The next failed round finds the newer manifest and waits for the write lock behind
@@ -1832,7 +1826,7 @@ async fn test_fence_for_reload_rechecks_version_and_role(
 async fn test_direct_demotion_ends_stalled_replay(#[case] with_lease: bool) {
     let stall = Arc::new(AtomicBool::new(false));
     let stalled = Arc::new(AtomicUsize::new(0));
-    let layer = stall_remote_listings(stall.clone(), stalled.clone());
+    let layer = stall_listings(is_remote_wal, stall.clone(), stalled.clone());
     let region =
         TestRegion::with_wal_layer("tail-replay-direct-demotion", false, None, Some(layer)).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;
@@ -1870,7 +1864,7 @@ async fn test_direct_demotion_ends_stalled_replay(#[case] with_lease: bool) {
 }
 
 #[tokio::test]
-async fn test_cannot_replay_notice_of_replaced_instance_keeps_replay() {
+async fn test_late_demotion_notice_of_replaced_instance_keeps_replay() {
     let region = TestRegion::new("tail-replay-stale-notice", false, None).await;
     region
         .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
@@ -1901,59 +1895,22 @@ async fn test_cannot_replay_notice_of_replaced_instance_keeps_replay() {
     assert_eq!(1, region.listener.commits());
 }
 
-/// Fails the first write of a manifest delta before anything is stored.
-fn fail_delta_write(version: Arc<AtomicU64>) -> MockLayer {
-    let armed = Arc::new(AtomicBool::new(true));
-    MockLayerBuilder::default()
-        .writer_factory(Arc::new(move |path, _args, inner| {
-            let target = delta_file(version.load(Ordering::Relaxed));
-            if path.contains(&target) && armed.swap(false, Ordering::Relaxed) {
-                Box::new(FailedWriter)
-            } else {
-                inner
-            }
-        }))
-        .build()
-        .unwrap()
-}
-
-struct FailedWriter;
-
-impl Write for FailedWriter {
-    async fn write(&mut self, _bs: Buffer) -> MockResult<()> {
-        Err(MockError::new(ErrorKind::Unexpected, "write failed"))
-    }
-
-    async fn close(&mut self) -> MockResult<Metadata> {
-        Err(MockError::new(ErrorKind::Unexpected, "write failed"))
-    }
-
-    async fn abort(&mut self) -> MockResult<()> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn test_failed_replay_reloads_region_after_failed_commit() {
-    let version = Arc::new(AtomicU64::new(u64::MAX));
+    let faults = DeltaFaults::default();
     let region = TestRegion::new(
         "tail-replay-failed-commit-reload",
         false,
-        Some(fail_delta_write(version.clone())),
+        Some(faults.layer()),
     )
     .await;
-    let last = region.write_remote_rows(region.region_id, 6, 9).await;
-    region
-        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
-        .await;
-    region.delete_remote_objects().await;
-    region.catchup().await;
+    region.start_failing_remote_replay().await;
     wait_until(|| region.listener.failed()).await;
 
     // A failed flush commit takes the next version number without installing it.
     let old = region.engine.get_region(region.region_id).unwrap();
     let next = next_manifest_version(&old).await;
-    version.store(next, Ordering::Relaxed);
+    faults.fail_next_write();
     let flush = RegionRequest::Flush(RegionFlushRequest::default());
     assert!(
         region

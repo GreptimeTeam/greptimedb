@@ -304,14 +304,17 @@ pub(crate) struct MemtableSstWriter {
 /// Kind of the writes of a [MemtableSstWriter].
 #[derive(Clone, Copy)]
 enum MemtableWriteKind {
-    Flush,
+    /// Writes of a flush, for the reason its log names.
+    Flush(FlushReason),
+    /// Writes of the replay of pending WAL tails.
     TailReplay,
 }
 
 impl MemtableWriteKind {
+    /// Returns the [WriteType] of the writes' metrics.
     fn write_type(self) -> WriteType {
         match self {
-            MemtableWriteKind::Flush => WriteType::Flush,
+            MemtableWriteKind::Flush(_) => WriteType::Flush,
             MemtableWriteKind::TailReplay => WriteType::TailReplay,
         }
     }
@@ -480,7 +483,7 @@ impl RegionFlushTask {
         // for consistency as others might already modify the version in the `version_control`.
         let file_metas = self
             .sst_writer
-            .write_ssts(&version_data.version, state, uncommitted, Some(self.reason))
+            .write_ssts(&version_data.version, state, uncommitted)
             .await?;
 
         // The manifest may name only a durable entry as flushed. A log store
@@ -595,16 +598,17 @@ impl RegionFlushTask {
 }
 
 impl MemtableSstWriter {
-    /// Creates a writer of the `region`'s immutable memtables for a flush.
+    /// Creates a writer of the `region`'s immutable memtables for a flush with `reason`.
     pub(crate) fn new_flush(
         region: &MitoRegion,
+        reason: FlushReason,
         row_group_size: Option<usize>,
         engine_config: Arc<MitoConfig>,
         cache_manager: CacheManagerRef,
         write_semaphore: Arc<Semaphore>,
     ) -> Self {
         Self::new(
-            MemtableWriteKind::Flush,
+            MemtableWriteKind::Flush(reason),
             region,
             row_group_size,
             engine_config,
@@ -656,19 +660,19 @@ impl MemtableSstWriter {
         }
     }
 
+    /// Returns the cache manager the written SSTs go through.
     pub(crate) fn cache_manager(&self) -> &CacheManagerRef {
         &self.cache_manager
     }
 
     /// Writes the immutable memtables of `version` to level 0 SSTs, which `uncommitted`
     /// tracks until a manifest edit references them, and returns their file metas. Its log
-    /// names the flush `reason`, or the write type when the write is not a flush.
+    /// names the flush reason, or the write type when the write is not a flush.
     pub(crate) async fn write_ssts(
         &self,
         version: &VersionRef,
         state: &CancellableTaskState,
         uncommitted: &UncommittedSsts,
-        reason: Option<FlushReason>,
     ) -> Result<Vec<FileMeta>> {
         let timer = self.write_elapsed().start_timer();
 
@@ -707,7 +711,10 @@ impl MemtableSstWriter {
         info!(
             "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, encoded_part_count: {}, metrics: {:?}",
             self.region_id,
-            reason.map_or_else(|| self.kind.write_type().into(), |reason| reason.as_str()),
+            match self.kind {
+                MemtableWriteKind::Flush(reason) => reason.as_str(),
+                MemtableWriteKind::TailReplay => WriteType::TailReplay.into(),
+            },
             file_ids,
             series_count,
             total_rows,
@@ -1042,7 +1049,7 @@ impl MemtableSstWriter {
             MemtableWriteKind::TailReplay => {
                 TAIL_REPLAY_ELAPSED.with_label_values(&["write_chunk"])
             }
-            MemtableWriteKind::Flush => FLUSH_ELAPSED.with_label_values(&["flush_memtables"]),
+            MemtableWriteKind::Flush(_) => FLUSH_ELAPSED.with_label_values(&["flush_memtables"]),
         }
     }
 
@@ -1050,7 +1057,7 @@ impl MemtableSstWriter {
     fn bytes_total(&self) -> &'static IntCounter {
         match self.kind {
             MemtableWriteKind::TailReplay => &TAIL_REPLAY_BYTES_TOTAL,
-            MemtableWriteKind::Flush => &FLUSH_BYTES_TOTAL,
+            MemtableWriteKind::Flush(_) => &FLUSH_BYTES_TOTAL,
         }
     }
 
@@ -1058,7 +1065,7 @@ impl MemtableSstWriter {
     fn file_total(&self) -> &'static IntCounter {
         match self.kind {
             MemtableWriteKind::TailReplay => &TAIL_REPLAY_FILE_TOTAL,
-            MemtableWriteKind::Flush => &FLUSH_FILE_TOTAL,
+            MemtableWriteKind::Flush(_) => &FLUSH_FILE_TOTAL,
         }
     }
 }
@@ -1859,7 +1866,7 @@ mod tests {
             manifest_ctx,
             sst_writer: MemtableSstWriter {
                 region_id,
-                kind: MemtableWriteKind::Flush,
+                kind: MemtableWriteKind::Flush(reason),
                 access_layer: env.access_layer.clone(),
                 engine_config: Arc::new(MitoConfig::default()),
                 row_group_size: None,
