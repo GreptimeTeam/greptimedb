@@ -672,7 +672,7 @@ mod test {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::procedure::region_migration::test_util::{TestingEnv, new_persistent_context};
 
     #[derive(Default)]
     struct SubmissionGate {
@@ -1339,16 +1339,8 @@ mod test {
             RegionMigrationTriggerReason::Manual,
         );
         let tracker_guard = tracker.insert_running_procedure(&task).unwrap();
-        let persistent_ctx = PersistentContext::new(
-            vec![("greptime".into(), "public".into())],
-            Peer::empty(1),
-            Peer::empty(2),
-            vec![region_id],
-            Duration::from_secs(1),
-            RegionMigrationTriggerReason::Manual,
-        );
         let mut procedure = RegionMigrationProcedure::new(
-            persistent_ctx,
+            new_persistent_context(1, 2, region_id),
             env.context_factory(),
             vec![tracker_guard],
         );

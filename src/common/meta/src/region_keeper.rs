@@ -24,6 +24,7 @@ use crate::DatanodeId;
 /// An operating region on a datanode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperatingRegion {
+    /// The role the region is granted while the operation runs.
     pub role: RegionRole,
     /// The random non-zero id of a region migration's registration of its target region, carried
     /// by the leases granted because of this registration. `None` for other operations.

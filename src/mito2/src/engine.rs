@@ -358,13 +358,13 @@ impl MitoEngine {
     pub fn record_granted_lease(
         &self,
         region_id: RegionId,
-        candidate_lease_id: Option<u64>,
         sent_at: Instant,
+        candidate_lease_id: Option<u64>,
     ) {
         self.inner
             .workers
             .granted_leases()
-            .record(region_id, candidate_lease_id, sent_at, || {
+            .record(region_id, sent_at, candidate_lease_id, || {
                 self.inner.find_region(region_id).is_ok()
             });
     }
@@ -1714,7 +1714,7 @@ impl RegionEngine for MitoEngine {
         candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
         // Before the role, so a lease the region ignores still counts.
-        self.record_granted_lease(region_id, candidate_lease_id, sent_at);
+        self.record_granted_lease(region_id, sent_at, candidate_lease_id);
         let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
         // Before the role, and even if the role leaves the region's state unchanged.
         if role.writable() {

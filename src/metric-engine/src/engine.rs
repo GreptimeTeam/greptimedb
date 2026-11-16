@@ -412,8 +412,8 @@ impl RegionEngine for MetricEngine {
                     if x == metadata_region_id {
                         self.inner.mito.record_granted_lease(
                             data_region_id,
-                            candidate_lease_id,
                             sent_at,
+                            candidate_lease_id,
                         );
                     }
                     return Ok(false);
@@ -708,6 +708,7 @@ mod test {
     use common_wal::options::{KafkaWalOptions, WalOptions};
     use mito2::sst::location::region_dir_from_table_dir;
     use mito2::test_util::{kafka_log_store_factory, prepare_test_for_kafka_log_store};
+    use rstest::rstest;
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
@@ -715,8 +716,6 @@ mod test {
         RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
         RegionTruncateRequest,
     };
-
-    use rstest::rstest;
 
     use super::*;
     use crate::maybe_skip_kafka_log_store_integration_test;
@@ -972,6 +971,23 @@ mod test {
         assert!(!object_store.exists(&data_region_dir).await.unwrap());
     }
 
+    const LEASE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Asserts that both the metadata and the data region of `physical_region_id` recorded
+    /// `expected` as the candidate lease id of their latest lease.
+    fn assert_candidate_lease_id_recorded(
+        mito: &MitoEngine,
+        physical_region_id: RegionId,
+        expected: Option<u64>,
+    ) {
+        for region_id in [
+            utils::to_metadata_region_id(physical_region_id),
+            utils::to_data_region_id(physical_region_id),
+        ] {
+            assert_eq!(mito.granted_candidate_lease_id(region_id), expected);
+        }
+    }
+
     /// The region that ignores a Leader grant is the one downgraded after the heartbeat is sent;
     /// the other one is downgraded before it.
     #[rstest]
@@ -995,7 +1011,6 @@ mod test {
         env.init_metric_region().await;
         let (engine, mito) = (env.metric(), env.mito());
         let physical_region_id = env.default_physical_region_id();
-        let lease = std::time::Duration::from_secs(10);
         let downgrade = |region_id| {
             mito.set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
         };
@@ -1013,7 +1028,7 @@ mod test {
                     physical_region_id,
                     RegionRole::Leader,
                     sent_at,
-                    sent_at + lease,
+                    sent_at + LEASE,
                     Some(7),
                 )
                 .unwrap()
@@ -1025,19 +1040,14 @@ mod test {
             Some(metadata_role)
         );
         // Both regions record the grant, including the one that is not handed it.
-        for region_id in [
-            utils::to_metadata_region_id(physical_region_id),
-            utils::to_data_region_id(physical_region_id),
-        ] {
-            assert_eq!(mito.granted_candidate_lease_id(region_id), Some(7));
-        }
+        assert_candidate_lease_id_recorded(&mito, physical_region_id, Some(7));
 
         assert!(grant(Instant::now()));
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
     }
 
     #[tokio::test]
-    async fn test_lease_candidate_lease_id_reaches_both_regions() {
+    async fn test_candidate_lease_id_reaches_metadata_and_data_regions() {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let (engine, mito) = (env.metric(), env.mito());
@@ -1049,17 +1059,12 @@ mod test {
                 physical_region_id,
                 RegionRole::Follower,
                 sent_at,
-                sent_at + std::time::Duration::from_secs(10),
+                sent_at + LEASE,
                 Some(7),
             )
             .unwrap();
 
-        for region_id in [
-            utils::to_metadata_region_id(physical_region_id),
-            utils::to_data_region_id(physical_region_id),
-        ] {
-            assert_eq!(mito.granted_candidate_lease_id(region_id), Some(7));
-        }
+        assert_candidate_lease_id_recorded(&mito, physical_region_id, Some(7));
     }
 
     #[tokio::test]

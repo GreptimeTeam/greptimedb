@@ -96,7 +96,9 @@ impl NodeLease {
 /// A region lease the metasrv granted for a heartbeat sent at `sent_at`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GrantedLease {
+    /// The candidate lease id the lease carries, if any.
     pub(crate) candidate_lease_id: Option<u64>,
+    /// When the heartbeat that carried the lease was sent.
     pub(crate) sent_at: Instant,
 }
 
@@ -112,8 +114,8 @@ impl GrantedLeases {
     pub(crate) fn record(
         &self,
         region_id: RegionId,
-        candidate_lease_id: Option<u64>,
         sent_at: Instant,
+        candidate_lease_id: Option<u64>,
         region_is_open: impl FnOnce() -> bool,
     ) {
         let lease = GrantedLease {
@@ -134,10 +136,12 @@ impl GrantedLeases {
             .or_insert(lease);
     }
 
+    /// Removes the lease recorded for the region.
     pub(crate) fn remove(&self, region_id: RegionId) {
         self.0.lock().unwrap().remove(&region_id);
     }
 
+    /// Returns the lease recorded for the region.
     #[cfg(any(test, feature = "test"))]
     pub(crate) fn get(&self, region_id: RegionId) -> Option<GrantedLease> {
         self.0.lock().unwrap().get(&region_id).copied()
@@ -152,7 +156,7 @@ mod tests {
     fn test_record_checks_region_under_removal_lock() {
         let leases = GrantedLeases::default();
         let region_id = RegionId::new(1, 1);
-        leases.record(region_id, Some(1), Instant::now(), || {
+        leases.record(region_id, Instant::now(), Some(1), || {
             // A concurrent `remove` waits until the record is done.
             assert!(leases.0.try_lock().is_err());
             true
@@ -160,7 +164,7 @@ mod tests {
         assert_eq!(leases.get(region_id).unwrap().candidate_lease_id, Some(1));
 
         leases.remove(region_id);
-        leases.record(region_id, Some(2), Instant::now(), || false);
+        leases.record(region_id, Instant::now(), Some(2), || false);
         assert_eq!(leases.get(region_id), None);
     }
 }

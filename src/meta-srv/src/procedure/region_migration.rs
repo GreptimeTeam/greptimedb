@@ -1129,48 +1129,22 @@ mod tests {
     #[tokio::test]
     async fn test_rollback_drops_candidate_registration_before_route_write() {
         let env = TestingEnv::new();
-        let (table_metadata_manager, keeper_empty_at_txn) =
-            table_metadata_manager_observing_keeper(env.opening_region_keeper().clone());
         let persistent_ctx = new_persistent_context();
-        let region_id = persistent_ctx.region_ids[0];
-        let region_routes = vec![RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(persistent_ctx.from_peer.clone()),
-            leader_state: Some(LeaderState::Downgrading),
-            ..Default::default()
-        }];
-        table_metadata_manager
-            .create_table_metadata(
-                new_test_table_info(region_id.table_id()),
-                TableRouteValue::physical(region_routes),
-                HashMap::default(),
-            )
-            .await
-            .unwrap();
-        keeper_empty_at_txn.lock().unwrap().clear();
-        let guard = env
-            .opening_region_keeper()
-            .register_candidate_region(persistent_ctx.to_peer.id, region_id)
-            .unwrap();
-        let mut procedure = RegionMigrationProcedure::new(
-            persistent_ctx,
-            env.context_factory_with_metadata(table_metadata_manager),
-            vec![],
-        );
+        let rollback = CandidateRollback::new(&env, &persistent_ctx).await;
+        let mut procedure =
+            RegionMigrationProcedure::new(persistent_ctx, rollback.context_factory, vec![]);
         procedure
             .context
             .volatile_ctx
             .opening_region_guards
-            .push(guard);
+            .push(rollback.guard);
 
         procedure
             .rollback_inner(&new_procedure_context())
             .await
             .unwrap();
 
-        let keeper_empty_at_txn = keeper_empty_at_txn.lock().unwrap();
-        assert!(!keeper_empty_at_txn.is_empty());
-        assert!(keeper_empty_at_txn.iter().all(|empty| *empty));
+        assert_registration_dropped_before_route_write(&rollback.keeper_empty_at_txn);
     }
 
     #[test]

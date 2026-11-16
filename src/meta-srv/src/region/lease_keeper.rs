@@ -847,17 +847,17 @@ mod tests {
         );
     }
 
-    /// Creates a table whose route has the region led by `leader_id`, and registers the region
-    /// on `candidate_id` as the target of a migration.
+    /// Creates a table whose route has the region led by `leader_peer_id`, and registers the region
+    /// on `candidate_peer_id` as the target of a migration.
     async fn register_candidate_with_route(
         keeper: &RegionLeaseKeeper,
         region_id: RegionId,
-        leader_id: DatanodeId,
-        candidate_id: DatanodeId,
+        leader_peer_id: DatanodeId,
+        candidate_peer_id: DatanodeId,
     ) -> OperatingRegionGuard {
         let region_route = RegionRouteBuilder::default()
             .region(Region::new_test(region_id))
-            .leader_peer(Peer::empty(leader_id))
+            .leader_peer(Peer::empty(leader_peer_id))
             .build()
             .unwrap();
         keeper
@@ -871,7 +871,7 @@ mod tests {
             .unwrap();
         keeper
             .memory_region_keeper
-            .register_candidate_region(candidate_id, region_id)
+            .register_candidate_region(candidate_peer_id, region_id)
             .unwrap()
     }
 

@@ -77,6 +77,30 @@ fn grant(engine: &MitoEngine, role: RegionRole, deadline: Instant) {
         .unwrap();
 }
 
+/// Grants `role` with `candidate_lease_id` for a heartbeat sent at `sent_at`, and returns whether
+/// the region applied the role.
+fn grant_at(
+    engine: &MitoEngine,
+    role: RegionRole,
+    sent_at: Instant,
+    candidate_lease_id: Option<u64>,
+) -> bool {
+    engine
+        .set_region_role_with_lease(
+            REGION_ID,
+            role,
+            sent_at,
+            Instant::now() + LEASE,
+            candidate_lease_id,
+        )
+        .unwrap()
+}
+
+/// Returns the latest lease the region recorded.
+fn granted_lease(engine: &MitoEngine) -> Option<GrantedLease> {
+    engine.inner.workers.granted_leases().get(REGION_ID)
+}
+
 /// Returns a request that writes rows `start..start + 3`.
 fn put_request(schema: &[ColumnSchema], start: usize) -> RegionRequest {
     let rows = Rows {
@@ -312,26 +336,11 @@ async fn test_stale_leader_grant_after_downgrade(#[case] downgraded_to: Settable
         .unwrap();
 
     // Grants for heartbeats sent before either downgrade arrive late.
-    assert!(!grant_candidate_at(
-        &engine,
-        RegionRole::Leader,
-        sent_before,
-        None
-    ));
-    assert!(!grant_candidate_at(
-        &engine,
-        RegionRole::Leader,
-        sent_between,
-        None
-    ));
+    assert!(!grant_at(&engine, RegionRole::Leader, sent_before, None));
+    assert!(!grant_at(&engine, RegionRole::Leader, sent_between, None));
     assert_eq!(downgraded, engine.get_region(REGION_ID).unwrap().state());
 
-    assert!(grant_candidate_at(
-        &engine,
-        RegionRole::Leader,
-        Instant::now(),
-        None
-    ));
+    assert!(grant_at(&engine, RegionRole::Leader, Instant::now(), None));
     assert!(engine.get_region(REGION_ID).unwrap().is_writable());
 }
 
@@ -364,12 +373,7 @@ async fn test_reopened_region_ignores_earlier_grants(#[case] close: bool) {
         &engine.get_region(REGION_ID).unwrap()
     ));
 
-    assert!(!grant_candidate_at(
-        &engine,
-        RegionRole::Leader,
-        sent_before,
-        None
-    ));
+    assert!(!grant_at(&engine, RegionRole::Leader, sent_before, None));
     assert!(!engine.get_region(REGION_ID).unwrap().is_writable());
 
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
@@ -398,27 +402,6 @@ async fn test_leader_grant_exits_staging() {
     );
 }
 
-fn granted_lease(engine: &MitoEngine) -> Option<GrantedLease> {
-    engine.inner.workers.granted_leases().get(REGION_ID)
-}
-
-fn grant_candidate_at(
-    engine: &MitoEngine,
-    role: RegionRole,
-    sent_at: Instant,
-    candidate_lease_id: Option<u64>,
-) -> bool {
-    engine
-        .set_region_role_with_lease(
-            REGION_ID,
-            role,
-            sent_at,
-            Instant::now() + LEASE,
-            candidate_lease_id,
-        )
-        .unwrap()
-}
-
 #[tokio::test]
 async fn test_granted_lease_keeps_latest_heartbeat_across_catchup_reopen() {
     common_telemetry::init_default_ut_logging();
@@ -435,12 +418,7 @@ async fn test_granted_lease_keeps_latest_heartbeat_across_catchup_reopen() {
         .unwrap();
 
     // A Leader lease the region ignores still counts as the latest one received.
-    assert!(!grant_candidate_at(
-        &engine,
-        RegionRole::Leader,
-        sent_before,
-        Some(9)
-    ));
+    assert!(!grant_at(&engine, RegionRole::Leader, sent_before, Some(9)));
     let latest = GrantedLease {
         candidate_lease_id: Some(9),
         sent_at: sent_before,
@@ -448,7 +426,7 @@ async fn test_granted_lease_keeps_latest_heartbeat_across_catchup_reopen() {
     assert_eq!(granted_lease(&engine), Some(latest));
     // A lease of an earlier heartbeat that arrives late does not replace it.
     let earlier = sent_before - Duration::from_millis(1);
-    grant_candidate_at(&engine, RegionRole::Follower, earlier, Some(1));
+    grant_at(&engine, RegionRole::Follower, earlier, Some(1));
     assert_eq!(granted_lease(&engine), Some(latest));
 
     let region = engine.get_region(REGION_ID).unwrap();
@@ -461,7 +439,7 @@ async fn test_granted_lease_keeps_latest_heartbeat_across_catchup_reopen() {
     assert_eq!(granted_lease(&engine), Some(latest));
 
     let later = Instant::now();
-    grant_candidate_at(&engine, RegionRole::Follower, later, None);
+    grant_at(&engine, RegionRole::Follower, later, None);
     assert_eq!(
         granted_lease(&engine),
         Some(GrantedLease {
@@ -509,7 +487,7 @@ async fn test_granted_lease_removed_on_engine_stop() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("granted-lease-stop").await;
     let (_listener, engine, _schema) = create_region(&mut env, None).await;
-    grant_candidate_at(&engine, RegionRole::Follower, Instant::now(), Some(7));
+    grant_at(&engine, RegionRole::Follower, Instant::now(), Some(7));
     assert!(granted_lease(&engine).is_some());
 
     engine.stop().await.unwrap();

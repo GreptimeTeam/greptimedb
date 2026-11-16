@@ -134,10 +134,11 @@ impl KvBackend for MockKvBackend {
     }
 }
 
-/// A [KvBackend] that runs `before_txn` before each transaction of `inner`, e.g. to observe the
-/// state when a table route is written.
+/// A [KvBackend] that runs `before_txn` before each transaction of `inner`.
 pub struct TxnObservingKvBackend {
+    /// The kv backend every request is forwarded to.
     pub inner: KvBackendRef,
+    /// Runs before each transaction is forwarded to `inner`.
     pub before_txn: Box<dyn Fn() + Send + Sync>,
 }
 

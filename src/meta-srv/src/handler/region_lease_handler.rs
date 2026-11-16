@@ -101,8 +101,10 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 let renewed = if let Some(renewer) = &self.customized_region_lease_renewer {
                     let candidate_lease_ids = renewed
                         .iter()
-                        .filter_map(|(region_id, info)| {
-                            info.candidate_lease_id.map(|id| (*region_id, id))
+                        .filter_map(|(region_id, region_lease_info)| {
+                            region_lease_info
+                                .candidate_lease_id
+                                .map(|candidate_lease_id| (*region_id, candidate_lease_id))
                         })
                         .collect::<HashMap<_, _>>();
                     renewer

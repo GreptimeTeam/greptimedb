@@ -426,6 +426,7 @@ impl WorkerGroup {
         &self.node_lease
     }
 
+    /// Returns the latest lease each region of this group received.
     pub(crate) fn granted_leases(&self) -> &GrantedLeases {
         &self.granted_leases
     }

@@ -179,8 +179,9 @@ impl SetRegionRoleStateResponse {
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
-    /// An opaque non-zero id the lease carries, or `None`. Engines pass it to
-    /// [`RegionEngine::set_region_role_with_lease`] and may record it, but must not interpret it.
+    /// An opaque non-zero id the metadata plane attaches to some leases, `None` for a lease
+    /// without one. It reaches the engine through [`RegionEngine::set_region_role_with_lease`];
+    /// engines keep it with the lease and must not interpret it.
     pub candidate_lease_id: Option<u64>,
     pub extensions: HashMap<String, Vec<u8>>,
 }
