@@ -135,12 +135,10 @@ impl GrantedLeases {
             .or_insert(lease);
     }
 
-    /// Removes the lease recorded for the region.
     pub(crate) fn remove(&self, region_id: RegionId) {
         self.0.lock().unwrap().remove(&region_id);
     }
 
-    /// Returns the lease recorded for the region.
     #[cfg(any(test, feature = "test"))]
     pub(crate) fn get(&self, region_id: RegionId) -> Option<GrantedLease> {
         self.0.lock().unwrap().get(&region_id).copied()
