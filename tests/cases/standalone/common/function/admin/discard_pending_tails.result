@@ -77,3 +77,8 @@ DROP TABLE discard_pending_tails_physical;
 
 Affected Rows: 0
 
+-- A region id reaches the region path; this one belongs to no table.
+ADMIN discard_pending_tails(4398046511104, 1);
+
+Error: 1002(Unexpected), Failed to execute admin function discard_pending_tails: Execution error: Failed to find table route: 1024
+
