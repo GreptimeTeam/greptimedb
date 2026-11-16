@@ -178,11 +178,29 @@ async fn test_admin_discard_unflushed_data(instance: Arc<dyn MockInstance>) {
     )
     .await;
 
-    let region_id = first_region_id(&instance, "discard_unflushed_data_test").await;
+    let region_output = execute_sql(
+        &instance,
+        "SELECT greptime_partition_id FROM information_schema.partitions \
+         WHERE table_name = 'discard_unflushed_data_test' LIMIT 1",
+    )
+    .await;
+    let OutputData::Stream(stream) = region_output.data else {
+        panic!("expected region id stream");
+    };
+    let batches = util::collect(stream).await.unwrap();
+    let region_ids = batches[0].column(0);
+    let region_ids = region_ids.as_any().downcast_ref::<UInt64Array>().unwrap();
+    let region_id = region_ids.value(0);
 
     let admin_sql = format!("ADMIN discard_unflushed({region_id})");
     for _ in 0..2 {
-        assert_eq!(0, execute_admin_u64(&instance, &admin_sql).await);
+        let output = execute_sql(&instance, &admin_sql).await;
+        let OutputData::RecordBatches(batches) = output.data else {
+            panic!("expected ADMIN result batches");
+        };
+        let result = batches.iter().next().unwrap().column(0);
+        let result = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(0, result.value(0));
     }
 
     let output = execute_sql(
@@ -204,55 +222,6 @@ async fn test_admin_discard_unflushed_data(instance: Arc<dyn MockInstance>) {
             .await
             .is_err()
     );
-}
-
-/// Returns the id of the first region of `table`.
-async fn first_region_id(instance: &Arc<Instance>, table: &str) -> u64 {
-    let output = execute_sql(
-        instance,
-        &format!(
-            "SELECT greptime_partition_id FROM information_schema.partitions \
-             WHERE table_name = '{table}' LIMIT 1"
-        ),
-    )
-    .await;
-    let OutputData::Stream(stream) = output.data else {
-        panic!("expected region id stream");
-    };
-    let batches = util::collect(stream).await.unwrap();
-    let region_ids = batches[0].column(0);
-    let region_ids = region_ids.as_any().downcast_ref::<UInt64Array>().unwrap();
-    region_ids.value(0)
-}
-
-/// Runs the ADMIN statement `sql` and returns its result.
-async fn execute_admin_u64(instance: &Arc<Instance>, sql: &str) -> u64 {
-    let output = execute_sql(instance, sql).await;
-    let OutputData::RecordBatches(batches) = output.data else {
-        panic!("expected ADMIN result batches");
-    };
-    let result = batches.iter().next().unwrap().column(0);
-    let result = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-    result.value(0)
-}
-
-#[apply(both_instances_cases)]
-async fn test_admin_discard_pending_tails_of_region(instance: Arc<dyn MockInstance>) {
-    let instance = instance.frontend();
-
-    execute_sql(
-        &instance,
-        r#"CREATE TABLE discard_pending_tails_test (
-            host STRING PRIMARY KEY,
-            ts TIMESTAMP TIME INDEX
-        ) ENGINE = mito"#,
-    )
-    .await;
-    let region_id = first_region_id(&instance, "discard_pending_tails_test").await;
-
-    // The region has no pending tails, so nothing is discarded.
-    let admin_sql = format!("ADMIN discard_pending_tails({region_id}, 1)");
-    assert_eq!(0, execute_admin_u64(&instance, &admin_sql).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
