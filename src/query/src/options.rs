@@ -866,6 +866,19 @@ experimental_memory_pool_policy = "fair"
         );
     }
 
+    /// The native PromQL route is opt-in: a query that states nothing keeps the plan the
+    /// existing planner builds.
+    ///
+    /// The per-request `query.experimental_native_promql` extension is read by
+    /// `query::promql::planner::native::native_promql_requested`; this default is the other
+    /// half of that gate today, and it becomes the only gate for a query that states nothing
+    /// once #10262 lands. Flipping it would expose the native route to every query that sets
+    /// the extension.
+    #[test]
+    fn test_native_promql_is_off_by_default() {
+        assert!(!QueryOptions::default().experimental_native_promql);
+    }
+
     #[test]
     fn test_parse_invalid_spill_option_values() {
         for toml_str in [
