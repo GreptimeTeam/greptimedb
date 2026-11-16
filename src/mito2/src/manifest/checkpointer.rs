@@ -35,12 +35,17 @@ use crate::metrics::MANIFEST_OP_ELAPSED;
 pub(crate) struct Checkpointer {
     manifest_options: RegionManifestOptions,
     inner: Arc<Inner>,
-    checkpoint_task: Option<JoinHandle<()>>,
-    /// Closes when the task in `checkpoint_task` ends, so that it can be awaited without
-    /// borrowing the checkpointer.
-    checkpoint_done: Option<watch::Receiver<()>>,
+    checkpoint_task: Option<CheckpointTask>,
     #[cfg(test)]
     pending_checkpoint_wait_started: Arc<Notify>,
+}
+
+/// A spawned checkpoint task and the signal that it has ended.
+#[derive(Debug)]
+struct CheckpointTask {
+    handle: JoinHandle<()>,
+    /// Closes when the task ends, so that it can be awaited without borrowing the checkpointer.
+    done: watch::Receiver<()>,
 }
 
 #[derive(Debug)]
@@ -115,7 +120,6 @@ impl Checkpointer {
                 last_checkpoint_version: AtomicU64::new(last_checkpoint_version),
             }),
             checkpoint_task: None,
-            checkpoint_done: None,
             #[cfg(test)]
             pending_checkpoint_wait_started: Arc::new(Notify::new()),
         }
@@ -147,7 +151,7 @@ impl Checkpointer {
         if self
             .checkpoint_task
             .as_ref()
-            .is_some_and(|handle| !handle.is_finished())
+            .is_some_and(|task| !task.handle.is_finished())
         {
             return;
         }
@@ -192,21 +196,22 @@ impl Checkpointer {
 
     fn do_checkpoint(&mut self, checkpoint: RegionCheckpoint) {
         let inner = self.inner.clone();
-        let (done_sender, done_receiver) = watch::channel(());
-        self.checkpoint_done = Some(done_receiver);
-        self.checkpoint_task = Some(common_runtime::spawn_global(async move {
+        let (done_sender, done) = watch::channel(());
+        let handle = common_runtime::spawn_global(async move {
             // The sender is dropped however the task ends, which closes the channel.
             let _done_sender = done_sender;
             inner.do_checkpoint(checkpoint).await;
-        }));
+        });
+        self.checkpoint_task = Some(CheckpointTask { handle, done });
     }
 
     /// Returns a future that resolves once the checkpoint task running now has ended.
     ///
-    /// Unlike [Self::wait_for_pending_checkpoint], the future does not borrow the checkpointer,
-    /// so the caller can await it without holding the manifest lock.
-    pub(crate) fn pending_checkpoint_done(&self) -> impl Future<Output = ()> + Send + use<> {
-        let done = self.checkpoint_done.clone();
+    /// Unlike [Self::wait_for_pending_checkpoint], which borrows the checkpointer mutably and reaps
+    /// the task handle, this does neither, so the caller can await the future without holding the
+    /// manifest lock.
+    pub(crate) fn pending_checkpoint_completion(&self) -> impl Future<Output = ()> + Send + use<> {
+        let done = self.checkpoint_task.as_ref().map(|task| task.done.clone());
         let region_id = self.inner.region_id();
         #[cfg(test)]
         let wait_started = self.pending_checkpoint_wait_started.clone();
@@ -228,14 +233,14 @@ impl Checkpointer {
     /// Keeping the handle in `self` while awaiting is important. If the caller is
     /// cancelled, another lifecycle transition can still wait for the same task.
     pub(crate) async fn wait_for_pending_checkpoint(&mut self) {
-        let Some(handle) = self.checkpoint_task.as_mut() else {
+        let Some(task) = self.checkpoint_task.as_mut() else {
             return;
         };
 
         #[cfg(test)]
         self.pending_checkpoint_wait_started.notify_one();
 
-        let result = (&mut *handle).await;
+        let result = (&mut task.handle).await;
         // There is no cancellation point between observing completion and
         // clearing the handle.
         self.checkpoint_task = None;
@@ -249,7 +254,7 @@ impl Checkpointer {
     pub(crate) fn is_doing_checkpoint(&self) -> bool {
         self.checkpoint_task
             .as_ref()
-            .is_some_and(|handle| !handle.is_finished())
+            .is_some_and(|task| !task.handle.is_finished())
     }
 
     #[cfg(test)]
@@ -257,6 +262,7 @@ impl Checkpointer {
         self.checkpoint_task
             .as_ref()
             .expect("checkpoint task must exist")
+            .handle
             .abort();
     }
 

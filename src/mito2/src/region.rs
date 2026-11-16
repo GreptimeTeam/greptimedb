@@ -1538,7 +1538,7 @@ impl ManifestContext {
         let done = {
             let manager = self.manifest_manager.read().await;
             debug_assert!(manager.is_stopped());
-            manager.pending_checkpoint_done()
+            manager.pending_checkpoint_completion()
         };
         done.await;
     }

@@ -833,7 +833,7 @@ async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
 #[case::cleanup_finished(false)]
 #[case::task_aborted(true)]
 #[tokio::test]
-async fn pending_checkpoint_done_waits_until_the_task_ends(#[case] abort: bool) {
+async fn pending_checkpoint_completion_waits_until_the_task_ends(#[case] abort: bool) {
     let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
     let env = TestEnv::new().await.with_mock_layer(mock_layer);
     let metadata = Arc::new(basic_region_metadata());
@@ -850,11 +850,11 @@ async fn pending_checkpoint_done_waits_until_the_task_ends(#[case] abort: bool) 
 
     // Two waiters stay on their own tasks until the checkpoint ends; a third is cancelled.
     let waiters = [
-        manager.pending_checkpoint_done(),
-        manager.pending_checkpoint_done(),
+        manager.pending_checkpoint_completion(),
+        manager.pending_checkpoint_completion(),
     ]
     .map(tokio::spawn);
-    let mut cancelled = Box::pin(manager.pending_checkpoint_done());
+    let mut cancelled = Box::pin(manager.pending_checkpoint_completion());
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut cancelled)
             .await
@@ -881,7 +881,7 @@ async fn pending_checkpoint_done_waits_until_the_task_ends(#[case] abort: bool) 
     let wait_started = manager.checkpointer().pending_checkpoint_wait_started();
     // Consumes the permit the waiters above left.
     let _ = tokio::time::timeout(Duration::ZERO, wait_started.notified()).await;
-    tokio::time::timeout(Duration::ZERO, manager.pending_checkpoint_done())
+    tokio::time::timeout(Duration::ZERO, manager.pending_checkpoint_completion())
         .await
         .expect("a wait after the checkpoint task ended did not return at once");
     assert!(
@@ -913,7 +913,7 @@ impl oio::Delete for PanickingDeleter {
 }
 
 #[tokio::test]
-async fn pending_checkpoint_done_ends_when_the_task_panics() {
+async fn pending_checkpoint_completion_ends_when_the_task_panics() {
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let panicked = Arc::new(AtomicBool::new(false));
@@ -941,7 +941,7 @@ async fn pending_checkpoint_done_ends_when_the_task_panics() {
     tokio::time::timeout(Duration::from_secs(5), entered.notified())
         .await
         .expect("checkpoint cleanup did not start");
-    let mut done = Box::pin(manager.pending_checkpoint_done());
+    let mut done = Box::pin(manager.pending_checkpoint_completion());
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut done)
             .await

@@ -446,7 +446,7 @@ impl RegionManifestManager {
     /// checkpoint already running keeps writing the manifest directory until it ends.
     ///
     /// A caller that hands the storage to another instance waits for that checkpoint with
-    /// [Self::pending_checkpoint_done] after the stop, as engine stop and reload do. Close and
+    /// `pending_checkpoint_completion` after the stop, as engine stop and reload do. Close and
     /// drop, which run in the region worker loop, deliberately do not.
     pub async fn stop(&mut self) {
         self.stopped = true;
@@ -855,9 +855,10 @@ impl RegionManifestManager {
     }
 
     /// Returns a future that resolves once the in-flight checkpoint has finished, including its
-    /// cleanup. The future does not borrow the manager.
-    pub(crate) fn pending_checkpoint_done(&self) -> impl Future<Output = ()> + Send + use<> {
-        self.checkpointer.pending_checkpoint_done()
+    /// cleanup. Unlike [Self::wait_for_pending_checkpoint], which borrows the manager mutably and
+    /// reaps the task handle, this does neither.
+    pub(crate) fn pending_checkpoint_completion(&self) -> impl Future<Output = ()> + Send + use<> {
+        self.checkpointer.pending_checkpoint_completion()
     }
 
     /// Clear deleted files from manifest's `removed_files` field without update version. Notice if datanode exit before checkpoint then new manifest by open region may still contain these deleted files, which is acceptable for gc process.
