@@ -290,7 +290,9 @@ pub fn extract_time_range_strict(
         // satisfying set (an `AND` side it cannot parse is dropped, which only
         // widens), so intersecting extracted conjuncts stays an
         // over-approximation.
-        match extract_time_range_from_expr(ts_col_name, ts_col_unit, expr) {
+        // Ranges derived from `date_bin` are skipped: they can be a bucket wider than
+        // the filter, so a timestamp synthesized at their bounds may not satisfy it.
+        match extract_time_range(ts_col_name, ts_col_unit, expr, DateBinFilters::Skip) {
             Some(extracted) => {
                 range = Some(match range {
                     Some(acc) => acc.and(&extracted),
@@ -329,16 +331,36 @@ pub fn extract_time_range_from_expr(
     ts_col_unit: TimeUnit,
     expr: &Expr,
 ) -> Option<TimestampRange> {
+    extract_time_range(ts_col_name, ts_col_unit, expr, DateBinFilters::Derive)
+}
+
+/// Whether a filter on `date_bin(stride, ts)` yields a range on `ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateBinFilters {
+    /// Derive a range that covers every satisfying row (see [`date_bin_stride`]).
+    Derive,
+    /// Treat the filter as unparsable.
+    Skip,
+}
+
+fn extract_time_range(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    expr: &Expr,
+    date_bin: DateBinFilters,
+) -> Option<TimestampRange> {
     match expr {
         Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
-            extract_from_binary_expr(ts_col_name, ts_col_unit, left, op, right)
+            extract_from_binary_expr(ts_col_name, ts_col_unit, left, op, right, date_bin)
         }
         Expr::Between(Between {
             expr,
             negated,
             low,
             high,
-        }) => extract_from_between_expr(ts_col_name, ts_col_unit, expr, negated, low, high),
+        }) => {
+            extract_from_between_expr(ts_col_name, ts_col_unit, expr, negated, low, high, date_bin)
+        }
         Expr::InList(InList {
             expr,
             list,
@@ -354,8 +376,11 @@ fn extract_from_binary_expr(
     left: &Expr,
     op: &Operator,
     right: &Expr,
+    date_bin: DateBinFilters,
 ) -> Option<TimestampRange> {
-    if let Some(range) = extract_from_date_bin_comparison(ts_col_name, ts_col_unit, left, op, right)
+    if date_bin == DateBinFilters::Derive
+        && let Some(range) =
+            extract_from_date_bin_comparison(ts_col_name, ts_col_unit, left, op, right)
     {
         return Some(range);
     }
@@ -420,15 +445,15 @@ fn extract_from_binary_expr(
         Operator::And => {
             // instead of return none when failed to extract time range from left/right, we unwrap the none into
             // `TimestampRange::min_to_max`.
-            let left = extract_time_range_from_expr(ts_col_name, ts_col_unit, left)
+            let left = extract_time_range(ts_col_name, ts_col_unit, left, date_bin)
                 .unwrap_or_else(TimestampRange::min_to_max);
-            let right = extract_time_range_from_expr(ts_col_name, ts_col_unit, right)
+            let right = extract_time_range(ts_col_name, ts_col_unit, right, date_bin)
                 .unwrap_or_else(TimestampRange::min_to_max);
             Some(left.and(&right))
         }
         Operator::Or => {
-            let left = extract_time_range_from_expr(ts_col_name, ts_col_unit, left)?;
-            let right = extract_time_range_from_expr(ts_col_name, ts_col_unit, right)?;
+            let left = extract_time_range(ts_col_name, ts_col_unit, left, date_bin)?;
+            let right = extract_time_range(ts_col_name, ts_col_unit, right, date_bin)?;
             Some(left.or(&right))
         }
         _ => None,
@@ -439,10 +464,15 @@ fn extract_from_binary_expr(
 /// and rounded up, if `expr` is that call with a literal, fixed-width stride.
 ///
 /// `date_bin` floors a timestamp to the start of its bucket, so for every row
-/// `date_bin(stride, ts) <= ts < date_bin(stride, ts) + stride`, whatever the
-/// origin. That lets a filter on the bucket start bound the time index itself,
-/// which is what a filter on a view's `date_bin(...) AS time` column becomes
-/// once it is pushed below the view's aggregate.
+/// `bucket_start <= ts < bucket_start + stride`, whatever the origin. That lets a
+/// filter on the bucket start bound the time index itself, which is what a
+/// filter on a view's `date_bin(...) AS time` column becomes once it is pushed
+/// below the view's aggregate.
+///
+/// This holds in nanoseconds. DataFusion computes the bucket start in
+/// nanoseconds and truncates it to the column unit, so on a coarser column the
+/// returned value can be up to one unit below the true start; see
+/// [`date_bin_range`].
 fn date_bin_stride(ts_col_name: &str, unit: TimeUnit, expr: &Expr) -> Option<i64> {
     let Expr::ScalarFunction(ScalarFunction { func, args }) = expr else {
         return None;
@@ -509,8 +539,15 @@ fn date_bin_range(
     // `bin >= bound` and `bin > bound` imply `ts >= bound`, because `ts >= bin`.
     let lower = || bound.convert_to_ceil(unit).map(TimestampRange::from_start);
     // `bin <= bound` and `bin < bound` imply `ts < bound + stride`, because `ts < bin + stride`.
+    // On a column coarser than nanoseconds, the returned `bin` is truncated from the true
+    // bucket start and can be up to one unit below it, so widen the end by one unit.
+    let slack = if unit == TimeUnit::Nanosecond { 0 } else { 1 };
     let upper = || {
-        let end = bound.convert_to_ceil(unit)?.value().checked_add(stride)?;
+        let end = bound
+            .convert_to_ceil(unit)?
+            .value()
+            .checked_add(stride)?
+            .checked_add(slack)?;
         Some(TimestampRange::until_end(Timestamp::new(end, unit), false))
     };
     match op {
@@ -544,12 +581,15 @@ fn extract_from_between_expr(
     negated: &bool,
     low: &Expr,
     high: &Expr,
+    date_bin: DateBinFilters,
 ) -> Option<TimestampRange> {
     if *negated {
         return None;
     }
 
-    if let Some(stride) = date_bin_stride(ts_col_name, ts_col_unit, expr) {
+    if date_bin == DateBinFilters::Derive
+        && let Some(stride) = date_bin_stride(ts_col_name, ts_col_unit, expr)
+    {
         // `low <= date_bin(...) <= high`
         let (Expr::Literal(low, _), Expr::Literal(high, _)) = (low, high) else {
             return None;
@@ -668,6 +708,8 @@ mod tests {
 
     #[test]
     fn test_date_bin() {
+        // Upper bounds on a coarser-than-ns column are widened by one unit, because
+        // `date_bin` truncates its nanosecond bucket start to the column unit.
         let t = Timestamp::new_millisecond;
         // date_bin(1m, ts) >= 120_000ms  =>  ts >= 120_000ms
         check_build_predicate(
@@ -679,30 +721,30 @@ mod tests {
             date_bin(minute()).gt(ms(120_000)),
             TimestampRange::from_start(t(120_000)),
         );
-        // date_bin(1m, ts) < 120_000ms  =>  ts < 180_000ms
+        // date_bin(1m, ts) < 120_000ms  =>  ts < 180_001ms
         check_build_predicate(
             date_bin(minute()).lt(ms(120_000)),
-            TimestampRange::until_end(t(180_000), false),
+            TimestampRange::until_end(t(180_001), false),
         );
-        // date_bin(1m, ts) <= 120_000ms  =>  ts < 180_000ms
+        // date_bin(1m, ts) <= 120_000ms  =>  ts < 180_001ms
         check_build_predicate(
             date_bin(minute()).lt_eq(ms(120_000)),
-            TimestampRange::until_end(t(180_000), false),
+            TimestampRange::until_end(t(180_001), false),
         );
         // 120_000ms <= date_bin(1m, ts)  =>  ts >= 120_000ms
         check_build_predicate(
             ms(120_000).lt_eq(date_bin(minute())),
             TimestampRange::from_start(t(120_000)),
         );
-        // date_bin(1m, ts) = 120_000ms  =>  120_000ms <= ts < 180_000ms
+        // date_bin(1m, ts) = 120_000ms  =>  120_000ms <= ts < 180_001ms
         check_build_predicate(
             date_bin(minute()).eq(ms(120_000)),
-            TimestampRange::new(t(120_000), t(180_000)).unwrap(),
+            TimestampRange::new(t(120_000), t(180_001)).unwrap(),
         );
-        // date_bin(1m, ts) BETWEEN 60_000ms AND 120_000ms  =>  60_000ms <= ts < 180_000ms
+        // date_bin(1m, ts) BETWEEN 60_000ms AND 120_000ms  =>  60_000ms <= ts < 180_001ms
         check_build_predicate(
             date_bin(minute()).between(ms(60_000), ms(120_000)),
-            TimestampRange::new(t(60_000), t(180_000)).unwrap(),
+            TimestampRange::new(t(60_000), t(180_001)).unwrap(),
         );
         // Combined with other conjuncts.
         check_build_predicate(
@@ -710,7 +752,7 @@ mod tests {
                 .gt_eq(ms(60_000))
                 .and(date_bin(minute()).lt(ms(120_000)))
                 .and(col("v").gt(lit(1))),
-            TimestampRange::new(t(60_000), t(180_000)).unwrap(),
+            TimestampRange::new(t(60_000), t(180_001)).unwrap(),
         );
         // An origin argument doesn't change the bounds.
         check_build_predicate(
@@ -731,6 +773,128 @@ mod tests {
                 .gt_eq(ms(120_000)),
             TimestampRange::min_to_max(),
         );
+        // An upper bound that overflows leaves the range unbounded.
+        check_build_predicate(
+            date_bin(minute()).lt_eq(ms(i64::MAX - 1)),
+            TimestampRange::min_to_max(),
+        );
+    }
+
+    /// Evaluates `date_bin` with DataFusion over a grid of timestamps, then checks
+    /// that every row satisfying a comparison on its result lies in the extracted
+    /// range. Covers coarse column units, strides and origins that are not a whole
+    /// number of column units, and negative timestamps.
+    #[tokio::test]
+    async fn test_date_bin_range_keeps_satisfying_rows() {
+        /// Whether the comparison holds for a `date_bin` result.
+        type BinHolds = Box<dyn Fn(i64) -> bool>;
+
+        use datafusion::prelude::SessionContext;
+        use datafusion_expr::cast;
+        use datatypes::arrow::array::{AsArray, Int64Array};
+        use datatypes::arrow::datatypes::{Int64Type, TimeUnit as ArrowTimeUnit};
+
+        let units = [
+            (TimeUnit::Second, ArrowTimeUnit::Second, 1_000_000_000i64),
+            (TimeUnit::Millisecond, ArrowTimeUnit::Millisecond, 1_000_000),
+            (TimeUnit::Microsecond, ArrowTimeUnit::Microsecond, 1_000),
+        ];
+        let ctx = SessionContext::new();
+
+        for (unit, arrow_unit, ns_per_unit) in units {
+            let ts_lit = |v: i64| {
+                lit(match unit {
+                    TimeUnit::Second => ScalarValue::TimestampSecond(Some(v), None),
+                    TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(v), None),
+                    TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(v), None),
+                    TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(v), None),
+                })
+            };
+            let ts_type = DataType::Timestamp(arrow_unit, None);
+            let ts_array = datatypes::arrow::compute::cast(
+                &Int64Array::from((-30..=30).collect::<Vec<i64>>()),
+                &ts_type,
+            )
+            .unwrap();
+            let schema = Arc::new(Schema::new(vec![Field::new("ts", ts_type, false)]));
+            let batch = RecordBatch::try_new(schema, vec![ts_array]).unwrap();
+
+            let strides_ns = [
+                ns_per_unit,
+                ns_per_unit * 3,
+                ns_per_unit / 2,
+                ns_per_unit * 13 / 10,
+                ns_per_unit * 26 / 10,
+            ];
+            let origins_ns = [
+                None,
+                Some(0),
+                Some(ns_per_unit / 2),
+                Some(-ns_per_unit * 7 / 3),
+            ];
+            for stride_ns in strides_ns {
+                for origin_ns in origins_ns {
+                    let mut args = vec![
+                        lit(ScalarValue::new_interval_mdn(0, 0, stride_ns)),
+                        col("ts"),
+                    ];
+                    if let Some(origin) = origin_ns {
+                        args.push(lit(ScalarValue::TimestampNanosecond(Some(origin), None)));
+                    }
+                    let bin = datafusion::functions::datetime::date_bin().call(args);
+
+                    // (ts, date_bin(ts)), both in the column unit.
+                    let rows: Vec<(i64, i64)> = ctx
+                        .read_batch(batch.clone())
+                        .unwrap()
+                        .select(vec![
+                            cast(col("ts"), DataType::Int64),
+                            cast(bin.clone(), DataType::Int64),
+                        ])
+                        .unwrap()
+                        .collect()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .flat_map(|b| {
+                            let ts = b.column(0).as_primitive::<Int64Type>();
+                            let bins = b.column(1).as_primitive::<Int64Type>();
+                            ts.values()
+                                .iter()
+                                .copied()
+                                .zip(bins.values().iter().copied())
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+                    assert_eq!(rows.len(), 61);
+
+                    for c in -35..=35 {
+                        let cases: Vec<(Expr, BinHolds)> = vec![
+                            (bin.clone().eq(ts_lit(c)), Box::new(move |b| b == c)),
+                            (bin.clone().lt(ts_lit(c)), Box::new(move |b| b < c)),
+                            (bin.clone().lt_eq(ts_lit(c)), Box::new(move |b| b <= c)),
+                            (bin.clone().gt(ts_lit(c)), Box::new(move |b| b > c)),
+                            (bin.clone().gt_eq(ts_lit(c)), Box::new(move |b| b >= c)),
+                            (ts_lit(c).gt_eq(bin.clone()), Box::new(move |b| c >= b)),
+                            (
+                                bin.clone().between(ts_lit(c), ts_lit(c + 2)),
+                                Box::new(move |b| c <= b && b <= c + 2),
+                            ),
+                        ];
+                        for (expr, holds) in cases {
+                            let range =
+                                build_time_range_predicate("ts", unit, std::slice::from_ref(&expr));
+                            for &(ts, b) in &rows {
+                                assert!(
+                                    !holds(b) || range.contains(&Timestamp::new(ts, unit)),
+                                    "{expr} holds for ts={ts} (bin={b}, {unit:?}, stride={stride_ns}ns, origin={origin_ns:?}ns) but {range:?} excludes it",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -979,6 +1143,27 @@ mod tests {
         assert_eq!(
             extract(&[col("ts").gt_eq(col("t2"))]),
             TimeRangeExtraction::Unsupported
+        );
+
+        // A range derived from `date_bin` over-approximates by up to a bucket, so a
+        // timestamp synthesized from its bounds may fail the filter: refuse it.
+        assert_eq!(
+            extract(&[date_bin(minute()).gt(ts_lit(60_000))]),
+            TimeRangeExtraction::Unsupported
+        );
+        assert_eq!(
+            extract(&[date_bin(minute()).between(ts_lit(0), ts_lit(60_000))]),
+            TimeRangeExtraction::Unsupported
+        );
+        // Under AND it is dropped like any other unparsable side.
+        assert_eq!(
+            extract(&[col("ts")
+                .lt(ts_lit(2000))
+                .and(date_bin(minute()).gt_eq(ts_lit(60_000)))]),
+            TimeRangeExtraction::Extracted(TimestampRange::until_end(
+                Timestamp::new_millisecond(2000),
+                false
+            ))
         );
     }
 

@@ -89,3 +89,69 @@ EXPLAIN ANALYZE SELECT count(*) FROM power_per_minute WHERE time < '2023-06-11 0
 DROP VIEW power_per_minute;
 
 DROP TABLE power;
+
+-- On a coarser time index, `date_bin` truncates its nanosecond bucket start to the
+-- column unit, so the returned bucket can start up to one unit before the true one.
+-- Each row below sits in its own file, which the upper bound must not prune.
+CREATE TABLE
+    IF NOT EXISTS `power_ms` (
+        `p` DOUBLE NULL,
+        `ts` TIMESTAMP(3) NOT NULL,
+        TIME INDEX (`ts`),
+    ) ENGINE = mito
+WITH
+    (append_mode = 'true');
+
+INSERT INTO power_ms VALUES (1, "2023-06-10 00:00:00.001");
+
+ADMIN FLUSH_TABLE ('power_ms');
+
+INSERT INTO power_ms VALUES (2, "2023-06-10 00:00:00.010");
+
+ADMIN FLUSH_TABLE ('power_ms');
+
+INSERT INTO power_ms VALUES (3, "2023-06-11 00:00:00");
+
+ADMIN FLUSH_TABLE ('power_ms');
+
+-- An origin half a millisecond off: the bucket of 00:00:00.001 truly starts at
+-- 00:00:00.0005 and is returned as 00:00:00.000.
+CREATE VIEW power_ms_origin AS
+SELECT
+    date_bin(
+        '1 millisecond' :: INTERVAL,
+        ts,
+        '2023-06-10 00:00:00.0005' :: TIMESTAMP(9)
+    ) AS time,
+    p
+FROM
+    power_ms;
+
+SELECT * FROM power_ms_origin WHERE time = '2023-06-10 00:00:00' ORDER BY time;
+
+SELECT * FROM power_ms_origin WHERE time <= '2023-06-10 00:00:00' ORDER BY time;
+
+SELECT * FROM power_ms_origin WHERE time BETWEEN '2023-06-09 00:00:00' AND '2023-06-10 00:00:00' ORDER BY time;
+
+-- A stride of 2.6 ms from midnight: the bucket of 00:00:00.010 truly starts at
+-- 00:00:00.0078 and is returned as 00:00:00.007.
+CREATE VIEW power_ms_stride AS
+SELECT
+    date_bin(
+        '2600 microseconds' :: INTERVAL,
+        ts,
+        '2023-06-10 00:00:00' :: TIMESTAMP(9)
+    ) AS time,
+    p
+FROM
+    power_ms;
+
+SELECT * FROM power_ms_stride WHERE time = '2023-06-10 00:00:00.007' ORDER BY time;
+
+SELECT * FROM power_ms_stride WHERE time <= '2023-06-10 00:00:00.007' ORDER BY time;
+
+DROP VIEW power_ms_origin;
+
+DROP VIEW power_ms_stride;
+
+DROP TABLE power_ms;
