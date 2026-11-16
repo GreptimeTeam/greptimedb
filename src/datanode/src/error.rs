@@ -330,7 +330,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Object store WAL is only supported in standalone mode"))]
+    #[snafu(display(
+        "Object store WAL requires the cluster acceptance plugin when controlled by metasrv"
+    ))]
     ObjectStoreWalNotStandalone {
         #[snafu(implicit)]
         location: Location,

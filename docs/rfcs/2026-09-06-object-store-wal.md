@@ -174,10 +174,15 @@ A `testing` cargo feature exposes hooks to wait for admitted appends, to seal th
 
 ### Node lease and recovery fencing
 
-The WAL exposes an I/O permit backed by Mito's node lease. Cluster wiring must
-install it before opening regions when cluster support is enabled; the current
-datanode builder still rejects object-store WAL with a metasrv client. The permit exposes only whether new object-store I/O is allowed; the
-WAL does not own deadlines or heartbeat renewal. Standalone installs no permit.
+A metasrv-controlled datanode accepts object-store WAL only when its plugins
+contain `EnableObjectStoreWal`; OSS does not register this marker. The builder
+installs an I/O permit backed by Mito's node lease before opening regions. The
+permit exposes only whether new object-store I/O is allowed; the WAL does not
+own deadlines or heartbeat renewal. Standalone installs no permit. The node
+prefix retains the fixed `epochs/0` directory across restarts, independently of
+the heartbeat node epoch and the store epoch in object headers. Metasrv
+configuration, failover integration and Enterprise registration remain separate
+prerequisites for enabling the distributed WAL.
 Startup's initial object and its withdrawal after a missing-history failure are
 exempt so startup does not depend on a heartbeat that has not started yet.
 
@@ -191,9 +196,8 @@ renewal. Release records remain available for a later batch, while their current
 waiters fail. An admission that would wait for upload capacity fails immediately
 while expired; ordinary admissions continue to rely on the region write lease.
 
-Cluster integration must keep the heartbeat running until the object-store WAL
-stops, then close the heartbeat and regions. This shutdown wiring is deferred
-until cluster support is enabled. If the lease expires during shutdown, the WAL
+The datanode keeps the heartbeat running until the object-store WAL stops, then
+closes the heartbeat and regions. If the lease expires during shutdown, the WAL
 drops its unindexed backlog without waiting for uploads, and still waits for
 issued deletes. Expiry is checked on the next flush timer tick, including during
 shutdown, so detection can take one configured flush interval plus actor

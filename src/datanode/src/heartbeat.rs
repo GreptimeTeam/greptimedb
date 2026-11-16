@@ -501,6 +501,12 @@ impl HeartbeatTask {
             .collect()
     }
 
+    /// Exposes the lifecycle flag for shutdown-order tests without a network task.
+    #[cfg(test)]
+    pub(crate) fn running_flag_for_test(&self) -> Arc<AtomicBool> {
+        self.running.clone()
+    }
+
     pub fn close(&self) -> Result<()> {
         let running = self.running.clone();
         if running

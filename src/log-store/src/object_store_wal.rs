@@ -52,9 +52,9 @@
 //! recovery with possible acknowledged data loss; remote readers never accept
 //! this fallback.
 //!
-//! A node-lease I/O permit is available for future cluster integration; the
-//! datanode builder currently rejects clustered object-store WAL. Integration
-//! must install the permit before opening regions. New creates and deletes check it immediately before issuance;
+//! With the cluster acceptance plugin registered, the datanode installs a
+//! node-lease I/O permit before opening regions. OSS registers no such plugin.
+//! New creates and deletes check the permit immediately before issuance;
 //! already issued operations may finish. Expiry fails unacknowledged durable
 //! batches and pauses the acknowledged enqueued backlog until renewal. Stop
 //! drops that backlog if the lease expires and still waits for issued deletes.

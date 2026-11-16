@@ -17,12 +17,19 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-/// Generation of the node prefix in standalone mode.
+/// Fixed directory generation used by standalone and distributed WAL stores.
 ///
-/// Standalone runs a single datanode that never changes generation, so the
-/// prefix layout carries the constant. Distributed mode will take both the
-/// node id and the generation from the metasrv.
+/// The directory remains stable across process restarts. This is distinct from
+/// both the heartbeat node epoch and the store epoch carried in object headers.
 pub const STANDALONE_GENERATION: u64 = 0;
+
+/// Plugin marker allowing a metasrv-controlled datanode to use object-store WAL.
+///
+/// OSS does not register this marker. Cluster integration registers it only after
+/// the distributed WAL prerequisites are available; it does not itself configure
+/// metasrv or enable region failover.
+#[derive(Debug, Clone, Copy)]
+pub struct EnableObjectStoreWal;
 
 /// When an append to the object store WAL returns.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
