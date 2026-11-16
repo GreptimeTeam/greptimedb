@@ -204,9 +204,24 @@ fn sample_slice_bytes(fields: &SeriesFields) -> usize {
 
 /// The histogram tables `series` is the first to reference, and the bytes they hold.
 ///
-/// The caller adds these identities to `billed` when it retains the chunk, so one allocation several
-/// chunks index into is billed once. The identity is the address of the allocation behind the `Arc`.
-fn unbilled_tables(series: &Series, billed: &HashSet<usize>) -> (Vec<usize>, usize) {
+/// A table is one allocation the chunks of a series share, so it is neither a per-chunk cost --
+/// counting it per chunk would make a series delivered in a thousand chunks cost a thousand tables
+/// -- nor no cost at all, which is what leaving it out of every chunk leaves the figure at. What it
+/// is, is a cost of the operand that first retains a chunk referencing it: the identities it returns
+/// are the tables `billed` does not hold yet, and the figure is what those tables hold
+/// ([`table_bytes`]). The caller bills the figure as it stands and adds the identities to `billed`
+/// once the chunk is retained, which is what makes the two halves of the figure agree.
+///
+/// The identity is the address of the allocation behind the `Arc`. It names one table for as long as
+/// it is remembered, because a chunk referencing a table keeps it alive and no later allocation can
+/// be given the same address. A table two segments or two fields of the one chunk reference is
+/// listed once. Each identity is also one slot in the set that remembers it, which is charged as it
+/// is written -- one entry at a time, like the boundary list's, and not from the capacity the set
+/// grows to -- so remembering a table is paid for beside the table itself.
+///
+/// Both nodes that retain chunks instead of folding them read this: a binary operand and a
+/// `quantile` input. Neither counts a table per chunk, and neither lets it go unbilled.
+pub(crate) fn unbilled_tables(series: &Series, billed: &HashSet<usize>) -> (Vec<usize>, usize) {
     let mut fresh: Vec<usize> = Vec::new();
     let mut bytes = 0usize;
     for field in series.fields.iter() {

@@ -46,6 +46,7 @@
 //! Everything else in this runtime trades memory for the width of a point: a fold's state per group
 //! and point, this one's whole input.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_query::promql_annotations::PromqlAnnotationCollector;
@@ -61,7 +62,7 @@ use crate::aggregate::{
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{GridSeriesBuilder, series_bytes};
 use crate::map::{constant_series, validate_grid_series};
-use crate::native::execute::{NodeBuffer, evaluated_bytes};
+use crate::native::execute::{NodeBuffer, evaluated_bytes, operand_chunk_bytes, unbilled_tables};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, Grouping as BoundGrouping,
     aggregate_state_binding,
@@ -100,19 +101,42 @@ struct QuantileInput {
     quantile: f64,
     /// One entry per series this node was handed.
     series: Vec<Series>,
+    /// The histogram tables the retained chunks index into, by the address of the allocation behind
+    /// their `Arc`.
+    ///
+    /// A table is one allocation however many chunks of a series index into it, so it is billed once
+    /// -- by the first chunk that references it -- exactly as a binary operand bills the tables of
+    /// the chunks it retains. That is what keeps a series delivered in a thousand chunks from costing
+    /// a thousand tables, and what keeps a table from costing nothing: the per-chunk figure leaves
+    /// its tables out ([`operand_chunk_bytes`]), so a table in neither this set nor a reservation is
+    /// a table nothing covers. The chunks of one Arrow batch are the same story one level down, and
+    /// the per-chunk figure leaves their shared buffer out for the same reason.
+    tables: HashSet<usize>,
+    /// The bytes the retained chunks hold, folded in as they arrive.
+    ///
+    /// Each chunk is measured once, by what it holds on its own ([`operand_chunk_bytes`]): the
+    /// samples its rows occupy and the descriptors it keeps, not the allocation those samples are
+    /// slices of, so a series delivered as a thousand slices of one buffer is charged the data it
+    /// holds rather than that buffer a thousand times. The histogram tables its chunks reference are
+    /// the other half, billed once each as [`unbilled_tables`] reports them. The vector that carries
+    /// the series is not part of the figure: [`Self::bytes`] adds it from the capacity it holds.
+    held: usize,
 }
 
 impl QuantileInput {
-    /// The bytes this input holds: the series themselves and the vector that carries them.
+    /// The bytes this input holds: the chunks it retained and the vector that carries them.
+    ///
+    /// The retained figure is [`Self::held`], which is folded in chunk by chunk, and the vector is
+    /// counted by the capacity it really holds -- the capacity `retain_quantile` reserved before it
+    /// grew -- so this is what the node has to reserve rather than a second estimate of it.
     fn bytes(&self) -> usize {
-        self.series.iter().fold(
-            std::mem::size_of::<Self>().saturating_add(
+        std::mem::size_of::<Self>()
+            .saturating_add(
                 self.series
                     .capacity()
                     .saturating_mul(std::mem::size_of::<Series>()),
-            ),
-            |total, series| total.saturating_add(series_bytes(series)),
-        )
+            )
+            .saturating_add(self.held)
     }
 }
 
@@ -295,6 +319,8 @@ impl AggregateRuntime {
         let retained = QuantileInput {
             quantile,
             series: Vec::new(),
+            tables: HashSet::new(),
+            held: 0,
         };
         buffer.resize(retained.bytes())?;
         Ok(Self {
@@ -319,7 +345,10 @@ impl AggregateRuntime {
     /// execution and so must count the slices of one buffer instead of the buffer once per chunk.
     ///
     /// A `quantile` keeps the chunk instead, so this figure is only what admitting it holds while it
-    /// is handed over; [`Self::accumulate`] settles the reservation on the input it now retains.
+    /// is handed over; [`Self::accumulate`] settles the reservation on the input it now retains,
+    /// which is measured the way a binary operand measures the chunks it keeps
+    /// ([`operand_chunk_bytes`] plus [`unbilled_tables`]) rather than chunk by chunk through the
+    /// allocations its slices point into.
     pub(crate) fn pending(&self, chunk: &EvaluatedChunk) -> usize {
         evaluated_bytes(chunk)
     }
@@ -373,11 +402,13 @@ impl AggregateRuntime {
     /// Keeps one chunk of a `quantile`'s input until the input ends.
     ///
     /// The chunk is kept whole rather than folded: the answer is the φ-quantile of the group's sample
-    /// set, and no fixed-width state holds a sample set. The charge is therefore the chunk's own
-    /// bytes as this node now holds them -- the series and, when the retained vector has to grow for
-    /// it, the capacity it grows to -- reserved before the push, because the push is what makes the
-    /// node hold it; the reservation then settles on the whole input, which is what this node holds
-    /// between chunks.
+    /// set, and no fixed-width state holds a sample set. What it costs is measured the way a binary
+    /// operand measures the chunks it retains ([`operand_chunk_bytes`] plus [`unbilled_tables`]), and
+    /// for the same reason: what a `quantile` keeps is a series for the rest of the execution, so the
+    /// slices of one buffer its chunks are must add up to that buffer once rather than count it once
+    /// per chunk. The figure is reserved before the push -- the push is what makes the node hold it --
+    /// and the reservation then settles on the whole input, which is what this node holds between
+    /// chunks.
     fn retain_quantile(&mut self, chunk: EvaluatedChunk, buffer: &mut NodeBuffer) -> Result<()> {
         // A quantile reads float values and skips a histogram sample, so a chunk only has to fit the
         // schema and the grid -- exactly what the kernel's own input check asks for.
@@ -397,11 +428,20 @@ impl AggregateRuntime {
         let Some(retained) = self.retained.as_mut() else {
             return Err(no_fold(&self.describe()));
         };
-        buffer.grow(series_bytes(&chunk.series))?;
+        // What this chunk adds to what the node holds: the samples its rows occupy and the
+        // descriptors it keeps, not the allocations those samples are slices of, and the histogram
+        // tables it is the first chunk to reference. A series handed over as a thousand slices of
+        // one batch holds one buffer, so charging every slice for the buffer it points into would
+        // make the figure grow with the number of chunks instead of with the data in them.
+        let (tables, table_bytes) = unbilled_tables(&chunk.series, &retained.tables);
+        let bytes = operand_chunk_bytes(&chunk.series).saturating_add(table_bytes);
+        buffer.grow(bytes)?;
         // The slot the chunk is about to take, and - when the vector has to grow for it - the
         // capacity it grows to. `Vec::push` doubles, so booking one slot would let the real
         // allocation outrun what the pool admitted; the target is booked instead, and the settle
-        // below then reads back the exact capacity the vector holds.
+        // below then reads back the exact capacity the vector holds. The vector's slots are not part
+        // of `held`: [`QuantileInput::bytes`] counts them from that capacity, so booking them here
+        // and folding them there would charge them twice.
         let needed = retained.series.len().saturating_add(1);
         if needed > retained.series.capacity() {
             let target = retained.series.capacity().saturating_mul(2).max(needed);
@@ -420,6 +460,10 @@ impl AggregateRuntime {
                 })?;
         }
         retained.series.push(chunk.series);
+        // From here the node keeps those tables alive itself, so a chunk arriving later that
+        // references one is charged its own slices and not the table again.
+        retained.tables.extend(tables);
+        retained.held = retained.held.saturating_add(bytes);
         buffer.resize(retained.bytes())
     }
 

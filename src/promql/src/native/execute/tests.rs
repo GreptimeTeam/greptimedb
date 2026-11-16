@@ -50,7 +50,7 @@ use super::{
     vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
-use crate::grid_series::merge_same_labelset;
+use crate::grid_series::{merge_same_labelset, series_bytes};
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::info::InfoSelector;
 use crate::instant_eval::{instant_candidate_span, select_instants};
@@ -12417,6 +12417,87 @@ fn quantile_parameter_costs_the_points_held_not_the_span_between_them() {
         vec![unlabelled(vec![(0, Some(1.0)), (99_999, Some(3.0))])]
     );
     assert_eq!(pool.reserved(), 0);
+}
+
+/// A `quantile` bills the buffer its chunks are slices of once, not once per chunk.
+///
+/// One 2000-sample Arrow allocation is handed over as 2000 one-row chunks, which is what a source
+/// handing over the rows of one batch does: every chunk is a slice of the same 16 KB buffer, so the
+/// series holds 16 KB of values and one descriptor per chunk. Charging each chunk for the allocation
+/// its slice points into -- `series_bytes`, which reads the capacity of the buffer a slice keeps
+/// alive -- bills 2000 x ~16.3 KB ≈ 32 MB, and the 4 MiB pool below refuses this input at about the
+/// 260th chunk (4 MiB / 16.3 KB), while `min` over the same chunks answers, because a point-wise fold
+/// holds one chunk at a time and never the input. Retained the way a binary operand retains its
+/// operands (`operand_chunk_bytes` plus the tables `unbilled_tables` reports), the input costs its
+/// rows and its descriptors -- under a megabyte -- so the fold answers and leaves the pool empty.
+#[test]
+fn a_quantile_bills_a_shared_buffer_once() {
+    const ROWS: usize = 2_000;
+    const POOL: usize = 4 * 1024 * 1024;
+    let grid = grid(0, 1, ROWS as u64);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let batch = Float64Array::from((0..ROWS).map(|row| row as f64).collect::<Vec<f64>>());
+    let chunks: Vec<EvaluatedChunk> = (0..ROWS)
+        .map(|row| {
+            evaluated_array_chunk_of(&schema, metric(), row, batch.slice(row, 1), row + 1 == ROWS)
+        })
+        .collect();
+    // What a one-row chunk is charged by the figure this test is about: the buffer it is a slice of,
+    // not the eight bytes of the row it holds. The whole input is that buffer twice over -- once
+    // spent on the values and once billed per chunk -- which is what the pool would refuse.
+    let per_chunk = series_bytes(&chunks[0].series);
+    assert!(
+        per_chunk >= ROWS * std::mem::size_of::<f64>(),
+        "a one-row chunk is charged {per_chunk} bytes, less than the {} the buffer it is a slice of \
+         holds, so this test is not reproducing the per-chunk billing it is about",
+        ROWS * std::mem::size_of::<f64>()
+    );
+    let per_chunk_total = per_chunk.saturating_mul(ROWS);
+    assert!(
+        per_chunk_total > 7 * POOL,
+        "billing each chunk for its buffer costs {per_chunk_total} bytes, which a {POOL}-byte pool \
+         would admit, so this input does not reproduce the double billing"
+    );
+
+    let run = |kind: AggregateKind, pool: Arc<dyn MemoryPool>| {
+        let tree = NativeTree::try_new(aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            BoundAggregate {
+                kind,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Complete,
+            },
+        ))
+        .unwrap();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        for chunk in &chunks {
+            execution
+                .push_evaluated(InputId::new(0), chunk.clone())
+                .unwrap();
+            // A source queue holds the chunk the caller just pushed, so a pull per push keeps what
+            // the pool holds to what the nodes retain rather than to the whole input stream. An
+            // aggregate answers once, when its input ends, so nothing has settled here yet.
+            assert!(
+                execution.next_chunk().unwrap().is_none(),
+                "{kind:?} answered early"
+            );
+        }
+        let output = execution.finish().unwrap();
+        assert_eq!(
+            pool.reserved(),
+            0,
+            "{kind:?} left the pool holding input it was finished with"
+        );
+        output
+    };
+    let minimum = run(AggregateKind::Min, bounded_pool(POOL));
+    let quantile = run(
+        AggregateKind::Quantile { quantile: 0.5 },
+        bounded_pool(POOL),
+    );
+    // Every point of this input holds exactly one value, so the φ-quantile of a point is that value
+    // and the two aggregates answer the same series.
+    assert_eq!(groups_of(&quantile), groups_of(&minimum));
 }
 
 /// A `quantile` skips a histogram sample and says so, exactly as `min` does.
