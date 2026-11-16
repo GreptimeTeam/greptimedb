@@ -22,7 +22,7 @@ use datatypes::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::series::Label;
 use datatypes::series::aggregate_state::{
-    AggregateStateSchema, StateComponent, StateFieldsBatch, StateSeries,
+    AggregateStateKind, AggregateStateSchema, StateComponent, StateFieldsBatch, StateSeries,
 };
 use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
@@ -1758,7 +1758,19 @@ fn state_schema_of(op: AggregateOp) -> AggregateStateSchema {
             StateField::IncrementalMean => StateComponent::IncrementalMean,
         })
         .collect::<Vec<_>>();
-    AggregateStateSchema::try_new(crate::native::state::state_kind(op), components).unwrap()
+    // The kind an executor would derive from the op, spelled out here so this encoder does not
+    // depend on the runtime helper the fixture is standing in for.
+    let kind = match op {
+        AggregateOp::Sum => AggregateStateKind::Sum,
+        AggregateOp::Count => AggregateStateKind::Count,
+        AggregateOp::Avg => AggregateStateKind::Avg,
+        AggregateOp::Min => AggregateStateKind::Min,
+        AggregateOp::Max => AggregateStateKind::Max,
+        AggregateOp::Group => AggregateStateKind::Group,
+        AggregateOp::Stddev => AggregateStateKind::Stddev,
+        AggregateOp::Stdvar => AggregateStateKind::Stdvar,
+    };
+    AggregateStateSchema::try_new(kind, components).unwrap()
 }
 
 /// One group encoded as the Arrow-backed row the executor hands the merge: field-major lists of
