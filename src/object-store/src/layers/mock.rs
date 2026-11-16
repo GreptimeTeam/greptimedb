@@ -18,9 +18,13 @@ use std::sync::{Arc, Mutex};
 use derive_builder::Builder;
 pub use oio::*;
 pub use opendal::raw::{
-    Layer, OpCopy, OpDelete, OpList, OpRead, OpWrite, RpRead, Service, Servicer, oio,
+    Layer, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat, OpWrite,
+    RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service, Servicer, Timestamp, oio,
 };
-pub use opendal::{Buffer, BytesRange, Error, ErrorKind, Metadata, OperationContext, Result};
+pub use opendal::{
+    Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, MetadataBuilder, OperationContext,
+    Result,
+};
 
 pub type MockWriterFactory = Arc<dyn Fn(&str, OpWrite, oio::Writer) -> oio::Writer + Send + Sync>;
 pub type MockReaderFactory = Arc<dyn Fn(&str, OpRead, oio::Reader) -> oio::Reader + Send + Sync>;

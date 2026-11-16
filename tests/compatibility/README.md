@@ -35,6 +35,12 @@ including exact integer counts, custom bounds, and NaN payloads:
 cargo nextest run -p servers -E 'test(native_histogram_remote_read_wire_fixture)'
 ```
 
+## Authority Head fixtures
+
+[Authority Head v1 fixtures](authority/object_store/README.md) freeze empty and
+owned payloads. `common-meta` tests cover exact encoding, required fields, unknown
+fields, UUID validation, version rejection and counter overflow.
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of

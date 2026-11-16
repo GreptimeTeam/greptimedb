@@ -1058,6 +1058,74 @@ pub enum Error {
         reason: String,
     },
 
+    #[snafu(display("Invalid Authority Head: {}", reason))]
+    AuthorityFormat {
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported Authority Head format version: {}", version))]
+    AuthorityVersion {
+        version: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Authority Head counter overflow: {}", counter))]
+    AuthorityOverflow {
+        counter: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Authority Head is missing at {}; operator recovery is required", path))]
+    AuthorityMissing {
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Authority Head metadata is unusable: {}", reason))]
+    AuthorityMetadata {
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Object store is not admitted for Authority Head: {}", reason))]
+    AuthorityCapability {
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Authority storage probe failed: {}", reason))]
+    AuthorityProbe {
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Authority storage request failed: {}", operation))]
+    AuthorityStorage {
+        operation: &'static str,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to open Authority storage"))]
+    AuthorityOpen {
+        #[snafu(source)]
+        error: object_store::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to write object, file path: {}", file_path))]
     WriteObject {
         #[snafu(implicit)]
@@ -1235,6 +1303,15 @@ impl ErrorExt for Error {
             | ElectionLeaderLeaseExpired { .. }
             | ElectionLeaderLeaseChanged { .. } => StatusCode::Internal,
 
+            AuthorityFormat { .. } | AuthorityVersion { .. } | AuthorityOverflow { .. } => {
+                StatusCode::InvalidArguments
+            }
+            AuthorityCapability { .. } => StatusCode::Unsupported,
+            AuthorityMissing { .. }
+            | AuthorityMetadata { .. }
+            | AuthorityProbe { .. }
+            | AuthorityStorage { .. }
+            | AuthorityOpen { .. } => StatusCode::StorageUnavailable,
             NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. }
             | ProcedurePoisonConflict { .. }
@@ -1450,6 +1527,16 @@ impl ErrorExt for Error {
 }
 
 impl Error {
+    /// Returns the original Authority request error without inviting write replay.
+    pub fn authority_storage_error(&self) -> Option<&object_store::Error> {
+        match self {
+            Self::AuthorityStorage { error, .. } | Self::AuthorityMissing { error, .. } => {
+                Some(error)
+            }
+            _ => None,
+        }
+    }
+
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     /// Check if the error is a serialization error.
     pub fn is_serialization_error(&self) -> bool {
