@@ -22,6 +22,7 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
 use common_time::TimeToLive;
 use either::Either;
+use futures::{StreamExt, stream};
 use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
 use partition::expr::PartitionExpr;
@@ -489,34 +490,24 @@ impl CompactionContext {
     /// Checks each physical input once before output tasks begin. Missing inputs
     /// disable imported summaries without changing the reader's tolerant behavior.
     async fn prepare_index_inputs<'a>(&mut self, inputs: impl Iterator<Item = &'a FileHandle>) {
-        if !self.index_plan.needs_input_reuse()
-            || self
-                .region_metadata
-                .partition_expr
-                .as_deref()
-                .is_some_and(|expr| !expr.is_empty())
-        {
+        if !self.index_plan.needs_input_reuse() {
             return;
         }
-        let mut seen = HashSet::new();
-        let mut existing = HashSet::new();
-        for input in inputs {
-            let id = input.file_id();
-            if !seen.insert(id) {
-                continue;
-            }
-            let path = crate::sst::location::sst_file_path(
-                self.access_layer.table_dir(),
-                id,
-                self.access_layer.path_type(),
-            );
-            if matches!(
-                self.access_layer.object_store().exists(&path).await,
-                Ok(true)
-            ) {
-                existing.insert(id);
-            }
-        }
+        let ids: HashSet<_> = inputs.map(FileHandle::file_id).collect();
+        let access_layer = &self.access_layer;
+        let existing = stream::iter(ids)
+            .map(|id| async move {
+                let path = crate::sst::location::sst_file_path(
+                    access_layer.table_dir(),
+                    id,
+                    access_layer.path_type(),
+                );
+                matches!(access_layer.object_store().exists(&path).await, Ok(true)).then_some(id)
+            })
+            .buffer_unordered(8)
+            .filter_map(|id| async move { id })
+            .collect::<HashSet<_>>()
+            .await;
         // FileHandles protect ordinary purge; external object-store deletion can race.
         self.existing_index_inputs = Some(Arc::new(existing));
     }
@@ -692,6 +683,18 @@ fn can_reuse_output_inputs(output: &CompactionOutput, has_rollover: bool) -> boo
     !has_rollover && output.output_time_range.is_none()
 }
 
+/// Whole-file summaries are usable only when reading needs no partition filtering.
+fn output_matches_partition(
+    output: &CompactionOutput,
+    partition_expr: Option<&PartitionExpr>,
+) -> bool {
+    partition_expr.is_none()
+        || output
+            .inputs
+            .iter()
+            .all(|input| input.meta_ref().partition_expr.as_ref() == partition_expr)
+}
+
 fn reusable_index_inputs(
     outputs: &[CompactionOutput],
     has_rollover: bool,
@@ -789,14 +792,18 @@ impl DefaultSstMerger {
             merge_mode,
             read_parallelism: write_opts.encode_parallelism,
         };
-        // A region filter, rollover or time slice requires output-scoped accumulation.
-        let no_region_filter = context
-            .region_metadata
-            .partition_expr
-            .as_deref()
-            .is_none_or(str::is_empty);
+        // Matching file scopes need no additional region filtering. Rollover and
+        // time slicing still require output-scoped accumulation.
+        let partition_expr = match context.region_metadata.partition_expr.as_deref() {
+            None | Some("") => None,
+            Some(expr) => {
+                PartitionExpr::from_json_str(expr).with_context(|_| InvalidPartitionExprSnafu {
+                    expr: expr.to_string(),
+                })?
+            }
+        };
         let can_merge_inputs = can_reuse_output_inputs(&output, write_opts.max_file_size.is_some())
-            && no_region_filter
+            && output_matches_partition(&output, partition_expr.as_ref())
             && context
                 .existing_index_inputs
                 .as_ref()
@@ -864,17 +871,6 @@ impl DefaultSstMerger {
                 },
             )
             .await?;
-        // Convert partition expression once outside the map
-        let partition_expr = match &region_metadata.partition_expr {
-            None => None,
-            Some(json_str) if json_str.is_empty() => None,
-            Some(json_str) => PartitionExpr::from_json_str(json_str).with_context(|_| {
-                InvalidPartitionExprSnafu {
-                    expr: json_str.clone(),
-                }
-            })?,
-        };
-
         let output_files = sst_infos
             .iter()
             .map(|sst_info| {
@@ -1434,6 +1430,36 @@ mod tests {
             vec![whole.file_id()],
         );
         assert_eq!(reusable_index_inputs(&outputs, true).count(), 0);
+    }
+
+    #[test]
+    fn test_reuse_requires_all_input_partition_scopes_to_match() {
+        use datatypes::value::Value;
+        use partition::expr::{RestrictedOp, col};
+
+        let scope = PartitionExpr::new(col("tag_0"), RestrictedOp::GtEq, Value::UInt32(10).into());
+        let other = PartitionExpr::new(col("tag_0"), RestrictedOp::GtEq, Value::UInt32(20).into());
+        for (scopes, expected) in [
+            (vec![Some(scope.clone()), Some(scope.clone())], true),
+            (vec![Some(scope.clone()), None], false),
+            (vec![Some(scope.clone()), Some(other)], false),
+        ] {
+            let output = CompactionOutput {
+                output_level: 1,
+                inputs: scopes
+                    .into_iter()
+                    .map(|partition_expr| {
+                        let mut meta = dummy_file_meta();
+                        meta.partition_expr = partition_expr;
+                        new_file_handle(meta)
+                    })
+                    .collect(),
+                filter_deleted: true,
+                output_time_range: None,
+            };
+            assert_eq!(output_matches_partition(&output, Some(&scope)), expected);
+            assert!(output_matches_partition(&output, None));
+        }
     }
 
     #[tokio::test]
