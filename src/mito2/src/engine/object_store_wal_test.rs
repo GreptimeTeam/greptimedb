@@ -29,7 +29,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
-use common_wal::config::object_store::{AckMode, ObjectStoreWalConfig, STANDALONE_GENERATION};
+use common_wal::config::object_store::{AckMode, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig};
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::value::Value;
 use futures::TryStreamExt;
@@ -82,7 +82,7 @@ pub(crate) fn wal_config() -> ObjectStoreWalConfig {
 /// The node prefix a standalone datanode derives from the configured root,
 /// which the regions persist in their WAL options.
 fn node_prefix() -> String {
-    wal_config().node_prefix(0, STANDALONE_GENERATION)
+    wal_config().node_prefix(0, FIXED_DIRECTORY_GENERATION)
 }
 
 pub(crate) fn wal_options() -> HashMap<String, String> {
@@ -650,7 +650,7 @@ async fn new_log_store() -> Arc<ObjectStoreLogStore> {
         ObjectStore::new(Memory::default()).unwrap(),
         &wal_config(),
         0,
-        STANDALONE_GENERATION,
+        FIXED_DIRECTORY_GENERATION,
     )
     .await
     .unwrap()

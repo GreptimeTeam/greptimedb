@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The directory remains stable across process restarts. This is distinct from
 /// both the heartbeat node epoch and the store epoch carried in object headers.
-pub const STANDALONE_GENERATION: u64 = 0;
+pub const FIXED_DIRECTORY_GENERATION: u64 = 0;
 
 /// Plugin marker allowing a metasrv-controlled datanode to use object-store WAL.
 ///
@@ -131,7 +131,7 @@ mod tests {
     fn test_node_prefix() {
         let config = ObjectStoreWalConfig::default();
         assert_eq!(
-            config.node_prefix(0, STANDALONE_GENERATION),
+            config.node_prefix(0, FIXED_DIRECTORY_GENERATION),
             "wal/datanodes/0/epochs/0"
         );
 

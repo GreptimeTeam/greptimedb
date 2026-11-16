@@ -42,7 +42,7 @@ use common_telemetry::{error, info, warn};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::object_store::{
-    EnableObjectStoreWal, ObjectStoreWalConfig, STANDALONE_GENERATION,
+    EnableObjectStoreWal, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig,
 };
 use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
@@ -906,7 +906,7 @@ impl DatanodeBuilder {
             "Creating object store logstore with config: {:?}, node id: {}",
             config, node_id
         );
-        ObjectStoreLogStore::try_new(object_store, config, node_id, STANDALONE_GENERATION)
+        ObjectStoreLogStore::try_new(object_store, config, node_id, FIXED_DIRECTORY_GENERATION)
             .await
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)
@@ -1236,7 +1236,7 @@ mod tests {
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
     use common_wal::config::object_store::{
-        AckMode, EnableObjectStoreWal, ObjectStoreWalConfig, STANDALONE_GENERATION,
+        AckMode, EnableObjectStoreWal, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig,
     };
     use common_wal::config::raft_engine::RaftEngineConfig;
     use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
@@ -1584,7 +1584,7 @@ mod tests {
         assert!(datanode.heartbeat_task.is_some());
         let log_store = datanode.object_store_log_store().unwrap();
         let engine = datanode.region_server.mito_engine().unwrap();
-        let prefix = config.node_prefix(7, STANDALONE_GENERATION);
+        let prefix = config.node_prefix(7, FIXED_DIRECTORY_GENERATION);
         assert_eq!("cluster-a/wal/datanodes/7/epochs/0", prefix);
         let provider = Provider::object_store_provider(REGION, prefix);
         let entry = log_store.entry(vec![1], 0, REGION, &provider).unwrap();
@@ -1632,8 +1632,10 @@ mod tests {
             .unwrap()
             .running_flag_for_test();
         heartbeat_running.store(true, Ordering::Release);
-        let provider =
-            Provider::object_store_provider(REGION, config.node_prefix(0, STANDALONE_GENERATION));
+        let provider = Provider::object_store_provider(
+            REGION,
+            config.node_prefix(0, FIXED_DIRECTORY_GENERATION),
+        );
         let entry = log_store.entry(vec![1], 0, REGION, &provider).unwrap();
         let response = log_store.append_batch(vec![entry]).await.unwrap();
         log_store.hold_creates();
@@ -2015,7 +2017,7 @@ mod tests {
 
     /// The options that put a region on the WAL of a datanode with `config`.
     fn region_wal_options(config: &ObjectStoreWalConfig) -> HashMap<String, String> {
-        let prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        let prefix = config.node_prefix(0, FIXED_DIRECTORY_GENERATION);
         let wal_options =
             serde_json::to_string(&WalOptions::ObjectStore(ObjectStoreWalOptions::new(prefix)))
                 .unwrap();
@@ -2063,7 +2065,7 @@ mod tests {
         skipped_rows: usize,
     ) -> (Datanode, Arc<ObjectStoreLogStore>) {
         let config = enqueued_wal_config(flush_interval);
-        let prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        let prefix = config.node_prefix(0, FIXED_DIRECTORY_GENERATION);
         let mut request = CreateRequestBuilder::new().build();
         request.options.extend(region_wal_options(&config));
         let datanode = object_store_wal_builder(data_home, config)
@@ -2264,7 +2266,7 @@ mod tests {
     fn test_node_prefix_passes_validation() {
         let config = ObjectStoreWalConfig::default();
         let derived = ObjectStoreWalConfig {
-            prefix: config.node_prefix(0, STANDALONE_GENERATION),
+            prefix: config.node_prefix(0, FIXED_DIRECTORY_GENERATION),
             ..config
         };
         validate_object_store_wal_config(&derived).unwrap();
