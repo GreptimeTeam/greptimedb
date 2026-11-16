@@ -51,6 +51,7 @@ use crate::test_util::{
 
 #[tokio::test]
 async fn test_engine_create_validates_extension_options_before_manifest() {
+    use crate::sst::index::IndexBuildType;
     use crate::sst::index::handler::{
         IndexKindHandler, IndexKindProvider, IndexKindProviderRef, PlanContext, PlannedIndex,
     };
@@ -81,7 +82,15 @@ async fn test_engine_create_validates_extension_options_before_manifest() {
             }
             Ok(())
         }
-        fn plan(&self, _: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+        fn plan(
+            &self,
+            context: &PlanContext<'_>,
+        ) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+            // Creation must validate options even though this provider skips flush work.
+            if context.build_type == IndexBuildType::Flush {
+                return Ok(None);
+            }
+            self.validate(context)?;
             Ok(None)
         }
     }

@@ -2611,6 +2611,11 @@ impl IndexKindHandler for RebuildSketchProvider {
     fn kinds(&self) -> &[IndexKind] {
         &[IndexKind::Extension(ExtensionIndexKind::Hll)]
     }
+
+    fn validate(&self, _: &PlanContext<'_>) -> Result<(), BoxedError> {
+        Ok(())
+    }
+
     fn plan(&self, context: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
         if context.build_type == IndexBuildType::Manual {
             self.manual_plans.fetch_add(1, Ordering::Relaxed);

@@ -1061,11 +1061,25 @@ impl IndexBuildTask {
         }
         let current_file = self.file.with_updated_index(current_file_meta.clone());
         let builder = Arc::make_mut(&mut self.indexer_builder);
+        let output_rows = (current_file_meta.num_rows != 0).then_some(current_file_meta.num_rows);
         if let Some(inputs) = &mut builder.index_build_inputs {
             inputs.plan = plan;
             inputs.inputs = vec![current_file.clone()].into();
-            inputs.output_rows =
-                (current_file_meta.num_rows != 0).then_some(current_file_meta.num_rows);
+            inputs.output_rows = output_rows;
+        } else {
+            builder.index_build_inputs = Some(build::IndexBuildInputs {
+                plan,
+                inputs: vec![current_file.clone()].into(),
+                input_puffin_manager: self.access_layer.build_puffin_manager(),
+                can_merge_inputs: self
+                    .target_region_metadata
+                    .partition_expr
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+                    && current_file_meta.region_id == self.region_id,
+                output_rows,
+                memory_limit: None,
+            });
         }
         self.file = current_file;
         self.source.file_meta = current_file_meta.as_ref().clone();
@@ -1142,6 +1156,12 @@ impl IndexBuildTask {
         }
         let output = indexer.finish().await;
         self.check_rebuild_indexer_or_abort(&mut indexer).await?;
+        if let Err(err) = self.check_rebuild_output(&output) {
+            indexer.abort().await;
+            return Err(err).context(BuildIndexAsyncSnafu {
+                region_id: self.region_id,
+            });
+        }
         if output.file_size == 0 {
             return Ok(ControlFlow::Break(self.aborted("No index was created")));
         }
@@ -1178,6 +1198,42 @@ impl IndexBuildTask {
                 indexer.discarded()
             );
             return Err(Arc::new(OperateAbortedIndexSnafu.build()));
+        }
+        Ok(())
+    }
+
+    /// A skipped creator or partial completion must not erase a requested existing extension.
+    fn check_rebuild_output(&self, output: &IndexOutput) -> Result<(), Arc<Error>> {
+        let source = &self.source.file_meta;
+        for entry in self.indexer_builder.plan().entries() {
+            if entry.kind.is_builtin() {
+                continue;
+            }
+            let index_type = entry.kind.index_type();
+            let existing_column = source.indexes.iter().any(|column| {
+                column.column_id == entry.column_id && column.created_indexes.contains(&index_type)
+            });
+            // Legacy file-level descriptors do not identify individual indexed columns.
+            let legacy_kind = source.available_indexes.contains(&index_type)
+                && !source
+                    .indexes
+                    .iter()
+                    .any(|column| column.created_indexes.contains(&index_type));
+            if (existing_column || legacy_kind)
+                && !output.entries.iter().any(|completed| {
+                    completed.kind == entry.kind
+                        && (legacy_kind || completed.column_id == Some(entry.column_id))
+                })
+            {
+                warn!(
+                    "Preserving previous index generation after incomplete rebuild, region_id: {}, file_id: {}, column_id: {}, kind: {}",
+                    self.region_id,
+                    source.file_id,
+                    entry.column_id,
+                    entry.kind.as_str()
+                );
+                return Err(Arc::new(OperateAbortedIndexSnafu.build()));
+            }
         }
         Ok(())
     }
@@ -2188,6 +2244,13 @@ mod tests {
     }
 
     impl handler::IndexKindHandler for TestProvider {
+        fn validate(
+            &self,
+            _context: &handler::PlanContext<'_>,
+        ) -> std::result::Result<(), common_error::ext::BoxedError> {
+            Ok(())
+        }
+
         fn kinds(&self) -> &[kind::IndexKind] {
             match self.kind {
                 Some(kind::ExtensionIndexKind::Kll) => {
@@ -2294,6 +2357,10 @@ mod tests {
         Reused,
         Budget,
         Create,
+        SkipCreate,
+        EmptyFinish,
+        CompletePair,
+        PartialFinish,
         Update,
         UpdateFlat,
         Finish,
@@ -2317,6 +2384,13 @@ mod tests {
     }
 
     impl handler::IndexKindHandler for FailingProvider {
+        fn validate(
+            &self,
+            _context: &handler::PlanContext<'_>,
+        ) -> std::result::Result<(), common_error::ext::BoxedError> {
+            Ok(())
+        }
+
         fn kinds(&self) -> &[kind::IndexKind] {
             &[kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll)]
         }
@@ -2346,6 +2420,23 @@ mod tests {
             handler::IndexKindHandler::kinds(self)
         }
         fn entries(&self) -> &[handler::PlanEntry] {
+            if matches!(
+                self.0,
+                ProviderFailure::CompletePair | ProviderFailure::PartialFinish
+            ) {
+                return &[
+                    handler::PlanEntry {
+                        column_id: 0,
+                        kind: kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll),
+                        format_version: 2,
+                    },
+                    handler::PlanEntry {
+                        column_id: 1,
+                        kind: kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll),
+                        format_version: 2,
+                    },
+                ];
+            }
             &[handler::PlanEntry {
                 column_id: 0,
                 kind: kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll),
@@ -2369,6 +2460,9 @@ mod tests {
         > {
             if self.0 == ProviderFailure::Create {
                 return Err(provider_test_error());
+            }
+            if self.0 == ProviderFailure::SkipCreate {
+                return Ok(None);
             }
             Ok(Some(Box::new(FailingCreator(self.0))))
         }
@@ -2414,6 +2508,9 @@ mod tests {
         ) -> std::result::Result<Vec<CompletedEntry>, common_error::ext::BoxedError> {
             use puffin::puffin_manager::PuffinWriter;
 
+            if self.0 == ProviderFailure::EmptyFinish {
+                return Ok(Vec::new());
+            }
             writer
                 .put_blob(
                     "test-sketch",
@@ -2427,11 +2524,18 @@ mod tests {
                 // Fail after writing to exercise partially written artifact handling.
                 return Err(provider_test_error());
             }
-            Ok(vec![CompletedEntry {
+            let mut entries = vec![CompletedEntry {
                 column_id: Some(0),
                 kind: kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll),
                 format_version: 2,
-            }])
+            }];
+            if self.0 == ProviderFailure::CompletePair {
+                entries.push(CompletedEntry {
+                    column_id: Some(1),
+                    ..entries[0].clone()
+                });
+            }
+            Ok(entries)
         }
 
         async fn abort(&mut self) -> std::result::Result<(), common_error::ext::BoxedError> {
@@ -3550,21 +3654,7 @@ mod tests {
         )
         .await;
         let original = FileHandle::new(meta.clone(), purger.clone());
-        let mut builder = mock_indexer_builder(metadata.clone(), &env).await;
-        let plan = Arc::new(builder.registry.plan(&handler::PlanContext {
-            metadata: &metadata,
-            index_options: &IndexOptions::default(),
-            build_type: IndexBuildType::SchemaChange,
-            existing_indexes: &[],
-        }));
-        Arc::make_mut(&mut builder).index_build_inputs = Some(build::IndexBuildInputs {
-            plan,
-            inputs: vec![original.clone()].into(),
-            input_puffin_manager: env.access_layer.build_puffin_manager(),
-            output_rows: Some(meta.num_rows),
-            can_merge_inputs: true,
-            memory_limit: None,
-        });
+        let builder = mock_indexer_builder(metadata.clone(), &env).await;
         let (tx, _rx) = mpsc::channel(4);
         let mut task = IndexBuildTask {
             region_id: metadata.region_id,
@@ -3721,18 +3811,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_rebuild_failure_preserves_published_indexes() {
-        for (failure, old_hll) in [
-            (Some(ProviderFailure::Plan), true),
-            (Some(ProviderFailure::Create), true),
-            (Some(ProviderFailure::UpdateFlat), true),
-            (Some(ProviderFailure::Finish), true),
-            (Some(ProviderFailure::Budget), true),
-            (Some(ProviderFailure::Budget), false),
-            (None, true),
-            (None, false),
+        for (failure, old_hll, legacy, with_builtin) in [
+            (Some(ProviderFailure::Plan), true, false, true),
+            (Some(ProviderFailure::Create), true, false, true),
+            (Some(ProviderFailure::UpdateFlat), true, false, true),
+            (Some(ProviderFailure::Finish), true, false, true),
+            (Some(ProviderFailure::Budget), true, false, true),
+            (Some(ProviderFailure::Budget), false, false, true),
+            (Some(ProviderFailure::SkipCreate), true, false, true),
+            (Some(ProviderFailure::SkipCreate), true, false, false),
+            (Some(ProviderFailure::SkipCreate), true, true, true),
+            (Some(ProviderFailure::SkipCreate), false, false, true),
+            (Some(ProviderFailure::EmptyFinish), true, false, true),
+            (Some(ProviderFailure::PartialFinish), true, false, true),
+            (None, true, false, true),
+            (None, false, false, true),
         ] {
             let env = SchedulerEnv::new().await;
-            let metadata = Arc::new(sst_region_metadata());
+            let mut metadata = sst_region_metadata();
+            if !with_builtin {
+                for column in &mut metadata.column_metadatas {
+                    column.column_schema.set_inverted_index(false);
+                    column.column_schema.unset_skipping_options().unwrap();
+                }
+            }
+            let metadata = Arc::new(metadata);
             let region_id = metadata.region_id;
             let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
             let file_purger = Arc::new(NoopFilePurger {});
@@ -3757,7 +3860,13 @@ mod tests {
             Arc::make_mut(&mut builder).build_type = IndexBuildType::Manual;
             if old_hll {
                 Arc::make_mut(&mut Arc::make_mut(&mut builder).registry)
-                    .register(Arc::new(FailingProvider(ProviderFailure::None)))
+                    .register(Arc::new(FailingProvider(
+                        if failure == Some(ProviderFailure::PartialFinish) {
+                            ProviderFailure::CompletePair
+                        } else {
+                            ProviderFailure::None
+                        },
+                    )))
                     .unwrap();
             }
             let (tx, _rx) = mpsc::channel(4);
@@ -3780,15 +3889,26 @@ mod tests {
             };
             // First publish real built-in blobs and the test provider's HLL blob.
             task.index_build(version).await.unwrap();
-            let old = manifest_ctx.manifest().await.files[&initial.file_id].clone();
+            let mut old = manifest_ctx.manifest().await.files[&initial.file_id].clone();
+            if legacy {
+                let mut legacy_meta = old.as_ref().clone();
+                for column in &mut legacy_meta.indexes {
+                    column
+                        .created_indexes
+                        .retain(|kind| *kind != IndexType::HllIndex);
+                }
+                old = legacy_meta.into();
+                seed_manifest_file(&manifest_ctx, old.as_ref()).await;
+            }
             assert_eq!(
                 old.available_indexes.contains(&IndexType::HllIndex),
                 old_hll
             );
-            assert!(
+            assert_eq!(
                 old.available_indexes
                     .iter()
-                    .any(|kind| *kind != IndexType::HllIndex)
+                    .any(|kind| *kind != IndexType::HllIndex),
+                with_builtin,
             );
             let old_path = location::index_file_path(
                 env.access_layer.table_dir(),
@@ -3832,7 +3952,14 @@ mod tests {
             task.indexer_builder = builder;
             let result = task.index_build(version).await;
             let published = manifest_ctx.manifest().await.files[&old.file_id].clone();
-            if old_hll || failure.is_none() {
+            if !with_builtin {
+                // No creator means no publication; the requested plan is not a removal plan.
+                assert!(matches!(
+                    result.unwrap(),
+                    IndexBuildReport::Done(IndexBuildOutcome::Aborted(_))
+                ));
+                assert_eq!(old, published);
+            } else if old_hll || failure.is_none() {
                 assert!(result.is_err(), "maintenance must fail for {failure:?}");
                 assert_eq!(
                     old, published,
@@ -3884,6 +4011,13 @@ mod tests {
     struct RemoveTestIndex;
 
     impl handler::IndexKindHandler for RemoveTestIndex {
+        fn validate(
+            &self,
+            _context: &handler::PlanContext<'_>,
+        ) -> std::result::Result<(), common_error::ext::BoxedError> {
+            Ok(())
+        }
+
         fn kinds(&self) -> &[kind::IndexKind] {
             &[kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll)]
         }

@@ -104,11 +104,10 @@ pub trait IndexKindHandler: Send + Sync + Debug {
     /// entirely built-in or entirely extension kinds.
     fn kinds(&self) -> &[IndexKind];
 
-    /// Validates options at region creation, even when this lifecycle event does
-    /// not build indexes. Implementations can override operation-specific planning.
-    fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
-        self.plan(context).map(|_| ())
-    }
+    /// Validates options at region creation independently of whether this lifecycle
+    /// event builds indexes. Implementations must not skip validation based on
+    /// `context.build_type`.
+    fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError>;
 
     /// Prepares typed parameters. `None` means no work; an empty entry list may
     /// still request removal of obsolete descriptors during maintenance.

@@ -72,7 +72,8 @@ impl IndexRegistry {
         Ok(self)
     }
 
-    /// Strictly validates configured options before a new region is created.
+    /// Validates required providers and their options before creating a new region.
+    /// Built-in handlers preserve their existing schema/build-time validation.
     pub fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
         self.validate_schema_kinds(context.metadata)?;
         for handler in &self.handlers {
@@ -346,6 +347,11 @@ mod tests {
         fn kinds(&self) -> &[IndexKind] {
             &self.0
         }
+
+        fn validate(&self, _: &PlanContext<'_>) -> Result<(), BoxedError> {
+            Ok(())
+        }
+
         fn plan(&self, _: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
             Ok(None)
         }
@@ -460,6 +466,10 @@ mod tests {
     impl IndexKindHandler for PlannedHandler {
         fn kinds(&self) -> &[IndexKind] {
             &self.owned
+        }
+
+        fn validate(&self, _: &PlanContext<'_>) -> Result<(), BoxedError> {
+            Ok(())
         }
 
         fn plan(&self, _: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {

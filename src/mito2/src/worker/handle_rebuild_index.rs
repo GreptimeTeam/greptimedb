@@ -36,7 +36,6 @@ use crate::region::options::IndexOptions;
 use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
 use crate::sst::file::{self, FileHandle, FileMeta, RegionFileId, RegionIndexId};
-use crate::sst::index::build::IndexBuildInputs;
 use crate::sst::index::handler::{IndexKindProviderRef, PlanContext};
 use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
 use crate::sst::index::{
@@ -79,27 +78,8 @@ impl<S> RegionWorkerLoop<S> {
             access_layer.intermediate_manager().clone()
         };
 
-        let plan = Arc::new(registry.plan(&PlanContext {
-            metadata: &snapshot.metadata,
-            index_options: &snapshot.index_options,
-            build_type: build_type.clone(),
-            existing_indexes: &file_meta.indexes,
-        }));
-        let index_build_inputs = Some(IndexBuildInputs {
-            output_rows: (file_meta.num_rows != 0).then_some(file_meta.num_rows),
-            plan,
-            inputs: vec![file.with_updated_index(file_meta.clone())].into(),
-            input_puffin_manager: access_layer.build_puffin_manager(),
-            can_merge_inputs: snapshot
-                .metadata
-                .partition_expr
-                .as_deref()
-                .is_none_or(str::is_empty)
-                && file_meta.region_id == region.region_id,
-            memory_limit: None,
-        });
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
-            index_build_inputs,
+            index_build_inputs: None,
             build_type: build_type.clone(),
             metadata: snapshot.metadata.clone(),
             registry: registry.clone(),
@@ -581,6 +561,13 @@ mod tests {
             &[IndexKind::Extension(ExtensionIndexKind::Hll)]
         }
 
+        fn validate(
+            &self,
+            _context: &PlanContext<'_>,
+        ) -> std::result::Result<(), common_error::ext::BoxedError> {
+            Ok(())
+        }
+
         fn plan(
             &self,
             context: &PlanContext<'_>,
@@ -687,6 +674,13 @@ mod tests {
     impl IndexKindHandler for FailingPlanHandler {
         fn kinds(&self) -> &[IndexKind] {
             &[IndexKind::Extension(ExtensionIndexKind::Hll)]
+        }
+
+        fn validate(
+            &self,
+            _context: &PlanContext<'_>,
+        ) -> std::result::Result<(), common_error::ext::BoxedError> {
+            Ok(())
         }
 
         fn plan(
