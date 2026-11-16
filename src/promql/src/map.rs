@@ -27,9 +27,7 @@ pub use broadcast::{
     ParameterizedMath, ScalarFunction, ScalarSeriesOperand, map_arithmetic_series,
     map_compare_series, map_math_with_parameters, map_scalar_function,
 };
-pub use comparison::{
-    Comparison, ComparisonOp, map_compare, map_compare_literal, scalar_arithmetic, scalar_compare,
-};
+pub use comparison::{Comparison, ComparisonOp, map_compare_literal};
 
 use std::f64::consts::PI;
 use std::sync::Arc;
@@ -186,16 +184,6 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
     let mut output = map_float_fields(schema, series, |floats| op.apply(floats))?;
     output.metric = drop_metric_name(&output.metric)?;
     Ok(Some(output))
-}
-
-/// Negates every float field and drops the metric name, like Prometheus' unary minus.
-///
-/// Shares the evaluated-grid, missingness, unsupported-type and same-labelset contract of
-/// [`map_math`].
-pub fn map_negate(schema: &SeriesSchema, series: &Series) -> Result<Series> {
-    let mut output = map_float_fields(schema, series, |floats| floats.unary(|v| -v))?;
-    output.metric = drop_metric_name(&output.metric)?;
-    Ok(output)
 }
 
 /// Applies arithmetic against a constant scalar to every field and drops the metric name.
