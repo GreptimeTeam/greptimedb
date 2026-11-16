@@ -65,7 +65,6 @@ impl RemoteDynFilterRegistry {
             .map(|query_regs| query_regs.clone())
     }
 
-    /// Returns whether `expected` is the state the registry holds for the query.
     fn is_current_query(
         &self,
         query_id: &QueryId,
