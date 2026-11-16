@@ -66,6 +66,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let result = async {
+                // The fenced instance is stopped, but its last checkpoint may still be writing
+                // the manifest that the reload reads.
+                region.manifest_ctx.wait_for_checkpoint_after_stop().await;
                 // The replay reads only what the log store has made durable.
                 durability_barrier.wait(last_entry_id).await?;
                 opener.open(&config, &wal).await

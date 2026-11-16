@@ -1847,10 +1847,19 @@ impl<S> RegionWorkerLoop<S> {
         }
         // Closes remaining regions.
         let regions = self.regions.list_regions();
-        for region in regions {
+        for region in &regions {
             region.deactivate_region_manifest_size_metric();
             region.stop().await;
         }
+        // Another engine may open these regions from the same storage after the stop. Regions
+        // closed earlier are not waited for; a datanode or standalone shutdown closes every region
+        // first, so there this only covers regions whose close failed.
+        join_all(
+            regions
+                .iter()
+                .map(|region| region.manifest_ctx.wait_for_checkpoint_after_stop()),
+        )
+        .await;
 
         self.regions.clear();
     }
