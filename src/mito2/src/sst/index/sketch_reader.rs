@@ -261,6 +261,44 @@ mod tests {
     }
 
     #[test]
+    fn test_sketch_files_keep_old_index_view_after_rebuild() {
+        use crate::sst::file::IndexType;
+
+        let mut old = file(
+            Timestamp::new_millisecond(10),
+            Timestamp::new_millisecond(20),
+        );
+        old.available_indexes.push(IndexType::InvertedIndex);
+        old.index_version = 1;
+        let purger = Arc::new(RecordingPurger::default());
+        let mut version = SstVersion::new(metadata_for_test());
+        version.add_files(purger.clone(), [old.clone()].into_iter());
+        let mut latest = Arc::new(version);
+        let range = SketchTimeRange {
+            start: Timestamp::new_millisecond(0),
+            end: Timestamp::new_millisecond(30),
+        };
+        let reader = SketchReadFiles::new(latest.clone(), range);
+        let mut rebuilt = old.clone();
+        rebuilt.index_version = 2;
+        Arc::make_mut(&mut latest).add_files(purger.clone(), [rebuilt.clone()].into_iter());
+        assert_eq!(reader.iter().next().unwrap().index_id().version, 1);
+        assert_eq!(
+            SketchReadFiles::new(latest.clone(), range)
+                .iter()
+                .next()
+                .unwrap()
+                .index_id()
+                .version,
+            2
+        );
+        Arc::make_mut(&mut latest).remove_files([rebuilt].into_iter());
+        assert!(purger.0.lock().unwrap().is_empty());
+        drop(reader);
+        assert_eq!(*purger.0.lock().unwrap(), vec![old.file_id]);
+    }
+
+    #[test]
     fn test_sketch_files_pin_retired_snapshot_until_drop() {
         let old = file(
             Timestamp::new_millisecond(10),

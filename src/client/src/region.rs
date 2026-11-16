@@ -151,6 +151,52 @@ impl RegionRequester {
         self.handle_inner(request).await
     }
 
+    /// Reads coverage of persisted sketch buckets without loading algorithm payloads.
+    pub async fn sketch_stat(
+        &self,
+        request: api::v1::region::SketchRequest,
+    ) -> Result<api::v1::region::SketchResponse> {
+        self.handle_sketch(region_request::Body::SketchStat(request))
+            .await
+    }
+
+    /// Queries persisted sketch buckets and returns estimates with explicit gaps.
+    pub async fn sketch_query(
+        &self,
+        request: api::v1::region::SketchRequest,
+    ) -> Result<api::v1::region::SketchResponse> {
+        self.handle_sketch(region_request::Body::SketchQuery(request))
+            .await
+    }
+
+    async fn handle_sketch(
+        &self,
+        body: region_request::Body,
+    ) -> Result<api::v1::region::SketchResponse> {
+        let sampled = match &body {
+            region_request::Body::SketchStat(request)
+            | region_request::Body::SketchQuery(request) => request.sampling.is_some(),
+            _ => false,
+        };
+        let response = self
+            .handle_inner(RegionRequest {
+                header: Some(RegionRequestHeader {
+                    tracing_context: TracingContext::from_current_span().to_w3c(),
+                    ..Default::default()
+                }),
+                body: Some(body),
+            })
+            .await?
+            .sketch
+            .context(MissingFieldSnafu { field: "sketch" })?;
+        if sampled {
+            response.sampling_info.as_ref().context(MissingFieldSnafu {
+                field: "sketch.sampling_info",
+            })?;
+        }
+        Ok(response)
+    }
+
     /// Sends a remote dynamic filter update to the region service.
     pub async fn handle_remote_dyn_filter_update(
         &self,
@@ -661,6 +707,106 @@ mod tests {
         assert_eq!(requests.len(), 2);
         for (actual, _, _) in requests.iter() {
             assert_eq!(actual.body, request.body);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sketch_rpc_preserves_request_and_response() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        let request = api::v1::region::SketchRequest {
+            sampling: Some(api::v1::region::SketchSamplingOptions {
+                max_files: 512,
+                seed: 42,
+            }),
+            region_id: 42,
+            time_range: Some(api::v1::region::SketchTimeRange {
+                start: 1001,
+                end: 2001,
+                time_unit: api::v1::TimeUnit::Microsecond as i32,
+            }),
+            columns: vec!["__table_id".into()],
+            queries: vec![api::v1::region::SketchQuery {
+                query: Some(api::v1::region::sketch_query::Query::DistinctCount(
+                    api::v1::region::SketchDistinctCountQuery {},
+                )),
+            }],
+        };
+        let expected = api::v1::region::SketchResponse {
+            sampling_info: Some(api::v1::region::SketchSamplingInfo {
+                candidate_files: 1000,
+                sampled_files: 512,
+                fingerprint: 42,
+                rows_squared_sum: 512.0,
+                max_file_rows: 1,
+            }),
+            results: vec![api::v1::region::ColumnSketchResult {
+                column_name: "__table_id".into(),
+                column_id: 42,
+                query: Some(request.queries[0].clone()),
+                ..Default::default()
+            }],
+        };
+        for _ in 0..2 {
+            let mut response = build_response(StatusCode::Success);
+            response.sketch = Some(expected.clone());
+            server
+                .service
+                .responses
+                .lock()
+                .unwrap()
+                .push_back(Ok(response));
+        }
+        assert_eq!(
+            requester.sketch_stat(request.clone()).await.unwrap(),
+            expected
+        );
+        assert_eq!(
+            requester.sketch_query(request.clone()).await.unwrap(),
+            expected
+        );
+        let requests = server.service.requests.lock().unwrap();
+        assert_eq!(
+            requests[0].0.body,
+            Some(region_request::Body::SketchStat(request.clone()))
+        );
+        assert_eq!(
+            requests[1].0.body,
+            Some(region_request::Body::SketchQuery(request))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sketch_rpc_rejects_missing_sampling_info() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        for sampled in [false, true] {
+            let mut response = build_response(StatusCode::Success);
+            response.sketch = Some(Default::default());
+            server
+                .service
+                .responses
+                .lock()
+                .unwrap()
+                .push_back(Ok(response));
+            let request = api::v1::region::SketchRequest {
+                sampling: sampled.then_some(api::v1::region::SketchSamplingOptions {
+                    max_files: u32::MAX,
+                    seed: 0,
+                }),
+                ..Default::default()
+            };
+            let result = requester.sketch_stat(request).await;
+            if sampled {
+                assert!(matches!(
+                    result,
+                    Err(error::Error::MissingField {
+                        field, ..
+                    }) if field == "sketch.sampling_info"
+                ));
+            } else {
+                assert_eq!(result.unwrap(), Default::default());
+            }
         }
     }
 
