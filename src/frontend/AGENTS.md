@@ -27,6 +27,7 @@ remote datanodes via `operator`/`client`.
 | `instance` | `src/frontend/src/instance.rs` | `Instance`: the core handler; implements `SqlQueryHandler`, `PrometheusHandler`, etc. |
 | `instance/builder` | `src/frontend/src/instance/builder.rs` | `FrontendBuilder` assembles `Instance` from its dependencies |
 | `instance/grpc` | `src/frontend/src/instance/grpc.rs` | `GrpcQueryHandler`: insert/delete/query/promql over gRPC |
+| `instance/schema_selection` | `src/frontend/src/instance/schema_selection.rs` | SQL database selection and authorization for sessions without a selected schema |
 | `instance/region_query` | `src/frontend/src/instance/region_query.rs` | Routes distributed region reads to datanodes |
 | `instance/exemplar` | `src/frontend/src/instance/exemplar.rs` | Resolves and authorizes selector branches before bounded exemplar-table scans |
 | `instance/*` | `src/frontend/src/instance/` | Per-protocol handlers (`influxdb.rs`, `promql.rs`, `otlp/`, `jaeger.rs`, `logs.rs`, `prom_store.rs`, ...) |
@@ -43,6 +44,9 @@ including caches owned by pipeline and protocol handlers.
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
   permission checks, timeout/cancellation, and delegates planning/execution to
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
+  MySQL sessions without a selected database validate explicit scopes before
+  planning or executing SQL, including prepared statements; unqualified targets
+  fail without falling back to `public`.
 - **Exemplar query** (`instance/exemplar.rs`): authorize all selector branches
   before calling `PromQueryInterceptor::pre_execute_exemplars` for each resolved
   exemplar table, with that table's schema context, before scanning it.
@@ -88,8 +92,8 @@ including caches owned by pipeline and protocol handlers.
   Expansion must not wait while the request holds transport memory permits.
 
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
-  one shared batcher for opted-in HTTP Prom and OTLP metric-engine
-  writes. Downstream routers can initialize it when enabling replacement endpoints.
+  one shared batcher for opted-in Prom remote-write (HTTP and PostgreSQL COPY)
+  and OTLP metric-engine writes. Downstream routers can initialize it when enabling replacement endpoints.
   `Instance::handle_otlp_metric_row_inserts` shares OTLP eligibility and dispatch
   between converters and falls back for incompatible tables.
   The schema adapter holds a weak instance reference to avoid an ownership cycle.

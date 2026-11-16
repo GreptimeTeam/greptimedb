@@ -1616,13 +1616,7 @@ pub fn build_flat_file_range_scan_stream(
                 .file_handle()
                 .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
 
-            let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch().await? {
-                let record_batch = if let Some(mapper) = mapper {
-                    mapper.project(record_batch)?
-                } else {
-                    record_batch
-                };
                 let Some(record_batch) = filter_flat_batch_by_sequence(
                     record_batch,
                     stream_ctx.input.sequence_range,

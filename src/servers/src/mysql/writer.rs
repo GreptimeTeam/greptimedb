@@ -151,10 +151,31 @@ pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
     Ok(())
 }
 
+pub(super) fn is_no_database_selected(error: &impl ErrorExt) -> bool {
+    matches!(
+        error.as_any().downcast_ref::<session::SessionError>(),
+        Some(session::SessionError::NoDatabaseSelected {})
+    ) || std::iter::successors(error.source(), |error| error.source()).any(|error| {
+        let session_error = error.downcast_ref::<session::SessionError>().or_else(|| {
+            error
+                .downcast_ref::<common_error::ext::BoxedError>()
+                .and_then(|error| error.as_any().downcast_ref::<session::SessionError>())
+        });
+        matches!(
+            session_error,
+            Some(session::SessionError::NoDatabaseSelected {})
+        )
+    })
+}
+
 /// Handle GreptimeDB error, convert it to MySQL error
 pub fn handle_err(e: impl ErrorExt, query_ctx: QueryContextRef) -> (ErrorKind, String) {
     let status_code = e.status_code();
-    let kind = mysql_error_kind(&status_code);
+    let kind = if is_no_database_selected(&e) {
+        ErrorKind::ER_NO_DB_ERROR
+    } else {
+        mysql_error_kind(&status_code)
+    };
 
     if status_code.should_log_error() {
         let root_error = e.root_cause().unwrap_or(&e);

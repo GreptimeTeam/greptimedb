@@ -69,6 +69,12 @@ lazy_static! {
         )
         .unwrap();
 
+    /// Close-time WAL releases that the log store failed to admit.
+    pub static ref WAL_RELEASE_ADMISSION_FAILURE_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_wal_release_admission_failure_total",
+        "Close-time WAL release admission failures"
+    ).unwrap();
+
     // ------ Flush related metrics
     /// Counter of scheduled flush requests.
     /// Note that the flush scheduler may merge some flush requests.

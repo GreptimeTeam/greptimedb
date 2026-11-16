@@ -2687,6 +2687,26 @@ async fn test_enter_staging_waits_for_picking_logical_cancellation_ack() {
     assert!(!compact_task.is_finished());
     assert!(!staging_task.is_finished());
 
+    // Moving EnterStaging into the compaction scheduler must keep import admission sealed.
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.edit_region(
+            region_id,
+            crate::manifest::action::RegionEdit {
+                files_to_add: vec![crate::sst::file::FileMeta {
+                    region_id,
+                    file_id: store_api::storage::FileId::random(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, error.status_code());
+
     gate_guard.release();
     let compact_err = tokio::time::timeout(Duration::from_secs(5), compact_task)
         .await

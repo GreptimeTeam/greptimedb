@@ -1316,13 +1316,13 @@ impl FlushScheduler {
             return Ok(());
         }
 
-        let closing = task.reason == FlushReason::Closing;
+        let reason = task.reason;
         let state = self.schedule_flush_task(version_control, task)?;
 
         // Add this region to status map.
         let _ = self.region_status.insert(
             region_id,
-            FlushStatus::new(region_id, version_control.clone(), state, closing),
+            FlushStatus::new(region_id, version_control.clone(), state, reason),
         );
 
         Ok(())
@@ -1514,13 +1514,13 @@ impl FlushScheduler {
         status.pending_bulk_writes.push(request);
     }
 
-    /// Whether an ALTER owns a turn while waiting for its memtables to flush.
-    pub(crate) fn has_pending_alter(&self, region_id: RegionId) -> bool {
+    /// Whether staging is waiting for its memtables to flush.
+    pub(crate) fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
         self.region_status.get(&region_id).is_some_and(|status| {
             status
                 .pending_ddls
                 .iter()
-                .any(|ddl| matches!(ddl.request, DdlRequest::Alter(_)))
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
         })
     }
 
@@ -1576,14 +1576,14 @@ impl FlushStatus {
         region_id: RegionId,
         version_control: VersionControlRef,
         state: CancellableTaskState,
-        closing: bool,
+        reason: FlushReason,
     ) -> FlushStatus {
         FlushStatus {
             region_id,
             version_control,
             state,
             pending_task: None,
-            closing,
+            closing: reason == FlushReason::Closing,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
             pending_bulk_writes: Vec::new(),

@@ -324,6 +324,24 @@ impl<S: LogStore> Wal<S> {
             .context(DeleteWalSnafu { region_id })
     }
 
+    /// Queues a persistent release through the region's safe recovery watermark.
+    /// Success acknowledges admission, not persistence; see [LogStore::release_entries].
+    pub async fn release_entries(
+        &self,
+        region_id: RegionId,
+        entry_id: EntryId,
+        provider: &Provider,
+    ) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .release_entries(provider, region_id, entry_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
+    }
+
     /// Marks all WAL entries of a region as obsolete and removes its dedicated namespace when
     /// supported by the backend.
     pub async fn obsolete_all(&self, region_id: RegionId, provider: &Provider) -> Result<()> {

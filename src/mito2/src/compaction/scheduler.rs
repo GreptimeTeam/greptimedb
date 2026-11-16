@@ -516,6 +516,23 @@ impl CompactionScheduler {
         status.pending_ddl_requests.push(request);
         Ok(())
     }
+
+    /// Pending and handed-off DDLs retain their turn until the final reply.
+    pub(crate) fn blocks_region_edits(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(|status| status.has_ddl())
+    }
+
+    /// Whether a staging request is still waiting for compaction cancellation.
+    pub(crate) fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
+        self.region_status.get(&region_id).is_some_and(|status| {
+            status
+                .pending_ddl_requests
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
+        })
+    }
 }
 
 // Internal state-machine helpers.
