@@ -692,7 +692,7 @@ fn output_matches_partition(
         || output
             .inputs
             .iter()
-            .all(|input| input.meta_ref().partition_expr.as_ref() == partition_expr)
+            .all(|input| input.meta_ref().partition_expr.as_deref() == partition_expr)
 }
 
 fn reusable_index_inputs(
@@ -1450,7 +1450,7 @@ mod tests {
                     .into_iter()
                     .map(|partition_expr| {
                         let mut meta = dummy_file_meta();
-                        meta.partition_expr = partition_expr;
+                        meta.partition_expr = partition_expr.map(Into::into);
                         new_file_handle(meta)
                     })
                     .collect(),
