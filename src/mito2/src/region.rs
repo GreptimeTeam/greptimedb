@@ -3522,7 +3522,6 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         );
 
-        // Downgrading Leader -> Downgrading Leader
         assert_eq!(
             manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id),
             None
@@ -3538,7 +3537,6 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
 
-        // Leader -> Leader
         assert_eq!(manifest_ctx.set_role(RegionRole::Leader, region_id), None);
 
         // Altering Leader -> Follower
@@ -3559,7 +3557,6 @@ mod tests {
         );
         assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
 
-        // Staging Leader -> Leader
         manifest_ctx.state.store(staging);
         assert_eq!(
             manifest_ctx.set_role(RegionRole::Leader, region_id),
