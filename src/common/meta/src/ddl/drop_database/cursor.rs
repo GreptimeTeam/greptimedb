@@ -69,8 +69,8 @@ impl DropDatabaseCursor {
     const MAX_BATCH_BYTES: usize = ReadableSize::mb(1).as_bytes() as usize;
 
     fn estimated_table_bytes(catalog: &str, schema: &str, name: &str) -> usize {
-        // Allow for nested JSON escaping and fixed per-table metadata overhead.
-        256 + 8 * (catalog.len() + schema.len() + name.len())
+        // Allow 128 bytes for per-table JSON/key overhead and 8x for nested JSON escaping.
+        128 + 8 * (catalog.len() + schema.len() + name.len())
     }
 
     async fn collect_page(ctx: &mut DropDatabaseContext) -> Result<Vec<(String, TableId)>> {
