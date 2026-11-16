@@ -2519,7 +2519,10 @@ async fn test_source_index_registration_failure_does_not_fall_back() {
         .await
         .err()
         .expect("conflicting registration must fail");
-    assert!(format!("{error:?}").contains("compaction index registration"));
+    assert!(
+        format!("{error:?}").contains("registering index handlers"),
+        "unexpected registration error: {error:?}"
+    );
     assert!(protection.files.lock().unwrap().is_empty());
 }
 
