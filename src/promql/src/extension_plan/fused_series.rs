@@ -86,6 +86,7 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::data_type::DataType as _;
+use datatypes::schema::ColumnSchema;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, SeriesFrameDeclaration, aggregate_state_frame_schema,
@@ -108,7 +109,7 @@ use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::extension_plan::{RawSeriesSourceExec, SeriesRouting};
 use crate::grid_series::METADATA_LABELS;
 use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
-use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor, SourceFacts};
 use crate::native::metrics::{NodeMetricsSnapshot, is_node_metric};
 use crate::native::plan::{
     AggregateStage, AggregateStateSchema, BoundInput, BoundMap, Grouping, InstantValue, MapOp,
@@ -1005,6 +1006,7 @@ impl FusedSeries {
             output_schema,
             self.binding.time_index.clone(),
             tags,
+            self.binding.metric_name.clone(),
             self.format,
             target_partitions,
             self.canonical_producer,
@@ -2140,6 +2142,13 @@ pub struct FusedSeriesExec {
     time_column: String,
     /// The tag column names, indexed by [`OutputColumn::Tag`].
     tags: Arc<[String]>,
+    /// The one metric every input series is named, taken from the binding.
+    ///
+    /// The canonical pass judged a dropped label set by this: a node that drops the metric name is
+    /// only told to stream when everything below it is named the same one. The execution reads it
+    /// so the collection it performs at run time is decided by that same proof; `None` is a binding
+    /// that names no metric - one raw source per input - and every consumer then collects.
+    metric_name: Option<Arc<str>>,
     /// The columns this node produces.
     output_schema: SchemaRef,
     /// The evidence claimed by this plan's output partitions.
@@ -2187,18 +2196,40 @@ struct StoredSeriesLabels {
     /// Every tag name a stored series reports besides its metric name.
     tags: Arc<[Arc<str>]>,
     /// Whether the primary key keeps telling two stored series apart once a name-dropping kernel
-    /// has normalized their labels.
-    ///
-    /// Two facts make that true. The tags and the primary key must be free of the metadata labels:
-    /// `__type__` and `__unit__` go with the metric name when a kernel drops it, so a binding that
-    /// keys a series by either of them stops telling two series apart once the name is gone. And
-    /// every primary-key column must always decode a value, which is what a non-nullable column
-    /// states. A kernel that drops the name drops every label whose value is empty with it, and a
-    /// nullable column lets one series hold `NULL` while another holds `''`: two different storage
-    /// keys, which decode to an absent label and to an empty one, so both are handed over as no
-    /// label at all once the empty one is dropped. Two such series that agree on every other tag
-    /// then leave as one identity, whether they arrive in one partition or in two.
+    /// has normalized their labels; see [`keys_survive_metadata_drop`] for the rule itself.
     keys_survive_metadata_drop: bool,
+}
+
+/// Whether the storage key of a scan keeps telling its stored series apart once a name-dropping
+/// kernel has normalized their labels.
+///
+/// `logical_tags` are the tag names every stored series of the scan reports, and `key_columns` are
+/// the columns the scan keys one series by. Two facts make the drop injective, and both are read
+/// from the scan's own binding rather than from a tree above it:
+///
+/// - Neither the tags nor the key columns may be a metadata label. `__type__` and `__unit__` go with
+///   the metric name when a kernel drops it, so a scan that keys a series by either of them stops
+///   telling two series apart once the name is gone.
+/// - Every key column must always decode a value, which is what a non-nullable column states. A
+///   kernel that drops the name drops every label whose value is empty with it, and a nullable
+///   column lets one series hold `NULL` while another holds `''`: two different storage keys, which
+///   decode to an absent label and to an empty one, so both are handed over as no label at all once
+///   the empty one is dropped. Two such series that agree on every other tag then leave as one
+///   identity, whether they arrive in one partition or in two.
+///
+/// This is the rule the logical canonical pass applies to decide whether a node that drops the
+/// metadata labels has to be collected, and the one the physical per-series scan applies to decide
+/// whether such a node can stream. Both read it here so the two answers cannot drift apart: the
+/// planner reads it from the resolved table's metadata, the execution from the bound scan.
+pub fn keys_survive_metadata_drop<'a, 'b>(
+    logical_tags: impl IntoIterator<Item = &'a str>,
+    key_columns: impl IntoIterator<Item = &'b ColumnSchema>,
+) -> bool {
+    let metadata = |name: &str| METADATA_LABELS.contains(&name);
+    logical_tags.into_iter().all(|tag| !metadata(tag))
+        && key_columns
+            .into_iter()
+            .all(|column| !metadata(&column.name) && !column.is_nullable())
 }
 
 impl StoredSeriesLabels {
@@ -2214,19 +2245,17 @@ impl StoredSeriesLabels {
         else {
             return None;
         };
-        let metadata = |name: &str| METADATA_LABELS.contains(&name);
         Some(Self {
             tags: logical_tags
                 .iter()
                 .map(|tag| Arc::clone(&tag.name))
                 .collect(),
-            keys_survive_metadata_drop: logical_tags.iter().all(|tag| !metadata(&tag.name))
-                && physical_metadata.primary_key_columns().all(|column| {
-                    // A nullable key column can be `NULL` in one series and `''` in another, and a
-                    // name-dropping kernel turns both into no label; only a column that always
-                    // decodes a value keeps the two apart under such a kernel.
-                    !metadata(&column.column_schema.name) && !column.column_schema.is_nullable()
-                }),
+            keys_survive_metadata_drop: keys_survive_metadata_drop(
+                logical_tags.iter().map(|tag| tag.name.as_ref()),
+                physical_metadata
+                    .primary_key_columns()
+                    .map(|column| &column.column_schema),
+            ),
         })
     }
 
@@ -2505,6 +2534,7 @@ impl FusedSeriesExec {
             output_schema,
             time_column,
             tags,
+            None,
             FusedOutputFormat::PlainRows,
             None,
             false,
@@ -2519,6 +2549,7 @@ impl FusedSeriesExec {
         output_schema: SchemaRef,
         time_column: String,
         tags: Vec<String>,
+        metric_name: Option<Arc<str>>,
         format: FusedOutputFormat,
         matching_parallelism: Option<usize>,
         canonical_producer: bool,
@@ -2802,6 +2833,7 @@ impl FusedSeriesExec {
             classification: classification.into(),
             time_column,
             tags: tags.into(),
+            metric_name,
             output_schema,
             duplicate_evidence: Mutex::new(EvidenceClaims {
                 evidence: None,
@@ -2953,6 +2985,7 @@ impl ExecutionPlan for FusedSeriesExec {
             self.output_schema.clone(),
             self.time_column.clone(),
             self.tags.to_vec(),
+            self.metric_name.clone(),
             self.format,
             self.matching_parallelism,
             self.canonical_producer,
@@ -3061,10 +3094,19 @@ impl FusedSeriesExec {
             evidence: Arc::clone(evidence),
             active: true,
         });
-        let mut state = match NativeExecutionState::try_new(
+        // The canonical pass decided where a merge belongs from the labels the binding names; the
+        // execution judges the collection it performs by the same fact, so an already-streaming
+        // window is not turned into a collecting one here.
+        let sources = SourceFacts::uniform(
+            self.tags.to_vec(),
+            self.metric_name.clone(),
+            self.series_schemas.len(),
+        );
+        let mut state = match NativeExecutionState::try_new_with_sources(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
             evidence.clone(),
+            &sources,
         ) {
             Ok(state) => state,
             Err(error) => {
