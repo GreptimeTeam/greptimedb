@@ -1198,8 +1198,11 @@ fn new_dummy_fetcher(region_id: RegionId, expr_json: String) -> PartitionExprFet
     })
 }
 
+#[rstest::rstest]
+#[case::from_writable(false)]
+#[case::after_empty_staging(true)]
 #[tokio::test]
-async fn test_open_backfills_partition_expr_with_fetcher() {
+async fn test_open_backfills_partition_expr_with_fetcher(#[case] staging: bool) {
     let mut env = TestEnv::with_prefix("open-backfill-fetcher").await;
 
     // prepare plugins with dummy fetcher
@@ -1255,10 +1258,27 @@ async fn test_open_backfills_partition_expr_with_fetcher() {
     engine
         .set_region_role(region_id, RegionRole::Leader)
         .unwrap();
+    if staging {
+        // Ending a staging with nothing to commit also backfills.
+        engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+            .await
+            .unwrap();
+    }
     engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
         .await
         .unwrap();
+    let manifest = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(
+        manifest.metadata.partition_expr.as_deref(),
+        Some(expr_json.as_str())
+    );
 
     // reopen again to ensure no further changes and still Some
     engine
@@ -1365,4 +1385,67 @@ async fn test_region_hook_on_open() {
     assert_eq!(hook.opened_count.load(Ordering::Relaxed), 2);
     assert_eq!(hook.closed_count.load(Ordering::Relaxed), 1);
     assert_eq!(hook.dropped_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn test_reopen_region_with_compressed_manifest_cache() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            enable_write_cache: true,
+            compress_manifest: true,
+            manifest_checkpoint_distance: 1,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for i in 0..3 {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(i * 3, (i + 1) * 3),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let mut manager = region.manifest_ctx.manifest_manager.write().await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        manager.wait_for_pending_checkpoint(),
+    )
+    .await
+    .unwrap();
+    assert!(manager.checkpointer().last_checkpoint_version() > 0);
+    drop(manager);
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let expected = RecordBatches::try_collect(stream)
+        .await
+        .unwrap()
+        .pretty_print()
+        .unwrap();
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let actual = RecordBatches::try_collect(stream)
+        .await
+        .unwrap()
+        .pretty_print()
+        .unwrap();
+    assert_eq!(expected, actual);
 }

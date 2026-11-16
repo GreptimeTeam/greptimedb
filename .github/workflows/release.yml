@@ -20,6 +20,11 @@ on:
     - cron: '0 0 * * 1-5'
   workflow_dispatch: # Allows you to run this workflow manually.
     inputs:
+      ec2_volume_size:
+        description: Root volume size in GiB for each EC2 build runner
+        type: number
+        required: false
+        default: 500
       linux_amd64_runner:
         type: choice
         description: The runner uses to build linux-amd64 artifacts
@@ -215,6 +220,7 @@ jobs:
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           image-id: ${{ vars.EC2_RUNNER_LINUX_AMD64_IMAGE_ID }}
+          ec2-volume-size: ${{ inputs.ec2_volume_size || 500 }}
           security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 
@@ -229,6 +235,7 @@ jobs:
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           image-id: ${{ vars.EC2_RUNNER_LINUX_ARM64_IMAGE_ID }}
+          ec2-volume-size: ${{ inputs.ec2_volume_size || 500 }}
           security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 
@@ -255,8 +262,8 @@ jobs:
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
           aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
           aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
-          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -282,8 +289,8 @@ jobs:
           large-page-size: true
           aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
           aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
-          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   build-linux-riscv64-artifacts:
     name: Build linux-riscv64 artifacts
@@ -297,6 +304,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Set up Linux runner
+        uses: ./.github/actions/setup-linux-runner
+        with:
+          tools: make shasum
 
       - name: Prepare riscv64 dev-builder image
         shell: bash

@@ -23,7 +23,9 @@ use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder};
 use datafusion_common::{Column, TableReference};
 use datafusion_expr::dml::InsertOp;
 use datafusion_expr::{DmlStatement, TableSource, WriteOp, col};
-pub use expr::{build_filter_from_timestamp, build_same_type_ts_filter};
+pub use expr::{
+    build_filter_from_timestamp, build_same_type_ts_filter, is_lossless_substrait_type,
+};
 
 use crate::error::Result;
 

@@ -713,7 +713,6 @@ async fn run_direct_iteration(
             file_path.clone(),
             object_store.clone(),
             CacheStrategy::Disabled,
-            row_group_idx,
             None,
         );
         let mut stream = build_sst_parquet_record_batch_stream(

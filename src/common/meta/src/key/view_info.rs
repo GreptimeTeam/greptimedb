@@ -114,7 +114,9 @@ impl ViewInfoValue {
         }
     }
 
-    pub(crate) fn update(
+    /// Builds a replacement [`ViewInfoValue`] with the next version, leaving this
+    /// value unchanged for a caller's compare-and-swap.
+    pub fn update(
         &self,
         new_view_info: Bytes,
         table_names: HashSet<TableName>,
@@ -313,6 +315,73 @@ mod tests {
         let serialized = value.try_as_raw_value().unwrap();
         let deserialized = ViewInfoValue::try_from_raw_value(&serialized).unwrap();
         assert_eq!(value, deserialized);
+    }
+
+    #[test]
+    fn test_update_replaces_fields_and_increments_version() {
+        let table_names = |table_name: &str| {
+            let mut set = HashSet::new();
+            set.insert(TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: table_name.to_string(),
+            });
+            set
+        };
+
+        let view_info = Bytes::from([1, 2, 3].as_ref());
+        let names = table_names("a_table");
+        let columns = vec!["a".to_string()];
+        let plan_columns = vec!["number".to_string()];
+        let definition = "CREATE VIEW test AS SELECT * FROM a_table".to_string();
+        let original = ViewInfoValue::new(
+            view_info.clone(),
+            names.clone(),
+            columns.clone(),
+            plan_columns.clone(),
+            definition.clone(),
+        );
+
+        let new_view_info = Bytes::from([4, 5, 6].as_ref());
+        let new_names = table_names("b_table");
+        let new_columns = vec!["b".to_string()];
+        let new_plan_columns = vec!["number2".to_string()];
+        let new_definition = "CREATE VIEW test AS SELECT * FROM b_table".to_string();
+        let updated = original.update(
+            new_view_info.clone(),
+            new_names.clone(),
+            new_columns.clone(),
+            new_plan_columns.clone(),
+            new_definition.clone(),
+        );
+
+        assert_eq!(updated.view_info, new_view_info);
+        assert_eq!(updated.table_names, new_names);
+        assert_eq!(updated.columns, new_columns);
+        assert_eq!(updated.plan_columns, new_plan_columns);
+        assert_eq!(updated.definition, new_definition);
+        assert_eq!(original.version, 0);
+        assert_eq!(updated.version, original.version + 1);
+
+        assert_eq!(original.view_info, view_info);
+        assert_eq!(original.table_names, names);
+        assert_eq!(original.columns, columns);
+        assert_eq!(original.plan_columns, plan_columns);
+        assert_eq!(original.definition, definition);
+
+        let newest = updated.update(
+            new_view_info.clone(),
+            new_names.clone(),
+            new_columns.clone(),
+            new_plan_columns.clone(),
+            new_definition.clone(),
+        );
+        assert_eq!(newest.version, updated.version + 1);
+        assert_eq!(newest.version, 2);
+
+        let serialized = newest.try_as_raw_value().unwrap();
+        let deserialized = ViewInfoValue::try_from_raw_value(&serialized).unwrap();
+        assert_eq!(newest, deserialized);
     }
 
     #[test]

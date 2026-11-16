@@ -19,7 +19,6 @@ use cache::{
     build_datanode_layered_cache_registry, build_fundamental_cache_registry,
     with_default_composite_cache_registry,
 };
-use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use common_base::Plugins;
@@ -55,7 +54,10 @@ use frontend::service_config::{BatcherOptions, PendingRowsBatcherOptions};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use standalone::options::StandaloneOptions;
-use standalone::{StandaloneDatanodeManager, StandaloneRepartitionProcedureFactory};
+use standalone::{
+    StandaloneDatanodeManager, StandaloneInformationExtension,
+    StandaloneRepartitionProcedureFactory,
+};
 
 use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
 
@@ -234,8 +236,12 @@ impl GreptimeDbStandaloneBuilder {
             .build(),
         );
 
+        let information_extension = Arc::new(StandaloneInformationExtension::new(
+            datanode.region_server(),
+            procedure_manager.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManagerBuilder::new(
-            Arc::new(NoopInformationExtension),
+            information_extension.clone(),
             kv_backend.clone(),
             cache_registry.clone(),
         )
@@ -253,6 +259,9 @@ impl GreptimeDbStandaloneBuilder {
             Arc::new(frontend_client),
         );
         let flownode = Arc::new(flow_builder.build().await.unwrap());
+        information_extension
+            .set_flow_engine(flownode.flow_engine())
+            .await;
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),

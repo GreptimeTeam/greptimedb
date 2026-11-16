@@ -57,11 +57,13 @@ mod merge_mode_test;
 #[cfg(test)]
 mod object_store_wal_recovery_test;
 #[cfg(test)]
-mod object_store_wal_test;
+pub(crate) mod object_store_wal_test;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
 mod parallel_test;
+#[cfg(test)]
+pub(crate) mod pending_tail_test;
 #[cfg(test)]
 mod projection_test;
 #[cfg(test)]
@@ -78,11 +80,17 @@ mod sequence_test;
 #[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
+mod shared_file_test;
+#[cfg(test)]
 mod skip_wal_test;
 #[cfg(test)]
 mod staging_test;
 #[cfg(test)]
 mod sync_test;
+#[cfg(feature = "enterprise")]
+pub mod table_compaction;
+#[cfg(test)]
+mod tail_replay_test;
 #[cfg(test)]
 mod truncate_test;
 
@@ -99,7 +107,7 @@ mod puffin_index;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use api::region::RegionResponse;
@@ -123,6 +131,7 @@ use region_hook::RegionHookRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::compaction_task::{self, CompactionTaskEntry};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
@@ -145,17 +154,18 @@ use tokio::sync::{Semaphore, oneshot};
 
 use crate::access_layer::RegionFilePathFactory;
 use crate::cache::{CacheManagerRef, CacheStrategy};
+use crate::compaction::CompactionState;
 use crate::config::{MitoConfig, ScanMemoryMode};
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
-    IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
-    RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu, SerdeJsonSnafu,
-    SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
+    EngineStoppedSnafu, IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu,
+    MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::gc::GcLimiterRef;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, WalRecoveryEdit};
 use crate::memtable::MemtableStats;
 use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
@@ -163,9 +173,9 @@ use crate::metrics::{
 };
 use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
 use crate::read::stream::ScanBatchStream;
-use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::options::parse_wal_options;
+use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
@@ -266,7 +276,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let inner = EngineInner {
             workers,
             config,
-            wal_raw_entry_reader,
+            wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
             scan_memory_tracker,
             region_hook,
             #[cfg(feature = "enterprise")]
@@ -582,6 +592,7 @@ impl MitoEngine {
             .context(RegionNotFoundSnafu { region_id })?;
 
         let version = region.version();
+        version.ensure_no_pending_tails()?;
         let memtable_stats = version
             .memtables
             .list_memtables()
@@ -750,6 +761,40 @@ impl MitoEngine {
         results
     }
 
+    /// Reads current compaction cycles with conservative metadata predicate pruning.
+    pub async fn inspect_compaction_tasks(
+        &self,
+        filters: &[Expr],
+    ) -> Result<Vec<CompactionTaskEntry>> {
+        let filters = MetadataFilter::new(filters);
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        let mut entries = Vec::new();
+        for region in self.inner.workers.all_regions() {
+            if !filters.matches(|column| match column {
+                compaction_task::REGION_ID => {
+                    Some(ScalarValue::UInt64(Some(region.region_id.as_u64())))
+                }
+                compaction_task::TABLE_ID => {
+                    Some(ScalarValue::UInt32(Some(region.region_id.table_id())))
+                }
+                compaction_task::NODE_ID => Some(ScalarValue::UInt64(node_id)),
+                _ => None,
+            }) {
+                continue;
+            }
+            // Clone only task handles under the region's lock. Snapshot materialization
+            // and residual metadata filtering never hold that lock or queue worker work.
+            let (active, pending) = CompactionState::current(&region.compaction_state);
+            for task in active.into_iter().chain(pending) {
+                let entry = task.snapshot(node_id);
+                if entry.matches(&filters) {
+                    entries.push(entry);
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     /// Lists region info entries of all regions in the engine.
     pub async fn all_region_infos(&self) -> Vec<RegionInfoEntry> {
         let node_id = self.inner.workers.file_ref_manager().node_id();
@@ -803,6 +848,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
                 ..
             }
         )
+        && edit.wal_recovery == WalRecoveryEdit::default()
 }
 
 /// Inner struct of [MitoEngine].
@@ -811,8 +857,9 @@ struct EngineInner {
     workers: WorkerGroup,
     /// Config of the engine.
     config: Arc<MitoConfig>,
-    /// The Wal raw entry reader.
-    wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    /// The Wal raw entry reader. `None` once the engine is stopped, so that it no longer holds
+    /// the log store and the owner of the log store can close it.
+    wal_raw_entry_reader: RwLock<Option<Arc<dyn RawEntryReader>>>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
     /// The region hook (if any) registered via plugins; exposed for the GC worker
@@ -865,7 +912,19 @@ impl EngineInner {
 
     /// Stop the inner engine.
     async fn stop(&self) -> Result<()> {
-        self.workers.stop().await
+        self.workers.stop().await?;
+        // Release the log store once the workers no longer use it.
+        let _ = self.wal_raw_entry_reader.write().unwrap().take();
+        Ok(())
+    }
+
+    /// Returns the Wal raw entry reader, or an error once the engine is stopped.
+    fn wal_raw_entry_reader(&self) -> Result<Arc<dyn RawEntryReader>> {
+        self.wal_raw_entry_reader
+            .read()
+            .unwrap()
+            .clone()
+            .context(EngineStoppedSnafu)
     }
 
     fn find_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
@@ -896,7 +955,7 @@ impl EngineInner {
         let provider = Provider::kafka_provider(topic);
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
-            self.wal_raw_entry_reader.clone(),
+            self.wal_raw_entry_reader()?,
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
@@ -992,7 +1051,7 @@ impl EngineInner {
             .collect::<Vec<_>>();
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
-            self.wal_raw_entry_reader.clone(),
+            self.wal_raw_entry_reader()?,
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
@@ -1134,6 +1193,7 @@ impl EngineInner {
         });
         let version_data = region.version_control.current();
         let version = version_data.version;
+        version.ensure_no_pending_tails()?;
 
         if request.snapshot_on_scan && request.memtable_max_sequence.is_none() {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
@@ -1262,11 +1322,27 @@ impl EngineInner {
         scan_region
     }
 
-    /// Converts the [`RegionRole`].
+    /// Converts the [`RegionRole`]. Unlike lease and catchup promotions, a conversion to Leader
+    /// does not check whether the region waits for a reload.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
+        let was_leader = region.region_role() == RegionRole::Leader;
+        let was_writable = region.is_writable();
         region.set_role(role);
+        if role == RegionRole::Leader && !was_leader {
+            // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
+            region.manifest_ctx.record_leader_lease(Instant::now());
+        }
+        self.notify_if_became_writable(&region, was_writable);
         Ok(())
+    }
+
+    /// Asks the worker to replay the pending tails of `region` if a role change made it
+    /// writable. The worker may already have started an ALTER or an edit of the region.
+    fn notify_if_became_writable(&self, region: &MitoRegion, was_writable: bool) {
+        if !was_writable && region.can_replay_tails() {
+            self.workers.notify_writable(region);
+        }
     }
 
     /// Sets read-only for a region and ensures no more writes in the region after it returns.
@@ -1614,9 +1690,12 @@ impl RegionEngine for MitoEngine {
             region.manifest_ctx.leader_deadline.extend(deadline);
         }
         if role == RegionRole::Leader {
-            return Ok(region
+            let was_writable = region.is_writable();
+            let promoted = region
                 .manifest_ctx
-                .promote_unless_downgrade_started_after(sent_at, region_id));
+                .promote_unless_downgrade_started_after(sent_at, region_id);
+            self.inner.notify_if_became_writable(&region, was_writable);
+            return Ok(promoted);
         }
         region.set_role(role);
         Ok(true)
@@ -1775,7 +1854,7 @@ impl MitoEngine {
                 )
                 .await?,
                 config,
-                wal_raw_entry_reader,
+                wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
                 scan_memory_tracker,
                 region_hook: None,
                 #[cfg(feature = "enterprise")]
@@ -1851,6 +1930,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1863,6 +1943,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1875,6 +1956,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1887,6 +1969,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1899,6 +1982,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1909,6 +1993,7 @@ mod tests {
             flushed_entry_id: Some(1),
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1919,6 +2004,21 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: Some(1),
             committed_sequence: None,
+            wal_recovery: Default::default(),
+        };
+        assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+            wal_recovery: WalRecoveryEdit {
+                pending_tails: Some(vec![]),
+                handoff_floor: None,
+            },
         };
         assert!(!is_valid_region_edit(&edit));
     }

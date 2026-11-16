@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use common_telemetry::{debug, info, warn};
 use parquet::file::metadata::PageIndexPolicy;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
@@ -30,9 +30,13 @@ use store_api::storage::{RegionId, SequenceNumber};
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::IndexBuildMode;
-use crate::error::{EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::error::{
+    EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, RegionStateSnafu,
+    RejectWriteInStagingSnafu, Result,
+};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate, TruncateKind,
+    WalRecoveryEdit,
 };
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
@@ -41,18 +45,26 @@ use crate::region::options::RegionOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, BuildIndexRequest, DiscardUnflushedResult, OptionOutputTx,
-    RegionChangeResult, RegionEditRequest, RegionEditResult, RegionSyncRequest, TruncateResult,
-    WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, DdlRequest, DiscardUnflushedResult, OptionOutputTx,
+    RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
+    SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
-use crate::sst::location;
+use crate::sst::{file, location};
 use crate::wal::EntryId;
+use crate::worker::handle_close;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
 
 pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
 
-/// A queue for region edit requests received while the region is already `Editing`.
+/// Outcome of admitting a region edit, independent of subsequent region role changes.
+pub(crate) enum RegionEditDispatch {
+    Started,
+    Queued,
+    Rejected,
+}
+
+/// A queue for region edits waiting behind an active edit or ALTER.
 ///
 /// Normal writes and bulk inserts that arrive during `Editing` use the stalled-write queue instead.
 /// When an edit completes, those writes are handled before the next queued edit starts, preserving
@@ -74,21 +86,26 @@ impl RegionEditQueue {
         }
     }
 
-    fn enqueue(&mut self, request: RegionEditRequest) {
-        if self.requests.len() > Self::QUEUE_MAX_LEN {
+    fn enqueue(&mut self, request: RegionEditRequest) -> RegionEditDispatch {
+        if self.requests.len() >= Self::QUEUE_MAX_LEN {
             request.waiters.reply_with(|| {
                 RegionBusySnafu {
                     region_id: self.region_id,
                 }
                 .fail()
             });
-            return;
+            return RegionEditDispatch::Rejected;
         };
         self.requests.push_back(request);
+        RegionEditDispatch::Queued
     }
 
     fn dequeue(&mut self) -> Option<RegionEditRequest> {
-        fn can_merge(edit: &RegionEdit) -> bool {
+        fn can_merge(request: &RegionEditRequest) -> bool {
+            if !matches!(request.kind, RegionEditKind::Import) {
+                return false;
+            }
+            let edit = &request.edit;
             // Only the `RegionEdit`:
             // 1. contains the "raw" (file without a sequence) files to add,
             // 2. and no `committed_sequence`,
@@ -105,17 +122,18 @@ impl RegionEditQueue {
                 && edit.flushed_entry_id.is_none()
                 && edit.flushed_sequence.is_none()
                 && edit.committed_sequence.is_none()
+                && edit.wal_recovery == WalRecoveryEdit::default()
         }
 
         let mut merged = self.requests.pop_front()?;
-        if !can_merge(&merged.edit) {
+        if !can_merge(&merged) {
             return Some(merged);
         }
 
-        while let Some(request) = self
-            .requests
-            .pop_front_if(|request| can_merge(&request.edit))
-        {
+        // Merging must preserve the staging binding of every waiter.
+        while let Some(request) = self.requests.pop_front_if(|request| {
+            can_merge(request) && request.staging_partition_expr == merged.staging_partition_expr
+        }) {
             merged.edit.files_to_add.extend(request.edit.files_to_add);
             merged.waiters.merge(request.waiters);
         }
@@ -149,8 +167,18 @@ impl RegionEditQueue {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Rejects queued region edit requests as region not found.
-    pub(crate) fn reject_region_edit_queue_as_not_found(&mut self, region_id: RegionId) {
+    /// Rejects queued DDL and region edit requests as region not found.
+    pub(crate) fn reject_region_requests_as_not_found(&mut self, region_id: RegionId) {
+        if let Some(queue) = self.pending_ddls.remove(region_id) {
+            for ddl in queue {
+                ddl.sender.send(RegionNotFoundSnafu { region_id }.fail());
+            }
+        }
+        self.reject_region_edits_as_not_found(region_id);
+    }
+
+    /// Rejects edits belonging to an abandoned staging without dropping queued controls.
+    pub(crate) fn reject_region_edits_as_not_found(&mut self, region_id: RegionId) {
         if let Some(edit_queue) = self.region_edit_queues.remove(&region_id) {
             edit_queue.reject_all_as_not_found();
         }
@@ -285,19 +313,93 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Handles region edit request.
-    pub(crate) fn handle_region_edit(&mut self, request: RegionEditRequest) {
+    fn is_import_without_staging_binding(request: &RegionEditRequest) -> bool {
+        matches!(request.kind, RegionEditKind::Import) && request.staging_partition_expr.is_none()
+    }
+
+    /// Whether EnterStaging is pending in the worker, flush, or compaction queue.
+    fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
+        self.flush_scheduler.has_pending_enter_staging(region_id)
+            || self
+                .compaction_scheduler
+                .has_pending_enter_staging(region_id)
+            || self.pending_ddls.has_enter_staging(region_id)
+    }
+
+    /// Handles a newly received edit, rejecting unbound imports while EnterStaging drains
+    /// previously accepted edits. Queued edits bypass this admission check.
+    pub(crate) fn handle_incoming_region_edit(
+        &mut self,
+        request: RegionEditRequest,
+    ) -> RegionEditDispatch {
+        let region_id = request.region_id;
+        if Self::is_import_without_staging_binding(&request)
+            && self.has_pending_enter_staging(region_id)
+        {
+            request
+                .waiters
+                .reply_with(|| RegionBusySnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+        self.handle_region_edit(request)
+    }
+
+    /// Executes an admitted edit and reports whether it started, queued, or failed synchronously.
+    fn handle_region_edit(&mut self, request: RegionEditRequest) -> RegionEditDispatch {
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
             request
                 .waiters
                 .reply_with(|| RegionNotFoundSnafu { region_id }.fail());
-            return;
+            return RegionEditDispatch::Rejected;
         };
 
-        if !region.is_writable() {
-            if region.state() == RegionRoleState::Leader(RegionLeaderState::Editing) {
-                self.region_edit_queues
+        // Unbound imports must not be acknowledged into a manifest that staging can discard.
+        if Self::is_import_without_staging_binding(&request) && region.in_staging_session() {
+            request
+                .waiters
+                .reply_with(|| RejectWriteInStagingSnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+
+        // A close-time flush ends with the region removed. A close that left staging keeps the
+        // region writable until then, so an edit meant for staging would run as a normal edit.
+        if self.flush_scheduler.has_close_time_flush(region_id) {
+            request
+                .waiters
+                .reply_with(|| RegionBusySnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+
+        // A close may have abandoned the staging this edit belongs to, even if its flush failed.
+        if let Some(expected) = &request.staging_partition_expr
+            && region
+                .manifest_ctx
+                .staging_partition_info()
+                .as_ref()
+                .and_then(|info| info.partition_expr())
+                != Some(expected.as_str())
+        {
+            let state = region.state();
+            request.waiters.reply_with(|| {
+                RegionStateSnafu {
+                    region_id,
+                    state,
+                    expect: RegionRoleState::Leader(RegionLeaderState::Staging),
+                }
+                .fail()
+            });
+            return RegionEditDispatch::Rejected;
+        }
+
+        if !region.is_writable() || self.scheduler_blocks_region_edits(region_id) {
+            if matches!(
+                region.state(),
+                RegionRoleState::Leader(RegionLeaderState::Editing | RegionLeaderState::Altering)
+            ) || (region.is_writable() && self.scheduler_blocks_region_edits(region_id))
+            {
+                return self
+                    .region_edit_queues
                     .entry(region_id)
                     .or_insert_with(|| RegionEditQueue::new(region_id))
                     .enqueue(request);
@@ -306,26 +408,28 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .waiters
                     .reply_with(|| RegionBusySnafu { region_id }.fail());
             }
-            return;
+            return RegionEditDispatch::Rejected;
         }
 
         let RegionEditRequest {
             region_id: _,
+            kind,
             mut edit,
             waiters,
             preload_sst_cache,
+            staging_partition_expr: _,
         } = request;
-        let file_sequence = region.version_control.current().last_sequence + 1;
-        edit.committed_sequence = Some(file_sequence);
-
-        // Generic region edits (direct/import/staging) assign a new destination
-        // sequence domain but cannot prove or rewrite the physical per-row sequence
-        // column. The added files are therefore atomic/untrusted: clear the
-        // `preserve_row_sequence` marker so exact sequence-range scans fail closed
-        // until the scan reaches the assigned max sequence.
-        for file in &mut edit.files_to_add {
-            file.sequence = NonZeroU64::new(file_sequence);
-            file.preserve_row_sequence = false;
+        #[cfg(feature = "enterprise")]
+        if matches!(kind, RegionEditKind::Compaction(_)) && region.is_staging() {
+            waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+        if matches!(kind, RegionEditKind::Import)
+            && let Err(error) = prepare_region_edit(&region, &mut edit)
+        {
+            let error = Arc::new(error);
+            waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
+            return RegionEditDispatch::Rejected;
         }
 
         // Allow retrieving `is_staging` before spawn the edit region task.
@@ -339,9 +443,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if let Err(e) = region.set_editing(expect_state) {
             let e = Arc::new(e);
             waiters.reply_with(|| Err(e.clone()).context(EditRegionSnafu { region_id }));
-            return;
+            return RegionEditDispatch::Rejected;
         }
-        region.version_control.update_last_sequence(file_sequence);
+        if let Some(sequence) = edit.committed_sequence {
+            region.version_control.update_last_sequence(sequence);
+        }
 
         let request_sender = self.sender.clone();
         let cache_manager = self.cache_manager.clone();
@@ -349,20 +455,30 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
-            let result = edit_region(
-                &region,
-                edit.clone(),
-                cache_manager,
-                listener,
-                is_staging,
-                preload_sst_cache,
-            )
-            .await
+            let result = match kind {
+                RegionEditKind::Import => {
+                    edit_region(
+                        &region,
+                        edit.clone(),
+                        cache_manager,
+                        listener,
+                        is_staging,
+                        preload_sst_cache,
+                    )
+                    .await
+                }
+                #[cfg(feature = "enterprise")]
+                RegionEditKind::Compaction(context) => {
+                    crate::worker::handle_table_compaction::publish(&region, &context, edit.clone())
+                        .await
+                }
+            }
             .map_err(Arc::new);
             let notify = WorkerRequest::Background {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
                     region_id,
+                    origin: region,
                     waiters,
                     edit,
                     result,
@@ -383,6 +499,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 );
             }
         });
+        RegionEditDispatch::Started
     }
 
     /// Handles region edit result.
@@ -393,7 +510,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Fail writes stalled behind this edit if the region was removed before the
                 // edit-completion notification reached the worker.
                 self.fail_region_stalled_requests_as_not_found(&edit_result.region_id);
-                self.reject_region_edit_queue_as_not_found(edit_result.region_id);
+                self.reject_region_requests_as_not_found(edit_result.region_id);
 
                 edit_result.waiters.reply_with(|| {
                     RegionNotFoundSnafu {
@@ -405,8 +522,41 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        if !Arc::ptr_eq(&region, &edit_result.origin) {
+            // The durable edit will be recovered by open. Never replay its old
+            // completion over newer files, or change the new incarnation's queues.
+            edit_result.waiters.reply_with(|| {
+                RegionNotFoundSnafu {
+                    region_id: edit_result.region_id,
+                }
+                .fail()
+            });
+            return;
+        }
+        // A region waiting for a reload recovers its files when the reload replaces it. A fence
+        // stops the manager and sets the mark under the manifest lock, so read both under it.
+        let requires_reopen = edit_result.result.is_err() && {
+            let manager = region.manifest_ctx.manifest_manager.read().await;
+            manager.is_stopped() && !region.manifest_ctx.is_reload_pending()
+        };
+        if let Err(error) = &edit_result.result
+            && requires_reopen
+        {
+            // An uncertain manifest write requires replay before the old Version
+            // can become writable again.
+            self.remove_region(edit_result.region_id).await;
+            edit_result.waiters.reply_with(|| {
+                Err(error.clone()).context(EditRegionSnafu {
+                    region_id: edit_result.region_id,
+                })
+            });
+            return;
+        }
         let need_compaction = if edit_result.is_staging {
-            if edit_result.update_region_state {
+            // A close may have abandoned this edit and left staging already.
+            if edit_result.update_region_state
+                && region.state() == RegionRoleState::Leader(RegionLeaderState::Editing)
+            {
                 // For staging regions, edits are not applied immediately,
                 // as they remain invisible until the region exits the staging state.
                 region.switch_state_to_staging(RegionLeaderState::Editing);
@@ -416,7 +566,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         } else {
             let need_compaction = self.config.schedule_compaction_after_edit
                 && edit_result.result.is_ok()
-                && !edit_result.edit.files_to_add.is_empty();
+                && edit_result
+                    .edit
+                    .files_to_add
+                    .iter()
+                    .any(|file| file.level < file::LEVEL_SHARED);
 
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
@@ -450,22 +604,164 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .await;
         }
 
-        let next_request =
-            if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
-                let request = edit_queue.dequeue();
-                if edit_queue.is_empty() {
-                    self.region_edit_queues.remove(&edit_result.region_id);
-                }
-                request
-            } else {
-                None
-            };
-        if let Some(request) = next_request {
-            self.handle_region_edit(request);
-        }
+        // Edit completion owns dispatch: stalled writes precede queued edits, and queued
+        // controls precede compaction. Early returns either retire waiters or ignore an old instance.
+        self.dispatch_pending_region_requests(edit_result.region_id)
+            .await;
 
         if need_compaction {
             self.schedule_compaction(&region).await;
+        }
+    }
+
+    /// Retains a control request without blocking the worker that receives its completion.
+    pub(crate) fn enqueue_region_ddl(&mut self, ddl: SenderDdlRequest) {
+        let region_id = ddl.region_id;
+        if let Err(ddl) = self.pending_ddls.enqueue(ddl) {
+            ddl.sender.send(RegionBusySnafu { region_id }.fail());
+        }
+    }
+
+    /// Whether a scheduler holds lifecycle work that must finish before edits run.
+    ///
+    /// Running ordinary and repartition flushes retain concurrency with edits through the
+    /// existing manifest synchronization. Ordinary and repartition flushes alone do not block
+    /// edits.
+    fn scheduler_blocks_region_edits(&self, region_id: RegionId) -> bool {
+        self.flush_scheduler.has_pending_ddls(region_id)
+            || self.compaction_scheduler.blocks_region_edits(region_id)
+    }
+
+    /// Defers only recoverable local contention; the original handler validates other states.
+    pub(crate) fn should_defer_region_ddl(&self, ddl: &SenderDdlRequest) -> bool {
+        let Some(region) = self.regions.get_region(ddl.region_id) else {
+            return false;
+        };
+        self.can_defer_ddl_request(ddl, &region)
+            && self.has_work_ahead_of_ddl(ddl.region_id, &region, &ddl.request)
+    }
+
+    /// Whether this request may wait for ongoing work in the current region state.
+    /// Ineligible requests go directly to their handlers for normal validation.
+    fn can_defer_ddl_request(&self, ddl: &SenderDdlRequest, region: &MitoRegionRef) -> bool {
+        if !matches!(
+            region.state(),
+            RegionRoleState::Leader(
+                RegionLeaderState::Writable
+                    | RegionLeaderState::Staging
+                    | RegionLeaderState::Editing
+                    | RegionLeaderState::Altering
+                    | RegionLeaderState::EnteringStaging
+            )
+        ) {
+            return false;
+        }
+        let version = region.version();
+        match &ddl.request {
+            DdlRequest::Alter(_) | DdlRequest::Flush(_) | DdlRequest::ApplyStagingManifest(_) => {
+                true
+            }
+            DdlRequest::EnterStaging(request) => {
+                if version.has_pending_tails() {
+                    return false;
+                }
+                // A different directive is not temporary contention with the active staging.
+                if let Some(info) = region.manifest_ctx.staging_partition_info()
+                    && info.partition_directive != request.partition_directive
+                {
+                    return false;
+                }
+                true
+            }
+            DdlRequest::Close(request) if !region.in_staging_session() => {
+                // Another Close can take queued closes and reply without executing their
+                // handlers, so reject invalid flush-on-close requests before that handoff.
+                !self.flush_scheduler.has_close_time_flush(ddl.region_id)
+                    && !(request.flush_on_close && version.has_pending_tails())
+                    // A later close cannot bypass an earlier close's flush requirement.
+                    && (handle_close::close_needs_flush(region, request)
+                        || self.pending_ddls.has_close(ddl.region_id))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether active work or queue ordering requires this DDL to wait.
+    /// EnterStaging also waits for previously accepted edits to drain.
+    fn has_work_ahead_of_ddl(
+        &self,
+        region_id: RegionId,
+        region: &MitoRegionRef,
+        request: &DdlRequest,
+    ) -> bool {
+        self.pending_ddls.contains_region(region_id)
+            || self.scheduler_blocks_region_edits(region_id)
+            || matches!(
+                region.state(),
+                RegionRoleState::Leader(
+                    RegionLeaderState::Editing
+                        | RegionLeaderState::Altering
+                        | RegionLeaderState::EnteringStaging
+                )
+            )
+            || (matches!(request, DdlRequest::EnterStaging(_))
+                && self
+                    .region_edit_queues
+                    .get(&region_id)
+                    .is_some_and(|queue| !queue.is_empty()))
+    }
+
+    /// Controls retain priority, except that staging first drains its accepted edit prefix.
+    pub(crate) async fn dispatch_pending_region_requests(&mut self, region_id: RegionId) {
+        loop {
+            if self.scheduler_blocks_region_edits(region_id) {
+                return;
+            }
+            if self.regions.get_region(region_id).is_some_and(|region| {
+                matches!(
+                    region.state(),
+                    RegionRoleState::Leader(
+                        RegionLeaderState::Editing
+                            | RegionLeaderState::Altering
+                            | RegionLeaderState::EnteringStaging
+                    )
+                )
+            }) {
+                return;
+            }
+            let drain_edits = self.pending_ddls.front_is_enter_staging(region_id);
+            if !drain_edits
+                || self
+                    .region_edit_queues
+                    .get(&region_id)
+                    .is_none_or(|queue| queue.is_empty())
+            {
+                let next = self.pending_ddls.pop_front(region_id);
+                if let Some(ddl) = next {
+                    self.execute_ddl_request(ddl).await;
+                    continue;
+                }
+            }
+            let next = self
+                .region_edit_queues
+                .get_mut(&region_id)
+                .and_then(RegionEditQueue::dequeue);
+            if self
+                .region_edit_queues
+                .get(&region_id)
+                .is_some_and(RegionEditQueue::is_empty)
+            {
+                self.region_edit_queues.remove(&region_id);
+            }
+            let Some(request) = next else {
+                return;
+            };
+            // Rejected edits produce no completion notification. Keep draining them so neither
+            // the next edit nor the staging boundary is stranded. Execution bypasses admission.
+            match self.handle_region_edit(request) {
+                RegionEditDispatch::Started | RegionEditDispatch::Queued => return,
+                RegionEditDispatch::Rejected => continue,
+            }
         }
     }
 
@@ -562,6 +858,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 flushed_entry_id: Some(discarded_entry_id),
                 flushed_sequence: Some(discarded_sequence),
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             };
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
             let result = match durability_barrier.wait(discarded_entry_id).await {
@@ -672,6 +969,87 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
+fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
+    let region_id = region.region_id;
+    edit.validate_shared_reclassification(region_id)?;
+    let current = region.version_control.current();
+    let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;
+    // Shared adoption is L0-only. The manifest is keyed by FileId and would
+    // replace an existing reference, but installing a shared handle detaches
+    // only the L0 handle, so an existing L1 reference would leave two live
+    // handles for one file and duplicate its rows until reopen.
+    let l1_files = &current.version.ssts.levels()[1].files;
+    snafu::ensure!(
+        edit.files_to_add
+            .iter()
+            .all(|file| file.level != file::LEVEL_SHARED || !l1_files.contains_key(&file.file_id)),
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: "Cannot adopt an existing L1 SST as shared; adoption is L0-only",
+        }
+    );
+    snafu::ensure!(
+        edit.files_to_remove
+            .iter()
+            .all(|file| file.level < file::LEVEL_SHARED && !shared.contains_key(&file.file_id))
+            && edit
+                .files_to_add
+                .iter()
+                .all(|file| file::is_supported_level(file.level)
+                    && (file.level != file::LEVEL_SHARED
+                        || file.region_id.table_id() == region_id.table_id())),
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: "Invalid shared SST import or removal"
+        }
+    );
+    for file in &edit.files_to_add {
+        if let Some(existing) = shared.get(&file.file_id) {
+            let mut imported = file.clone();
+            imported.sequence = existing.meta_ref().sequence;
+            imported.preserve_row_sequence = false;
+            snafu::ensure!(
+                &imported == existing.meta_ref(),
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Shared SST import conflicts with a visible reference",
+                }
+            );
+        }
+    }
+    let existing_sequence = |file: &file::FileMeta| {
+        shared
+            .get(&file.file_id)
+            .and_then(|handle| handle.meta_ref().sequence)
+    };
+    // A repeat of a still-visible shared import is not a new admission. Retired
+    // imports are not tracked: compaction retries must never re-import old inputs.
+    let same_import = !edit.files_to_add.is_empty()
+        && edit.files_to_remove.is_empty()
+        && edit
+            .files_to_add
+            .iter()
+            .all(|file| existing_sequence(file).is_some());
+    let sequence =
+        if same_import {
+            None
+        } else {
+            let sequence = current.last_sequence.checked_add(1).context(
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Region sequence exhausted",
+                },
+            )?;
+            edit.committed_sequence = Some(sequence);
+            NonZeroU64::new(sequence)
+        };
+    for file in &mut edit.files_to_add {
+        file.sequence = existing_sequence(file).or(sequence);
+        file.preserve_row_sequence = false;
+    }
+    Ok(())
+}
+
 /// Checks the edit, writes and applies it.
 async fn edit_region(
     region: &MitoRegionRef,
@@ -694,7 +1072,7 @@ async fn edit_region(
             let remote_path =
                 location::sst_file_path(layer.table_dir(), file_meta.file_id(), layer.path_type());
 
-            let is_index_exist = file_meta.exists_index();
+            let has_downloadable_index = file_meta.has_downloadable_index();
             let index_file_size = file_meta.index_file_size();
 
             let index_file_index_key = IndexKey::new(
@@ -728,12 +1106,8 @@ async fn edit_region(
                             PageIndexPolicy::Optional,
                         )
                         .await;
-
-                    if matches!(parquet_cached, Ok(true)) {
-                        listener.on_file_cache_filled(index_key.file_id);
-                    }
                 }
-                if is_index_exist {
+                if has_downloadable_index {
                     // also download puffin file
                     if let Err(err) = write_cache
                         .download(
@@ -751,6 +1125,9 @@ async fn edit_region(
                 }
 
                 WRITE_CACHE_INFLIGHT_DOWNLOAD.sub(1);
+                if matches!(parquet_cached, Ok(true)) {
+                    listener.on_file_cache_filled(index_key.file_id);
+                }
             });
         }
     }
@@ -761,9 +1138,160 @@ async fn edit_region(
     );
 
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
-    region
+    let result = region
         .manifest_ctx
         .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
+        .await;
+    if let Err(error) = &result
+        && error.may_have_persisted_manifest_update()
+    {
+        // Recover the file list before accepting another edit after an uncertain write.
+        region
+            .manifest_ctx
+            .manifest_manager
+            .write()
+            .await
+            .stop()
+            .await;
+    }
+    result.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::FileId;
+
+    use super::*;
+    use crate::sst::file::{FileMeta, LEVEL_SHARED};
+    use crate::test_util::{CreateRequestBuilder, TestEnv};
+
+    #[test]
+    fn test_edit_queue_preserves_staging_bindings() {
+        for (left, right, merge) in [
+            (None, None, true),
+            (Some("a"), Some("a"), true),
+            (None, Some("a"), false),
+            (Some("a"), None, false),
+            (Some("a"), Some("b"), false),
+        ] {
+            let region_id = RegionId::new(1, 1);
+            let mut queue = RegionEditQueue::new(region_id);
+            let mut receivers = Vec::new();
+            for binding in [left, right] {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                let mut request =
+                    RegionEditRequest::new(region_id, RegionEdit::default(), false, sender);
+                request.staging_partition_expr = binding.map(str::to_string);
+                assert!(matches!(queue.enqueue(request), RegionEditDispatch::Queued));
+                receivers.push(receiver);
+            }
+            let first = queue.dequeue().unwrap();
+            assert_eq!(left, first.staging_partition_expr.as_deref());
+            first.waiters.reply_with(|| Ok(()));
+            assert!(receivers[0].try_recv().unwrap().is_ok());
+            if merge {
+                assert!(receivers[1].try_recv().unwrap().is_ok());
+            } else {
+                assert!(matches!(
+                    receivers[1].try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+                let second = queue.dequeue().unwrap();
+                assert_eq!(right, second.staging_partition_expr.as_deref());
+                second.waiters.reply_with(|| Ok(()));
+                assert!(receivers[1].try_recv().unwrap().is_ok());
+            }
+            assert!(queue.is_empty());
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::shared_removal(false)]
+    #[case::unsupported_level(true)]
+    #[tokio::test]
+    async fn test_rejected_edit_does_not_stop_manifest(#[case] unsupported_level: bool) {
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        let manifest_version = region.manifest_ctx.manifest_version().await;
+        let file = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            level: if unsupported_level {
+                // An ordinary-looking but unallocated level; rejected in every build.
+                2
+            } else {
+                LEVEL_SHARED
+            },
+            ..Default::default()
+        };
+        let edit = if unsupported_level {
+            RegionEdit {
+                files_to_add: vec![file],
+                ..Default::default()
+            }
+        } else {
+            RegionEdit {
+                files_to_remove: vec![file],
+                ..Default::default()
+            }
+        };
+        region.set_editing(RegionLeaderState::Writable).unwrap();
+        // Exercise persistence-side rejection, not the earlier worker admission guard.
+        let error = edit_region(
+            &region,
+            edit,
+            engine.cache_manager(),
+            WorkerListener::default(),
+            false,
+            false,
+        )
         .await
-        .map(|_| ())
+        .unwrap_err();
+        assert!(matches!(error, crate::error::Error::InvalidRequest { .. }));
+        assert_eq!(
+            manifest_version,
+            region.manifest_ctx.manifest_version().await
+        );
+        assert!(
+            !region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .is_stopped()
+        );
+        assert!(
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .all(|level| level.files.is_empty())
+        );
+        // A rejected edit must not poison the manager for a subsequent valid update.
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Editing,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default())),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            manifest_version + 1,
+            region.manifest_ctx.manifest_version().await
+        );
+    }
 }

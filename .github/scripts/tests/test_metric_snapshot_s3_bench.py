@@ -28,6 +28,25 @@ SPEC.loader.exec_module(bench)
 
 
 class PhaseTests(unittest.TestCase):
+    def test_cloud_region_configuration(self):
+        for bucket, runner, accepted in (("us-east-1", "us-east-1", True),
+                                          ("ap-southeast-1", "ap-southeast-1", True),
+                                          ("us-east-1", "ap-southeast-1", False),
+                                          ("", "", False)):
+            with self.subTest(bucket=bucket, runner=runner), tempfile.TemporaryDirectory() as directory:
+                env = dict(GREPTIMEDB_IMAGE="greptime/greptimedb@sha256:" + "a" * 64,
+                           EXPECTED_COMMIT="b" * 40, RUN_PREFIX="metric-snapshot-bench/123-1/",
+                           RESULTS=str(Path(directory) / "results"), DATA_ROOT=str(Path(directory) / "data"),
+                           S3_REGION=bucket, RUNNER_REGION=runner, S3_ENDPOINT="")
+                with patch.dict(bench.os.environ, env):
+                    if accepted:
+                        benchmark = bench.Benchmark(local_smoke=False)
+                        benchmark.summary()
+                        self.assertIn(f"S3 in {bucket};", (benchmark.results / "summary.md").read_text())
+                    else:
+                        with self.assertRaisesRegex(ValueError, "same nonempty"):
+                            bench.Benchmark(local_smoke=False)
+
     def test_docker_nanosecond_timestamps(self):
         start = bench.docker_timestamp("2026-10-14T06:06:44.72000818Z")
         end = bench.docker_timestamp("2026-10-14T06:06:46.123456789Z")

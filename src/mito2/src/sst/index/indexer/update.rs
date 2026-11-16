@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_telemetry::warn;
 use datatypes::arrow::record_batch::RecordBatch;
 
@@ -23,203 +25,66 @@ impl Indexer {
         if batch.is_empty() {
             return;
         }
-
-        if !self.do_prepare_primary_key(batch) {
+        if let Err(err) = self.prepare_primary_key(batch) {
+            if cfg!(any(test, feature = "test")) {
+                panic!("Failed to decode primary key for indexes: {err:?}");
+            }
+            warn!(err; "Failed to decode primary key for indexes, region_id: {}, file_id: {}", self.region_id, self.file_id);
+            self.failure.get_or_insert_with(|| Arc::new(err));
             self.do_abort().await;
             return;
         }
-
-        if !self.do_update_inverted_index(batch).await {
-            self.do_abort().await;
+        let mut position = 0;
+        while position < self.creators.len() {
+            if !self.creators[position].creator.requires_row_scan() {
+                position += 1;
+                continue;
+            }
+            match self.creators[position].creator.update(batch).await {
+                Ok(()) => position += 1,
+                Err(err) => {
+                    let builtin = self.creators[position].is_builtin();
+                    if builtin && cfg!(any(test, feature = "test")) {
+                        panic!("Failed to update index: {err:?}");
+                    }
+                    warn!(err; "Failed to update index, region_id: {}, file_id: {}, kinds: {:?}", self.region_id, self.file_id, self.creators[position].kinds);
+                    self.record_failure(err);
+                    if builtin {
+                        self.do_abort().await;
+                        return;
+                    }
+                    self.abort_creator(position).await;
+                }
+            }
         }
-        if !self.do_update_fulltext_index(batch).await {
-            self.do_abort().await;
-        }
-        if !self.do_update_bloom_filter(batch).await {
-            self.do_abort().await;
-        }
-    }
-
-    /// Handles decode errors before entering asynchronous cleanup, following the
-    /// creators' update policy without carrying a decode error across an await.
-    fn do_prepare_primary_key(&self, batch: &mut Batch) -> bool {
-        let Err(err) = self.prepare_primary_key(batch) else {
-            return true;
-        };
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to decode primary key for indexes, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(err; "Failed to decode primary key for indexes, region_id: {}, file_id: {}", self.region_id, self.file_id);
-        }
-        false
-    }
-
-    /// Returns false if the update failed.
-    async fn do_update_inverted_index(&mut self, batch: &mut Batch) -> bool {
-        let Some(creator) = self.inverted_indexer.as_mut() else {
-            return true;
-        };
-
-        let Err(err) = creator.update(batch).await else {
-            return true;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to update inverted index, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to update inverted index, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-
-        false
-    }
-
-    /// Returns false if the update failed.
-    async fn do_update_fulltext_index(&mut self, batch: &mut Batch) -> bool {
-        let Some(creator) = self.fulltext_indexer.as_mut() else {
-            return true;
-        };
-
-        let Err(err) = creator.update(batch).await else {
-            return true;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to update full-text index, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to update full-text index, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-
-        false
-    }
-
-    /// Returns false if the update failed.
-    async fn do_update_bloom_filter(&mut self, batch: &mut Batch) -> bool {
-        let Some(creator) = self.bloom_filter_indexer.as_mut() else {
-            return true;
-        };
-
-        let Err(err) = creator.update(batch).await else {
-            return true;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to update bloom filter, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to update bloom filter, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-
-        false
     }
 
     pub(crate) async fn do_update_flat(&mut self, batch: &RecordBatch) {
         if batch.num_rows() == 0 {
             return;
         }
-
-        if !self.do_update_flat_inverted_index(batch).await {
-            self.do_abort().await;
+        let mut position = 0;
+        while position < self.creators.len() {
+            if !self.creators[position].creator.requires_row_scan() {
+                position += 1;
+                continue;
+            }
+            match self.creators[position].creator.update_flat(batch).await {
+                Ok(()) => position += 1,
+                Err(err) => {
+                    let builtin = self.creators[position].is_builtin();
+                    if builtin && cfg!(any(test, feature = "test")) {
+                        panic!("Failed to update flat index: {err:?}");
+                    }
+                    warn!(err; "Failed to update flat index, region_id: {}, file_id: {}, kinds: {:?}", self.region_id, self.file_id, self.creators[position].kinds);
+                    self.record_failure(err);
+                    if builtin {
+                        self.do_abort().await;
+                        return;
+                    }
+                    self.abort_creator(position).await;
+                }
+            }
         }
-        if !self.do_update_flat_fulltext_index(batch).await {
-            self.do_abort().await;
-        }
-        if !self.do_update_flat_bloom_filter(batch).await {
-            self.do_abort().await;
-        }
-    }
-
-    /// Returns false if the update failed.
-    async fn do_update_flat_inverted_index(&mut self, batch: &RecordBatch) -> bool {
-        let Some(creator) = self.inverted_indexer.as_mut() else {
-            return true;
-        };
-
-        let Err(err) = creator.update_flat(batch).await else {
-            return true;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to update inverted index with flat format, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to update inverted index with flat format, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-
-        false
-    }
-
-    /// Returns false if the update failed.
-    async fn do_update_flat_fulltext_index(&mut self, batch: &RecordBatch) -> bool {
-        let Some(creator) = self.fulltext_indexer.as_mut() else {
-            return true;
-        };
-
-        let Err(err) = creator.update_flat(batch).await else {
-            return true;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to update full-text index with flat format, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to update full-text index with flat format, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-
-        false
-    }
-
-    /// Returns false if the update failed.
-    async fn do_update_flat_bloom_filter(&mut self, batch: &RecordBatch) -> bool {
-        let Some(creator) = self.bloom_filter_indexer.as_mut() else {
-            return true;
-        };
-
-        let Err(err) = creator.update_flat(batch).await else {
-            return true;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to update bloom filter with flat format, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to update bloom filter with flat format, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-
-        false
     }
 }

@@ -44,6 +44,40 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Failed to route multi-region compaction input"))]
+    RouteMultiRegion {
+        #[snafu(source)]
+        source: PartitionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Invalid multi-region compaction: {reason}"))]
+    InvalidMultiRegionCompaction {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Multi-region compaction resource limit: {reason}"))]
+    MultiRegionCompactionResource {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("SST writer {kind} needs {bytes} bytes, budget is {limit}"))]
+    SstWriteMemoryExceeded {
+        kind: &'static str,
+        bytes: usize,
+        limit: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unexpected data type"))]
     DataTypeMismatch {
         source: datatypes::error::Error,
@@ -113,6 +147,25 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Manifest version {version} conflicts in {manifest_dir}: {reason}"))]
+    ManifestVersionConflict {
+        version: ManifestVersion,
+        manifest_dir: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Manifest checkpoint {version} in {manifest_dir} was removed after it was listed"
+    ))]
+    ManifestCheckpointVanished {
+        version: ManifestVersion,
+        manifest_dir: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize manifest, region_id: {}", region_id))]
     SerializeManifest {
         region_id: RegionId,
@@ -159,6 +212,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Engine is stopped"))]
+    EngineStopped {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to recv result"))]
     Recv {
         #[snafu(source)]
@@ -198,8 +257,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to load range result"))]
+    LoadRangeResult {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to load SST metadata"))]
     LoadSstMeta {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to load Parquet page"))]
+    LoadParquetPage {
         source: Arc<Error>,
         #[snafu(implicit)]
         location: Location,
@@ -443,6 +516,15 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to read the WAL of node {} for region {}", node_id, region_id))]
+    ReadNodeWal {
+        region_id: RegionId,
+        node_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to decode WAL entry, region_id: {}", region_id))]
     DecodeWal {
         region_id: RegionId,
@@ -663,6 +745,39 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} still has WAL tails to recover", region_id))]
+    RegionPendingTails {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} cannot read pending WAL tails of node {}",
+        region_id,
+        node_id
+    ))]
+    RemoteWalUnsupported {
+        region_id: RegionId,
+        node_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} cannot read entry {} of the WAL of node {}, where its pending tail ends",
+        region_id,
+        entry_id,
+        node_id
+    ))]
+    TailEntryMissing {
+        region_id: RegionId,
+        node_id: u64,
+        entry_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
     RegionLeaseExpired {
         region_id: RegionId,
@@ -692,6 +807,24 @@ pub enum Error {
     EditRegion {
         region_id: RegionId,
         source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to end staging of region {}, which is still staging",
+        region_id
+    ))]
+    EndStaging {
+        region_id: RegionId,
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} waits for a retry of its end-of-staging commit", region_id))]
+    EndStagingPending {
+        region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1462,7 +1595,9 @@ impl Error {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
             Error::ManifestDeltaNotFound { .. } => true,
-            Error::LoadSstMeta { source, .. } => source.is_object_not_found(),
+            Error::LoadSstMeta { source, .. }
+            | Error::LoadParquetPage { source, .. }
+            | Error::LoadRangeResult { source, .. } => source.is_object_not_found(),
             _ => false,
         }
     }
@@ -1475,10 +1610,14 @@ impl Error {
     /// from a revoked key, a changed bucket policy or clock skew) never proves nothing was written.
     pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
         match self {
-            Error::UpdateManifest { .. }
+            // Applicability and capability checks reject the edit before storage I/O.
+            Error::InvalidRequest { .. }
+            | Error::UpdateManifest { .. }
             | Error::RegionState { .. }
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
+            | Error::RegionLeaseExpired { .. }
+            | Error::EndStagingPending { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
             Error::OpenDal { error, .. } => !matches!(
@@ -1503,12 +1642,22 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            #[cfg(feature = "enterprise")]
+            RouteMultiRegion { source, .. } => source.status_code(),
+            #[cfg(feature = "enterprise")]
+            InvalidMultiRegionCompaction { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            MultiRegionCompactionResource { .. } => StatusCode::RuntimeResourcesExhausted,
+            SstWriteMemoryExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            OpenDal { .. }
+            | ManifestDeltaNotFound { .. }
+            | ManifestVersionConflict { .. }
+            | ManifestCheckpointVanished { .. }
+            | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. }
             | ReadWal { source, .. }
+            | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | CheckWalHistory { source, .. } => source.status_code(),
@@ -1563,6 +1712,7 @@ impl ErrorExt for Error {
             | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
+            | EngineStopped { .. }
             | Recv { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
@@ -1585,7 +1735,10 @@ impl ErrorExt for Error {
             OpenRegion { source, .. } => source.status_code(),
 
             WriteParquet { .. } => StatusCode::StorageUnavailable,
-            WriteGroup { source, .. } | LoadSstMeta { source, .. } => source.status_code(),
+            WriteGroup { source, .. }
+            | LoadSstMeta { source, .. }
+            | LoadParquetPage { source, .. }
+            | LoadRangeResult { source, .. } => source.status_code(),
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
@@ -1605,11 +1758,14 @@ impl ErrorExt for Error {
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } | RejectWriteInStaging { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
-            EditRegion { source, .. } => source.status_code(),
+            EditRegion { source, .. } | EndStaging { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
             RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
+            RegionPendingTails { .. } => StatusCode::RegionNotReady,
+            RemoteWalUnsupported { .. } => StatusCode::Unsupported,
+            TailEntryMissing { .. } => StatusCode::StorageUnavailable,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1652,7 +1808,7 @@ impl ErrorExt for Error {
             | StatsNotPresent { .. }
             | InvalidPrimaryKeyRange { .. }
             | DecodePrimaryKeyRange { .. } => StatusCode::Internal,
-            RegionBusy { .. } => StatusCode::RegionBusy,
+            RegionBusy { .. } | EndStagingPending { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
 
@@ -1722,9 +1878,14 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
+            | RegionPendingTails { .. }
+            | EndStaging { .. }
+            | EndStagingPending { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
-            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
+            | ManifestDeltaNotFound { .. }
+            | ManifestVersionConflict { .. }
+            | ManifestCheckpointVanished { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }
@@ -1733,6 +1894,7 @@ impl ErrorExt for Error {
 
             WriteWal { source, .. }
             | ReadWal { source, .. }
+            | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | CheckWalHistory { source, .. }
@@ -1741,6 +1903,8 @@ impl ErrorExt for Error {
 
             OpenRegion { source, .. }
             | LoadSstMeta { source, .. }
+            | LoadParquetPage { source, .. }
+            | LoadRangeResult { source, .. }
             | WriteGroup { source, .. }
             | FlushRegion { source, .. }
             | BuildIndexAsync { source, .. }
@@ -1888,10 +2052,14 @@ mod tests {
             let expected_status = source.status_code();
             let expected_retry = source.retry_hint();
             let source = Arc::new(source);
-            let wrapped = LoadSstMetaSnafu.into_error(source);
-            assert_eq!(expected_not_found, wrapped.is_object_not_found());
-            assert_eq!(expected_status, wrapped.status_code());
-            assert_eq!(expected_retry, wrapped.retry_hint());
+            for wrapped in [
+                LoadSstMetaSnafu.into_error(source.clone()),
+                LoadRangeResultSnafu.into_error(source),
+            ] {
+                assert_eq!(expected_not_found, wrapped.is_object_not_found());
+                assert_eq!(expected_status, wrapped.status_code());
+                assert_eq!(expected_retry, wrapped.retry_hint());
+            }
         }
     }
 
@@ -1932,9 +2100,36 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let error = RegionTruncatedSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
+        let error = InvalidRequestSnafu {
+            region_id,
+            reason: "manifest applicability check rejected the edit",
+        }
+        .build();
+        assert!(!error.may_have_persisted_manifest_update());
+        // Staging that waits for a retried end commit refuses before storage I/O.
+        let error = EndStagingPendingSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert!(error.retry_hint().is_retryable());
+        assert_eq!(error.status_code(), StatusCode::RegionBusy);
+        // Other busy errors keep the conservative classification.
+        let error = RegionBusySnafu { region_id }.build();
+        assert!(error.may_have_persisted_manifest_update());
+
+        // A commit refused before its PUT because the Leader deadline has passed.
+        let error = RegionLeaseExpiredSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
 
         // This can be raised while applying an edit after its manifest file was saved.
         let error = RegionMetadataNotFoundSnafu {}.build();
         assert!(error.may_have_persisted_manifest_update());
+
+        let error = ManifestVersionConflictSnafu {
+            version: 1u64,
+            manifest_dir: "manifest/",
+            reason: "test",
+        }
+        .build();
+        assert!(error.may_have_persisted_manifest_update());
+        assert!(error.retry_hint().is_retryable());
     }
 }

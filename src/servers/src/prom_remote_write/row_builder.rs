@@ -37,12 +37,14 @@ pub struct PromCtx {
 pub struct TablesBuilder<'a> {
     pub tables: HashMap<PromCtx, HashMap<String, TableBuilder<'a>>>,
     pub(crate) raw_data: Vec<u8>,
+    pub(crate) exemplars: crate::exemplar::ExemplarRequests,
 }
 
 impl<'a> Clear for TablesBuilder<'a> {
     fn clear(&mut self) {
         self.tables.clear();
         self.raw_data.clear();
+        self.exemplars.clear();
     }
 }
 

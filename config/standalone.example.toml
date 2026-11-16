@@ -795,6 +795,11 @@ compress_manifest = false
 #+ max_background_flushes = 4
 
 ## Max number of running background compaction jobs (default: 1/4 of cpu cores).
+## The same limit bounds engine-wide admission of local compaction units and
+## the merge-output budget of each automatic per-region pick. Outputs sharing
+## inputs form one unit. Expired SSTs may add one expiration-only unit outside
+## the merge-output budget; it still consumes a slot in the same admission limit.
+## Manual compaction keeps using the request's parallelism.
 ## @toml2docs:none-default="Auto"
 #+ max_background_compactions = 2
 
@@ -1151,6 +1156,12 @@ cache_ttl = "10s"
 ## network, and logs. Default is false. Enable only for trusted pipeline authors.
 ## Applies to pipeline creation, execution, and dry-runs. Requires a restart.
 allow_vrl_host_access = false
+## Default for the HTTP log ingestion and pipeline dry-run `ignore_errors` parameter.
+## Explicit request values override this setting. Malformed input may be discarded,
+## and invalid custom timestamps in identity ingestion fall back to server time.
+## Pipeline execution errors are controlled separately by `skip_error`.
+## Default is false. Requires a restart.
+ignore_errors = false
 
 ## Configuration options for the event recorder.
 [event_recorder]

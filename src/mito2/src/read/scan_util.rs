@@ -34,6 +34,7 @@ use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, SequenceRange, TimeSeriesRowSelector};
 
+use crate::cache::range_cache::RangeCacheMetricsReport;
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
@@ -915,6 +916,26 @@ impl DedupMetricsReport for PartitionMetricsInner {
     }
 }
 
+impl RangeCacheMetricsReport for PartitionMetricsInner {
+    /// Increments the total bytes added to the range cache.
+    fn inc_range_cache_size(&self, size: usize) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.range_cache_size += size;
+    }
+
+    /// Increments the range cache hit counter.
+    fn inc_range_cache_hit(&self) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.range_cache_hit += 1;
+    }
+
+    /// Increments the range cache miss counter.
+    fn inc_range_cache_miss(&self) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.range_cache_miss += 1;
+    }
+}
+
 impl Drop for PartitionMetricsInner {
     fn drop(&mut self) {
         self.on_finish(false);
@@ -1107,22 +1128,9 @@ impl PartitionMetrics {
         self.0.clone()
     }
 
-    /// Increments the total bytes added to the range cache.
-    pub(crate) fn inc_range_cache_size(&self, size: usize) {
-        let mut metrics = self.0.metrics.lock().unwrap();
-        metrics.range_cache_size += size;
-    }
-
-    /// Increments the range cache hit counter.
-    pub(crate) fn inc_range_cache_hit(&self) {
-        let mut metrics = self.0.metrics.lock().unwrap();
-        metrics.range_cache_hit += 1;
-    }
-
-    /// Increments the range cache miss counter.
-    pub(crate) fn inc_range_cache_miss(&self) {
-        let mut metrics = self.0.metrics.lock().unwrap();
-        metrics.range_cache_miss += 1;
+    /// Returns the range-cache reporter while preserving query metric ownership.
+    pub(crate) fn range_cache_metrics_reporter(&self) -> Arc<dyn RangeCacheMetricsReport> {
+        self.0.clone()
     }
 }
 
@@ -1272,7 +1280,10 @@ pub(crate) fn should_split_flat_batches_for_merge(
             let file_index = index.index - stream_ctx.input.num_memtables();
             let file = &stream_ctx.input.files[file_index];
             let file_meta = file.meta_ref();
-            if file_meta.level == 0 {
+            // Only L1 compaction outputs guarantee a published, non-overlapping layout.
+            // L0 and shared inputs may carry short series whose tiny batches
+            // would otherwise be retained by the merge.
+            if file_meta.level != 1 {
                 // Short series can leave too many tiny batches retained by the merge.
                 if file_meta.num_series > 0 {
                     if !can_split_series(file_meta.num_rows, file_meta.num_series) {
@@ -1605,13 +1616,7 @@ pub fn build_flat_file_range_scan_stream(
                 .file_handle()
                 .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
 
-            let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch().await? {
-                let record_batch = if let Some(mapper) = mapper {
-                    mapper.project(record_batch)?
-                } else {
-                    record_batch
-                };
                 let Some(record_batch) = filter_flat_batch_by_sequence(
                     record_batch,
                     stream_ctx.input.sequence_range,
@@ -1648,7 +1653,6 @@ pub fn build_flat_file_range_scan_stream(
 
         // Reports metrics.
         reader_metrics.observe_rows(read_type);
-        reader_metrics.filter_metrics.observe();
         part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
     }
 }
@@ -1811,6 +1815,34 @@ mod tests {
     use crate::sst::file_purger::NoopFilePurger;
     use crate::test_util::memtable_util::metadata_for_test;
     use crate::test_util::scheduler_util::SchedulerEnv;
+
+    #[test]
+    fn test_range_cache_reporter_preserves_metrics_and_lifetime() {
+        let metrics = PartitionMetrics::new(
+            RegionId::new(1, 1),
+            0,
+            "test_range_cache_reporter",
+            Instant::now(),
+            false,
+            &ExecutionPlanMetricsSet::new(),
+        );
+        let weak = Arc::downgrade(&metrics.0);
+        let reporter = metrics.range_cache_metrics_reporter();
+        reporter.inc_range_cache_hit();
+        reporter.inc_range_cache_miss();
+        drop(metrics);
+        // Background publication can still report after the query drops its handle.
+        reporter.inc_range_cache_size(128);
+        {
+            let inner = weak.upgrade().unwrap();
+            let metrics = inner.metrics.lock().unwrap();
+            assert_eq!(metrics.range_cache_hit, 1);
+            assert_eq!(metrics.range_cache_miss, 1);
+            assert_eq!(metrics.range_cache_size, 128);
+        }
+        drop(reporter);
+        assert!(weak.upgrade().is_none());
+    }
 
     struct EmptyIterBuilder;
 

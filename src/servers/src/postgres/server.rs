@@ -27,6 +27,7 @@ use futures::StreamExt;
 use pgwire::tokio::process_socket;
 use tokio_rustls::TlsAcceptor;
 
+use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::Result;
 use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
 use crate::prom_remote_write::validation::PromValidationMode;
@@ -36,6 +37,7 @@ use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 use crate::query_handler::PipelineHandlerRef;
 use crate::query_handler::PromStoreProtocolHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::ReloadableTlsServerConfig;
 
@@ -48,6 +50,7 @@ pub struct PostgresServer {
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     otlp_with_metric_engine: bool,
+    memory_limiter: ServerMemoryLimiter,
     prom_write_state: Option<crate::http::prom_store::PromStoreState>,
     bind_addr: Option<SocketAddr>,
     process_manager: Option<ProcessManagerRef>,
@@ -89,6 +92,7 @@ impl PostgresServer {
             influxdb_handler: None,
             otlp_handler: None,
             otlp_with_metric_engine: false,
+            memory_limiter: ServerMemoryLimiter::default(),
             prom_write_state: None,
             bind_addr: None,
             process_manager,
@@ -98,6 +102,12 @@ impl PostgresServer {
     /// Enables ordinary-table batching for connections accepted by this server.
     pub fn with_batching_enabled(mut self, enabled: bool) -> Self {
         self.batching_enabled = enabled;
+        self
+    }
+
+    /// Sets the shared memory limiter used for OTLP exemplar expansion.
+    pub fn with_memory_limiter(mut self, limiter: ServerMemoryLimiter) -> Self {
+        self.memory_limiter = limiter;
         self
     }
 
@@ -127,27 +137,26 @@ impl PostgresServer {
 
     /// Wires the Prometheus Remote Write ingestion used by table-less
     /// `COPY FROM STDIN WITH (FORMAT promwrite)` — the same handler,
-    /// metric-engine flag and validation mode the HTTP endpoint's state
-    /// carries.
+    /// metric-engine flag, validation mode and optional shared logical-table
+    /// batcher the HTTP endpoint's state carries.
     pub fn with_prom_remote_write(
         mut self,
         handler: PromStoreProtocolHandlerRef,
         pipeline_handler: Option<PipelineHandlerRef>,
         with_metric_engine: bool,
         validation_mode: PromValidationMode,
-        memory_limiter: crate::request_memory_limiter::ServerMemoryLimiter,
+        pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     ) -> Self {
         self.prom_write_state = Some(crate::http::prom_store::PromStoreState {
             prom_store_handler: handler,
             pipeline_handler,
             prom_store_with_metric_engine: with_metric_engine,
             prom_validation_mode: validation_mode,
-            pending_rows_batcher: None,
-            // The same shared quota the HTTP ingestion protocols
-            // enforce (`max_in_flight_write_bytes`): decompression and
-            // conversion memory are charged against it, so COPY cannot
-            // bypass the aggregate budget.
-            memory_limiter,
+            pending_rows_batcher,
+            // Placeholder; `accept` injects the server's shared limiter
+            // (see below) so the receive-stage charging and the
+            // ingestion core enforce ONE budget.
+            memory_limiter: ServerMemoryLimiter::default(),
         });
         self
     }
@@ -163,13 +172,22 @@ impl PostgresServer {
         // going through the builder — keeps this infallible: no
         // `.build().unwrap()` on the hot accept path.
         let make_handler = &self.make_handler;
+        // The ingestion state enforces the same shared request-memory
+        // budget (`max_in_flight_write_bytes`) as the HTTP endpoints:
+        // receive-stage COPY buffering and decode/conversion memory are
+        // charged against one limiter.
+        let prom_write_state = self.prom_write_state.clone().map(|mut state| {
+            state.memory_limiter = self.memory_limiter.clone();
+            state
+        });
         let handler_maker = Arc::new(MakePostgresServerHandler {
             query_handler: make_handler.query_handler.clone(),
             copy_in_handler: make_handler.copy_in_handler.clone(),
             influxdb_handler: self.influxdb_handler.clone(),
             otlp_handler: self.otlp_handler.clone(),
             otlp_with_metric_engine: self.otlp_with_metric_engine,
-            prom_write_state: self.prom_write_state.clone(),
+            memory_limiter: self.memory_limiter.clone(),
+            prom_write_state,
             user_provider: make_handler.user_provider.clone(),
             param_provider: make_handler.param_provider.clone(),
             force_tls: make_handler.force_tls,

@@ -19,18 +19,18 @@ pub(crate) mod cache_size;
 pub(crate) mod file_cache;
 pub(crate) mod index;
 pub(crate) mod manifest_cache;
+pub(crate) mod parquet_page;
 pub(crate) mod range_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
 
-use std::collections::{BTreeMap, HashMap};
-use std::mem;
-use std::ops::Range;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
+use std::{io, mem};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
+use common_cache::metrics::{CacheSizeMetric, CacheSizeRegistration};
 use common_datasource::compression::CompressionType;
 use common_runtime::Runtime;
 use common_runtime::runtime::RuntimeTrait;
@@ -59,6 +59,8 @@ pub use write_cache::{WriteCacheUploadStoreWrapper, WriteCacheUploadStoreWrapper
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
+use crate::cache::parquet_page::ParquetPageCache;
+use crate::cache::range_cache::RangeScanCacheValue;
 use crate::cache::write_cache::WriteCacheRef;
 use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, InvalidMetadataSnafu, InvalidParquetSnafu,
@@ -67,12 +69,29 @@ use crate::error::{
 use crate::memtable::record_batch_estimated_size;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
-use crate::read::range_cache::{RangeScanCacheKey, RangeScanCacheValue};
+use crate::read::range_cache::RangeScanCacheKey;
 use crate::read::read_columns::JsonTargetTypes;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::parquet::PARQUET_METADATA_KEY;
 use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
+
+/// Finds a typed shared error through the range-reader I/O wrappers.
+pub(crate) fn find_shared_page_source<E: std::error::Error + Send + Sync + 'static>(
+    mut error: &io::Error,
+) -> Option<Arc<E>> {
+    loop {
+        let source = error.get_ref()?;
+        if let Some(source) = source.downcast_ref::<Arc<E>>() {
+            return Some(source.clone());
+        }
+        if let Some(nested) = source.downcast_ref::<Arc<io::Error>>() {
+            error = nested;
+        } else {
+            error = source.downcast_ref::<io::Error>()?;
+        }
+    }
+}
 
 /// Metrics type key for sst meta.
 const SST_META_TYPE: &str = "sst_meta";
@@ -80,8 +99,6 @@ const SST_META_TYPE: &str = "sst_meta";
 const SST_META_DECODED_TYPE: &str = "sst_meta_decoded";
 /// Metrics type key for vector.
 const VECTOR_TYPE: &str = "vector";
-/// Metrics type key for pages.
-const PAGE_TYPE: &str = "page";
 /// Metrics type key for files on the local store.
 const FILE_TYPE: &str = "file";
 /// Metrics type key for index files (puffin) on the local store.
@@ -157,27 +174,6 @@ impl RangeResultMemoryLimiter {
             .clone()
             .try_acquire_many_owned(permits.try_into().ok()?)
             .ok()
-    }
-
-    /// Transfers a load's reservation to its completed result without a gap in
-    /// accounting. Compaction may shrink buffers or add metadata; growing the
-    /// reservation must remain nonblocking just like loading more input.
-    pub(crate) fn try_resize(
-        &self,
-        permit: Option<tokio::sync::OwnedSemaphorePermit>,
-        bytes: usize,
-    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        let Some(mut permit) = permit else {
-            return self.try_acquire(bytes);
-        };
-        let required = bytes.div_ceil(self.permit_bytes).max(1);
-        let reserved = permit.num_permits();
-        if required > reserved {
-            permit.merge(self.try_acquire((required - reserved).checked_mul(self.permit_bytes)?)?);
-        } else {
-            drop(permit.split(reserved - required));
-        }
-        Some(permit)
     }
 
     pub(crate) async fn acquire(&self, bytes: usize) -> Result<tokio::sync::SemaphorePermit<'_>> {
@@ -945,33 +941,11 @@ impl CacheStrategy {
         }
     }
 
-    /// Calls [CacheManager::get_page_ranges()].
-    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
-    pub fn get_page_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-    ) -> Option<PageRangeLookup> {
+    /// Returns the Parquet byte cache for normal query reads.
+    pub(crate) fn parquet_page_cache(&self) -> Option<&Arc<ParquetPageCache>> {
         match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.get_page_ranges(file_id, row_group_idx, ranges)
-            }
-            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
-        }
-    }
-
-    /// Calls [CacheManager::put_page_ranges()].
-    /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
-    pub fn put_page_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-        pages: &[Bytes],
-    ) {
-        if let CacheStrategy::EnableAll(cache_manager) = self {
-            cache_manager.put_page_ranges(file_id, row_group_idx, ranges, pages);
+            Self::EnableAll(manager) => manager.page_cache.as_ref(),
+            Self::Compaction(_) | Self::Disabled => None,
         }
     }
 
@@ -1029,7 +1003,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::put_range_result()].
     /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -1040,7 +1014,7 @@ impl CacheStrategy {
         }
     }
 
-    pub(crate) fn range_cache_worker(&self) -> Option<&Arc<range_cache::RangeCacheWorker>> {
+    pub(crate) fn range_result_cache(&self) -> Option<&RangeResultCacheRef> {
         match self {
             Self::EnableAll(manager) => manager.range_result_cache.as_ref(),
             Self::Compaction(_) | Self::Disabled => None,
@@ -1055,22 +1029,9 @@ impl CacheStrategy {
         }
     }
 
-    pub(crate) fn range_result_memory_limiter(&self) -> Option<&Arc<RangeResultMemoryLimiter>> {
-        match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                Some(cache_manager.range_result_memory_limiter())
-            }
-            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
-        }
-    }
-
-    pub(crate) fn range_result_cache_size(&self) -> Option<usize> {
-        match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                Some(cache_manager.range_result_cache_size())
-            }
-            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
-        }
+    #[cfg(test)]
+    pub(crate) fn range_concat_memory(&self) -> Option<&Arc<RangeResultMemoryLimiter>> {
+        self.range_result_cache().map(|cache| cache.concat_memory())
     }
 
     /// Calls [CacheManager::write_cache()].
@@ -1147,12 +1108,16 @@ impl CacheStrategy {
 pub struct CacheManager {
     /// Cache for compact, authoritative SST metadata.
     sst_meta_cache: Option<SstMetaCache>,
+    /// Unregisters compact metadata bytes when this manager is dropped.
+    _sst_meta_size_registration: Option<CacheSizeRegistration>,
+    /// Skips output metadata prewarming for caches used only by the current compaction.
+    disable_sst_meta_cache_on_write: bool,
     /// Cache for decoded SST metadata, used only as an acceleration tier.
     sst_decoded_meta_cache: Option<SstDecodedMetaCache>,
     /// Cache for vectors.
     vector_cache: Option<VectorCache>,
     /// Cache for SST byte ranges.
-    page_cache: Option<Arc<PageRangeCache>>,
+    page_cache: Option<Arc<ParquetPageCache>>,
     /// A Cache for writing files to object stores.
     write_cache: Option<WriteCacheRef>,
     /// Cache for inverted index.
@@ -1164,11 +1129,10 @@ pub struct CacheManager {
     /// Cache for time series selectors.
     selector_result_cache: Option<SelectorResultCache>,
     /// Cache for range scan outputs in flat format.
-    range_result_cache: Option<RangeResultCache>,
+    range_result_cache: Option<RangeResultCacheRef>,
     /// Configured capacity for range scan outputs in flat format.
+    #[cfg(test)]
     range_result_cache_size: u64,
-    /// Shared memory limiter for async range-result cache tasks.
-    range_result_memory_limiter: Arc<RangeResultMemoryLimiter>,
     /// Cache for index result.
     index_result_cache: Option<IndexResultCache>,
     /// Cache for prefilter result.
@@ -1333,9 +1297,6 @@ impl CacheManager {
     ) {
         let key = SstMetaKey(file_id.region_id(), file_id.file_id());
         if let Some(cache) = &self.sst_meta_cache {
-            CACHE_BYTES
-                .with_label_values(&[SST_META_TYPE])
-                .add(meta_cache_weight(&key, &metadata).into());
             cache.insert(key, metadata);
         }
     }
@@ -1452,6 +1413,11 @@ impl CacheManager {
         self.sst_meta_cache.is_some()
     }
 
+    /// Whether newly written SST metadata should be prepared for later readers.
+    pub(crate) fn sst_meta_cache_on_write_enabled(&self) -> bool {
+        self.sst_meta_cache_enabled() && !self.disable_sst_meta_cache_on_write
+    }
+
     /// Gets a vector with repeated value for specific `key`.
     pub fn get_repeated_vector(
         &self,
@@ -1475,38 +1441,6 @@ impl CacheManager {
         }
     }
 
-    /// Gets cached byte fragments for the requested ranges.
-    pub fn get_page_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-    ) -> Option<PageRangeLookup> {
-        self.page_cache.as_ref().map(|page_cache| {
-            let lookup = page_cache.lookup(file_id, row_group_idx, ranges);
-            if lookup.cached_bytes > 0 {
-                CACHE_HIT.with_label_values(&[PAGE_TYPE]).inc();
-            }
-            if !lookup.missing_ranges.is_empty() {
-                CACHE_MISS.with_label_values(&[PAGE_TYPE]).inc();
-            }
-            lookup
-        })
-    }
-
-    /// Puts byte fragments into the page cache.
-    pub fn put_page_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-        pages: &[Bytes],
-    ) {
-        if let Some(cache) = &self.page_cache {
-            cache.insert_ranges(file_id, row_group_idx, ranges, pages);
-        }
-    }
-
     /// Evicts every puffin-related cache entry for the given file.
     pub async fn evict_puffin_cache(&self, file_id: RegionIndexId) {
         if let Some(cache) = &self.bloom_filter_index_cache {
@@ -1522,7 +1456,10 @@ impl CacheManager {
         }
 
         if let Some(cache) = &self.puffin_metadata_cache {
-            cache.remove(&file_id.to_string()).await;
+            // Evict this exact generation across all storage scopes and paths.
+            if let Err(err) = cache.invalidate_file(&file_id.to_string()) {
+                warn!(err; "Failed to invalidate Puffin metadata, file_id: {file_id}");
+            }
         }
 
         if let Some(write_cache) = &self.write_cache {
@@ -1579,7 +1516,7 @@ impl CacheManager {
     }
 
     /// Puts range scan result into cache.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -1595,10 +1532,7 @@ impl CacheManager {
         self.range_result_cache.is_some()
     }
 
-    pub(crate) fn range_result_memory_limiter(&self) -> &Arc<RangeResultMemoryLimiter> {
-        &self.range_result_memory_limiter
-    }
-
+    #[cfg(test)]
     pub(crate) fn range_result_cache_size(&self) -> usize {
         self.range_result_cache_size as usize
     }
@@ -1654,6 +1588,7 @@ pub fn selector_result_cache_hit() {
 #[derive(Default)]
 pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
+    disable_sst_meta_cache_on_write: bool,
     vector_cache_size: u64,
     page_cache_size: u64,
     index_metadata_size: u64,
@@ -1671,6 +1606,12 @@ impl CacheManagerBuilder {
     /// Sets meta cache size.
     pub fn sst_meta_cache_size(mut self, bytes: u64) -> Self {
         self.sst_meta_cache_size = bytes;
+        self
+    }
+
+    /// Keeps read-side metadata caching without prewarming newly written SSTs.
+    pub(crate) fn disable_sst_meta_cache_on_write(mut self) -> Self {
+        self.disable_sst_meta_cache_on_write = true;
         self
     }
 
@@ -1742,6 +1683,13 @@ impl CacheManagerBuilder {
 
     /// Builds the [CacheManager].
     pub fn build(self) -> CacheManager {
+        self.build_with_sst_meta_size_metric(CACHE_BYTES.bind(&[SST_META_TYPE]))
+    }
+
+    fn build_with_sst_meta_size_metric(
+        self,
+        sst_meta_size_metric: CacheSizeMetric,
+    ) -> CacheManager {
         // Reserve half the configured capacity for the compact authoritative tier. This prevents
         // decoded acceleration entries from evicting metadata that would require storage I/O to
         // recover. Both reservations together equal the configured limit.
@@ -1751,17 +1699,16 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(compact_meta_capacity)
                 .weigher(meta_cache_weight)
-                .eviction_listener(|k, v, cause| {
-                    let size = meta_cache_weight(&k, &v);
-                    CACHE_BYTES
-                        .with_label_values(&[SST_META_TYPE])
-                        .sub(size.into());
+                .eviction_listener(|_k, _v, cause| {
                     CACHE_EVICTION
                         .with_label_values(&[SST_META_TYPE, removal_cause_str(cause)])
                         .inc();
                 })
                 .build()
         });
+        let sst_meta_size_registration = sst_meta_cache
+            .clone()
+            .map(|cache| sst_meta_size_metric.register(move || cache.weighted_size()));
         let sst_decoded_meta_cache = (decoded_meta_capacity != 0).then(|| {
             common_cache::Cache::new(
                 "sst_decoded_metadata",
@@ -1792,7 +1739,7 @@ impl CacheManagerBuilder {
                 .build()
         });
         let page_cache =
-            (self.page_cache_size != 0).then(|| PageRangeCache::new(self.page_cache_size));
+            (self.page_cache_size != 0).then(|| ParquetPageCache::from_env(self.page_cache_size));
         let inverted_index_cache = InvertedIndexCache::new(
             self.index_metadata_size,
             self.index_content_size,
@@ -1827,9 +1774,11 @@ impl CacheManagerBuilder {
                 .build()
         });
         let range_result_cache = (self.range_result_cache_size != 0)
-            .then(|| range_cache::RangeCacheWorker::new(self.range_result_cache_size));
+            .then(|| range_cache::RangeResultCache::new(self.range_result_cache_size));
         CacheManager {
             sst_meta_cache,
+            _sst_meta_size_registration: sst_meta_size_registration,
+            disable_sst_meta_cache_on_write: self.disable_sst_meta_cache_on_write,
             sst_decoded_meta_cache,
             vector_cache,
             page_cache,
@@ -1839,11 +1788,8 @@ impl CacheManagerBuilder {
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             range_result_cache,
+            #[cfg(test)]
             range_result_cache_size: self.range_result_cache_size,
-            range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::new(
-                self.range_result_cache_size as usize,
-                RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize,
-            )),
             index_result_cache,
             prefilter_result_cache,
         }
@@ -1864,10 +1810,6 @@ fn decoded_meta_cache_weight(k: &SstDecodedMetaKey, v: &Arc<SstMetaLoadResult>) 
 fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
     // We ignore the heap size of `Value`.
     (mem::size_of::<ConcreteDataType>() + mem::size_of::<Value>() + v.memory_size()) as u32
-}
-
-fn page_cache_weight(k: &PageFragmentKey, v: &Bytes) -> u32 {
-    (k.estimated_size() + mem::size_of::<Bytes>() + v.len()) as u32
 }
 
 fn selector_result_cache_weight(k: &SelectorResultKey, v: &Arc<SelectorResultValue>) -> u32 {
@@ -1896,284 +1838,6 @@ impl SstMetaKey {
     /// Returns memory used by the key (estimated).
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PageFragmentGroupKey {
-    file_id: FileId,
-    row_group_idx: usize,
-}
-
-/// Cache key for one byte fragment in an SST row group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PageFragmentKey {
-    /// Id of the SST file.
-    file_id: FileId,
-    /// Index of the row group.
-    row_group_idx: usize,
-    /// Start offset of the cached byte fragment.
-    start: u64,
-    /// End offset of the cached byte fragment.
-    end: u64,
-}
-
-impl PageFragmentKey {
-    fn new(file_id: FileId, row_group_idx: usize, range: &Range<u64>) -> PageFragmentKey {
-        PageFragmentKey {
-            file_id,
-            row_group_idx,
-            start: range.start,
-            end: range.end,
-        }
-    }
-
-    fn group_key(&self) -> PageFragmentGroupKey {
-        PageFragmentGroupKey {
-            file_id: self.file_id,
-            row_group_idx: self.row_group_idx,
-        }
-    }
-
-    /// Returns memory used by the key (estimated).
-    fn estimated_size(&self) -> usize {
-        mem::size_of::<Self>()
-    }
-}
-
-/// One cached byte fragment that overlaps a requested range.
-#[derive(Clone)]
-pub struct PageRangePart {
-    /// Range covered by `bytes`.
-    pub range: Range<u64>,
-    /// Bytes for `range`.
-    pub bytes: Bytes,
-}
-
-/// Result of looking up request ranges in the page range cache.
-pub struct PageRangeLookup {
-    /// Cached fragments grouped by the original requested range index.
-    pub cached_parts: Vec<Vec<PageRangePart>>,
-    /// Ranges that are not covered by cached fragments and need fetching.
-    pub missing_ranges: Vec<Range<u64>>,
-    /// Number of cached fragments used.
-    pub cached_range_count: usize,
-    /// Number of requested bytes served from cached fragments.
-    pub cached_bytes: u64,
-}
-
-impl PageRangeLookup {
-    pub fn is_fully_cached(&self) -> bool {
-        self.missing_ranges.is_empty()
-    }
-}
-
-type PageFragmentRangeIndex = BTreeMap<(u64, u64), PageFragmentKey>;
-type PageFragmentIndex = HashMap<PageFragmentGroupKey, PageFragmentRangeIndex>;
-
-/// Byte-fragment cache for Parquet row-group reads.
-pub struct PageRangeCache {
-    cache: Cache<PageFragmentKey, Bytes>,
-    index: RwLock<PageFragmentIndex>,
-}
-
-impl PageRangeCache {
-    fn new(capacity: u64) -> Arc<PageRangeCache> {
-        Arc::new_cyclic(|weak_cache: &std::sync::Weak<PageRangeCache>| {
-            let cache = Cache::builder()
-                .max_capacity(capacity)
-                .weigher(page_cache_weight)
-                .eviction_listener({
-                    let weak_cache = weak_cache.clone();
-                    move |k, v, cause| {
-                        let size = page_cache_weight(&k, &v);
-                        CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
-                        CACHE_EVICTION
-                            .with_label_values(&[PAGE_TYPE, removal_cause_str(cause)])
-                            .inc();
-
-                        if let Some(cache) = weak_cache.upgrade()
-                            && !matches!(cause, RemovalCause::Replaced)
-                        {
-                            cache.remove_index_entry(*k);
-                        }
-                    }
-                })
-                .build();
-
-            PageRangeCache {
-                cache,
-                index: RwLock::new(HashMap::new()),
-            }
-        })
-    }
-
-    fn lookup(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-    ) -> PageRangeLookup {
-        let mut cached_parts = Vec::with_capacity(ranges.len());
-        let mut missing_ranges = Vec::new();
-        let mut cached_range_count = 0;
-        let mut cached_bytes = 0;
-
-        for range in ranges {
-            if range.start >= range.end {
-                cached_parts.push(Vec::new());
-                continue;
-            }
-
-            let mut parts = Vec::new();
-            let candidates = self.find_index_candidates(file_id, row_group_idx, range);
-            let mut stale_keys = Vec::new();
-
-            for fragment_key in candidates {
-                if let Some(bytes) = self.cache.get(&fragment_key) {
-                    let part_start = range.start.max(fragment_key.start);
-                    let part_end = range.end.min(fragment_key.end);
-                    let slice_start = (part_start - fragment_key.start) as usize;
-                    let slice_end = (part_end - fragment_key.start) as usize;
-                    parts.push(PageRangePart {
-                        range: part_start..part_end,
-                        bytes: bytes.slice(slice_start..slice_end),
-                    });
-                } else {
-                    stale_keys.push(fragment_key);
-                }
-            }
-            for key in stale_keys {
-                self.remove_uncached_index_entry(key);
-            }
-
-            let mut cursor = range.start;
-            let mut compacted_parts: Vec<PageRangePart> = Vec::with_capacity(parts.len());
-            for part in parts {
-                if part.range.end <= cursor {
-                    continue;
-                }
-
-                let part = if part.range.start < cursor {
-                    let offset = (cursor - part.range.start) as usize;
-                    PageRangePart {
-                        range: cursor..part.range.end,
-                        bytes: part.bytes.slice(offset..),
-                    }
-                } else {
-                    part
-                };
-
-                if cursor < part.range.start {
-                    missing_ranges.push(cursor..part.range.start);
-                }
-                cached_bytes += part.range.end - part.range.start;
-                cached_range_count += 1;
-                cursor = part.range.end;
-                compacted_parts.push(part);
-
-                if cursor >= range.end {
-                    break;
-                }
-            }
-
-            if cursor < range.end {
-                missing_ranges.push(cursor..range.end);
-            }
-            cached_parts.push(compacted_parts);
-        }
-
-        PageRangeLookup {
-            cached_parts,
-            missing_ranges,
-            cached_range_count,
-            cached_bytes,
-        }
-    }
-
-    fn insert_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-        pages: &[Bytes],
-    ) {
-        for (range, bytes) in ranges.iter().zip(pages) {
-            if range.start >= range.end || bytes.len() as u64 != range.end - range.start {
-                continue;
-            }
-
-            let key = PageFragmentKey::new(file_id, row_group_idx, range);
-            let bytes = Bytes::copy_from_slice(bytes.as_ref());
-            let size = page_cache_weight(&key, &bytes);
-            CACHE_BYTES.with_label_values(&[PAGE_TYPE]).add(size.into());
-            self.cache.insert(key, bytes);
-            let mut index = self.index.write().unwrap();
-            index
-                .entry(key.group_key())
-                .or_default()
-                .insert((key.start, key.end), key);
-        }
-    }
-
-    fn find_index_candidates(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        range: &Range<u64>,
-    ) -> Vec<PageFragmentKey> {
-        let group_key = PageFragmentGroupKey {
-            file_id,
-            row_group_idx,
-        };
-        let index = self.index.read().unwrap();
-        index
-            .get(&group_key)
-            .map(|ranges| {
-                ranges
-                    .range(..(range.end, 0))
-                    .filter_map(|(_, fragment_key)| {
-                        (fragment_key.end > range.start).then_some(*fragment_key)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn remove_uncached_index_entry(&self, key: PageFragmentKey) {
-        let group_key = key.group_key();
-        let mut index = self.index.write().unwrap();
-        if self.cache.contains_key(&key) {
-            return;
-        }
-
-        Self::remove_index_entry_locked(&mut index, group_key, key);
-    }
-
-    fn remove_index_entry(&self, key: PageFragmentKey) {
-        let group_key = key.group_key();
-        let mut index = self.index.write().unwrap();
-        Self::remove_index_entry_locked(&mut index, group_key, key);
-    }
-
-    fn remove_index_entry_locked(
-        index: &mut PageFragmentIndex,
-        group_key: PageFragmentGroupKey,
-        key: PageFragmentKey,
-    ) {
-        let Some(ranges) = index.get_mut(&group_key) else {
-            return;
-        };
-
-        let removed = ranges
-            .get(&(key.start, key.end))
-            .is_some_and(|current| current == &key);
-        if removed {
-            ranges.remove(&(key.start, key.end));
-        }
-        if ranges.is_empty() {
-            index.remove(&group_key);
-        }
     }
 }
 
@@ -2342,7 +2006,7 @@ type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (file id, row group id, time series row selector) to [SelectorResultValue].
 type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
 /// Maps partition-range scan key to cached flat batches.
-type RangeResultCache = Arc<range_cache::RangeCacheWorker>;
+type RangeResultCacheRef = Arc<range_cache::RangeResultCache>;
 
 #[cfg(test)]
 mod tests {
@@ -2363,11 +2027,27 @@ mod tests {
     use crate::cache::test_util::{
         parquet_meta, sst_parquet_meta, sst_parquet_meta_with_region_metadata,
     };
-    use crate::read::range_cache::{
-        RangeScanCacheKey, RangeScanCacheValue, ScanRequestFingerprintBuilder,
-    };
+    use crate::read::range_cache::{RangeScanCacheKey, ScanRequestFingerprintBuilder};
     use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::row_selection::RowGroupSelection;
+
+    #[test]
+    fn test_find_shared_page_source() {
+        let source = Arc::new(
+            UnexpectedSnafu {
+                reason: "page read failed",
+            }
+            .build(),
+        );
+        let direct = io::Error::other(source.clone());
+        let nested = io::Error::other(Arc::new(io::Error::other(direct)));
+        let retained = find_shared_page_source::<crate::error::Error>(&nested).unwrap();
+        assert!(Arc::ptr_eq(&source, &retained));
+        assert!(
+            find_shared_page_source::<crate::error::Error>(&io::Error::other("untyped error"))
+                .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn test_disable_cache() {
@@ -2763,6 +2443,65 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_sst_meta_bytes_follow_cache_lifetime() {
+        use common_cache::metrics::CacheSizeMetrics;
+        use prometheus::Opts;
+        use prometheus::core::Collector;
+
+        let metrics =
+            CacheSizeMetrics::new(Opts::new("test_compact_sst_meta_bytes", "test"), &["type"])
+                .unwrap();
+        let (metadata, region) = sst_parquet_meta();
+        let SstMetaPreparation::Prepared(prepared) = prepare_sst_meta_sync(
+            "test.parquet",
+            Arc::unwrap_or_clone(metadata),
+            None,
+            PageIndexPolicy::Skip,
+        )
+        .unwrap() else {
+            panic!("valid metadata should produce a compact entry");
+        };
+        let file_id = RegionFileId::new(region.region_id, FileId::random());
+        let expected_bytes = f64::from(meta_cache_weight(
+            &SstMetaKey(file_id.region_id(), file_id.file_id()),
+            &prepared.compact,
+        ));
+        let make_cache = || {
+            let manager = Arc::new(
+                CacheManager::builder()
+                    .sst_meta_cache_size(1024 * 1024)
+                    .build_with_sst_meta_size_metric(metrics.bind(&[SST_META_TYPE])),
+            );
+            manager.put_compact_sst_meta(file_id, prepared.compact.clone());
+            manager.sst_meta_cache.as_ref().unwrap().run_pending_tasks();
+            manager
+        };
+        let sample = || {
+            metrics.collect()[0].get_metric()[0]
+                .get_gauge()
+                .as_ref()
+                .unwrap()
+                .value()
+        };
+        let resident = make_cache();
+        assert!(expected_bytes > 0.0);
+        assert_eq!(expected_bytes, sample());
+
+        // Repeated remote compactions must not leave byte counts after releasing their caches.
+        for _ in 0..3 {
+            let transient = make_cache();
+            assert_eq!(2.0 * expected_bytes, sample());
+            let reader = transient.clone();
+            drop(transient);
+            assert_eq!(2.0 * expected_bytes, sample());
+            drop(reader);
+            assert_eq!(expected_bytes, sample());
+        }
+        drop(resident);
+        assert_eq!(0.0, sample());
+    }
+
+    #[test]
     fn test_sst_meta_cache_splits_capacity() {
         let cache = CacheManager::builder().sst_meta_cache_size(101).build();
 
@@ -3152,174 +2891,6 @@ mod tests {
     }
 
     #[test]
-    fn test_page_cache() {
-        let cache = CacheManager::builder().page_cache_size(1000).build();
-        let file_id = FileId::random();
-        let uncached = 0..10;
-        assert_eq!(
-            vec![0..10],
-            cache
-                .get_page_ranges(file_id, 0, std::slice::from_ref(&uncached))
-                .unwrap()
-                .missing_ranges
-        );
-
-        let cached = 100..500;
-        cache.put_page_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&cached),
-            &[Bytes::from(vec![7; 400])],
-        );
-
-        let subrange = 200..300;
-        let lookup = cache
-            .get_page_ranges(file_id, 0, std::slice::from_ref(&subrange))
-            .unwrap();
-        assert!(lookup.is_fully_cached());
-        assert_eq!(100, lookup.cached_bytes);
-        assert_eq!(1, lookup.cached_parts.len());
-        assert_eq!(200..300, lookup.cached_parts[0][0].range);
-        assert_eq!(100, lookup.cached_parts[0][0].bytes.len());
-
-        let overlapping = 400..600;
-        let lookup = cache
-            .get_page_ranges(file_id, 0, std::slice::from_ref(&overlapping))
-            .unwrap();
-        assert!(!lookup.is_fully_cached());
-        assert_eq!(100, lookup.cached_bytes);
-        assert_eq!(vec![500..600], lookup.missing_ranges);
-        assert_eq!(400..500, lookup.cached_parts[0][0].range);
-    }
-
-    #[test]
-    fn test_page_cache_detaches_fragment_bytes() {
-        let cache = PageRangeCache::new(1000);
-        let file_id = FileId::random();
-        let backing = Bytes::from(vec![1; 1024]);
-        let page = backing.slice(512..522);
-        let page_ptr = page.as_ptr();
-        let range = 0..10;
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            std::slice::from_ref(&page),
-        );
-
-        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
-        assert!(lookup.is_fully_cached());
-        assert_eq!(1, lookup.cached_parts[0].len());
-        assert_eq!(&page[..], &lookup.cached_parts[0][0].bytes[..]);
-        assert_ne!(page_ptr, lookup.cached_parts[0][0].bytes.as_ptr());
-    }
-
-    #[test]
-    fn test_page_cache_replaces_fragment() {
-        let cache = PageRangeCache::new(1000);
-        let file_id = FileId::random();
-        let range = 0..10;
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            &[Bytes::from(vec![1; 10])],
-        );
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            &[Bytes::from(vec![2; 10])],
-        );
-        cache.cache.run_pending_tasks();
-        assert_eq!(
-            vec![PageFragmentKey::new(file_id, 0, &range)],
-            cache.find_index_candidates(file_id, 0, &range)
-        );
-
-        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
-        assert!(lookup.is_fully_cached());
-        assert_eq!(&vec![2; 10][..], &lookup.cached_parts[0][0].bytes[..]);
-    }
-
-    #[test]
-    fn test_page_cache_retains_disjoint_inserts_for_same_row_group() {
-        let cache = PageRangeCache::new(1000);
-        let file_id = FileId::random();
-        let range1 = 0..10;
-        let range2 = 20..30;
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range1),
-            &[Bytes::from(vec![1; 10])],
-        );
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range2),
-            &[Bytes::from(vec![2; 10])],
-        );
-
-        let lookup = cache.lookup(file_id, 0, &[range1, range2]);
-        assert!(lookup.is_fully_cached());
-        assert_eq!(2, lookup.cached_range_count);
-        assert_eq!(&vec![1; 10][..], &lookup.cached_parts[0][0].bytes[..]);
-        assert_eq!(&vec![2; 10][..], &lookup.cached_parts[1][0].bytes[..]);
-    }
-
-    #[test]
-    fn test_page_cache_fragment_eviction() {
-        let file_id = FileId::random();
-        let range = 0..10;
-        let key = PageFragmentKey::new(file_id, 0, &range);
-        let page = Bytes::from(vec![1; 10]);
-        let cache = PageRangeCache::new(page_cache_weight(&key, &page) as u64);
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            &[Bytes::from(vec![1; 10])],
-        );
-        assert!(
-            cache
-                .lookup(file_id, 0, std::slice::from_ref(&range))
-                .is_fully_cached()
-        );
-
-        cache.cache.invalidate(&key);
-        cache.cache.run_pending_tasks();
-        assert!(cache.find_index_candidates(file_id, 0, &range).is_empty());
-
-        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
-        assert!(!lookup.is_fully_cached());
-        assert_eq!(vec![0..10], lookup.missing_ranges);
-    }
-
-    #[test]
-    fn test_page_cache_rejects_oversized_fragment() {
-        let cache = PageRangeCache::new(1);
-        let file_id = FileId::random();
-        let range = 0..10;
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            &[Bytes::from(vec![1; 10])],
-        );
-        cache.cache.run_pending_tasks();
-
-        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
-        assert!(!lookup.is_fully_cached());
-        assert_eq!(vec![0..10], lookup.missing_ranges);
-    }
-
-    #[test]
     fn test_selector_result_cache() {
         let cache = CacheManager::builder()
             .selector_result_cache_size(1000)
@@ -3485,7 +3056,7 @@ mod tests {
             }
             .build(),
         };
-        let value = Arc::new(RangeScanCacheValue::new(Vec::new(), 0));
+        let value = Arc::new(RangeScanCacheValue::empty());
 
         assert!(cache.get_range_result(&key).is_none());
         cache.put_range_result(key.clone(), value.clone());
@@ -3514,17 +3085,27 @@ mod tests {
 
         assert_eq!(cache.range_result_cache_size(), cache_size as usize);
         assert_eq!(
-            cache.range_result_memory_limiter().permit_bytes(),
+            cache
+                .range_result_cache
+                .as_ref()
+                .unwrap()
+                .concat_memory()
+                .permit_bytes(),
             RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize
         );
         assert_eq!(
-            cache.range_result_memory_limiter().available_permits(),
+            cache
+                .range_result_cache
+                .as_ref()
+                .unwrap()
+                .concat_memory()
+                .available_permits(),
             (cache_size as usize).div_ceil(RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize)
         );
     }
 
     #[tokio::test]
-    async fn range_result_memory_limiter_rejects_oversized_request() {
+    async fn test_range_concat_memory_rejects_oversized_request() {
         let limiter = RangeResultMemoryLimiter::new(2 * 1024, 1024);
         assert_eq!(limiter.available_permits(), 2);
 
@@ -3537,7 +3118,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn range_result_memory_limiter_allows_request_up_to_capacity() {
+    async fn test_range_concat_memory_allows_request_up_to_capacity() {
         let limiter = RangeResultMemoryLimiter::new(2 * 1024, 1024);
         let permit = limiter.acquire(2 * 1024).await.unwrap();
         assert_eq!(limiter.available_permits(), 0);
@@ -3546,23 +3127,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::empty_result(None, 0, Some(1))]
-    #[case::new_result(None, 1025, Some(2))]
-    #[case::unchanged(Some(1024), 1024, Some(1))]
-    #[case::grow(Some(1024), 2048, Some(2))]
-    #[case::shrink(Some(3072), 1024, Some(1))]
-    #[case::exhausted(Some(1024), 4096, None)]
-    #[case::oversized(Some(1024), usize::MAX, None)]
+    #[case::empty_result(0, Some(1))]
+    #[case::rounded_result(1025, Some(2))]
+    #[case::exhausted(4096, None)]
+    #[case::oversized(usize::MAX, None)]
     #[test]
-    fn range_result_memory_reservation_resizes_without_waiting(
-        #[case] input_size: Option<usize>,
+    fn test_range_result_memory_reservation_is_nonblocking(
         #[case] result_size: usize,
         #[case] expected_permits: Option<usize>,
     ) {
         let limiter = RangeResultMemoryLimiter::new(4096, 1024);
         let blocker = limiter.try_acquire(1024).unwrap();
-        let input_permit = input_size.map(|size| limiter.try_acquire(size).unwrap());
-        let result_permit = limiter.try_resize(input_permit, result_size);
+        let result_permit = limiter.try_acquire(result_size);
         assert_eq!(
             result_permit.as_ref().map(|permit| permit.num_permits()),
             expected_permits
@@ -3581,18 +3157,63 @@ mod tests {
     async fn test_evict_puffin_cache_clears_all_entries() {
         use std::collections::{BTreeMap, HashMap};
 
-        let cache = CacheManager::builder()
-            .index_metadata_size(128)
-            .index_content_size(128)
-            .index_content_page_size(64)
-            .index_result_cache_size(128)
-            .puffin_metadata_size(128)
-            .build();
-        let cache = Arc::new(cache);
+        use puffin::puffin_manager::file_key::{PuffinFileKey, PuffinStorageScope};
 
         let region_id = RegionId::new(1, 1);
         let index_id = RegionIndexId::new(RegionFileId::new(region_id, FileId::random()), 0);
+        let file_key = PuffinFileKey::new(
+            Arc::new(PuffinStorageScope::new(
+                "memory".into(),
+                "cache-test".into(),
+                "/".into(),
+            )),
+            "table/index.puffin".into(),
+            index_id,
+        );
+        let metadata_key = file_key.clone().map_handle(|id| id.to_string());
+        let other_scope_key = PuffinFileKey::new(
+            Arc::new(PuffinStorageScope::new(
+                "memory".into(),
+                "other-store".into(),
+                "/".into(),
+            )),
+            "table/index.puffin".into(),
+            index_id.to_string(),
+        );
+        let newer_metadata_key = file_key.clone().map_handle(|mut id| {
+            id.version += 1;
+            id.to_string()
+        });
         let column_id: ColumnId = 1;
+
+        // Budget for the actual keys and empty values used below, including all
+        // three footer entries. Shared scopes are conservatively charged per key.
+        let index_metadata_size = file_key.estimated_size()
+            + ::index::target::IndexTarget::ColumnId(column_id).approx_mem_size()
+            + std::mem::size_of::<Tag>()
+            + std::mem::size_of::<BloomFilterMeta>()
+            + std::mem::size_of::<InvertedIndexMetas>();
+        let puffin_metadata_size: usize = [&metadata_key, &other_scope_key, &newer_metadata_key]
+            .into_iter()
+            .map(|key| {
+                key.estimated_size()
+                    + key.handle().capacity()
+                    + FileMetadata {
+                        blobs: Vec::new(),
+                        properties: HashMap::new(),
+                    }
+                    .memory_usage()
+            })
+            .sum();
+        let cache = Arc::new(
+            CacheManager::builder()
+                .index_metadata_size(index_metadata_size as u64)
+                .index_content_size(128)
+                .index_content_page_size(64)
+                .index_result_cache_size(128)
+                .puffin_metadata_size(puffin_metadata_size as u64)
+                .build(),
+        );
 
         let bloom_cache = cache.bloom_filter_index_cache().unwrap().clone();
         let inverted_cache = cache.inverted_index_cache().unwrap().clone();
@@ -3600,8 +3221,7 @@ mod tests {
         let puffin_metadata_cache = cache.puffin_metadata_cache().unwrap().clone();
 
         let bloom_key = (
-            index_id.file_id(),
-            index_id.version,
+            file_key.clone(),
             Arc::new(::index::target::IndexTarget::ColumnId(column_id)),
             Tag::Skipping,
         );
@@ -3609,51 +3229,73 @@ mod tests {
             .put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()))
             .await;
         inverted_cache
-            .put_metadata(
-                (index_id.file_id(), index_id.version),
-                Arc::new(InvertedIndexMetas::default()),
-            )
+            .put_metadata(file_key.clone(), Arc::new(InvertedIndexMetas::default()))
             .await;
         let predicate = PredicateKey::new_bloom(Arc::new(BTreeMap::new()));
         let selection = Arc::new(RowGroupSelection::default());
         result_cache.put(predicate.clone(), index_id.file_id(), selection);
-        let file_id_str = index_id.to_string();
         let metadata = Arc::new(FileMetadata {
             blobs: Vec::new(),
             properties: HashMap::new(),
         });
         puffin_metadata_cache
-            .put_metadata(file_id_str.clone(), metadata)
+            .put_metadata(metadata_key.clone(), metadata)
             .await;
 
         assert!(bloom_cache.get_metadata(bloom_key.clone()).await.is_some());
         assert!(
             inverted_cache
-                .get_metadata((index_id.file_id(), index_id.version))
+                .get_metadata(file_key.clone())
                 .await
                 .is_some()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_some());
         assert!(
             puffin_metadata_cache
-                .get_metadata(&file_id_str)
+                .get_metadata(&metadata_key)
                 .await
                 .is_some()
         );
 
+        // Retirement only has the immutable index handle, so matching scopes are
+        // all invalidated while a different generation remains available.
+        for key in [&other_scope_key, &newer_metadata_key] {
+            puffin_metadata_cache
+                .put_metadata(
+                    key.clone(),
+                    Arc::new(FileMetadata {
+                        blobs: Vec::new(),
+                        properties: HashMap::new(),
+                    }),
+                )
+                .await;
+            assert!(puffin_metadata_cache.get_metadata(key).await.is_some());
+        }
         cache.evict_puffin_cache(index_id).await;
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&other_scope_key)
+                .await
+                .is_none()
+        );
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&newer_metadata_key)
+                .await
+                .is_some()
+        );
 
         assert!(bloom_cache.get_metadata(bloom_key.clone()).await.is_none());
         assert!(
             inverted_cache
-                .get_metadata((index_id.file_id(), index_id.version))
+                .get_metadata(file_key.clone())
                 .await
                 .is_none()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
         assert!(
             puffin_metadata_cache
-                .get_metadata(&file_id_str)
+                .get_metadata(&metadata_key)
                 .await
                 .is_none()
         );
@@ -3663,10 +3305,7 @@ mod tests {
             .put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()))
             .await;
         inverted_cache
-            .put_metadata(
-                (index_id.file_id(), index_id.version),
-                Arc::new(InvertedIndexMetas::default()),
-            )
+            .put_metadata(file_key.clone(), Arc::new(InvertedIndexMetas::default()))
             .await;
         result_cache.put(
             predicate.clone(),
@@ -3675,7 +3314,7 @@ mod tests {
         );
         puffin_metadata_cache
             .put_metadata(
-                file_id_str.clone(),
+                metadata_key.clone(),
                 Arc::new(FileMetadata {
                     blobs: Vec::new(),
                     properties: HashMap::new(),
@@ -3689,14 +3328,14 @@ mod tests {
         assert!(bloom_cache.get_metadata(bloom_key.clone()).await.is_none());
         assert!(
             inverted_cache
-                .get_metadata((index_id.file_id(), index_id.version))
+                .get_metadata(file_key.clone())
                 .await
                 .is_none()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
         assert!(
             puffin_metadata_cache
-                .get_metadata(&file_id_str)
+                .get_metadata(&metadata_key)
                 .await
                 .is_none()
         );

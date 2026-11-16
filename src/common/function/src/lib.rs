@@ -15,6 +15,7 @@
 mod admin;
 mod flush_flow;
 mod macros;
+mod permission;
 mod system;
 mod uddsketch_compat;
 
@@ -27,3 +28,7 @@ pub mod helper;
 pub mod scalars;
 pub mod state;
 pub mod utils;
+
+// Public for `admin_fn` expansions in downstream crates; the module stays private.
+#[doc(hidden)]
+pub use permission::ensure_admin_privilege;

@@ -60,7 +60,7 @@ use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
+use crate::region::{ManifestContextRef, RegionLeaderState, parse_partition_expr};
 use crate::request::{
     BackgroundNotify, DdlRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx, OutputTx,
     SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
@@ -220,6 +220,8 @@ pub enum FlushReason {
     EngineFull,
     /// Region reaches its write buffer threshold.
     RegionFull,
+    /// Flush to relieve retained WAL pressure.
+    WalPressure,
     /// Manual flush.
     Manual,
     /// Flush to alter table.
@@ -238,6 +240,8 @@ pub enum FlushReason {
     RemoteWalPrune,
     /// Flush before closing a region.
     Closing,
+    /// Writes a chunk of pending WAL tails replayed in the background.
+    TailReplay,
 }
 
 impl FlushReason {
@@ -281,8 +285,6 @@ pub(crate) struct RegionFlushTask {
     pub(crate) index_options: IndexOptions,
     /// Semaphore to control flush concurrency.
     pub(crate) flush_semaphore: Arc<Semaphore>,
-    /// Whether the region is in staging mode.
-    pub(crate) is_staging: bool,
     /// Partition expression of the region.
     ///
     /// This is used to generate the file meta.
@@ -412,7 +414,6 @@ impl RegionFlushTask {
                     _timer: timer,
                     edit,
                     memtables_to_remove,
-                    is_staging: self.is_staging,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -421,7 +422,10 @@ impl RegionFlushTask {
             }
             Err(e) => {
                 let err = Arc::new(e);
-                let failed = FlushFailed { err: err.clone() };
+                let failed = FlushFailed {
+                    err: err.clone(),
+                    senders: std::mem::take(&mut self.senders),
+                };
                 if failed.is_cancelled() {
                     info!("Flush cancelled for region {}", self.region_id);
                 } else {
@@ -431,7 +435,6 @@ impl RegionFlushTask {
                 timer.stop_and_discard();
                 uncommitted.cleanup().await;
 
-                self.on_failure(err.clone());
                 WorkerRequest::Background {
                     region_id: self.region_id,
                     notify: BackgroundNotify::FlushFailed(failed),
@@ -441,17 +444,14 @@ impl RegionFlushTask {
         self.send_worker_request(worker_request).await;
     }
 
-    /// Flushes memtables to level 0 SSTs and updates the manifest.
-    /// Returns the [RegionEdit] to apply.
-    async fn flush_memtables(
+    /// Writes the immutable memtables of `version` to level 0 SSTs, which `uncommitted`
+    /// tracks until a manifest edit references them, and returns their file metas.
+    pub(crate) async fn write_ssts(
         &self,
-        version_data: &VersionControlData,
+        version: &VersionRef,
         state: &CancellableTaskState,
         uncommitted: &UncommittedSsts,
-    ) -> Result<RegionEdit> {
-        // We must use the immutable memtables list and entry ids from the `version_data`
-        // for consistency as others might already modify the version in the `version_control`.
-        let version = &version_data.version;
+    ) -> Result<Vec<FileMeta>> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["flush_memtables"])
             .start_timer();
@@ -516,6 +516,23 @@ impl RegionFlushTask {
                 .await;
         }
 
+        Ok(file_metas)
+    }
+
+    /// Flushes memtables to level 0 SSTs and updates the manifest.
+    /// Returns the [RegionEdit] to apply.
+    async fn flush_memtables(
+        &self,
+        version_data: &VersionControlData,
+        state: &CancellableTaskState,
+        uncommitted: &UncommittedSsts,
+    ) -> Result<RegionEdit> {
+        // We must use the immutable memtables list and entry ids from the `version_data`
+        // for consistency as others might already modify the version in the `version_control`.
+        let file_metas = self
+            .write_ssts(&version_data.version, state, uncommitted)
+            .await?;
+
         // The manifest may name only a durable entry as flushed. A log store
         // that acknowledges appends before their entries are durable can have
         // handed out `last_entry_id` for an entry that is still in its backlog.
@@ -536,11 +553,9 @@ impl RegionFlushTask {
             flushed_entry_id: Some(version_data.last_entry_id),
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
-        info!(
-            "Applying {edit:?} to region {}, is_staging: {}",
-            self.region_id, self.is_staging
-        );
+        info!("Applying {edit:?} to region {}", self.region_id);
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
 
@@ -553,17 +568,11 @@ impl RegionFlushTask {
         let expected_state = if matches!(self.reason, FlushReason::Downgrading) {
             RegionLeaderState::Downgrading
         } else {
-            // Check if region is in staging mode
-            let current_state = self.manifest_ctx.current_state();
-            if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
-                RegionLeaderState::Staging
-            } else {
-                RegionLeaderState::Writable
-            }
+            RegionLeaderState::Writable
         };
         let manifest_version = match self
             .manifest_ctx
-            .update_manifest(expected_state, action_list, self.is_staging)
+            .update_manifest(expected_state, action_list, false)
             .await
         {
             Ok(manifest_version) => {
@@ -584,9 +593,8 @@ impl RegionFlushTask {
             }
         };
         info!(
-            "Successfully update manifest version to {manifest_version}, region: {}, is_staging: {}, reason: {}",
+            "Successfully update manifest version to {manifest_version}, region: {}, reason: {}",
             self.region_id,
-            self.is_staging,
             self.reason.as_str()
         );
 
@@ -681,7 +689,7 @@ impl RegionFlushTask {
                         partition_expr.clone(),
                         pk_range,
                         version.options.preserve_row_sequence,
-                    ));
+                    )?);
                 }
                 if hook.is_some() {
                     all_sst_infos.extend(ssts_written);
@@ -824,12 +832,12 @@ impl RegionFlushTask {
         partition_expr: Option<PartitionExpr>,
         primary_key_range: Option<(Bytes, Bytes)>,
         preserve_row_sequence: bool,
-    ) -> FileMeta {
+    ) -> Result<FileMeta> {
         let (primary_key_min, primary_key_max) = match primary_key_range {
             Some((min, max)) => (Some(min), Some(max)),
             None => (None, None),
         };
-        FileMeta {
+        Ok(FileMeta {
             region_id,
             file_id: sst_info.file_id,
             time_range: sst_info.time_range,
@@ -837,18 +845,18 @@ impl RegionFlushTask {
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
             available_indexes: sst_info.index_metadata.build_available_indexes(),
-            indexes: sst_info.index_metadata.build_indexes(),
+            indexes: sst_info.index_metadata.build_indexes()?,
             index_file_size: sst_info.index_metadata.file_size,
             index_version: 0,
             num_rows: sst_info.num_rows as u64,
             num_row_groups: sst_info.num_row_groups,
             sequence: NonZeroU64::new(max_sequence),
-            partition_expr,
+            partition_expr: partition_expr.map(Into::into),
             num_series: sst_info.num_series,
             primary_key_min,
             primary_key_max,
             preserve_row_sequence,
-        }
+        })
     }
 
     fn new_write_request(
@@ -863,6 +871,7 @@ impl RegionFlushTask {
             .map(|f| f == FormatType::Flat)
             .unwrap_or(self.engine_config.default_flat_format);
         SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Flush,
             metadata: version.metadata.clone(),
             source,
@@ -897,17 +906,25 @@ impl RegionFlushTask {
                 "Failed to notify flush job status for region {}, request: {:?}",
                 self.region_id, request
             );
-            if let WorkerRequest::Background {
-                notify: BackgroundNotify::FlushFinished(mut finished),
-                ..
-            } = request
-            {
-                finished.on_failure(
-                    RegionClosedSnafu {
-                        region_id: self.region_id,
+            if let WorkerRequest::Background { notify, .. } = request {
+                let err = RegionClosedSnafu {
+                    region_id: self.region_id,
+                }
+                .build();
+                match notify {
+                    BackgroundNotify::FlushFinished(mut finished) => {
+                        finished.on_failure(err);
                     }
-                    .build(),
-                );
+                    BackgroundNotify::FlushFailed(failed) => {
+                        let err = Arc::new(err);
+                        for sender in failed.senders {
+                            sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                                region_id: self.region_id,
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1299,13 +1316,13 @@ impl FlushScheduler {
             return Ok(());
         }
 
-        let closing = task.reason == FlushReason::Closing;
+        let reason = task.reason;
         let state = self.schedule_flush_task(version_control, task)?;
 
         // Add this region to status map.
         let _ = self.region_status.insert(
             region_id,
-            FlushStatus::new(region_id, version_control.clone(), state, closing),
+            FlushStatus::new(region_id, version_control.clone(), state, reason),
         );
 
         Ok(())
@@ -1497,6 +1514,23 @@ impl FlushScheduler {
         status.pending_bulk_writes.push(request);
     }
 
+    /// Whether staging is waiting for its memtables to flush.
+    pub(crate) fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
+        self.region_status.get(&region_id).is_some_and(|status| {
+            status
+                .pending_ddls
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
+        })
+    }
+
+    /// Returns true if the region has a close-time flush.
+    pub(crate) fn has_close_time_flush(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(|status| status.closing)
+    }
+
     /// Returns true if the region has pending DDLs or a close-time flush.
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         self.region_status
@@ -1542,14 +1576,14 @@ impl FlushStatus {
         region_id: RegionId,
         version_control: VersionControlRef,
         state: CancellableTaskState,
-        closing: bool,
+        reason: FlushReason,
     ) -> FlushStatus {
         FlushStatus {
             region_id,
             version_control,
             state,
             pending_task: None,
-            closing,
+            closing: reason == FlushReason::Closing,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
             pending_bulk_writes: Vec::new(),
@@ -1703,7 +1737,6 @@ mod tests {
             manifest_ctx,
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
-            is_staging: false,
             partition_expr: None,
             durability_barrier: DurabilityBarrier::noop(),
         }
@@ -1854,7 +1887,6 @@ mod tests {
                 .await,
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
-            is_staging: false,
             partition_expr: None,
             durability_barrier: DurabilityBarrier::noop(),
         };
@@ -1938,9 +1970,9 @@ mod tests {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 },
                 memtables_to_remove: smallvec![],
-                is_staging: false,
             }),
         };
 
@@ -1948,6 +1980,82 @@ mod tests {
 
         let output = output_rx.await.expect("waiter must receive explicit error");
         assert!(output.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flush_failure_defers_waiter_notification_to_worker() {
+        let env = SchedulerEnv::new().await;
+        let (tx, mut rx) = mpsc::channel(1);
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = builder.build();
+        let version_data = version_control.current();
+        let manifest_ctx = env
+            .mock_manifest_context(version_data.version.metadata.clone())
+            .await;
+        let mut task = new_test_flush_task(&env, region_id, FlushReason::Closing, tx, manifest_ctx);
+        let (output_tx, mut output_rx) = oneshot::channel();
+        task.push_sender(OptionOutputTx::from(output_tx));
+        let state = CancellableTaskState::new();
+        state.request_cancel();
+
+        // Cancellation exercises the job's failure path without depending on I/O or scheduling.
+        task.do_flush(version_data, state).await;
+        let request = rx.try_recv().unwrap().request;
+        assert!(matches!(
+            output_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let WorkerRequest::Background {
+            region_id: failed_region_id,
+            notify: BackgroundNotify::FlushFailed(failed),
+        } = request
+        else {
+            panic!("expected a flush failure notification");
+        };
+        assert_eq!(failed_region_id, region_id);
+        assert_eq!(failed.senders.len(), 1);
+        assert!(failed.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_send_worker_request_failure_notifies_flush_failed_waiter() {
+        let env = SchedulerEnv::new().await;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Manual,
+            tx,
+            manifest_ctx,
+        );
+        let (output_tx, output_rx) = oneshot::channel();
+        let request = WorkerRequest::Background {
+            region_id: builder.region_id(),
+            notify: BackgroundNotify::FlushFailed(FlushFailed {
+                err: Arc::new(
+                    RegionBusySnafu {
+                        region_id: builder.region_id(),
+                    }
+                    .build(),
+                ),
+                senders: vec![OutputTx::new(output_tx)],
+            }),
+        };
+
+        task.send_worker_request(request).await;
+
+        let err = output_rx
+            .await
+            .expect("waiter must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Cancelled);
     }
 
     #[tokio::test]
@@ -2156,7 +2264,6 @@ mod tests {
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
-                is_staging: false,
                 partition_expr: None,
                 durability_barrier: DurabilityBarrier::noop(),
             })
@@ -2194,6 +2301,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[0],
             builder.file_purger(),
@@ -2463,7 +2571,6 @@ mod tests {
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
-                is_staging: false,
                 partition_expr: None,
                 durability_barrier: DurabilityBarrier::noop(),
             })
@@ -2503,6 +2610,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[0],
             builder.file_purger(),
@@ -2577,6 +2685,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[0],
             builder.file_purger(),

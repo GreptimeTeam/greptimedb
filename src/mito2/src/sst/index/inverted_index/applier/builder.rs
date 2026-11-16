@@ -390,6 +390,7 @@ mod tests {
                     data_type: ConcreteDataType::float64_datatype(),
                     inverted_index: true,
                     skipping_index: None,
+                    fulltext_index: None,
                 }],
                 vec![],
                 vec![JsonTypeHint {
@@ -397,6 +398,7 @@ mod tests {
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 }],
             ] {
                 let mut sst = metadata.clone();
@@ -656,12 +658,14 @@ mod tests {
             data_type: ConcreteDataType::string_datatype(),
             inverted_index,
             skipping_index: None,
+            fulltext_index: None,
         })
         .chain(std::iter::once(JsonTypeHint {
             path: vec!["n".into()],
             data_type: ConcreteDataType::int64_datatype(),
             inverted_index: true,
             skipping_index: None,
+            fulltext_index: None,
         }))
         .collect();
         column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(

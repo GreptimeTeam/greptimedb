@@ -45,10 +45,12 @@ use crate::http::extractor::{
     LogTableName, OtlpMetricOptions, PipelineInfo, SelectInfoWrapper, TraceTableName,
 };
 use crate::http::header::{CONTENT_TYPE_PROTOBUF, write_cost_header_map};
+use crate::http::memory_limit::BodyMemoryAccounting;
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
 use crate::query_handler::{
     MetricsIngestOutcome, OpenTelemetryProtocolHandlerRef, PipelineHandler, TraceIngestOutcome,
 };
+use crate::request_memory_limiter::ServerMemoryLimiter;
 
 #[derive(Clone, prost::Message)]
 pub struct GoogleRpcStatus {
@@ -87,6 +89,7 @@ pub async fn metrics(
     Extension(mut query_ctx): Extension<QueryContext>,
     http_opts: OtlpMetricOptions,
     content_type: Option<TypedHeader<ContentType>>,
+    extensions: http::Extensions,
     bytes: Bytes,
 ) -> Result<OtlpMetricsResponse> {
     if is_json_content_type(content_type.as_ref().map(|h| &h.0)) {
@@ -122,7 +125,16 @@ pub async fn metrics(
     }));
     let query_ctx = Arc::new(query_ctx);
 
-    match handler.metrics(request, query_ctx).await {
+    let memory_limiter = extensions
+        .get::<ServerMemoryLimiter>()
+        .cloned()
+        .map(|limiter| {
+            let held_bytes = extensions
+                .get::<BodyMemoryAccounting>()
+                .map_or(0, BodyMemoryAccounting::reserved_bytes);
+            (limiter, held_bytes)
+        });
+    match handler.metrics(request, query_ctx, memory_limiter).await {
         Ok(outcome) => {
             if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
                 Ok(OtlpMetricsResponse::Failure(outcome))

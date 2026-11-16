@@ -18,6 +18,7 @@ mod admin_function_event;
 mod build_series_index;
 mod database_ddl_event;
 mod dict_groupby_sst;
+mod drain_datanode;
 mod event_recorder_test_util;
 #[macro_use]
 mod grpc;

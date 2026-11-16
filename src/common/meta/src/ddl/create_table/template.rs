@@ -17,11 +17,16 @@ use std::collections::HashMap;
 use api::v1::column_def::try_as_column_def;
 use api::v1::meta::Partition;
 use api::v1::region::{CreateRequest, RegionColumnDef};
-use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
+use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
+use common_catalog::consts::{MITO_ENGINE, MITO2_ENGINE};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
-use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
+    PRIMARY_KEY_ENCODING,
+};
 use store_api::region_request::RegionRequirements;
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
@@ -135,6 +140,28 @@ pub fn build_template_from_raw_table_info_for_physical_table(
 }
 
 pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<CreateRequest> {
+    // Explicit sparse identity columns use the same IDs as metric physical regions.
+    let reserved_prefix = matches!(
+        create_table_expr.engine.as_str(),
+        MITO_ENGINE | MITO2_ENGINE
+    ) && create_table_expr
+        .table_options
+        .get(PRIMARY_KEY_ENCODING)
+        .is_some_and(|value| value.eq_ignore_ascii_case("sparse"))
+        && create_table_expr.primary_keys.starts_with(&[
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME.into(),
+            DATA_SCHEMA_TSID_COLUMN_NAME.into(),
+        ])
+        && [
+            (DATA_SCHEMA_TABLE_ID_COLUMN_NAME, ColumnDataType::Uint32),
+            (DATA_SCHEMA_TSID_COLUMN_NAME, ColumnDataType::Uint64),
+        ]
+        .into_iter()
+        .all(|(name, data_type)| {
+            create_table_expr.column_defs.iter().any(|column| {
+                column.name == name && column.data_type == data_type as i32 && !column.is_nullable
+            })
+        });
     let column_defs = create_table_expr
         .column_defs
         .iter()
@@ -159,7 +186,13 @@ pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<Crea
                     datatype_extension: c.datatype_extension.clone(),
                     options: c.options.clone(),
                 }),
-                column_id: i as u32,
+                column_id: if reserved_prefix && c.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                    ReservedColumnId::table_id()
+                } else if reserved_prefix && c.name == DATA_SCHEMA_TSID_COLUMN_NAME {
+                    ReservedColumnId::tsid()
+                } else {
+                    i as u32
+                },
             }
         })
         .collect::<Vec<_>>();
@@ -279,6 +312,48 @@ mod tests {
 
     use super::*;
     use crate::key::test_utils;
+
+    #[test]
+    fn test_create_sparse_reserved_column_ids() {
+        let mut expr = CreateTableExpr {
+            engine: MITO_ENGINE.into(),
+            table_options: HashMap::from([(PRIMARY_KEY_ENCODING.into(), "sparse".into())]),
+            primary_keys: vec![
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.into(),
+                DATA_SCHEMA_TSID_COLUMN_NAME.into(),
+                "job".into(),
+            ],
+            time_index: "ts".into(),
+            column_defs: [
+                ("ts", ColumnDataType::TimestampMillisecond),
+                (DATA_SCHEMA_TABLE_ID_COLUMN_NAME, ColumnDataType::Uint32),
+                (DATA_SCHEMA_TSID_COLUMN_NAME, ColumnDataType::Uint64),
+                ("job", ColumnDataType::String),
+            ]
+            .into_iter()
+            .map(|(name, data_type)| ColumnDef {
+                name: name.into(),
+                data_type: data_type as i32,
+                is_nullable: false,
+                ..Default::default()
+            })
+            .collect(),
+            ..Default::default()
+        };
+        let template = build_template(&expr).unwrap();
+        assert_eq!(
+            template.primary_key,
+            vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 3]
+        );
+        assert_eq!(
+            template.column_defs[1].column_id,
+            ReservedColumnId::table_id()
+        );
+        assert_eq!(template.column_defs[2].column_id, ReservedColumnId::tsid());
+        // The names alone must not change ordinary dense-table column allocation.
+        expr.table_options.clear();
+        assert_eq!(build_template(&expr).unwrap().primary_key, vec![1, 2, 3]);
+    }
 
     #[test]
     fn test_build_one_sets_partition_expr_per_region() {

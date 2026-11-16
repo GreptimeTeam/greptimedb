@@ -20,6 +20,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -81,6 +82,45 @@ class OperationsTest(unittest.TestCase):
                         {"EXPECTED_COMMIT": "abcdef"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 ops.plan(self.env(**changes))
+
+    def test_regions_follow_configuration_and_reject_mismatch_or_empty(self):
+        for region in ("us-east-1", "ap-southeast-1"):
+            with self.subTest(region=region):
+                self.assertEqual(ops.plan(self.env(S3_REGION=region, RUNNER_REGION=region))["region"], region)
+        for bucket, runner in (("us-east-1", "ap-southeast-1"), ("", ""), (" ", " ")):
+            with self.subTest(bucket=bucket, runner=runner), self.assertRaises(ValueError):
+                ops.plan(self.env(S3_REGION=bucket, RUNNER_REGION=runner))
+
+    def test_client_uses_configured_region(self):
+        boto = types.ModuleType("boto3")
+        boto.client = mock.Mock()
+        config = types.ModuleType("botocore.config")
+        config.Config = mock.Mock()
+        with mock.patch.dict("sys.modules", {"boto3": boto, "botocore.config": config}):
+            for region in ("us-east-1", "ap-southeast-1"):
+                ops.client(region)
+                self.assertEqual(boto.client.call_args.kwargs["region_name"], region)
+            with self.assertRaises(ValueError):
+                ops.client("")
+
+    def test_hourly_estimate_controls_reservation_and_cost(self):
+        env = self.env(EC2_HOURLY_USD="2", BENCHMARK_TIMEOUT_MINUTES="30")
+        plan = ops.plan(env)
+        self.assertEqual(plan["ec2_hourly_usd"], "2")
+        self.assertEqual(plan["attempt_reserve_usd"], "5.00")
+        with mock.patch.dict(ops.os.environ, env), mock.patch.object(ops.time, "time", return_value=4600), \
+                mock.patch("sys.argv", ["ops", "cost", "--started-at", "1000"]), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            ops.main()
+        cost = json.loads(output.getvalue())
+        self.assertEqual(cost["ec2_hourly_usd"], "2")
+        self.assertEqual(cost["ec2_estimate_usd"], "2.0000")
+        self.assertEqual(cost["campaign_estimate_with_other_reserve_usd"], "3.5000")
+        for rate in ("", "invalid", "0", "-1", "NaN", "Infinity", "-Infinity"):
+            with self.subTest(rate=rate), self.assertRaises(ValueError):
+                ops.plan(self.env(EC2_HOURLY_USD=rate))
+        with self.assertRaises(ValueError):
+            ops.plan(self.env(EC2_HOURLY_USD="4"))
 
     def watcher_env(self):
         return self.env(GITHUB_REPOSITORY="GreptimeTeam/greptimedb", GITHUB_RUN_ID="123",

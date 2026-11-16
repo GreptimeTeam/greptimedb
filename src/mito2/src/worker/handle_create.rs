@@ -61,6 +61,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id,
             &request.table_dir,
             request.path_type,
+            self.node_lease.clone(),
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
             self.purge_scheduler.clone(),

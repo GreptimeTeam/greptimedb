@@ -58,7 +58,6 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
-use crate::heartbeat::frontend_peer_addr;
 use crate::instance::Instance;
 use crate::instance::entity_graph::EntityGraphProviderImpl;
 use crate::instance::otlp::TraceAuxCache;
@@ -345,7 +344,7 @@ impl FrontendBuilder {
             kv_catalog.set_entity_graph_provider(provider);
         }
 
-        let frontend_peer_addr = frontend_peer_addr(&self.options);
+        let frontend_peer_addr = self.options.peer_addr();
         let statement_executor = StatementExecutor::new(
             self.catalog_manager.clone(),
             query_engine.clone(),

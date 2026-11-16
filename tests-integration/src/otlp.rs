@@ -21,6 +21,7 @@ mod test {
     use api::region::RegionResponse;
     use api::v1::region::{RegionRequest, region_request};
     use client::{DEFAULT_CATALOG_NAME, OutputData};
+    use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::node_manager::{
         Datanode, DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef, NodeManagerRef,
@@ -1533,6 +1534,7 @@ WITH(
                 .metrics(
                     build_sum_request("custom", AggregationTemporality::Cumulative, &[(60, 7)]),
                     ctx.clone(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1564,7 +1566,8 @@ WITH(
                             AggregationTemporality::Cumulative,
                             &[(60, 1)]
                         ),
-                        Arc::new(fixed)
+                        Arc::new(fixed),
+                        None
                     )
                     .await
                     .unwrap()
@@ -1573,6 +1576,878 @@ WITH(
             );
         }
         assert_eq!(results[..3], results[3..]);
+    }
+
+    fn exemplar_metric_request(count: usize) -> ExportMetricsServiceRequest {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        metric_request(
+            (0..count)
+                .map(|i| Metric {
+                    name: format!("exemplar_memory_{i}"),
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: vec![NumberDataPoint {
+                            attributes: vec![keyvalue(&format!("tag_{i}"), "value")],
+                            time_unix_nano: 60_000_000_000,
+                            value: Some(Value::AsDouble(1.0)),
+                            exemplars: vec![Exemplar {
+                                time_unix_nano: 60_000_000_000,
+                                value: Some(exemplar::Value::AsDouble(1.0)),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                    })),
+                    ..Default::default()
+                })
+                .collect(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_existing_ordinary_tables() {
+        use common_memory_manager::OnExhaustedPolicy;
+        use servers::request_memory_limiter::ServerMemoryLimiter;
+
+        for (batching, count) in [(false, 1), (true, 1), (false, 64), (true, 64)] {
+            let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_ordinary")
+                .with_logical_batcher(BatcherOptions {
+                    protocols: vec![BatchingProtocol::Otlp],
+                    pending_rows_flush_interval: Duration::from_millis(5),
+                    ..Default::default()
+                })
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let request = exemplar_metric_request(count);
+            let mut seed = request.clone();
+            for metric in &mut seed.resource_metrics[0].scope_metrics[0].metrics {
+                let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                    unreachable!()
+                };
+                gauge.data_points[0].exemplars.clear();
+            }
+            // Ordinary tables can already exist when metric-engine ingestion is enabled.
+            instance
+                .metrics(seed, QueryContext::arc(), None)
+                .await
+                .unwrap();
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_logical_batching_enabled(batching);
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+            let limiter = ServerMemoryLimiter::new(64 * 1024, OnExhaustedPolicy::Fail);
+            let dropped = servers::metrics::EXEMPLARS_DROPPED_TOTAL.with_label_values(&["otlp"]);
+            for round in 0..3 {
+                let mut request = request.clone();
+                let metrics = &mut request.resource_metrics[0].scope_metrics[0].metrics;
+                if round > 0 {
+                    let mut sibling = metrics[0].clone();
+                    sibling.name = "logical_sibling".into();
+                    metrics.push(sibling);
+                }
+                for metric in metrics {
+                    let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                        unreachable!()
+                    };
+                    gauge.data_points[0].time_unix_nano += (round + 1) * 60_000_000_000;
+                }
+                let before = dropped.get();
+                let outcome = instance
+                    .metrics(request, ctx.clone(), Some((limiter.clone(), 0)))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    outcome.accepted_data_points,
+                    count as i64 + i64::from(round > 0)
+                );
+                assert_eq!(outcome.rejected_data_points, 0);
+                assert_eq!(dropped.get() - before, count as u64);
+                assert_eq!(limiter.used_bytes(), 0);
+                if round == 0 {
+                    assert_trace_v2_query(instance, &format!("SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"), ctx.clone()).await.unwrap();
+                }
+            }
+            for sql in [
+                "SELECT COUNT(*)=4 FROM exemplar_memory_0",
+                "SELECT COUNT(*)=2 FROM logical_sibling",
+                &format!(
+                    "SELECT COUNT(*)=2 AND MIN(greptime_metric)='logical_sibling' FROM {METRICS_EXEMPLARS_TABLE}"
+                ),
+            ] {
+                assert_trace_v2_query(instance, sql, ctx.clone())
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_without_metric_engine() {
+        use axum::body::Body;
+        use common_memory_manager::OnExhaustedPolicy;
+        use futures::SinkExt;
+        use http::{Request, StatusCode};
+        use prost::Message;
+        use servers::http::HttpServerBuilder;
+        use servers::postgres::PostgresServer;
+        use servers::request_memory_limiter::ServerMemoryLimiter;
+        use servers::server::Server;
+        use servers::tls::ReloadableTlsServerConfig;
+        use tower::ServiceExt;
+
+        let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_disabled")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        // The body fits, but expanding the discarded exemplars would exceed the quota.
+        let limiter = ServerMemoryLimiter::new(64 * 1024, OnExhaustedPolicy::Fail);
+        let server = HttpServerBuilder::new(Default::default())
+            .with_memory_limiter(limiter.clone())
+            .with_otlp_handler(instance.clone(), false)
+            .build();
+        let app = server.build(server.make_app()).unwrap();
+        let request = exemplar_metric_request(64);
+        let response = app
+            .oneshot(
+                Request::post("/v1/otlp/v1/metrics")
+                    .header("content-type", "application/x-protobuf")
+                    .body(Body::from(request.encode_to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(limiter.used_bytes(), 0);
+
+        let mut server = PostgresServer::new(
+            instance.clone(),
+            instance.clone(),
+            false,
+            Arc::new(ReloadableTlsServerConfig::try_new(Default::default()).unwrap()),
+            0,
+            common_runtime::global_runtime(),
+            None,
+            None,
+        )
+        .with_otlp_handler(instance.clone(), false)
+        .with_memory_limiter(limiter.clone());
+        server.start("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (client, connection) = tokio_postgres::connect(
+            &format!(
+                "host=127.0.0.1 port={} dbname=public",
+                server.bind_addr().unwrap().port()
+            ),
+            tokio_postgres::NoTls,
+        )
+        .await
+        .unwrap();
+        let connection = tokio::spawn(connection);
+        let mut sink = Box::pin(
+            client
+                .copy_in("COPY FROM STDIN WITH (FORMAT otlp)")
+                .await
+                .unwrap(),
+        );
+        let mut request = request;
+        for metric in &mut request.resource_metrics[0].scope_metrics[0].metrics {
+            let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                unreachable!()
+            };
+            gauge.data_points[0].time_unix_nano += 1_000_000_000;
+        }
+        sink.as_mut()
+            .send(bytes::Bytes::from(request.encode_to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(sink.as_mut().finish().await.unwrap(), 64);
+        assert_eq!(limiter.used_bytes(), 0);
+        drop(sink);
+        drop(client);
+        connection.await.unwrap().unwrap();
+        server.shutdown().await.unwrap();
+
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "public"));
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*)=2 FROM exemplar_memory_0",
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_trace_v2_query(
+            instance,
+            &format!("SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"),
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_memory_limit() {
+        use std::io::Write;
+
+        use axum::body::Body;
+        use common_memory_manager::OnExhaustedPolicy;
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use futures::SinkExt;
+        use http::{Request, StatusCode};
+        use prost::Message;
+        use servers::http::HttpServerBuilder;
+        use servers::postgres::PostgresServer;
+        use servers::request_memory_limiter::ServerMemoryLimiter;
+        use servers::server::Server;
+        use servers::tls::ReloadableTlsServerConfig;
+        use tower::ServiceExt;
+
+        let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_memory")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        for (count, compressed) in [(64, false), (64, true), (1, true)] {
+            let request = exemplar_metric_request(count);
+            let limit = if count == 1 {
+                let conversion = servers::otlp::metrics::to_grpc_insert_requests(
+                    request.clone(),
+                    &mut OtlpMetricCtx {
+                        with_metric_engine: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let bytes = servers::exemplar::estimated_row_bytes(std::iter::once(
+                    conversion.exemplars.as_slice(),
+                ))
+                .unwrap() as u64;
+                // Fits the exemplar rows plus either body buffer, but not both.
+                bytes.div_ceil(1024) * 1024 + 1024
+            } else {
+                64 * 1024
+            };
+            let limiter = ServerMemoryLimiter::new(
+                limit,
+                OnExhaustedPolicy::Wait {
+                    timeout: Duration::from_secs(30),
+                },
+            );
+            let server = HttpServerBuilder::new(Default::default())
+                .with_memory_limiter(limiter.clone())
+                .with_otlp_handler(instance.clone(), true)
+                .build();
+            let app = server.build(server.make_app()).unwrap();
+            let body = request.encode_to_vec();
+            assert!((body.len() as u64) < limit);
+            let mut request = Request::post("/v1/otlp/v1/metrics")
+                .header("content-type", "application/x-protobuf");
+            let body = if compressed {
+                request = request.header("content-encoding", "gzip");
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(&body).unwrap();
+                encoder.finish().unwrap()
+            } else {
+                body.clone()
+            };
+            let response = tokio::time::timeout(
+                Duration::from_secs(5),
+                app.oneshot(request.body(Body::from(body)).unwrap()),
+            )
+            .await
+            .expect("requests must not wait for their own body permits")
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(limiter.used_bytes(), 0);
+        }
+        let limiter = ServerMemoryLimiter::new(64 * 1024, OnExhaustedPolicy::Fail);
+        let mut server = PostgresServer::new(
+            instance.clone(),
+            instance.clone(),
+            false,
+            Arc::new(ReloadableTlsServerConfig::try_new(Default::default()).unwrap()),
+            0,
+            common_runtime::global_runtime(),
+            None,
+            None,
+        )
+        .with_otlp_handler(instance.clone(), true)
+        .with_memory_limiter(limiter.clone());
+        server.start("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (client, connection) = tokio_postgres::connect(
+            &format!(
+                "host=127.0.0.1 port={} dbname=public",
+                server.bind_addr().unwrap().port()
+            ),
+            tokio_postgres::NoTls,
+        )
+        .await
+        .unwrap();
+        let connection = tokio::spawn(connection);
+        let mut sink = Box::pin(
+            client
+                .copy_in("COPY FROM STDIN WITH (FORMAT otlp)")
+                .await
+                .unwrap(),
+        );
+        sink.as_mut()
+            .send(bytes::Bytes::from(
+                exemplar_metric_request(64).encode_to_vec(),
+            ))
+            .await
+            .unwrap();
+        let error = sink.as_mut().finish().await.unwrap_err();
+        let error = error.as_db_error().unwrap();
+        assert_eq!(error.code().code(), "54000", "{error}");
+        assert!(
+            error.message().starts_with("Memory limit exceeded"),
+            "{error}"
+        );
+        assert_eq!(limiter.used_bytes(), 0);
+        drop(sink);
+        drop(client);
+        connection.await.unwrap().unwrap();
+        server.shutdown().await.unwrap();
+
+        for table in ["exemplar_memory_0", METRICS_EXEMPLARS_TABLE] {
+            assert!(
+                instance
+                    .catalog_manager()
+                    .table(DEFAULT_CATALOG_NAME, "public", table, None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_memory_wait_and_lifetime() {
+        use common_memory_manager::OnExhaustedPolicy;
+        use servers::request_memory_limiter::ServerMemoryLimiter;
+
+        let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_memory_lifetime")
+            .build()
+            .await;
+        let source = standalone.fe_instance();
+        let gate = Arc::new(Mutex::new(None));
+        let cache_registry = Arc::new(
+            cache::with_default_composite_cache_registry(
+                LayeredCacheRegistryBuilder::default().add_cache_registry(
+                    cache::build_fundamental_cache_registry(standalone.kv_backend.clone()),
+                ),
+            )
+            .unwrap()
+            .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new(
+                standalone.opts.frontend_options(),
+                standalone.kv_backend.clone(),
+                cache_registry,
+                source.catalog_manager().clone(),
+                Arc::new(GatedTraceNodeManager {
+                    inner: source.node_manager().clone(),
+                    gate: gate.clone(),
+                }),
+                source.procedure_executor().clone(),
+                Arc::new(catalog::process_manager::ProcessManager::new(
+                    "exemplar_otlp_memory_lifetime".into(),
+                    None,
+                )),
+            )
+            .try_build()
+            .await
+            .unwrap(),
+        );
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let ctx = Arc::new(ctx);
+        let request = exemplar_metric_request(1);
+        instance
+            .metrics(request.clone(), ctx.clone(), None)
+            .await
+            .unwrap();
+        let limit = 64 * 1024;
+        let limiter = ServerMemoryLimiter::new(
+            limit,
+            OnExhaustedPolicy::Wait {
+                timeout: Duration::from_secs(30),
+            },
+        );
+        let body = limiter.acquire(limit / 2).await.unwrap();
+        let concurrent_body = limiter.acquire(limit / 2).await.unwrap();
+        // Body permits cannot be released while their requests wait for expansion.
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            instance.metrics(
+                request.clone(),
+                ctx.clone(),
+                Some((limiter.clone(), body.granted_bytes())),
+            ),
+        )
+        .await
+        .expect("requests holding body permits must not wait for expansion")
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            servers::error::Error::MemoryLimitExceeded {
+                source: common_memory_manager::Error::MemoryLimitExceeded { .. },
+                ..
+            }
+        ));
+        assert_eq!(limiter.used_bytes(), limit);
+        drop(concurrent_body);
+        assert_eq!(
+            instance
+                .metrics(
+                    request.clone(),
+                    ctx.clone(),
+                    Some((limiter.clone(), body.granted_bytes())),
+                )
+                .await
+                .unwrap()
+                .accepted_data_points,
+            1
+        );
+        assert_eq!(limiter.used_bytes(), body.granted_bytes());
+        drop(body);
+        assert_eq!(limiter.used_bytes(), 0);
+
+        let limiter = ServerMemoryLimiter::new(
+            limit,
+            OnExhaustedPolicy::Wait {
+                timeout: Duration::from_millis(100),
+            },
+        );
+        for release in [true, false] {
+            let held = limiter.acquire(limit).await.unwrap();
+            let write = instance.metrics(request.clone(), ctx.clone(), Some((limiter.clone(), 0)));
+            tokio::pin!(write);
+            assert!(futures::poll!(&mut write).is_pending());
+            if release {
+                drop(held);
+                assert_eq!(write.await.unwrap().accepted_data_points, 1);
+            } else {
+                assert!(matches!(
+                    write.await,
+                    Err(servers::error::Error::MemoryLimitExceeded {
+                        source: common_memory_manager::Error::MemoryAcquireTimeout { .. },
+                        ..
+                    })
+                ));
+                drop(held);
+            }
+            assert_eq!(limiter.used_bytes(), 0);
+        }
+
+        let limiter = ServerMemoryLimiter::new(
+            limit,
+            OnExhaustedPolicy::Wait {
+                timeout: Duration::from_secs(10),
+            },
+        );
+        let table = instance
+            .catalog_manager()
+            .table(
+                DEFAULT_CATALOG_NAME,
+                "public",
+                METRICS_EXEMPLARS_TABLE,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let region_id = instance
+            .partition_manager()
+            .find_physical_table_route(table.table_info().table_id())
+            .await
+            .unwrap()
+            .region_routes[0]
+            .region
+            .id;
+        for cancel in [false, true] {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            *gate.lock().unwrap() = Some(TraceAuxWriteGate {
+                region_id,
+                started: started_tx,
+                release: release_rx,
+            });
+            let write = tokio::spawn({
+                let instance = instance.clone();
+                let request = request.clone();
+                let ctx = ctx.clone();
+                let limiter = limiter.clone();
+                async move { instance.metrics(request, ctx, Some((limiter, 0))).await }
+            });
+            tokio::time::timeout(Duration::from_secs(10), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let reserved = limiter.used_bytes();
+            assert!(reserved > 0);
+            if cancel {
+                write.abort();
+                assert!(write.await.unwrap_err().is_cancelled());
+                assert_eq!(
+                    limiter.used_bytes(),
+                    reserved,
+                    "in-flight rows still own the permit"
+                );
+                release_tx.send(true).unwrap();
+            } else {
+                release_tx.send(false).unwrap();
+                assert!(write.await.unwrap().is_err());
+            }
+            // Acquiring the entire pool waits for the detached write to drop its guard.
+            let released = limiter.acquire(limit).await.unwrap();
+            drop(released);
+            assert_eq!(limiter.used_bytes(), 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_inherited_label_collisions() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_label_collisions")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let ctx = Arc::new(ctx);
+        let dropped = servers::metrics::EXEMPLARS_DROPPED_TOTAL.with_label_values(&["otlp"]);
+        let before = dropped.get();
+        let observation = Exemplar {
+            time_unix_nano: 60_000_000_000,
+            value: Some(exemplar::Value::AsDouble(0.5)),
+            ..Default::default()
+        };
+        let mut metrics = Vec::new();
+        for (i, key) in [
+            "greptime_metric",
+            "exemplar_labels",
+            "greptime.metric",
+            "exemplar.labels",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut metric =
+                gauge_metric(&format!("collision_{i}"), &[(60_000_000_000, 1.0, None)]);
+            let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                unreachable!()
+            };
+            gauge.data_points[0].attributes = vec![keyvalue(key, "original")];
+            gauge.data_points[0].exemplars = vec![observation.clone(); 2];
+            metrics.push(metric);
+        }
+        for sql in [
+            "CREATE TABLE collision_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')",
+            "CREATE TABLE collision_default (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE, greptime_metric STRING DEFAULT 'original' PRIMARY KEY) ENGINE=metric WITH ('on_physical_table'='collision_physical')",
+        ] {
+            instance.do_query(sql, ctx.clone()).await.remove(0).unwrap();
+        }
+        for name in ["collision_default", "retained"] {
+            let mut metric = gauge_metric(name, &[(60_000_000_000, 1.0, None)]);
+            let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                unreachable!()
+            };
+            gauge.data_points[0].exemplars = vec![observation.clone()];
+            metrics.push(metric);
+        }
+        let outcome = instance
+            .metrics(metric_request(metrics), ctx.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (outcome.accepted_data_points, outcome.rejected_data_points),
+            (6, 0)
+        );
+        assert_eq!(dropped.get(), before + 9);
+        for (table, column) in [
+            ("collision_0", "greptime_metric"),
+            ("collision_1", "exemplar_labels"),
+            ("collision_2", "greptime_metric"),
+            ("collision_3", "exemplar_labels"),
+            ("collision_default", "greptime_metric"),
+        ] {
+            assert_trace_v2_query(
+                instance,
+                &format!("SELECT COUNT(*)=1 FROM {table} WHERE {column}='original'"),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        }
+        assert_trace_v2_query(
+            instance,
+            &format!("SELECT COUNT(*)=1 AND MIN(greptime_metric)='retained' FROM {METRICS_EXEMPLARS_TABLE}"),
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_defaulted_source_identity() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        for batching in [false, true] {
+            let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_defaulted_identity")
+                .with_logical_batcher(BatcherOptions {
+                    protocols: vec![BatchingProtocol::Otlp],
+                    pending_rows_flush_interval: Duration::from_millis(5),
+                    ..Default::default()
+                })
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_logical_batching_enabled(batching);
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+            instance.do_query("CREATE TABLE defaults_physical (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')", ctx.clone()).await.remove(0).unwrap();
+            for name in ["defaulted_gauge", "defaulted_histogram_bucket"] {
+                let (le, le_key) = if name.ends_with("_bucket") {
+                    (", le STRING", ", le")
+                } else {
+                    ("", "")
+                };
+                instance.do_query(&format!("CREATE TABLE {name} (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, host STRING DEFAULT 'unknown', empty_tag STRING DEFAULT '', nullable_tag STRING{le}, PRIMARY KEY(host, empty_tag, nullable_tag{le_key})) ENGINE=metric WITH ('on_physical_table'='defaults_physical')"), ctx.clone()).await.remove(0).unwrap();
+            }
+            let mut gauge = gauge_metric(
+                "defaulted_gauge",
+                &[
+                    (60_000_000_000, 1.0, None),
+                    (120_000_000_000, 2.0, Some("known")),
+                    (180_000_000_000, 3.0, None),
+                ],
+            );
+            let Some(metric::Data::Gauge(data)) = &mut gauge.data else {
+                unreachable!()
+            };
+            for point in &mut data.data_points {
+                point.exemplars.push(Exemplar {
+                    time_unix_nano: point.time_unix_nano,
+                    value: Some(exemplar::Value::AsDouble(0.5)),
+                    ..Default::default()
+                });
+            }
+            let mut request = build_histogram_request(
+                "defaulted_histogram",
+                vec![HistogramDataPoint {
+                    time_unix_nano: 240_000_000_000,
+                    count: 3,
+                    sum: Some(5.0),
+                    explicit_bounds: vec![1.0, 2.0],
+                    bucket_counts: vec![1, 1, 1],
+                    exemplars: [0.5, 1.5, 3.0]
+                        .into_iter()
+                        .map(|value| Exemplar {
+                            time_unix_nano: 240_000_000_000,
+                            value: Some(exemplar::Value::AsDouble(value)),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }],
+            );
+            request.resource_metrics[0].scope_metrics[0]
+                .metrics
+                .push(gauge);
+            let outcome = instance.metrics(request, ctx.clone(), None).await.unwrap();
+            assert_eq!(
+                (outcome.accepted_data_points, outcome.rejected_data_points),
+                (4, 0)
+            );
+            assert_trace_v2_query(
+                instance,
+                "SELECT COUNT(*)=2 FROM defaulted_gauge WHERE host='unknown'",
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+            assert_trace_v2_query(
+                instance,
+                "SELECT COUNT(*)=3 FROM defaulted_histogram_bucket WHERE host='unknown'",
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+            assert_trace_v2_query(instance, &format!("SELECT COUNT(*)=6 FROM {METRICS_EXEMPLARS_TABLE} e JOIN defaults_physical m ON e.__table_id=m.__table_id AND e.__tsid=m.__tsid AND e.greptime_timestamp=m.greptime_timestamp"), ctx.clone()).await.unwrap();
+            assert_trace_v2_query(
+                instance,
+                &format!("SELECT COUNT(*)=6 FROM {METRICS_EXEMPLARS_TABLE} WHERE empty_tag='' AND host IS NOT NULL"),
+                ctx,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_source_identity() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        for (with_metric_engine, batching) in [(false, false), (true, false), (true, true)] {
+            let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_identity")
+                .with_logical_batcher(BatcherOptions {
+                    protocols: vec![BatchingProtocol::Otlp],
+                    pending_rows_flush_interval: Duration::from_millis(5),
+                    ..Default::default()
+                })
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_logical_batching_enabled(batching);
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine,
+                promote_all_resource_attrs: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+            let mut request = build_histogram_request(
+                "latency",
+                vec![HistogramDataPoint {
+                    attributes: vec![keyvalue("job", "point"), keyvalue("zone", "")],
+                    time_unix_nano: 10_000_000_000,
+                    count: 3,
+                    sum: Some(5.0),
+                    explicit_bounds: vec![1.0, 2.0],
+                    bucket_counts: vec![1, 1, 1],
+                    exemplars: [1.5, 3.0]
+                        .into_iter()
+                        .map(|value| Exemplar {
+                            filtered_attributes: vec![keyvalue("trace_id", "observation")],
+                            time_unix_nano: 9_123_456_789,
+                            value: Some(exemplar::Value::AsDouble(value)),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }],
+            );
+            request.resource_metrics[0].resource = Some(Resource {
+                attributes: vec![keyvalue("job", "resource"), keyvalue("service.name", "api")],
+                ..Default::default()
+            });
+            let result = instance.metrics(request, ctx.clone(), None).await;
+            assert_eq!(result.unwrap().accepted_data_points, 1);
+            if !with_metric_engine {
+                assert_trace_v2_query(
+                    instance,
+                    "SELECT COUNT(*)=3 FROM latency_bucket",
+                    ctx.clone(),
+                )
+                .await
+                .unwrap();
+                assert_trace_v2_query(instance, &format!("SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"), ctx).await.unwrap();
+                continue;
+            }
+            assert_trace_v2_query(
+                instance,
+                &format!("SELECT COUNT(*)=2 FROM {METRICS_EXEMPLARS_TABLE}"),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+            assert_trace_v2_query(instance, &format!("SELECT COUNT(*)=2 FROM {METRICS_EXEMPLARS_TABLE} e JOIN greptime_physical_table m ON e.__table_id=m.__table_id AND e.__tsid=m.__tsid AND e.le=m.le AND e.job=m.job AND e.zone=m.zone WHERE e.greptime_metric='latency_bucket'"), ctx).await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_schema_failure_isolation() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        for metric_fails in [false, true] {
+            let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_partial")
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+            let (failed, retained) = if metric_fails {
+                ("exemplar_partial_total", METRICS_EXEMPLARS_TABLE)
+            } else {
+                (METRICS_EXEMPLARS_TABLE, "exemplar_partial_total")
+            };
+            instance
+                .do_query(
+                    &format!(
+                        "CREATE TABLE {failed} (ts TIMESTAMP TIME INDEX, greptime_value STRING)"
+                    ),
+                    ctx.clone(),
+                )
+                .await
+                .remove(0)
+                .unwrap();
+            let mut request = build_sum_request(
+                "exemplar.partial",
+                AggregationTemporality::Cumulative,
+                &[(10, 1)],
+            );
+            let Some(metric::Data::Sum(sum)) =
+                &mut request.resource_metrics[0].scope_metrics[0].metrics[0].data
+            else {
+                unreachable!()
+            };
+            sum.data_points[0].exemplars.push(Exemplar {
+                time_unix_nano: 10_123_456_789,
+                value: Some(exemplar::Value::AsDouble(0.75)),
+                ..Default::default()
+            });
+            let result = instance.metrics(request, ctx.clone(), None).await;
+            if metric_fails {
+                let outcome = result.unwrap();
+                assert_eq!(outcome.accepted_data_points, 0);
+                assert_eq!(outcome.rejected_data_points, 1);
+                assert_trace_v2_query(
+                    instance,
+                    &format!(
+                        "SELECT COUNT(*)=0 FROM information_schema.tables \
+                     WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"
+                    ),
+                    ctx,
+                )
+                .await
+                .unwrap();
+                continue;
+            }
+            assert!(result.is_err());
+            let output = instance
+                .do_query(&format!("SELECT COUNT(*) FROM {retained}"), ctx)
+                .await
+                .remove(0)
+                .unwrap();
+            let OutputData::Stream(stream) = output.data else {
+                unreachable!()
+            };
+            let rows = RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .pretty_print()
+                .unwrap();
+            assert!(rows.contains("| 1        |"), "{retained}: {rows}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1616,6 +2491,7 @@ WITH(
             .metrics(
                 build_sum_request("fixed.delta", AggregationTemporality::Delta, &[(60, 10)]),
                 ctx.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -1661,7 +2537,7 @@ WITH(
             .is_ok()
         );
 
-        let resp = instance.metrics(req, ctx.clone()).await;
+        let resp = instance.metrics(req, ctx.clone(), None).await;
         assert!(resp.is_ok());
 
         let mut output = instance
@@ -1689,7 +2565,7 @@ WITH(
                 ),
                 build_sum_request(metric, AggregationTemporality::Cumulative, &[(180, 30)]),
             ] {
-                let result = instance.metrics(request, ctx.clone()).await;
+                let result = instance.metrics(request, ctx.clone(), None).await;
                 assert!(result.is_ok(), "{metric}: {result:?}");
             }
 
@@ -1748,7 +2624,7 @@ WITH(
                 unreachable!()
             };
             sum.data_points[0].flags = DataPointFlags::NoRecordedValueMask as u32;
-            assert!(instance.metrics(stale, ctx.clone()).await.is_ok());
+            assert!(instance.metrics(stale, ctx.clone(), None).await.is_ok());
 
             for (matcher, expected_rows) in [
                 ("otlp_aggregation_temporality=\"delta\"", 0),
@@ -1795,7 +2671,10 @@ WITH(
                 ..Default::default()
             }],
         };
-        let outcome = instance.metrics(malformed, ctx.clone()).await.unwrap();
+        let outcome = instance
+            .metrics(malformed, ctx.clone(), None)
+            .await
+            .unwrap();
         assert_eq!(0, outcome.accepted_data_points);
         assert_eq!(1, outcome.rejected_data_points);
         assert!(
@@ -1857,6 +2736,7 @@ WITH(
                 .metrics(
                     build_histogram_request("raw.delta.histogram", points),
                     ctx.clone(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -2144,7 +3024,7 @@ WITH(
                 ..Default::default()
             }],
         };
-        instance.metrics(request, ctx.clone()).await.unwrap();
+        instance.metrics(request, ctx.clone(), None).await.unwrap();
 
         let mut output = instance
             .do_query("SELECT greptime_timestamp FROM my_gauge", ctx.clone())
@@ -2378,7 +3258,7 @@ WITH(
             ..Default::default()
         });
         instance
-            .metrics(warm.clone(), Arc::new(ctx.clone()))
+            .metrics(warm.clone(), Arc::new(ctx.clone()), None)
             .await
             .unwrap();
         let region = async |name: &str| {
@@ -2414,7 +3294,7 @@ WITH(
         let write = tokio::spawn({
             let instance = instance.clone();
             let ctx = Arc::new(ctx.clone());
-            async move { instance.metrics(request, ctx).await }
+            async move { instance.metrics(request, ctx, None).await }
         });
         tokio::time::timeout(Duration::from_secs(10), started_rx)
             .await
@@ -2527,7 +3407,12 @@ WITH(
                     let auth::PermissionTableTargets::Resolved(targets) = targets else {
                         panic!("metric destinations must be resolved");
                     };
-                    let denied = targets.iter().any(|t| t.table == "restricted_metric");
+                    let denied = targets.iter().any(|t| {
+                        matches!(
+                            t.table.as_str(),
+                            "restricted_metric" | METRICS_EXEMPLARS_TABLE
+                        )
+                    });
                     self.calls
                         .lock()
                         .unwrap()
@@ -2575,7 +3460,7 @@ WITH(
                     expected_targets.push("allowed_metric");
                 }
                 let err = instance
-                    .metrics(metric_request(metrics), ctx.clone())
+                    .metrics(metric_request(metrics), ctx.clone(), None)
                     .await
                     .unwrap_err();
                 assert_eq!(err.status_code(), StatusCode::PermissionDenied);
@@ -2586,13 +3471,72 @@ WITH(
                 );
             }
         }
+        let mut metric = gauge_metric("allowed_metric", &[(60_000_000_000, 7.0, None)]);
+        let Some(metric::Data::Gauge(gauge)) = metric.data.as_mut() else {
+            unreachable!()
+        };
+        gauge.data_points[0].exemplars.push(
+            otel_arrow_rust::proto::opentelemetry::metrics::v1::Exemplar {
+                time_unix_nano: 1,
+                value: Some(
+                    otel_arrow_rust::proto::opentelemetry::metrics::v1::exemplar::Value::AsDouble(
+                        0.5,
+                    ),
+                ),
+                ..Default::default()
+            },
+        );
+        let mut metric_ctx = ctx.fork();
+        metric_ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let metric_ctx = Arc::new(metric_ctx);
+        let request = metric_request(vec![metric]);
+        let err = instance
+            .metrics(request.clone(), metric_ctx.clone(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::PermissionDenied);
+        assert_eq!(
+            std::mem::take(&mut *checker.calls.lock().unwrap()),
+            vec![vec!["allowed_metric"], vec![METRICS_EXEMPLARS_TABLE]]
+        );
         assert_trace_v2_query(
             instance,
             "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='allowed_metric'",
-            ctx,
+            ctx.clone(),
         )
         .await
         .unwrap();
+        assert_eq!(
+            instance
+                .metrics(request.clone(), ctx.clone(), None)
+                .await
+                .unwrap()
+                .accepted_data_points,
+            1
+        );
+        assert_eq!(
+            std::mem::take(&mut *checker.calls.lock().unwrap()),
+            vec![vec!["allowed_metric"]]
+        );
+        // Enabling metric-engine ingestion leaves this ordinary destination unchanged.
+        assert_eq!(
+            instance
+                .metrics(request, metric_ctx, None)
+                .await
+                .unwrap()
+                .accepted_data_points,
+            1
+        );
+        assert_eq!(
+            std::mem::take(&mut *checker.calls.lock().unwrap()),
+            vec![vec!["allowed_metric"]]
+        );
+        assert_trace_v2_query(instance, "SELECT COUNT(*)=1 FROM allowed_metric", ctx)
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2614,6 +3558,7 @@ WITH(
                     ],
                 )]),
                 ctx.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -2662,6 +3607,7 @@ WITH(
                             gauge_metric("independent", &[(60_000_000_000, 7.0, None)]),
                         ]),
                         ctx.clone(),
+                        None,
                     )
                     .await
                     .unwrap();
@@ -2732,7 +3678,7 @@ WITH(
                 request.resource_metrics[0].scope_metrics[0]
                     .metrics
                     .push(native_metric("bad", -5));
-                let outcome = instance.metrics(request, ctx.clone()).await.unwrap();
+                let outcome = instance.metrics(request, ctx.clone(), None).await.unwrap();
                 assert_eq!(
                     (outcome.accepted_data_points, outcome.rejected_data_points),
                     (1, 1),
@@ -2778,7 +3724,10 @@ WITH(
                             "invalid_backing",
                             &[(120_000_000_000, 1.0, None)],
                         ));
-                    let outcome = instance.metrics(request, Arc::new(selected)).await.unwrap();
+                    let outcome = instance
+                        .metrics(request, Arc::new(selected), None)
+                        .await
+                        .unwrap();
                     assert_eq!(
                         (outcome.accepted_data_points, outcome.rejected_data_points),
                         (1, 1)
@@ -2823,7 +3772,7 @@ WITH(
             })
             .collect();
         let outcome = instance
-            .metrics(metric_request(vec![metric]), ctx.clone())
+            .metrics(metric_request(vec![metric]), ctx.clone(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -2970,6 +3919,7 @@ WITH(
                                         .collect(),
                                 ),
                                 Arc::new(ctx.clone()),
+                                None,
                             )
                             .await
                             .unwrap();
@@ -3049,7 +3999,7 @@ WITH(
                 metrics.reverse();
             }
             let outcome = instance
-                .metrics(metric_request(metrics.clone()), ctx.clone())
+                .metrics(metric_request(metrics.clone()), ctx.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(
@@ -3068,6 +4018,7 @@ WITH(
                         gauge_metric("independent", &[(120_000_000_000, 9.0, None)]),
                     ]),
                     ctx.clone(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -3085,7 +4036,7 @@ WITH(
                 .unwrap()
                 .clone();
             let outcome = instance
-                .metrics(metric_request(vec![compatible]), ctx.clone())
+                .metrics(metric_request(vec![compatible]), ctx.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(
@@ -3102,7 +4053,7 @@ WITH(
                     .name = "independent".into();
             }
             let outcome = instance
-                .metrics(metric_request(metrics), ctx.clone())
+                .metrics(metric_request(metrics), ctx.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(
@@ -3146,6 +4097,7 @@ WITH(
                             .collect(),
                     ),
                     ctx.clone(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -3241,7 +4193,7 @@ WITH(
                         60_000_000_000 + if precision == 9 { 1 } else { 1 + round as u64 };
                 }
                 let outcome = instance
-                    .metrics(metric_request(vec![metric]), ctx.clone())
+                    .metrics(metric_request(vec![metric]), ctx.clone(), None)
                     .await
                     .unwrap();
                 assert_eq!(
@@ -3314,7 +4266,7 @@ WITH(
                     data.data_points[0].time_unix_nano += if precision == 6 { 1_000 } else { 2 };
                 }
                 instance
-                    .metrics(metric_request(vec![metric]), ctx.clone())
+                    .metrics(metric_request(vec![metric]), ctx.clone(), None)
                     .await
                     .unwrap();
                 assert_trace_v2_query(instance, "SELECT COUNT(*)=2 FROM interval", ctx.clone())
@@ -3347,6 +4299,7 @@ WITH(
                     gauge_metric("independent", &[(60_000_000_000, 7.0, None)]),
                 ]),
                 ctx.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -3359,6 +4312,7 @@ WITH(
                     gauge_metric("independent", &[(120_000_000_000, 9.0, None)]),
                 ]),
                 Arc::new(fixed),
+                None,
             )
             .await
             .unwrap();
@@ -3393,7 +4347,7 @@ WITH(
                 metrics.reverse();
             }
             let outcome = instance
-                .metrics(metric_request(metrics), ctx.clone())
+                .metrics(metric_request(metrics), ctx.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(

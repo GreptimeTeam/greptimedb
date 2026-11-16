@@ -43,6 +43,8 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   `handler/utils.rs` for per-node address persistence. Datanode address
   updates retain the statistics handler's per-node ordering. Address epochs are
   confirmed only after a successful save; cache invalidation remains best effort.
+  A changed datanode address invalidates every table on that node (`__dn_table`),
+  not only the tables in the current heartbeat.
 - **Datanode process fence**: before the handler chain, the leader's heartbeat
   session checks a datanode request's non-zero `node_epoch` against the highest
   one recorded under `__datanode_epoch`, read and raised through the leader
@@ -55,6 +57,10 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   `common-meta`'s `DdlManager`, executed via `common-procedure`.
 - **Region migration**: `procedure/region_migration/manager.rs` plus per-step
   files; triggered by failover or an explicit command.
+- **HTTP drain administration**: `service/admin/datanode.rs` checks the same leader
+  predicate as gRPC procedure submission. Drain submissions and restoring scheduling
+  wait for procedure recovery and share admission control in `procedure/drain_datanode/manager.rs`; retain both
+  the recovered-procedure and concurrent-submission tests when changing this boundary.
 - **Leader election**: via `common-meta`'s election; transitions in `state.rs`.
 
 ## Public surface

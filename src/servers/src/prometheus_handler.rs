@@ -128,6 +128,17 @@ pub fn resolve_schema_from_matchers(matchers: &[Matcher]) -> Result<Option<Strin
 
 #[async_trait]
 pub trait PrometheusHandler {
+    async fn query_exemplars(
+        &self,
+        _query: crate::exemplar::query::Query,
+        _ctx: QueryContextRef,
+    ) -> Result<Vec<crate::exemplar::query::Series>> {
+        crate::error::NotSupportedSnafu {
+            feat: "query_exemplars",
+        }
+        .fail()
+    }
+
     async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
 
     /// Executes a query whose statement has already been parsed.
@@ -168,11 +179,18 @@ pub trait PrometheusHandler {
         query_ctx: &QueryContextRef,
     ) -> Result<()>;
 
-    /// Removes inaccessible metric names from logical-table metadata enumeration results.
+    /// Removes inaccessible names from non-physical table metadata enumeration results.
     async fn filter_metadata_metric_names(
         &self,
         metric_names: Vec<String>,
         schema: &str,
+        query_ctx: &QueryContextRef,
+    ) -> Result<Vec<String>>;
+
+    /// Removes schemas the user cannot access from metadata enumeration results.
+    async fn filter_metadata_schema_names(
+        &self,
+        schema_names: Vec<String>,
         query_ctx: &QueryContextRef,
     ) -> Result<Vec<String>>;
 

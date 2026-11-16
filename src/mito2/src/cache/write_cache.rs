@@ -38,6 +38,7 @@ use crate::region::opener::RegionLoadCacheTask;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
+use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
@@ -300,6 +301,7 @@ impl WriteCache {
         let store = self.file_cache.local_store();
         let path_provider = WriteCachePathProvider::new(self.file_cache.clone());
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: write_request.index_build_inputs,
             build_type: write_request.op_type.into(),
             metadata: write_request.metadata.clone(),
             puffin_manager: self
@@ -308,9 +310,11 @@ impl WriteCache {
             write_cache_enabled: true,
             intermediate_manager: self.intermediate_manager.clone(),
             index_options: write_request.index_options,
-            inverted_index_config: write_request.inverted_index_config,
-            fulltext_index_config: write_request.fulltext_index_config,
-            bloom_filter_index_config: write_request.bloom_filter_index_config,
+            registry: Arc::new(IndexRegistry::new(
+                write_request.inverted_index_config,
+                write_request.fulltext_index_config,
+                write_request.bloom_filter_index_config,
+            )),
         };
 
         let cleaner = TempFileCleaner::new(region_id, store.clone());
@@ -743,6 +747,7 @@ mod tests {
         ]);
 
         let write_request = SstWriteRequest {
+            index_build_inputs: None,
             op_type,
             metadata,
             source,
@@ -860,6 +865,7 @@ mod tests {
 
         // Write to local cache and upload sst to mock remote store
         let write_request = SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Flush,
             metadata,
             source,
@@ -952,6 +958,7 @@ mod tests {
 
         // Write to local cache and upload sst to mock remote store
         let write_request = SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Flush,
             metadata,
             source,

@@ -43,6 +43,15 @@ pub struct PhysicalRegionState {
     primary_key_encoding: PrimaryKeyEncoding,
     options: PhysicalRegionOptions,
     time_index_unit: TimeUnit,
+    /// Serializes adding columns to this physical region: the column existence
+    /// check, the column id allocation and the physical ALTER that installs the
+    /// columns. Column ids are derived from the current metadata, so two
+    /// concurrent add-column requests on logical regions sharing this physical
+    /// region could otherwise assign the same id to different columns.
+    ///
+    /// Callers clone the [`Arc`] out of the state and hold it across the
+    /// physical alter; see [`crate::data_region::DataRegion::add_columns`].
+    column_add_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl PhysicalRegionState {
@@ -67,7 +76,13 @@ impl PhysicalRegionState {
             primary_key_encoding,
             options,
             time_index_unit,
+            column_add_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Returns the lock that serializes adding columns to this physical region.
+    pub fn column_add_lock(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.column_add_lock
     }
 
     /// Returns a reference to the logical region ids.

@@ -114,7 +114,6 @@ const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("otlp", otlp::build_otlp_codec),
     ("otlp_metrics", otlp::build_otlp_codec),
     ("promwrite", prom_write::build_prom_write_codec),
-    ("prom_remote_write", prom_write::build_prom_write_codec),
     ("text", build_unimplemented_text_codec),
     ("txt", build_unimplemented_text_codec),
     ("binary", build_unimplemented_binary_codec),
@@ -253,11 +252,47 @@ fn resolve_table_name(
 pub(crate) struct CopyInState {
     query_ctx: QueryContextRef,
     payload: Payload,
+    /// Reservations against the shared request-memory limiter for the
+    /// bytes buffered by a Prometheus payload, acquired per CopyData
+    /// chunk as it arrives and held until the buffer is flushed or the
+    /// copy ends — the receive-stage counterpart of HTTP's
+    /// body-accounting middleware, so concurrent unfinished COPY
+    /// requests cannot retain unaccounted memory.
+    memory_guards: Vec<
+        common_memory_manager::MemoryGuard<crate::request_memory_metrics::RequestMemoryMetrics>,
+    >,
+    /// Payload bytes already covered by limiter grants, in the
+    /// limiter's KiB grant granularity. Chunks acquire only the
+    /// uncovered delta (`buffered_total - granted`), so rounding adds at
+    /// most one KiB for the whole stream instead of one per chunk.
+    granted_bytes: u64,
     /// The resolved codec's name, for logging.
     codec_name: &'static str,
     /// The wire format code of the resolved codec.
     codec_format_code: i8,
     rows_written: u64,
+}
+
+/// The receive-stage reservation for one buffered payload, handed to
+/// the flush that consumes the payload: the guards must outlive the
+/// payload's bytes (they may coexist with the decode buffer or wait on
+/// decode quota), and `charged_bytes` is the payload's pre-charged
+/// reservation to hand to decode-side fits checks.
+pub(crate) struct BufferedReservation {
+    /// Held only for its Drop (the reservation release); never read.
+    #[allow(dead_code)]
+    guards: Vec<
+        common_memory_manager::MemoryGuard<crate::request_memory_metrics::RequestMemoryMetrics>,
+    >,
+    granted_bytes: u64,
+}
+
+impl BufferedReservation {
+    /// The payload bytes already charged at the receive stage; decode
+    /// paths take this as their pre-held reservation.
+    pub(crate) fn charged_bytes(&self) -> u64 {
+        self.granted_bytes
+    }
 }
 
 enum Payload {
@@ -330,6 +365,8 @@ impl CopyInState {
                 parser,
                 rows: Vec::with_capacity(COPY_IN_FLUSH_ROWS),
             },
+            memory_guards: Vec::new(),
+            granted_bytes: 0,
             codec_name: "csv",
             codec_format_code: 0,
             rows_written: 0,
@@ -345,6 +382,8 @@ impl CopyInState {
                 data: Vec::new(),
                 precision: options.precision,
             },
+            memory_guards: Vec::new(),
+            granted_bytes: 0,
             codec_name: "influxdb",
             codec_format_code: 0,
             rows_written: 0,
@@ -361,6 +400,8 @@ impl CopyInState {
                 data: Vec::new(),
                 options: options.clone(),
             },
+            memory_guards: Vec::new(),
+            granted_bytes: 0,
             codec_name: "otlp",
             codec_format_code: 1,
             rows_written: 0,
@@ -378,6 +419,8 @@ impl CopyInState {
                 data: Vec::new(),
                 options: options.clone(),
             },
+            memory_guards: Vec::new(),
+            granted_bytes: 0,
             codec_name: "promwrite",
             codec_format_code: 1,
             rows_written: 0,
@@ -387,6 +430,52 @@ impl CopyInState {
     /// The wire format code advertised to the client.
     pub(crate) fn format_code(&self) -> i8 {
         self.codec_format_code
+    }
+
+    /// Prometheus bodies are charged against the shared request-memory limiter
+    /// as they arrive, before decode and conversion acquire additional memory.
+    fn buffers_payload(&self) -> bool {
+        matches!(self.payload, Payload::PromWrite { .. })
+    }
+
+    /// The payload bytes currently buffered (charged or not).
+    fn buffered_bytes(&self) -> u64 {
+        match &self.payload {
+            Payload::Influxdb { data, .. }
+            | Payload::Otlp { data, .. }
+            | Payload::PromWrite { data, .. } => data.len() as u64,
+            Payload::Table { .. } => 0,
+        }
+    }
+
+    /// The payload bytes already covered by grants (KiB-aligned).
+    fn granted_bytes(&self) -> u64 {
+        self.granted_bytes
+    }
+
+    /// Retains a new reservation and records the granted coverage: the
+    /// limiter grants in KiB granularity, so coverage rounds the
+    /// buffered total up to the next KiB — subsequent chunks inside
+    /// that headroom need no acquisition.
+    fn charge_chunk(
+        &mut self,
+        guard: common_memory_manager::MemoryGuard<
+            crate::request_memory_metrics::RequestMemoryMetrics,
+        >,
+        buffered_total: u64,
+    ) {
+        self.memory_guards.push(guard);
+        self.granted_bytes = buffered_total.div_ceil(1024) * 1024;
+    }
+
+    /// Detaches the buffered-payload reservation so a flush can hold it
+    /// alongside the payload until the payload's memory is actually
+    /// consumed; see [`Self::memory_guards`].
+    fn take_reservation(&mut self) -> BufferedReservation {
+        BufferedReservation {
+            guards: std::mem::take(&mut self.memory_guards),
+            granted_bytes: std::mem::take(&mut self.granted_bytes),
+        }
     }
 
     /// Feeds a `CopyData` chunk into the parser and buffers parsed rows
@@ -466,14 +555,18 @@ impl CopyInState {
     }
 
     /// Takes the buffered remote-write body and its options, if any.
-    fn take_prom_write(&mut self) -> Option<(PromWriteOptions, Vec<u8>)> {
+    fn take_prom_write(&mut self) -> Option<(PromWriteOptions, Vec<u8>, BufferedReservation)> {
         let Payload::PromWrite { options, data } = &mut self.payload else {
             return None;
         };
         if data.is_empty() {
             return None;
         }
-        Some((options.clone(), std::mem::take(data)))
+        Some((
+            options.clone(),
+            std::mem::take(data),
+            self.take_reservation(),
+        ))
     }
 
     /// Takes the buffered payload as one line-protocol request body, if
@@ -664,8 +757,6 @@ impl PostgresServerHandlerInner {
         )))
     }
 
-    /// Flushes the buffered payload of an in-progress copy. Returns the
-    /// number of rows written by the flushed batch.
     /// Resolves the target table and builds the table-bound copy state
     /// shared by csv and jsonl.
     async fn table_bound_state(
@@ -703,6 +794,8 @@ impl PostgresServerHandlerInner {
         CopyInState::new(codec, stmt.columns.clone(), table_info, query_ctx, table)
     }
 
+    /// Flushes the buffered payload of an in-progress copy. Returns the
+    /// number of rows written by the flushed batch.
     async fn flush_copy_in(&self, state: &mut CopyInState) -> PgWireResult<u64> {
         let query_ctx = state.query_ctx.clone();
         // The buffered influxdb payload is completed through the
@@ -719,14 +812,14 @@ impl PostgresServerHandlerInner {
                 .flush_otlp(otlp_handler, options, bytes, query_ctx)
                 .await;
         }
-        if let Some((options, bytes)) = state.take_prom_write() {
+        if let Some((options, bytes, reservation)) = state.take_prom_write() {
             let Some(prom_write_state) = &self.prom_write_state else {
                 return Err(unsupported(
                     "this server is not wired for the promwrite format",
                 ));
             };
             return self
-                .flush_prom_write(prom_write_state, options, bytes, query_ctx)
+                .flush_prom_write(prom_write_state, options, bytes, reservation, query_ctx)
                 .await;
         }
         if let Some(request) = state.take_lines()? {
@@ -804,7 +897,11 @@ impl PostgresServerHandlerInner {
                 let request = ExportMetricsServiceRequest::decode(bytes.as_slice())
                     .map_err(|e| bad_copy_data(format!("invalid OTLP payload: {e}")))?;
                 let outcome = otlp_handler
-                    .metrics(request, Arc::new(ctx))
+                    .metrics(
+                        request,
+                        Arc::new(ctx),
+                        Some((self.memory_limiter.clone(), 0)),
+                    )
                     .await
                     .map_err(convert_err)?;
                 // Same failure semantics as the HTTP route: a payload
@@ -914,6 +1011,7 @@ impl PostgresServerHandlerInner {
         prom_write_state: &crate::http::prom_store::PromStoreState,
         options: PromWriteOptions,
         bytes: Vec<u8>,
+        reservation: BufferedReservation,
         query_ctx: QueryContextRef,
     ) -> PgWireResult<u64> {
         use crate::http::prom_store::{
@@ -928,6 +1026,11 @@ impl PostgresServerHandlerInner {
         // Same context extensions the HTTP endpoint stamps (physical
         // table, semantic identity); the channel stays this
         // connection's postgres channel.
+        // Capture pipeline presence BEFORE the options are moved: the
+        // v2 core rejects pipelines combined with exemplars, exactly
+        // like the HTTP route, so the same payload+options cannot be
+        // silently ingested without the pipeline over COPY.
+        let has_pipeline = options.pipeline_name.is_some();
         let mut ctx = (*query_ctx).clone();
         stamp_remote_write_extensions(&mut ctx, options.physical_table.as_deref(), version_str);
         let pipeline_info = crate::http::extractor::PipelineInfo {
@@ -936,30 +1039,41 @@ impl PostgresServerHandlerInner {
             pipeline_params: Default::default(),
         };
         let body = axum::body::Bytes::from(bytes);
+        // The db labels the write-progress counters. The body's receive
+        // reservation stays held for the whole ingestion (the guards in
+        // `reservation` drop when it does), and its charged bytes ride
+        // along as the decode-side pre-held reservation — the same
+        // contract HTTP's body accounting passes downstream.
+        let body_reserved_bytes = reservation.charged_bytes();
+        let db = query_ctx.get_db_string();
         match options.version {
             PromWriteVersion::V1 => {
-                let outcome = ingest_remote_write_v1(
+                let result = ingest_remote_write_v1(
                     prom_write_state,
+                    &db,
                     pipeline_info,
                     options.zstd,
                     Arc::new(ctx),
                     body,
+                    body_reserved_bytes,
                 )
                 .await
                 .map_err(|error| convert_err(error.error))?;
-                Ok(outcome.rows_written)
+                Ok(result.written.iter().sum())
             }
             PromWriteVersion::V2 => {
-                // The db labels the per-batch write-progress counters,
-                // and CopyData carries no pre-charged body reservation
-                // (the decompressed size is charged inside decode, like
-                // an HTTP request without the accounting extension).
-                let db = query_ctx.get_db_string();
-                let (outcome, _, _) =
-                    ingest_remote_write_v2(prom_write_state, &db, options.zstd, ctx, body, 0)
-                        .await
-                        .map_err(|error| convert_err(error.error))?;
-                Ok(outcome.samples_written + outcome.histograms_written)
+                let result = ingest_remote_write_v2(
+                    prom_write_state,
+                    &db,
+                    has_pipeline,
+                    options.zstd,
+                    ctx,
+                    body,
+                    body_reserved_bytes,
+                )
+                .await
+                .map_err(|error| convert_err(error.error))?;
+                Ok(result.written.iter().sum())
             }
         }
     }
@@ -1007,7 +1121,45 @@ impl CopyHandler for PostgresServerHandlerInner {
         // below aborts the whole copy and drops the buffered data —
         // otherwise a pooled connection would retain failed-import
         // buffers until its next COPY. On success it is put back.
-        state.feed(&copy_data.data)?;
+        //
+        // Buffered Prometheus payloads charge their bytes against the
+        // shared request-memory limiter as they arrive (the
+        // receive-stage counterpart of HTTP's body accounting); the
+        // reservation is held until the buffer is flushed or the state
+        // is dropped.
+        if state.buffers_payload() {
+            let chunk_bytes = u64::try_from(copy_data.data.len())
+                .map_err(|_| bad_copy_data("chunk too large"))?;
+            // Charge only this chunk's uncovered delta against the
+            // shared budget: the limiter rounds each acquisition up to a
+            // KiB, so per-chunk full charges would accumulate rounding
+            // overhead (64 x 16-byte chunks would retain 64 KiB of
+            // permits for 1 KiB of payload). The fits check covers only
+            // THIS request's own holdings — cross-request contention is
+            // left to `acquire`, which applies the configured
+            // Wait/Reject policy instead of failing fast.
+            let buffered_after = state.buffered_bytes() + chunk_bytes;
+            // Granted coverage is KiB-aligned, so it can exceed the
+            // buffered bytes: chunks inside the rounding headroom are
+            // already covered.
+            let uncovered = buffered_after.saturating_sub(state.granted_bytes());
+            if uncovered > 0 {
+                self.memory_limiter
+                    .check_request_fits(uncovered, state.granted_bytes())
+                    .map_err(convert_err)?;
+                let memory_guard = self.memory_limiter.acquire(uncovered).await.map_err(|e| {
+                    convert_err(crate::prom_remote_write::map_memory_acquire_timeout(e))
+                })?;
+                state.feed(&copy_data.data)?;
+                state.charge_chunk(memory_guard, buffered_after);
+            } else {
+                // Fully covered by the previous acquisitions' rounding
+                // headroom.
+                state.feed(&copy_data.data)?;
+            }
+        } else {
+            state.feed(&copy_data.data)?;
+        }
         if state.should_flush() {
             let rows = self.flush_copy_in(&mut state).await?;
             state.rows_written += rows;

@@ -44,8 +44,10 @@ use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::FlatSource;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
+use crate::sst::index::build::IndexBuildInputs;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
+use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -157,6 +159,7 @@ pub struct AccessLayer {
     puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
+    file_protection: Option<crate::engine::region_hook::RegionHookRef>,
 }
 
 impl std::fmt::Debug for AccessLayer {
@@ -182,6 +185,26 @@ impl AccessLayer {
             object_store,
             puffin_manager_factory,
             intermediate_manager,
+            file_protection: None,
+        }
+    }
+
+    /// Attaches the engine's deletion-time protection provider for local purging.
+    pub(crate) fn with_file_protection(
+        mut self,
+        hook: Option<crate::engine::region_hook::RegionHookRef>,
+    ) -> Self {
+        self.file_protection = hook;
+        self
+    }
+
+    pub(crate) async fn is_file_protected(&self, file: RegionFileId) -> crate::error::Result<bool> {
+        match &self.file_protection {
+            Some(hook) => Ok(hook
+                .protected_sst_files(self, &[file])
+                .await?
+                .contains(&file)),
+            None => Ok(false),
         }
     }
 
@@ -349,6 +372,36 @@ impl AccessLayer {
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
+        self.write_sst_inner(request, write_opts, metrics, None)
+            .await
+    }
+
+    /// Writes an SST whose output is registered with `context.guard`.
+    ///
+    /// The write cache is bypassed, upload concurrency is fixed to one, and
+    /// the guard runs before either the SST or its index becomes visible.
+    /// `context.limits` bounds the encoder and footer workspace.
+    #[cfg(feature = "enterprise")]
+    pub(crate) async fn write_sst_with_guard(
+        &self,
+        request: SstWriteRequest,
+        write_opts: &WriteOptions,
+        metrics: &mut Metrics,
+        context: crate::sst::parquet::writer::SstWriteContext,
+    ) -> Result<SstInfoArray> {
+        self.write_sst_inner(request, write_opts, metrics, Some(context))
+            .await
+    }
+
+    async fn write_sst_inner(
+        &self,
+        request: SstWriteRequest,
+        write_opts: &WriteOptions,
+        metrics: &mut Metrics,
+        context: Option<crate::sst::parquet::writer::SstWriteContext>,
+    ) -> Result<SstInfoArray> {
+        let limits = context.as_ref().map(|context| context.limits);
+        let guard = context.map(|context| context.guard);
         let op_type = request.op_type;
         let region_id = request.metadata.region_id;
         let region_metadata = request.metadata.clone();
@@ -359,7 +412,9 @@ impl AccessLayer {
             request.max_sequence
         };
 
-        let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
+        let sst_info = if let Some(write_cache) = cache_manager.write_cache()
+            && guard.is_none()
+        {
             // Write to the write cache.
             write_cache
                 .write_and_upload_sst(
@@ -376,21 +431,29 @@ impl AccessLayer {
                 )
                 .await?
         } else {
-            // Write cache is disabled.
+            // Write cache is disabled, or bypassed by an SST write guard.
             let store = self.object_store.clone();
             let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
+            let puffin_factory = if limits.is_some() {
+                self.puffin_manager_factory
+                    .clone()
+                    .with_write_buffer_size(write_opts.write_buffer_size.as_bytes() as usize)
+            } else {
+                self.puffin_manager_factory.clone()
+            };
             let indexer_builder = IndexerBuilderImpl {
+                index_build_inputs: request.index_build_inputs,
                 build_type: request.op_type.into(),
                 metadata: request.metadata.clone(),
-                puffin_manager: self
-                    .puffin_manager_factory
-                    .build(store, path_provider.clone()),
+                puffin_manager: puffin_factory.build(store, path_provider.clone()),
                 write_cache_enabled: false,
                 intermediate_manager: self.intermediate_manager.clone(),
                 index_options: request.index_options,
-                inverted_index_config: request.inverted_index_config,
-                fulltext_index_config: request.fulltext_index_config,
-                bloom_filter_index_config: request.bloom_filter_index_config,
+                registry: Arc::new(IndexRegistry::new(
+                    request.inverted_index_config,
+                    request.fulltext_index_config,
+                    request.bloom_filter_index_config,
+                )),
             };
             // We disable write cache on file system but we still use atomic write.
             // TODO(yingwen): If we support other non-fs stores without the write cache, then
@@ -405,7 +468,14 @@ impl AccessLayer {
                 metrics,
             )
             .await
-            .with_file_cleaner(cleaner);
+            .with_file_cleaner(cleaner)
+            .with_write_concurrency(if guard.is_some() {
+                1
+            } else {
+                crate::sst::DEFAULT_WRITE_CONCURRENCY
+            })
+            .with_write_guard(guard)
+            .with_memory_limits(limits);
             match request.sst_write_format {
                 FormatType::PrimaryKey => {
                     writer
@@ -425,7 +495,7 @@ impl AccessLayer {
         };
 
         // Put parquet metadata to cache manager.
-        if !sst_info.is_empty() && cache_manager.sst_meta_cache_enabled() {
+        if !sst_info.is_empty() && cache_manager.sst_meta_cache_on_write_enabled() {
             let runtime = match op_type {
                 OperationType::Compact => common_runtime::compact_runtime(),
                 OperationType::Flush => common_runtime::global_runtime(),
@@ -603,6 +673,8 @@ pub enum OperationType {
 
 /// Contents to build a SST.
 pub struct SstWriteRequest {
+    /// Optional preplanned index work and physical input files.
+    pub index_build_inputs: Option<IndexBuildInputs>,
     pub op_type: OperationType,
     pub metadata: RegionMetadataRef,
     pub source: FlatSource,
@@ -639,15 +711,18 @@ impl EncodedSstIndexBuildParams {
         intermediate_manager: IntermediateManager,
     ) -> IndexerBuilderImpl {
         IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: OperationType::Flush.into(),
             metadata: self.metadata,
             puffin_manager,
             write_cache_enabled,
             intermediate_manager,
             index_options: self.index_options,
-            inverted_index_config: self.inverted_index_config,
-            fulltext_index_config: self.fulltext_index_config,
-            bloom_filter_index_config: self.bloom_filter_index_config,
+            registry: Arc::new(IndexRegistry::new(
+                self.inverted_index_config,
+                self.fulltext_index_config,
+                self.bloom_filter_index_config,
+            )),
         }
     }
 }
@@ -916,6 +991,117 @@ mod tests {
                 encoded
             );
         }
+    }
+
+    #[rstest::rstest]
+    #[case::flush(OperationType::Flush, false)]
+    #[case::local_compaction(OperationType::Compact, false)]
+    #[case::input_only_compaction(OperationType::Compact, true)]
+    #[tokio::test]
+    async fn test_written_sst_metadata_cache_policy(
+        #[case] op_type: OperationType,
+        #[case] input_only: bool,
+    ) {
+        use crate::cache::CacheStrategy;
+        use crate::sst::file::FileMeta;
+        use crate::sst::file_purger::NoopFilePurger;
+        use crate::sst::parquet::reader::MetadataCacheMetrics;
+        use crate::test_util::sst_util::{
+            new_flat_source_from_record_batches, new_record_batch_by_range, sst_region_metadata,
+        };
+
+        let mut env = TestEnv::new().await;
+        let store = env.init_object_store_manager();
+        let access_layer = AccessLayer::new(
+            "test",
+            PathType::Bare,
+            store,
+            env.get_puffin_manager(),
+            env.get_intermediate_manager(),
+        );
+        let builder = CacheManager::builder().sst_meta_cache_size(1024 * 1024);
+        let cache = Arc::new(if input_only {
+            builder.disable_sst_meta_cache_on_write().build()
+        } else {
+            builder.build()
+        });
+        let metadata = Arc::new(sst_region_metadata());
+        let region_id = metadata.region_id;
+        let infos =
+            access_layer
+                .write_sst(
+                    SstWriteRequest {
+                        index_build_inputs: None,
+                        op_type,
+                        metadata,
+                        source: new_flat_source_from_record_batches(vec![
+                            new_record_batch_by_range(&["a", "b"], 0, 16),
+                        ]),
+                        cache_manager: cache.clone(),
+                        max_sequence: None,
+                        sst_write_format: FormatType::Flat,
+                        preserve_row_sequence: false,
+                        index_options: Default::default(),
+                        index_config: Default::default(),
+                        inverted_index_config: Default::default(),
+                        fulltext_index_config: Default::default(),
+                        bloom_filter_index_config: Default::default(),
+                    },
+                    &WriteOptions::default(),
+                    &mut Metrics::new(WriteType::Compaction),
+                )
+                .await
+                .unwrap();
+        assert_eq!(1, infos.len());
+        // A prewarming task owns a cache reference until both tiers are populated.
+        // Drain it before checking absence so the negative assertion cannot race it.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while Arc::strong_count(&cache) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let info = &infos[0];
+        let file_id = RegionFileId::new(region_id, info.file_id);
+        let cached = cache
+            .get_sst_meta_data(
+                file_id,
+                &mut MetadataCacheMetrics::default(),
+                PageIndexPolicy::Skip,
+                &common_runtime::compact_runtime(),
+            )
+            .await;
+        assert_eq!(!input_only, cached.is_some());
+
+        let file = FileHandle::new(
+            FileMeta {
+                region_id,
+                file_id: info.file_id,
+                file_size: info.file_size,
+                ..Default::default()
+            },
+            Arc::new(NoopFilePurger),
+        );
+        let path = file.file_path(access_layer.table_dir(), access_layer.path_type());
+        let reader = access_layer
+            .read_sst(file)
+            .cache(CacheStrategy::Compaction(cache));
+        let mut cold = MetadataCacheMetrics::default();
+        let (first, _) = reader
+            .read_parquet_metadata(&path, info.file_size, &mut cold, PageIndexPolicy::Skip)
+            .await
+            .unwrap();
+        assert_eq!(input_only, cold.num_reads > 0);
+        let mut warm = MetadataCacheMetrics::default();
+        let (second, _) = reader
+            .read_parquet_metadata(&path, info.file_size, &mut warm, PageIndexPolicy::Skip)
+            .await
+            .unwrap();
+        assert_eq!(16, second.parquet_metadata().file_metadata().num_rows());
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(0, warm.num_reads);
+        assert_eq!(1, warm.mem_cache_hit);
     }
 
     #[tokio::test]

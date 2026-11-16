@@ -20,6 +20,7 @@ use mito2::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use mito2::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use mito2::region::ManifestStats;
 use mito2::sst::file::RegionFileId;
+use mito2::sst::file_metadata::FileMetadataInterner;
 use mito2::sst::location::{region_dir_from_table_dir, sst_file_path};
 use object_store::ObjectStore;
 use parquet::file::FOOTER_SIZE;
@@ -94,11 +95,16 @@ impl SstReplaceCommand {
             .unwrap_or_else(|| vec![PathType::Bare, PathType::Data, PathType::Metadata]);
         let mut found = None;
         let mut existing_manifests = Vec::new();
+        let file_metadata_interner = FileMetadataInterner::new();
         for candidate in candidates {
             let stats = ManifestStats::default();
             let region_dir = region_dir_from_table_dir(&self.table_dir, region_id, candidate);
-            let manifest_opts =
-                RegionManifestOptions::new(&mito_config, &region_dir, &object_store);
+            let manifest_opts = RegionManifestOptions::new(
+                &mito_config,
+                &region_dir,
+                &object_store,
+                file_metadata_interner.clone(),
+            );
             let Some(manifest_manager) = RegionManifestManager::open(manifest_opts, &stats)
                 .await
                 .map_err(|e| {
@@ -161,7 +167,7 @@ impl SstReplaceCommand {
         let new_num_row_groups = parquet_meta.num_row_groups() as u64;
         validate_replacement(&old_file, new_num_rows, new_num_row_groups)?;
 
-        let mut new_file = old_file.clone();
+        let mut new_file = old_file.as_ref().clone();
         new_file.file_size = new_file_size;
         new_file.num_rows = new_num_rows;
         new_file.num_row_groups = new_num_row_groups;
@@ -208,6 +214,7 @@ impl SstReplaceCommand {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         let version = manifest_manager
             .update(

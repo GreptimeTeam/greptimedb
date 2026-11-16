@@ -27,7 +27,9 @@ remote datanodes via `operator`/`client`.
 | `instance` | `src/frontend/src/instance.rs` | `Instance`: the core handler; implements `SqlQueryHandler`, `PrometheusHandler`, etc. |
 | `instance/builder` | `src/frontend/src/instance/builder.rs` | `FrontendBuilder` assembles `Instance` from its dependencies |
 | `instance/grpc` | `src/frontend/src/instance/grpc.rs` | `GrpcQueryHandler`: insert/delete/query/promql over gRPC |
+| `instance/schema_selection` | `src/frontend/src/instance/schema_selection.rs` | SQL database selection and authorization for sessions without a selected schema |
 | `instance/region_query` | `src/frontend/src/instance/region_query.rs` | Routes distributed region reads to datanodes |
+| `instance/exemplar` | `src/frontend/src/instance/exemplar.rs` | Resolves and authorizes selector branches before bounded exemplar-table scans |
 | `instance/*` | `src/frontend/src/instance/` | Per-protocol handlers (`influxdb.rs`, `promql.rs`, `otlp/`, `jaeger.rs`, `logs.rs`, `prom_store.rs`, ...) |
 | `frontend` | `src/frontend/src/frontend.rs` | `Frontend` lifecycle wrapper (`FrontendOptions`, start/shutdown) |
 | `server` | `src/frontend/src/server.rs` | `Services`: builds and wires the protocol servers |
@@ -42,6 +44,12 @@ including caches owned by pipeline and protocol handlers.
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
   permission checks, timeout/cancellation, and delegates planning/execution to
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
+  MySQL sessions without a selected database validate explicit scopes before
+  planning or executing SQL, including prepared statements; unqualified targets
+  fail without falling back to `public`.
+- **Exemplar query** (`instance/exemplar.rs`): authorize all selector branches
+  before calling `PromQueryInterceptor::pre_execute_exemplars` for each resolved
+  exemplar table, with that table's schema context, before scanning it.
 - **Logical-table batch DDL** (`instance.rs`): dedicated SQL handler → bounded
   parse/interception → all-member permissions → operator CREATE preparation →
   one logical-table batch procedure. Keep pre-submission validation side-effect free.
@@ -74,12 +82,18 @@ including caches owned by pipeline and protocol handlers.
   These tables are ingestion-managed; manual mutation requires restarting
   serving frontends.
 
-- **OTLP metrics** (`instance/otlp.rs`): authorize all emitted destinations before
-  schema preflight can reject points or expose destination schemas.
+- **OTLP metrics** (`instance/otlp.rs`): authorize source tables before schema
+  preflight can reject points or expose their schemas. Skip and count exemplars
+  when metric-engine ingestion is disabled or the source is an ordinary table,
+  retaining metric rows. Authorize retained exemplar writes before accessing
+  the exemplar destination or reserving expansion memory.
+  Reserve exemplar expansion with the transport's memory limiter before building
+  rows; retain the permit through `WriteProgress` until writes complete.
+  Expansion must not wait while the request holds transport memory permits.
 
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
-  one shared batcher for opted-in HTTP Prom and OTLP metric-engine
-  writes. Downstream routers can initialize it when enabling replacement endpoints.
+  one shared batcher for opted-in Prom remote-write (HTTP and PostgreSQL COPY)
+  and OTLP metric-engine writes. Downstream routers can initialize it when enabling replacement endpoints.
   `Instance::handle_otlp_metric_row_inserts` shares OTLP eligibility and dispatch
   between converters and falls back for incompatible tables.
   The schema adapter holds a weak instance reference to avoid an ownership cycle.
@@ -116,6 +130,14 @@ cargo nextest run -p frontend
 
 - Keep the frontend/servers split straight: wire format and network live in
   `servers`; permissions, planning, and routing live here.
+- A statement whose tables are known only at execution time (`COPY DATABASE`)
+  resolves them first, authorizes every resolved table, then executes exactly
+  the authorized set. Do not authorize such a statement with empty targets.
+- Built-in permission action names are a contract with external
+  `PermissionChecker` implementations. Define each as a constant in
+  `src/auth/src/permission.rs` and list it in `ALL_ACTIONS`; do not build them
+  from string literals at call sites. A new action or access-mode requirement
+  on an existing statement or endpoint is a user-visible permission change.
 - Standalone vs distributed diverge in datanode access (the `standalone` crate's
   local `RegionServer` adapter vs `NodeClients` RPC), MetaClient usage, and
   whether heartbeat matters. The builder defaults local invalidation to its

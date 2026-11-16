@@ -50,7 +50,7 @@ pub enum SettableRegionRoleState {
     DowngradingLeader,
     /// Exit staging mode and return to normal leader state. Only allowed from staging state.
     Leader,
-    /// Enter staging mode. Region remains writable but disables checkpoint and compaction. Only allowed from normal leader state.
+    /// Enter staging mode. Region remains writable but disables checkpoint, compaction and flush. Only allowed from normal leader state.
     StagingLeader,
 }
 
@@ -579,7 +579,10 @@ pub struct RegionStatistic {
     pub memtable_size: u64,
     /// The size of WAL in bytes.
     pub wal_size: u64,
-    /// The size of manifest in bytes.
+    /// Stored bytes of the latest observed manifest checkpoint and subsequent deltas,
+    /// compressed when enabled. Excludes staging manifests, `_last_checkpoint`, and
+    /// superseded files still present on disk. This is a logical recovery-size estimate,
+    /// not the physical directory usage; observation failures can leave it incomplete.
     pub manifest_size: u64,
     /// The size of SST data files owned by this region in bytes.
     ///
@@ -600,12 +603,14 @@ pub struct RegionStatistic {
     #[serde(default)]
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
-    /// Total Parquet bytes committed by flushes since the region opened.
+    /// Total ingested Parquet bytes since the region opened.
+    /// Currently counts only committed flush output.
     ///
-    /// Includes staging flushes, but excludes index files, compaction and imported SSTs.
+    /// Excludes index files, compaction and imported SSTs.
     /// Resets when the region instance is recreated; manifest replay does not increment it.
-    #[serde(default)]
-    pub flushed_parquet_bytes: u64,
+    /// Accepts the legacy `flushed_parquet_bytes` key; upgrade metasrv before datanodes.
+    #[serde(default, alias = "flushed_parquet_bytes")]
+    pub ingested_parquet_bytes: u64,
     /// The total query CPU time of the region since region opened.
     ///
     /// Unit: nanoseconds.
@@ -801,24 +806,39 @@ mod tests {
             "written_bytes": 11
         }"#;
         let mut statistic = RegionStatistic::deserialize_from_slice(legacy_bytes).unwrap();
-        assert_eq!(statistic.flushed_parquet_bytes, 0);
-        statistic.flushed_parquet_bytes = 1234;
+        assert_eq!(statistic.ingested_parquet_bytes, 0);
+        statistic.ingested_parquet_bytes = 1234;
         let encoded = statistic.serialize_to_vec().unwrap();
         let decoded = RegionStatistic::deserialize_from_slice(&encoded).unwrap();
-        assert_eq!(decoded.flushed_parquet_bytes, 1234);
+        assert_eq!(decoded.ingested_parquet_bytes, 1234);
         let legacy: serde_json::Value = serde_json::from_slice(legacy_bytes).unwrap();
         let mut current: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(current["ingested_parquet_bytes"], 1234);
+        assert!(current.get("flushed_parquet_bytes").is_none());
+        let mut old_wire = current.clone();
+        let bytes = old_wire
+            .as_object_mut()
+            .unwrap()
+            .remove("ingested_parquet_bytes")
+            .unwrap();
+        old_wire["flushed_parquet_bytes"] = bytes;
+        assert_eq!(
+            serde_json::from_value::<RegionStatistic>(old_wire)
+                .unwrap()
+                .ingested_parquet_bytes,
+            1234
+        );
         for (key, value) in legacy.as_object().unwrap() {
             assert_eq!(&current[key], value);
         }
         current
             .as_object_mut()
             .unwrap()
-            .remove("flushed_parquet_bytes");
+            .remove("ingested_parquet_bytes");
         assert_eq!(
             serde_json::from_value::<RegionStatistic>(current)
                 .unwrap()
-                .flushed_parquet_bytes,
+                .ingested_parquet_bytes,
             0
         );
     }
@@ -989,7 +1009,10 @@ pub struct MitoCopyRegionFromRequest {
 
 #[derive(Debug, Clone)]
 pub struct MitoCopyRegionFromResponse {
-    /// The file ids that were copied from the source region to the target region.
+    /// Source SST IDs installed in the target by this copy. Shared references may
+    /// be installed without copying their physical objects. If no new references
+    /// need installation, returns the source IDs already present in the target.
+    /// This is not a count or inventory of physical object transfers.
     pub copied_file_ids: Vec<FileId>,
 }
 

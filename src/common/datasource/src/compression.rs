@@ -16,6 +16,7 @@ use std::fmt::Display;
 use std::io;
 use std::str::FromStr;
 
+use async_compression::Level;
 use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
 use async_compression::tokio::write;
 use bytes::Bytes;
@@ -87,6 +88,15 @@ impl CompressionType {
             Self::Zstd => "zst",
             Self::Uncompressed => "",
         }
+    }
+
+    /// Encodes `content` as a gzip stream at level 0, which stores it without compression.
+    pub async fn encode_gzip_stored(content: &[u8]) -> io::Result<Vec<u8>> {
+        let mut buffer = Vec::with_capacity(content.len());
+        let mut encoder = write::GzipEncoder::with_quality(&mut buffer, Level::Precise(0));
+        encoder.write_all(content).await?;
+        encoder.shutdown().await?;
+        Ok(buffer)
     }
 }
 

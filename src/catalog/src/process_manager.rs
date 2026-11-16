@@ -41,8 +41,14 @@ pub type ProcessManagerRef = Arc<ProcessManager>;
 
 /// Query process manager.
 pub struct ProcessManager {
-    /// Local frontend server address,
-    server_addr: String,
+    /// Address this frontend advertises to the cluster.
+    ///
+    /// It is the heartbeat peer address, which is also the only address other
+    /// frontends use to reach this node's process management service. The same
+    /// value identifies processes owned by this frontend and routes kill
+    /// requests, so discovery addresses and process addresses share one
+    /// namespace.
+    peer_addr: String,
     /// Next process id for local queries.
     next_id: AtomicU32,
     /// Running process per catalog.
@@ -79,11 +85,15 @@ impl Display for QueryStatement {
 }
 
 impl ProcessManager {
-    /// Create a [ProcessManager] instance with server address and kv client.
-    pub fn new(server_addr: String, meta_client: Option<MetaClientRef>) -> Self {
+    /// Creates a [ProcessManager] for the frontend identified by `peer_addr`.
+    ///
+    /// `peer_addr` must be the address the frontend advertises to metasrv, not
+    /// its public gRPC address: discovered peers are matched by that address to
+    /// exclude this node from remote listings and to route kill requests.
+    pub fn new(peer_addr: String, meta_client: Option<MetaClientRef>) -> Self {
         let frontend_selector = meta_client.map(MetaClientSelector::new);
         Self {
-            server_addr,
+            peer_addr,
             next_id: Default::default(),
             catalogs: Default::default(),
             frontend_selector,
@@ -111,7 +121,7 @@ impl ProcessManager {
             query,
             start_timestamp: current_time_millis(),
             client,
-            frontend: self.server_addr.clone(),
+            frontend: self.peer_addr.clone(),
         };
         let cancellation_handle = Arc::new(CancellationHandle::default());
         let cancellable_process = CancellableProcess::new(cancellation_handle.clone(), process);
@@ -168,6 +178,10 @@ impl ProcessManager {
 
     /// Lists running processes from every selected frontend and the local registry.
     ///
+    /// The local frontend is excluded from the remote selection by its advertised
+    /// peer address, which is what [`MetaClientSelector`] discovers. Its processes
+    /// are appended from the local registry exactly once.
+    ///
     /// Returns an error if a remote frontend cannot provide its process list.
     pub async fn list_all_processes(
         &self,
@@ -176,7 +190,7 @@ impl ProcessManager {
         let mut processes = vec![];
         if let Some(remote_frontend_selector) = self.frontend_selector.as_ref() {
             let frontends = remote_frontend_selector
-                .select(|peer| peer.addr != self.server_addr)
+                .select(|peer| peer.addr != self.peer_addr)
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             for mut f in frontends {
@@ -194,29 +208,32 @@ impl ProcessManager {
     }
 
     /// Kills query with provided catalog and id.
+    ///
+    /// `peer_addr` is the frontend address from the process id, which is the
+    /// advertised peer address of the frontend that owns the process.
     pub async fn kill_process(
         &self,
-        server_addr: String,
+        peer_addr: String,
         catalog: String,
         id: ProcessId,
     ) -> error::Result<bool> {
-        if server_addr == self.server_addr {
+        if peer_addr == self.peer_addr {
             self.kill_local_process(catalog, id).await
         } else {
             let mut nodes = self
                 .frontend_selector
                 .as_ref()
                 .context(error::MetaClientMissingSnafu)?
-                .select(|peer| peer.addr == server_addr)
+                .select(|peer| peer.addr == peer_addr)
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             ensure!(
                 !nodes.is_empty(),
-                error::FrontendNotFoundSnafu { addr: server_addr }
+                error::FrontendNotFoundSnafu { addr: peer_addr }
             );
 
             let request = KillProcessRequest {
-                server_addr,
+                server_addr: peer_addr,
                 catalog,
                 process_id: id,
             };

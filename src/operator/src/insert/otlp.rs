@@ -30,7 +30,9 @@ use common_time::timestamp::TimeUnit;
 use datatypes::schema::ColumnSchema as DataColumn;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+};
 use table::TableRef;
 
 use crate::error::{self, InvalidInsertRequestSnafu, Result};
@@ -43,6 +45,7 @@ use crate::req_convert::insert::{ImpureDefaultFiller, value_matches_type};
 pub struct MetricInsertPreflight {
     /// Rejections in batch order, then row order.
     pub rejections: Vec<Vec<Option<String>>>,
+    /// Backing tables for existing or newly created logical metric-engine destinations.
     pub physical_tables: std::collections::HashMap<String, String>,
 }
 
@@ -91,7 +94,7 @@ impl Inserter {
                 tables.insert(request.table_name.clone(), table);
             }
             let backing = match tables[&request.table_name].as_ref() {
-                Some(table) => table
+                Some(table) if table.table_info().meta.engine == METRIC_ENGINE_NAME => table
                     .table_info()
                     .meta
                     .options
@@ -99,7 +102,7 @@ impl Inserter {
                     .get(LOGICAL_TABLE_METADATA_KEY)
                     .cloned(),
                 None if metric_engine => Some(physical_table.to_string()),
-                None => None,
+                _ => None,
             };
             if let Some(backing) = backing {
                 physical_tables.insert(request.table_name.clone(), backing);

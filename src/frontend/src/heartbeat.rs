@@ -39,7 +39,6 @@ use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, warn};
 use meta_client::client::heartbeat::HeartbeatConfig;
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
-use servers::addrs;
 use snafu::ResultExt;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{Mutex, mpsc};
@@ -747,16 +746,5 @@ impl HeartbeatTask {
     #[cfg(test)]
     pub(crate) fn is_shutdown(&self) -> bool {
         self.runner.cancellation.is_cancelled()
-    }
-}
-
-pub(crate) fn frontend_peer_addr(opts: &FrontendOptions) -> String {
-    // if internal grpc is configured, use its address as the peer address
-    // otherwise use the public grpc address, because peer address only promises to be reachable
-    // by other components, it doesn't matter whether it's internal or external
-    if let Some(internal) = &opts.internal_grpc {
-        addrs::resolve_addr(&internal.bind_addr, Some(&internal.server_addr))
-    } else {
-        addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr))
     }
 }

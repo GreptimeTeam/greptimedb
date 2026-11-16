@@ -203,6 +203,7 @@ impl ObjbenchCommand {
             max_sequence: None,
             sst_write_format: FormatType::PrimaryKey,
             index_options: Default::default(),
+            index_build_inputs: None,
             index_config: mito_engine_config.index.clone(),
             inverted_index_config: MitoConfig::default().inverted_index,
             fulltext_index_config,

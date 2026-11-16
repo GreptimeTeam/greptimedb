@@ -25,6 +25,7 @@ use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use common_base::range_read::RangeReader;
@@ -89,14 +90,27 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
         weigher: impl Fn(&(K, u64), &Bytes) -> u32 + Send + Sync + 'static,
         observer: PageCacheObserver,
     ) -> Self {
+        Self::new_with_ttl(name, capacity, page_size, weigher, observer, None)
+    }
+
+    /// Creates a page cache with optional expiration measured from insertion.
+    pub fn new_with_ttl(
+        name: &str,
+        capacity: u64,
+        page_size: u64,
+        weigher: impl Fn(&(K, u64), &Bytes) -> u32 + Send + Sync + 'static,
+        observer: PageCacheObserver,
+        ttl: Option<Duration>,
+    ) -> Self {
         let events = observer.events.clone();
-        let mut cache = Cache::new(
+        let mut cache = Cache::new_with_ttl(
             name,
             capacity,
             move |key, value: &Arc<CachedPage>| weigher(key, &value.bytes),
             move |_, _, cause| {
                 events(PageEvent::Evicted { cause });
             },
+            ttl,
         )
         .with_size_metric(observer.bytes.clone());
         if let Some(metrics) = &observer.loads {

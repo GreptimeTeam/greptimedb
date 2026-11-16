@@ -1,0 +1,8 @@
+name = "exemplar_sparse"
+reason = "Preserve reserved sparse source identity keys, append duplicates and nanosecond timestamps across restart."
+introduced_by = "persistent_metric_exemplars"
+topologies = ["standalone", "distributed"]
+from_range = [">=v1.4.0-alpha.0"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["sparse", "table", "read"]
+owner = "mito2"

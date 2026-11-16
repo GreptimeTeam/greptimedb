@@ -21,7 +21,7 @@
 """Budget preflight and strictly scoped S3 operations for the metric snapshot benchmark."""
 
 import argparse
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
@@ -29,8 +29,8 @@ import re
 import time
 import urllib.request
 
-REGION = "ap-southeast-1"
-HOURLY_USD = Decimal("0.9408")
+# Historical budget estimate; dispatch can supply a rate for the configured region.
+DEFAULT_HOURLY_USD = "0.9408"
 OTHER_RESERVE_USD = Decimal("1.50")
 
 
@@ -38,6 +38,16 @@ def owned_prefix(prefix):
     if not re.fullmatch(r"metric-snapshot-bench/[0-9]+-[0-9]+/", prefix):
         raise ValueError("prefix must be exactly metric-snapshot-bench/<run_id>-<attempt>/")
     return prefix
+
+
+def hourly_estimate(env):
+    try:
+        estimate = Decimal(env.get("EC2_HOURLY_USD", DEFAULT_HOURLY_USD))
+    except InvalidOperation as error:
+        raise ValueError("EC2_HOURLY_USD must be a positive finite estimate") from error
+    if not estimate.is_finite() or estimate <= 0:
+        raise ValueError("EC2_HOURLY_USD must be a positive finite estimate")
+    return estimate
 
 
 def plan(env):
@@ -49,21 +59,22 @@ def plan(env):
     tables, minutes = int(env["LOGICAL_TABLES_PER_GROUP"]), int(env["BENCHMARK_TIMEOUT_MINUTES"])
     if not 50 <= tables <= 10_000 or not 30 <= minutes <= 240:
         raise ValueError("logical tables per group must be 50..10000; timeout must be 30..240 minutes")
-    if env["S3_REGION"] != REGION or env["RUNNER_REGION"] != REGION:
-        raise ValueError("bucket and runner must both use ap-southeast-1")
+    if not env["S3_REGION"].strip() or env["S3_REGION"] != env["RUNNER_REGION"]:
+        raise ValueError("bucket and runner must use the same nonempty region")
     if not env["S3_BUCKET"]:
         raise ValueError("S3 bucket is required")
     prior = Decimal(env["PRIOR_SPEND_USD"])
     # Reserve 45m provision, 10m queue allowance and 20m cleanup beyond the job timeout.
-    reservation = HOURLY_USD * Decimal(minutes + 75) / 60 + OTHER_RESERVE_USD
+    hourly = hourly_estimate(env)
+    reservation = hourly * Decimal(minutes + 75) / 60 + OTHER_RESERVE_USD
     if not prior.is_finite() or prior < 0 or prior >= 15 or prior + reservation > 20:
         raise ValueError("campaign budget exhausted: prior spend must be below $15 and leave the full attempt reserve within $20")
     return {"image": image, "expected_commit": env["EXPECTED_COMMIT"],
             "logical_tables_per_group": tables, "smoke_logical_tables": 500,
             "timeout_minutes": minutes, "prefix": owned_prefix(env["RUN_PREFIX"]),
-            "instance_type": "c6id.4xlarge", "region": REGION,
+            "instance_type": "c6id.4xlarge", "region": env["S3_REGION"],
             "prior_estimated_usd": str(prior), "attempt_reserve_usd": str(reservation),
-            "ec2_hourly_usd": str(HOURLY_USD), "other_reserve_usd": str(OTHER_RESERVE_USD),
+            "ec2_hourly_usd": str(hourly), "other_reserve_usd": str(OTHER_RESERVE_USD),
             "cost_note": "Estimate, not an AWS billing total or a hard spending cap."}
 
 
@@ -71,8 +82,8 @@ def client(region):
     import boto3
     from botocore.config import Config
 
-    if region != REGION:
-        raise ValueError("S3 region must be ap-southeast-1")
+    if not region.strip():
+        raise ValueError("S3 region is required")
     return boto3.client("s3", region_name=region, config=Config(
         connect_timeout=10, read_timeout=30, retries={"mode": "standard", "max_attempts": 3}))
 
@@ -193,8 +204,10 @@ def main():
         if args.started_at is None:
             parser.error("cost requires --started-at")
         seconds = max(0, int(time.time()) - args.started_at)
-        estimate = HOURLY_USD * Decimal(seconds) / 3600
-        result = {"allocation_window_seconds": seconds, "ec2_estimate_usd": str(round(estimate, 4)),
+        hourly = hourly_estimate(os.environ)
+        estimate = hourly * Decimal(seconds) / 3600
+        result = {"allocation_window_seconds": seconds, "ec2_hourly_usd": str(hourly),
+                  "ec2_estimate_usd": str(round(estimate, 4)),
                   "campaign_estimate_with_other_reserve_usd": str(round(
                       Decimal(os.environ["PRIOR_SPEND_USD"]) + estimate + OTHER_RESERVE_USD, 4)),
                   "note": "Allocation wall-time estimate plus $1.50 reserve for S3, disk and IPv4; not an AWS bill."}

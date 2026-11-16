@@ -191,6 +191,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Multiple blobs have the same key: {blob}"))]
+    AmbiguousBlob {
+        blob: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Blob not found: {blob}"))]
     BlobNotFound {
         blob: String,
@@ -256,6 +263,7 @@ impl ErrorExt for Error {
             | UnexpectedPuffinFileSize { .. }
             | Lz4Compression { .. }
             | Lz4Decompression { .. }
+            | AmbiguousBlob { .. }
             | BlobNotFound { .. }
             | BlobIndexOutOfBound { .. }
             | FileKeyNotMatch { .. }

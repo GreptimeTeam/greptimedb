@@ -35,13 +35,15 @@
 //!   compression, matching `Content-Encoding: zstd`.
 //! - `physical_table 'name'` — the `?physical_table=` query parameter.
 //! - `pipeline_name`/`pipeline_version` — the pipeline headers (v1
-//!   only; for v2 they are accepted and ignored, exactly like the HTTP
-//!   route ignores them).
+//!   only; for v2 they are accepted and ignored by the core, exactly
+//!   like the HTTP route — except that their presence still feeds the
+//!   pipelines-with-exemplars restriction).
 //!
 //! One COPY statement is one bounded ingestion request (see
 //! [`crate::postgres::copy_in::COPY_IN_MAX_PAYLOAD_BYTES`]); the row
-//! count reports written rows (v1) or written samples plus histograms
-//! (v2).
+//! count includes samples, histograms and exemplars. With asynchronous v2
+//! batching it reports accepted counts; COPY cannot distinguish HTTP 202
+//! acceptance from completed writes or return partial counts on an error.
 
 use pgwire::error::PgWireResult;
 
@@ -103,12 +105,11 @@ pub(crate) fn build_prom_write_codec(mut options: CopyOptionSet) -> PgWireResult
     let pipeline_version = options.take_string("pipeline_version")?;
     let zstd = options.take_flag("zstd")?.unwrap_or(false);
     options.reject_leftovers("promwrite")?;
-    // The pipeline options are accepted and ignored for version 2,
-    // exactly like the HTTP route ignores them there.
-    let (pipeline_name, pipeline_version) = match version {
-        PromWriteVersion::V1 => (pipeline_name, pipeline_version),
-        PromWriteVersion::V2 => (None, None),
-    };
+    // The pipeline options are accepted for version 2 but ignored by its
+    // ingestion core, exactly like the HTTP route — except that their
+    // PRESENCE still feeds the pipelines-with-exemplars restriction the
+    // core enforces, so the option must be retained here (see
+    // `flush_prom_write`).
     Ok(CopyFormat::PromWrite(PromWriteOptions {
         version,
         physical_table,
@@ -179,8 +180,10 @@ mod tests {
 
     #[test]
     fn test_v2_accepts_and_ignores_pipeline_options() {
-        // The HTTP v2 route deliberately ignores pipeline information;
-        // COPY accepts the options and ignores them too.
+        // The HTTP v2 route deliberately ignores pipeline information
+        // except for the pipelines-with-exemplars restriction; COPY
+        // accepts the options and retains them so the same restriction
+        // can fire, while the core otherwise ignores them.
         let CopyFormat::PromWrite(options) = build_prom_write_codec(opts(&[
             ("version", CopyOptionValue::Number("2".into())),
             ("pipeline_name", CopyOptionValue::String("p".into())),
@@ -190,7 +193,7 @@ mod tests {
             panic!("expected promwrite");
         };
         assert_eq!(options.version, PromWriteVersion::V2);
-        assert!(options.pipeline_name.is_none());
-        assert!(options.pipeline_version.is_none());
+        assert_eq!(options.pipeline_name.as_deref(), Some("p"));
+        assert_eq!(options.pipeline_version.as_deref(), Some("v1"));
     }
 }

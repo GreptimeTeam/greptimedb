@@ -1237,6 +1237,7 @@ impl ErrorExt for Error {
             | Error::PusherNotFound { .. } => StatusCode::Unexpected,
             Error::MailboxTimeout { .. } | Error::ExceededDeadline { .. } => StatusCode::Cancelled,
             Error::PruneTaskAlreadyRunning { .. }
+            | Error::DrainDatanodeRunning { .. }
             | Error::RetryLater { .. }
             | Error::MailboxChannelClosed { .. }
             | Error::IsNotLeader { .. } => StatusCode::IllegalState,
@@ -1286,7 +1287,6 @@ impl ErrorExt for Error {
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. }
             | Error::RegionMigrated { .. }
-            | Error::DrainDatanodeRunning { .. }
             | Error::DrainDatanodeAbort { .. }
             | Error::DrainDatanodeRescanExceeded { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,

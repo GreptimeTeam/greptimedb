@@ -15,6 +15,7 @@
 use std::borrow::Borrow;
 use std::hash::Hash;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::metrics::{CacheMetrics, CacheSizeMetric, CacheSizeRegistration};
 
@@ -76,14 +77,32 @@ where
         W: Fn(&K, &V) -> u32 + Send + Sync + 'static,
         L: Fn(Arc<K>, V, RemovalCause) + Send + Sync + 'static,
     {
+        Self::new_with_ttl(name, capacity, weigher, listener, None)
+    }
+
+    /// Creates a cache with an optional write-based expiration time.
+    pub fn new_with_ttl<W, L>(
+        name: &str,
+        capacity: u64,
+        weigher: W,
+        listener: L,
+        ttl: Option<Duration>,
+    ) -> Self
+    where
+        W: Fn(&K, &V) -> u32 + Send + Sync + 'static,
+        L: Fn(Arc<K>, V, RemovalCause) + Send + Sync + 'static,
+    {
+        let mut builder = moka::future::Cache::builder()
+            .name(name)
+            .max_capacity(capacity)
+            .support_invalidation_closures()
+            .weigher(weigher)
+            .eviction_listener(move |key, value, cause| listener(key, value, cause.into()));
+        if let Some(ttl) = ttl {
+            builder = builder.time_to_live(ttl);
+        }
         Self {
-            inner: moka::future::Cache::builder()
-                .name(name)
-                .max_capacity(capacity)
-                .support_invalidation_closures()
-                .weigher(weigher)
-                .eviction_listener(move |key, value, cause| listener(key, value, cause.into()))
-                .build(),
+            inner: builder.build(),
             capacity,
             size_registration: None,
             metrics: None,

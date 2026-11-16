@@ -32,7 +32,6 @@ use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{
     CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, new_read_only_meta_kv_backend,
 };
-use catalog::process_manager::ProcessManager;
 use client::Client;
 use client::client_manager::NodeClients;
 use cmd::frontend::create_heartbeat_task;
@@ -58,6 +57,7 @@ use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::Instance as FeInstance;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
+use frontend::service_config::BatcherOptions;
 use futures::TryStreamExt;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
@@ -203,6 +203,7 @@ pub struct GreptimeDbClusterBuilder {
     datanode_gc_config: GcConfig,
     metasrv_gc_config: GcSchedulerOptions,
     frontend_auto_create_table: bool,
+    table_batcher: BatcherOptions,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
     plugins: Plugins,
@@ -241,6 +242,7 @@ impl GreptimeDbClusterBuilder {
             datanode_gc_config: GcConfig::default(),
             metasrv_gc_config: GcSchedulerOptions::default(),
             frontend_auto_create_table: true,
+            table_batcher: BatcherOptions::default(),
             shared_home_dir: None,
             meta_selector: None,
             plugins: Plugins::default(),
@@ -304,6 +306,13 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_frontend_auto_create_table(mut self, auto_create_table: bool) -> Self {
         self.frontend_auto_create_table = auto_create_table;
+        self
+    }
+
+    /// Configures ordinary-table batching for the frontend.
+    #[must_use]
+    pub fn with_table_batcher(mut self, options: BatcherOptions) -> Self {
+        self.table_batcher = options;
         self
     }
 
@@ -484,6 +493,19 @@ impl GreptimeDbClusterBuilder {
 
                 opts
             };
+            // Shared object storage must not make datanodes share a local WAL.
+            if self.shared_home_dir.is_some()
+                && let DatanodeWalConfig::RaftEngine(config) = &mut opts.wal
+                && config.dir.is_none()
+            {
+                config.dir = Some(
+                    std::path::Path::new(&opts.storage.data_home)
+                        .join(format!("wal-{datanode_id}"))
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                );
+            }
             opts.node_id = Some(datanode_id);
             if self.real_datanode_grpc_addr {
                 // Give every datanode its own address, so that the other datanodes can
@@ -621,7 +643,7 @@ impl GreptimeDbClusterBuilder {
             catalog_manager,
             datanode_clients,
             meta_client.clone(),
-            Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
+            fe_opts.create_process_manager(None),
         )
         .with_local_file_access(self.local_file_access.clone())
         .with_local_cache_invalidator(cache_registry)
@@ -655,6 +677,7 @@ impl GreptimeDbClusterBuilder {
             event_recorder: self.event_recorder_options.clone(),
             ..Default::default()
         };
+        fe_opts.pending_rows_batcher.table = self.table_batcher.clone();
 
         // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
         let port_range = 14000..=24000;

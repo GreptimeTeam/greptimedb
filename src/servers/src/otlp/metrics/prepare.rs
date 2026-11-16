@@ -31,6 +31,7 @@ use table::requests::{
 
 use crate::error::{self, Result};
 use crate::metrics::OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS;
+use crate::otlp::metrics::exemplars::RowExemplars;
 use crate::otlp::metrics::{
     MetricMetadata, MetricsConversion, OTEL_RESOURCE_INFO_TABLE_NAME, ResourceInfoData,
     add_accepted_data_points, encode_metrics, from_metric_type, has_no_recorded_value,
@@ -56,6 +57,7 @@ struct PreparedPoint {
     resource: usize,
     timestamp: i64,
     rows: Range<usize>,
+    exemplars: Vec<RowExemplars>,
 }
 
 #[derive(Default)]
@@ -213,6 +215,7 @@ impl PreparedMetrics {
         let invalid_interval =
             !matches!(metric.data, Some(metric::Data::Gauge(_))) && start > timestamp;
         let mut outcome = MetricsIngestOutcome::default();
+        let mut exemplars = Vec::new();
         let encoded = if !exponential && (timestamp > i64::MAX as u64 || invalid_interval) {
             Err(error::InvalidOtlpMetricInputSnafu {
                 reason: "invalid OTLP data-point timestamp or interval",
@@ -227,6 +230,7 @@ impl PreparedMetrics {
                 scope_attrs,
                 ctx,
                 &mut outcome,
+                &mut exemplars,
             )
         };
         if let Err(err) = encoded {
@@ -259,6 +263,16 @@ impl PreparedMetrics {
         }
         let first_row = self.row_locations.len();
         for (name, schema, rows) in writer.tables.drain_rows() {
+            for pending in exemplars
+                .iter_mut()
+                .filter(|pending| pending.metric.as_ref() == name)
+            {
+                pending.row = self.row_locations.len().checked_add(pending.row).context(
+                    error::InternalSnafu {
+                        err_msg: "exemplar source row offset overflow",
+                    },
+                )?;
+            }
             let batch = match writer.batches.get(name) {
                 Some(&(columns, batch)) if columns == schema.len() => batch,
                 _ => {
@@ -313,6 +327,7 @@ impl PreparedMetrics {
             resource,
             timestamp: timestamp as i64,
             rows: first_row..self.row_locations.len(),
+            exemplars,
         });
         Ok(true)
     }
@@ -411,6 +426,28 @@ impl PreparedMetrics {
         for index in conflicts {
             rejections[index] =
                 Some("incompatible metric sample kinds or column definitions".to_string());
+        }
+        // Bind before survivor merging moves batch schemas and row values.
+        let mut exemplars = Vec::new();
+        for (point, rejection) in self.points.iter_mut().zip(&rejections) {
+            if rejection.is_some() {
+                continue;
+            }
+            for pending in std::mem::take(&mut point.exemplars) {
+                let &(batch, row) =
+                    self.row_locations
+                        .get(pending.row)
+                        .context(error::InternalSnafu {
+                            err_msg: "missing exemplar source row",
+                        })?;
+                let rows = self.requests[batch]
+                    .rows
+                    .as_ref()
+                    .context(error::InternalSnafu {
+                        err_msg: "missing prepared batch",
+                    })?;
+                exemplars.extend(pending.finish(&rows.schema, &rows.rows[row].values));
+            }
         }
         let reuse_batches = rejections.iter().all(Option::is_none) && {
             let mut tables = HashSet::new();
@@ -539,6 +576,7 @@ impl PreparedMetrics {
             );
         }
         Ok(MetricsConversion {
+            exemplars,
             requests,
             rows,
             semantic_index,

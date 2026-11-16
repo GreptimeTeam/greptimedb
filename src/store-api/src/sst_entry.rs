@@ -19,7 +19,7 @@ use common_recordbatch::DfRecordBatch;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datafusion_common::DataFusionError;
-use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, LogicalTableSource};
+use datafusion_expr::LogicalPlan;
 use datatypes::arrow::array::{
     ArrayRef, BinaryArray, BooleanArray, TimestampMillisecondArray, TimestampNanosecondArray,
     UInt8Array, UInt32Array, UInt64Array,
@@ -30,6 +30,7 @@ use datatypes::arrow_array::StringArray;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 
+use crate::inspect::{self, ProjectedBatchBuilder};
 use crate::storage::{RegionGroup, RegionId, RegionNumber, RegionSeq, ScanRequest, TableId};
 
 // Manifest SST column names.
@@ -193,7 +194,7 @@ impl ManifestSstEntry {
 
     /// Builds a logical plan for scanning the manifest sst entries.
     pub fn build_plan(scan_request: ScanRequest) -> Result<LogicalPlan, DataFusionError> {
-        build_plan_helper(
+        inspect::build_plan(
             scan_request,
             Self::reserved_table_name_for_inspection(),
             Self::schema(),
@@ -204,24 +205,15 @@ impl ManifestSstEntry {
 /// Converts manifest SST batches using a schema prepared once per scan.
 /// Repeated projected columns share the same Arrow array.
 pub struct ManifestSstBatchBuilder {
-    schema: ArrowSchemaRef,
-    duplicates: Vec<Option<usize>>,
+    projected: ProjectedBatchBuilder,
 }
 
 impl ManifestSstBatchBuilder {
     /// Creates a builder for a projected manifest SST schema.
     pub fn new(schema: ArrowSchemaRef) -> Self {
-        let duplicates = schema
-            .fields()
-            .iter()
-            .enumerate()
-            .map(|(index, field)| {
-                schema.fields()[..index]
-                    .iter()
-                    .position(|previous| previous == field)
-            })
-            .collect();
-        Self { schema, duplicates }
+        Self {
+            projected: ProjectedBatchBuilder::new(schema),
+        }
     }
 
     /// Builds the projected columns, copying string contents only into Arrow buffers.
@@ -229,13 +221,8 @@ impl ManifestSstBatchBuilder {
         &self,
         entries: &[ManifestSstEntry],
     ) -> std::result::Result<DfRecordBatch, ArrowError> {
-        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
-        for (index, field) in self.schema.fields().iter().enumerate() {
-            if let Some(previous) = self.duplicates[index] {
-                columns.push(columns[previous].clone());
-                continue;
-            }
-            let array: ArrayRef = match field.name().as_str() {
+        self.projected.build(entries.len(), |name| {
+            let array: ArrayRef = match name {
                 TABLE_DIR => Arc::new(StringArray::from_iter_values(
                     entries.iter().map(|e| e.table_dir.as_str()),
                 )),
@@ -324,14 +311,8 @@ impl ManifestSstBatchBuilder {
                     )));
                 }
             };
-            columns.push(array);
-        }
-        DfRecordBatch::try_new_with_options(
-            self.schema.clone(),
-            columns,
-            &datatypes::arrow::record_batch::RecordBatchOptions::new()
-                .with_row_count(Some(entries.len())),
-        )
+            Ok(array)
+        })
     }
 }
 
@@ -396,7 +377,7 @@ impl StorageSstEntry {
 
     /// Builds a logical plan for scanning the storage sst entries.
     pub fn build_plan(scan_request: ScanRequest) -> Result<LogicalPlan, DataFusionError> {
-        build_plan_helper(
+        inspect::build_plan(
             scan_request,
             Self::reserved_table_name_for_inspection(),
             Self::schema(),
@@ -514,45 +495,12 @@ impl PuffinIndexMetaEntry {
 
     /// Builds a logical plan for scanning puffin index metadata entries.
     pub fn build_plan(scan_request: ScanRequest) -> Result<LogicalPlan, DataFusionError> {
-        build_plan_helper(
+        inspect::build_plan(
             scan_request,
             Self::reserved_table_name_for_inspection(),
             Self::schema(),
         )
     }
-}
-
-fn build_plan_helper(
-    scan_request: ScanRequest,
-    table_name: &str,
-    schema: SchemaRef,
-) -> Result<LogicalPlan, DataFusionError> {
-    let table_source = LogicalTableSource::new(schema.arrow_schema().clone());
-
-    // Filters may reference columns omitted from the requested output. Apply
-    // them to the full schema and let the optimizer push the minimal projection.
-    let projection = scan_request.projection;
-    let mut builder = LogicalPlanBuilder::scan(table_name, Arc::new(table_source), None)?;
-
-    for filter in scan_request.filters {
-        builder = builder.filter(filter)?;
-    }
-
-    if let Some(projection) = projection {
-        let projected = schema.arrow_schema().project(&projection)?;
-        builder = builder.project(
-            projected
-                .fields()
-                .iter()
-                .map(|field| datafusion_expr::col(field.name())),
-        )?;
-    }
-
-    if let Some(limit) = scan_request.limit {
-        builder = builder.limit(0, Some(limit))?;
-    }
-
-    builder.build()
 }
 
 #[cfg(test)]

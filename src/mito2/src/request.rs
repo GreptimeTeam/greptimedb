@@ -58,7 +58,7 @@ use crate::error::{
     Result, UnexpectedSnafu,
 };
 use crate::flush::FlushReason;
-use crate::manifest::action::{RegionEdit, TruncateKind};
+use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
@@ -793,6 +793,13 @@ pub(crate) enum WorkerRequest {
         sender: Sender<SetRegionRoleStateResponse>,
     },
 
+    /// Cancels one live compaction on its owning worker.
+    CancelCompaction {
+        region_id: RegionId,
+        task_id: String,
+        sender: OptionOutputTx,
+    },
+
     /// Notify a worker to stop.
     Stop,
 
@@ -924,6 +931,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Compact(v),
             }),
+            RegionRequest::CancelCompaction(v) => WorkerRequest::CancelCompaction {
+                region_id,
+                task_id: v.task_id,
+                sender: sender.into(),
+            },
             RegionRequest::BuildIndex(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
@@ -1131,8 +1143,71 @@ pub(crate) enum BackgroundNotify {
     RegionEdit(RegionEditResult),
     /// Enter staging result.
     EnterStaging(EnterStagingResult),
+    /// The region left [RegionLeaderState::EndingStaging](crate::region::RegionLeaderState::EndingStaging),
+    /// so writes stalled meanwhile can be handled. The sender is notified once they are.
+    StagingEnded(oneshot::Sender<()>),
     /// Copy region result.
     CopyRegionFromFinished(CopyRegionFromFinished),
+    /// A commit outside the worker fenced the region until it is reloaded.
+    RegionFenced,
+    /// The reload of a fenced region has finished.
+    RegionReloaded {
+        /// The instance the reload replaces.
+        old: MitoRegionRef,
+        /// The reloaded instance.
+        result: Result<MitoRegionRef>,
+    },
+    /// The region became writable and may have pending tails to replay.
+    RegionBecameWritable,
+    /// A tail replay published its result in the manifest.
+    TailReplayCommitted {
+        /// The instance the replay ran for.
+        region: MitoRegionRef,
+        /// The published edit.
+        edit: RegionEdit,
+        /// The tails the replay read, which the manifest recorded when the edit was published.
+        tails: Vec<PendingTail>,
+    },
+    /// A tail replay ended.
+    TailReplayEnded,
+}
+
+impl BackgroundNotify {
+    /// Whether the worker dispatches pending requests after handling this notification.
+    ///
+    /// Dispatch consumes queued requests and can determine their terminal errors. A fenced
+    /// region must let reload reject its old requests as not found, rather than dispatching
+    /// them against the fenced instance and returning busy.
+    /// Keep this exhaustive so new notifications must declare their scheduling effect.
+    pub(crate) fn should_dispatch_pending(&self) -> bool {
+        match self {
+            Self::CompactionUnit(_)
+            | Self::CompactionDdlComplete { .. }
+            | Self::CompactionPickFinished(_)
+            | Self::FlushFinished(_)
+            | Self::FlushFailed(_)
+            | Self::CompactionFinished(_)
+            | Self::CompactionFailed(_)
+            | Self::RegionChange(_)
+            | Self::StagingEnded(_)
+            | Self::EnterStaging(_) => true,
+            // Edit completion dispatches before scheduling compaction, after stalled writes.
+            // A completion from an old instance must not dispatch the new instance's queue.
+            Self::RegionEdit(_) => false,
+            Self::RegionOpened { .. }
+            | Self::IndexBuildFinished(_)
+            | Self::IndexBuildStopped(_)
+            | Self::IndexBuildRetry(_)
+            | Self::Truncate(_)
+            | Self::DiscardUnflushed(_)
+            | Self::CopyRegionFromFinished(_)
+            | Self::RegionFenced
+            | Self::RegionReloaded { .. }
+            | Self::RegionBecameWritable
+            | Self::TailReplayCommitted { .. }
+            | Self::TailReplayEnded => false,
+        }
+    }
 }
 
 /// Notifies a flush job is finished.
@@ -1152,8 +1227,6 @@ pub(crate) struct FlushFinished {
     pub(crate) edit: RegionEdit,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
-    /// Whether the region is in staging mode.
-    pub(crate) is_staging: bool,
 }
 
 impl FlushFinished {
@@ -1163,11 +1236,9 @@ impl FlushFinished {
             sender.send(Ok(0));
         }
     }
-}
 
-impl OnFailure for FlushFinished {
-    fn on_failure(&mut self, err: Error) {
-        let err = Arc::new(err);
+    /// Marks the flush job as failed with an error that other waiters share.
+    pub(crate) fn on_shared_failure(&mut self, err: Arc<Error>) {
         for sender in self.senders.drain(..) {
             sender.send(Err(err.clone()).context(FlushRegionSnafu {
                 region_id: self.region_id,
@@ -1176,11 +1247,19 @@ impl OnFailure for FlushFinished {
     }
 }
 
+impl OnFailure for FlushFinished {
+    fn on_failure(&mut self, err: Error) {
+        self.on_shared_failure(Arc::new(err));
+    }
+}
+
 /// Notifies a flush job is failed.
 #[derive(Debug)]
 pub(crate) struct FlushFailed {
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
+    /// Flush result senders.
+    pub(crate) senders: Vec<OutputTx>,
 }
 
 impl FlushFailed {
@@ -1363,15 +1442,27 @@ impl Waiters {
     }
 }
 
+/// Transient execution semantics; this is never serialized into the manifest.
+#[derive(Debug)]
+pub(crate) enum RegionEditKind {
+    Import,
+    #[cfg(feature = "enterprise")]
+    Compaction(Box<crate::engine::table_compaction::PublicationContext>),
+}
+
 /// Request to edit a region directly.
 #[derive(Debug)]
 pub(crate) struct RegionEditRequest {
     pub(crate) region_id: RegionId,
+    pub(crate) kind: RegionEditKind,
     pub(crate) edit: RegionEdit,
     /// Whether to preload SST files into the write cache.
     pub(crate) preload_sst_cache: bool,
     /// The waiters that are waiting for this region edit's result.
     pub(crate) waiters: Waiters,
+    /// The partition expression of the staging this edit belongs to, if any.
+    /// The edit must not run unless the region is staging for that expression.
+    pub(crate) staging_partition_expr: Option<String>,
 }
 
 impl RegionEditRequest {
@@ -1385,8 +1476,16 @@ impl RegionEditRequest {
             region_id,
             edit,
             preload_sst_cache,
+            kind: RegionEditKind::Import,
             waiters: Waiters::one(waiter),
+            staging_partition_expr: None,
         }
+    }
+
+    /// Binds the edit to the staging for `partition_expr`.
+    pub(crate) fn for_staging(mut self, partition_expr: String) -> Self {
+        self.staging_partition_expr = Some(partition_expr);
+        self
     }
 }
 
@@ -1395,6 +1494,8 @@ impl RegionEditRequest {
 pub(crate) struct RegionEditResult {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Prevents a delayed completion from mutating a reopened region with the same id.
+    pub(crate) origin: MitoRegionRef,
     /// Result waiters.
     pub(crate) waiters: Waiters,
     /// Region edit to apply.
@@ -1466,6 +1567,33 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::test_util::ts_ms_value;
+
+    #[tokio::test]
+    async fn test_cancel_compaction_is_worker_control_request() {
+        let region_id = RegionId::new(7, 3);
+        let (request, receiver) = WorkerRequest::try_from_region_request(
+            region_id,
+            RegionRequest::CancelCompaction(
+                store_api::region_request::RegionCancelCompactionRequest {
+                    task_id: "task-1".to_string(),
+                },
+            ),
+            None,
+        )
+        .unwrap();
+        let WorkerRequest::CancelCompaction {
+            region_id: actual_region_id,
+            task_id,
+            sender,
+        } = request
+        else {
+            panic!("cancellation must bypass the DDL queue");
+        };
+        assert_eq!(actual_region_id, region_id);
+        assert_eq!(task_id, "task-1");
+        sender.send(Ok(1));
+        assert_eq!(receiver.await.unwrap().unwrap(), 1);
+    }
 
     fn new_column_schema(
         name: &str,

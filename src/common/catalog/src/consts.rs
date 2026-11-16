@@ -128,6 +128,8 @@ pub const INFORMATION_SCHEMA_PLUGINS_TABLE_ID: u32 = 47;
 pub const INFORMATION_SCHEMA_USER_PRIVILEGES_TABLE_ID: u32 = 48;
 /// id for information_schema.PROCESSLIST (for mysql)
 pub const INFORMATION_SCHEMA_PROCESSLIST_TABLE_ID: u32 = 49;
+/// Id for information_schema.compaction_tasks.
+pub const INFORMATION_SCHEMA_COMPACTION_TASKS_TABLE_ID: u32 = 50;
 
 // ----- End of information_schema tables -----
 
@@ -224,6 +226,8 @@ pub const SPAN_KIND_SERVER: &str = "SPAN_KIND_SERVER";
 pub const SPAN_STATUS_ERROR: &str = "STATUS_CODE_ERROR";
 pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
 pub const TRACE_TABLE_NAME_SESSION_KEY: &str = "trace_table_name";
+/// Shared exemplar destination within each source metric's schema.
+pub const METRICS_EXEMPLARS_TABLE: &str = concatcp!(DEFAULT_CATALOG_NAME, "_metrics_exemplars");
 // ---- End of special table and fields ----
 
 /// Generate the trace services table name from the trace table name by adding `_services` suffix.
