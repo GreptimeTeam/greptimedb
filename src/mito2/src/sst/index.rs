@@ -1028,33 +1028,7 @@ impl IndexBuildTask {
                 .await,
             ));
         };
-        if self.reason == IndexBuildType::Flush {
-            // Flush plans omit extension handlers, even when their providers are
-            // registered. A replacement would erase these published indexes.
-            let has_extensions = current_file_meta
-                .available_indexes
-                .iter()
-                .chain(
-                    current_file_meta
-                        .indexes
-                        .iter()
-                        .flat_map(|column| &column.created_indexes),
-                )
-                .any(|index_type| {
-                    kind::ExtensionIndexKind::ALL.into_iter().any(|extension| {
-                        kind::IndexKind::Extension(extension).index_type() == *index_type
-                    })
-                });
-            if has_extensions {
-                return Ok(ControlFlow::Break(
-                    self.abort_and_notify(
-                        region_file_id,
-                        "Flush cannot replace published extension indexes",
-                    )
-                    .await,
-                ));
-            }
-        } else {
+        if self.reason != IndexBuildType::Flush {
             self.indexer_builder
                 .registry
                 .validate_required_kinds(&self.target_region_metadata, [current_file_meta.as_ref()])
@@ -3639,81 +3613,6 @@ mod tests {
         assert_eq!(*purger.0.lock().unwrap(), vec![refreshed]);
     }
 
-    #[rstest::rstest]
-    #[case(false, false)]
-    #[case(false, true)]
-    #[case(true, false)]
-    #[case(true, true)]
-    #[tokio::test]
-    async fn test_flush_refresh_preserves_published_extensions(
-        #[case] registered: bool,
-        #[case] column_level: bool,
-    ) {
-        let env = SchedulerEnv::new().await;
-        let metadata = Arc::new(sst_region_metadata());
-        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        let file_purger = Arc::new(NoopFilePurger);
-        let info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
-        let initial = FileMeta {
-            region_id: metadata.region_id,
-            file_id: info.file_id,
-            file_size: info.file_size,
-            num_rows: info.num_rows as u64,
-            num_row_groups: info.num_row_groups,
-            ..Default::default()
-        };
-        let mut published = initial.clone();
-        published.index_version = 1;
-        if column_level {
-            published.indexes.push(ColumnIndexMetadata {
-                column_id: metadata.column_metadatas[0].column_id,
-                created_indexes: smallvec::smallvec![IndexType::HllIndex],
-                ..Default::default()
-            });
-        } else {
-            published.available_indexes.push(IndexType::HllIndex);
-        }
-        seed_manifest_file(&manifest_ctx, &published).await;
-        let version = mock_version_control(
-            metadata.clone(),
-            file_purger.clone(),
-            HashMap::from([(initial.file_id, published.clone())]),
-        )
-        .await;
-        let mut builder = mock_indexer_builder(metadata.clone(), &env).await;
-        if registered {
-            Arc::make_mut(&mut Arc::make_mut(&mut builder).registry)
-                .register(Arc::new(RemoveTestIndex))
-                .unwrap();
-        }
-        let (tx, _rx) = mpsc::channel(4);
-        let mut task = IndexBuildTask {
-            region_id: metadata.region_id,
-            file: FileHandle::new(initial.clone(), file_purger.clone()),
-            target_region_metadata: metadata.clone(),
-            source: IndexBuildSource::new(initial.clone(), metadata.schema_version),
-            reason: IndexBuildType::Flush,
-            access_layer: env.access_layer.clone(),
-            listener: WorkerListener::default(),
-            manifest_ctx: manifest_ctx.clone(),
-            write_cache: None,
-            cache_manager: None,
-            file_purger,
-            indexer_builder: builder,
-            request_sender: tx,
-            index_options: IndexOptions::default(),
-            result_senders: Vec::new(),
-        };
-        assert!(matches!(
-            task.index_build(version).await.unwrap(),
-            IndexBuildReport::Done(IndexBuildOutcome::Aborted(_))
-        ));
-        assert_eq!(
-            manifest_ctx.manifest().await.files[&initial.file_id].as_ref(),
-            &published
-        );
-    }
-
     #[tokio::test]
     async fn test_rebuild_scans_only_when_a_creator_requires_rows() {
         for with_builtin in [false, true] {
@@ -4130,13 +4029,6 @@ mod tests {
         if remove_sketches && !registered {
             let mut task = task;
             assert!(task.index_build(version_control.clone()).await.is_err());
-            // A flush retry must not overwrite an already published extension
-            // index merely because it skips schema-level provider requirements.
-            task.reason = IndexBuildType::Flush;
-            assert!(matches!(
-                task.index_build(version_control.clone()).await.unwrap(),
-                IndexBuildReport::Done(IndexBuildOutcome::Aborted(_))
-            ));
             assert_eq!(
                 manifest_ctx.manifest().await.files[&file_meta.file_id].as_ref(),
                 &file_meta

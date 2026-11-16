@@ -102,7 +102,7 @@ impl IndexRegistry {
     }
 
     /// Rejects unavailable implementations for indexes being replaced.
-    pub(crate) fn validate_file_kinds<'a>(
+    fn validate_file_kinds<'a>(
         &self,
         files: impl IntoIterator<Item = &'a FileMeta>,
     ) -> Result<(), BoxedError> {
