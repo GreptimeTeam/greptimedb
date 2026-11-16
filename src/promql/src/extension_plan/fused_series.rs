@@ -488,9 +488,8 @@ impl FusedSeries {
             }
             node.canonical_producer = true;
         }
-        // The planner's single-region proof is not part of the encoding: the envelope keeps the
-        // bytes it has always had, and a node read back from one carries no proof - which is the
-        // conservative answer, because a producer without it keeps its placement above the regions.
+        // Placement is not part of the encoding: the envelope keeps the bytes it has always had, and
+        // a node read back from one is placed by its shape, which keeps a producer above the regions.
         if format == FusedOutputFormat::PlainRows {
             let schema = Arc::new(node.output_schema.as_arrow().clone());
             validate_plain_output_schema(

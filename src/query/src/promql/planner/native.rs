@@ -14,24 +14,22 @@
 
 //! The native fused-series route of the PromQL planner.
 //!
-//! [`PromPlanner::try_plan_native_fused`] offers a whole statement expression to the native
-//! compiler and, when the compiler accepts it, replaces everything the existing path would plan
-//! below the root with one [`FusedSeries`] node over the selector's own table scan. A tree that
-//! folds across series - an aggregate - is split instead: its per-series prefix and a `Partial`
-//! aggregate run in a `FusedSeries` producer, a `SeriesRepartitionExec` routes that state, and a
-//! second `FusedSeries` runs the `Final` aggregate over it, because a region holds only part of a
-//! group. Declining is the normal answer: every shape the
-//! compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps the
-//! plan the existing planner builds.
+//! [`PromPlanner::try_plan_native_fused`] offers a whole statement expression to the native compiler and,
+//! when the compiler accepts it, replaces everything the existing path would plan below the root with one
+//! [`FusedSeries`] node over the selector's own table scan. A tree that folds across series, such as an
+//! aggregate, is split instead: its per-series prefix and a `Partial` aggregate run in a `FusedSeries`
+//! producer, a `SeriesRepartitionExec` routes that state, and a second `FusedSeries` runs the `Final`
+//! aggregate over it, because a region holds only part of a group. Declining is the normal answer: every
+//! shape the compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps
+//! the plan the existing planner builds.
 //!
-//! What the node needs from here is the raw series schema the tree's input was compiled against
-//! (the selector's selected field columns), the statement's evaluation grid, and output tag names
-//! derived from the native tree. The output schema is built to the shape the existing unary pipeline
-//! produces — the time index, then the series fields, then the tags — so a node planned here can be
-//! consumed by the same code that consumes a `SeriesNormalize` output.
+//! The node is built from the raw series schema the tree's input was compiled against, the statement's
+//! evaluation grid, and output tag names derived from the native tree. The output schema has the shape the
+//! existing unary pipeline produces -- the time index, then the series fields, then the tags -- so a node
+//! planned here is consumed by the same code that consumes a `SeriesNormalize` output.
 //!
-//! A statement that reads no data - a constant, `time()`, `vector(time())` - is planned with no
-//! scan: one node, no child, the time index and value.
+//! A statement that reads no data - a constant, `time()`, `vector(time())` - is planned with no scan: one
+//! node, no child, the time index and value.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -93,24 +91,19 @@ use crate::query_engine::QueryEngineState;
 
 /// The query-context key that turns the native fused-series route on for one query.
 ///
-/// Named after the engine-wide option it mirrors ([`QueryOptions::experimental_native_promql`]),
-/// and read exactly the way the other per-query override in this crate is read
-/// ([`remote_dyn_filter_pushdown_enabled_from_extensions`]): a query-context extension, which a
-/// client can set per request over the HTTP hints header or as a gRPC context key. The engine-wide
-/// option is applied while building query-engine state; this planner reads the per-query request
-/// extension at the call site; see [`native_promql_requested`].
+/// Named after the engine-wide option it mirrors ([`QueryOptions::experimental_native_promql`]) and read
+/// the way the other per-query override in this crate is read: a query-context extension, which a client
+/// can set per request. The engine-wide option is applied while building query-engine state; this planner
+/// reads the per-query extension at the call site; see [`native_promql_requested`].
 ///
 /// [`QueryOptions::experimental_native_promql`]: crate::options::QueryOptions::experimental_native_promql
-/// [`remote_dyn_filter_pushdown_enabled_from_extensions`]:
-///     crate::options::remote_dyn_filter_pushdown_enabled_from_extensions
 pub const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
 
 /// Whether `query_ctx` asks for the native fused-series route.
 ///
-/// The route is off unless the query asks for it, so a query that says nothing keeps the plan the
-/// existing planner builds. The value is compared literally (`true` in any case) rather than through
-/// a shared boolean parser: an unrecognized value leaves the route off, which is the same plan as
-/// the flag never having been read, so a typo costs a slow query and never a wrong one.
+/// The route is off unless the query asks for it, so a query that says nothing keeps the plan the existing
+/// planner builds. The value is compared literally (`true` in any case), so a typo costs a slow query and
+/// never a wrong one.
 pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
     query_ctx
         .extension(NATIVE_PROMQL_EXTENSION_KEY)
@@ -120,12 +113,9 @@ pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
 /// Whether this executable plan is the native raw PromQL topology, the one plan shape whose
 /// region reads one query-wide body budget cannot deadlock.
 ///
-/// That topology is a chain of [`FusedSeriesExec`] nodes over region reads: the split aggregate's
-/// final and partial halves are one unary chain, and each fused node polls its input while that
-/// input is being drained, so a region body holding a permit keeps making progress.
-/// Admission stops there: a plan with any other multi-input node (a join, or the union a
-/// discovered selector builds) keeps its per-scan bounds only and is not counted against the
-/// query-wide target until its own topology is checked against the budget.
+/// That topology is a chain of [`FusedSeriesExec`] nodes over region reads, and each fused node polls its
+/// input while that input is being drained, so a region body holding a permit keeps making progress.
+/// Admission stops there: a plan with any other multi-input node keeps its per-scan bounds only.
 pub(crate) fn native_raw_plan_bounds_region_reads(plan: &Arc<dyn ExecutionPlan>) -> bool {
     fn walk(node: &dyn ExecutionPlan, fused: &mut usize) -> bool {
         let is_fused = node.is::<FusedSeriesExec>();
@@ -150,10 +140,8 @@ type DiscoveredSelectorMetadata = (Arc<SeriesSchema>, String, Vec<String>, Arc<s
 
 /// One prepared occurrence of a selector: its scan, raw-series layout and reporting columns.
 ///
-/// `partitioned` says whether the table behind that scan is split into regions along a partition
-/// column. Nothing in the scan itself carries this: a partition is a placement fact about the
-/// table, and the canonical route of a region-local plan has to know it before it can claim a
-/// label-set answer covers the whole query rather than one region's share of it.
+/// `partitioned` says whether the table behind that scan is split into regions along a partition column.
+/// Nothing in the scan carries this: it is a placement fact about the table.
 type PreparedInput = (
     LogicalPlan,
     Arc<SeriesSchema>,
@@ -222,10 +210,8 @@ impl PromPlanner {
         };
         let tags = self.ctx.tag_columns.clone();
         let fields = self.ctx.field_columns.clone();
-        // A `__field__` matcher narrows the field set in a projection the existing planner
-        // builds, and the raw series scan below this node has no equivalent: it reports every
-        // field the scan carries. Binding all of them would fold fields the query excluded, so
-        // the route is declined until the field selector is reused here.
+        // A `__field__` matcher narrows the field set in a projection the existing planner builds, and the
+        // raw series scan below this node has no equivalent: it reports every field the scan carries.
         if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
             return Ok(None);
         }
@@ -246,11 +232,9 @@ impl PromPlanner {
         let mut input = self.create_table_scan_plan(table_ref).await?;
         let logical_scan = metric_scan_and_table_id(&input);
         let has_verified_metric_rewrite = logical_scan.is_some();
-        // A metric logical table's id is part of the identity its own scan reads: two
-        // logical tables served through one physical table prepare two scans of that one
-        // table, and the ids are what says they are two metrics. A selector whose scan is not
-        // a logical rewrite contributes no id, and a missing id on either side is not a
-        // difference.
+        // A metric logical table's id is part of the identity its own scan reads: two logical tables served
+        // through one physical table prepare two scans of that one table, and the ids are what says they are
+        // two metrics. A missing id on either side is not a difference.
         if let Some((_, _, table_id)) = &logical_scan {
             match *logical_scan_id {
                 None => *logical_scan_id = Some(*table_id),
@@ -297,21 +281,15 @@ impl PromPlanner {
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
-        // A table split along a partition column lives in more than one region. In process the
-        // canonical boundary's router only collects the pieces its own region's producer holds, so
-        // the caller needs this fact to tell a whole-query label-set answer from one region's share
-        // of it.
+        // A table split along a partition column lives in more than one region. The canonical boundary's router
+        // only collects the pieces its own producer holds, so the caller needs this fact to tell a whole-query
+        // label-set answer from one region's share of it.
         let partitioned = table_meta.partition_column_names().next().is_some();
-        // An engine without a raw-series scanner has no frame to give this node, and by the
-        // time the physical planner asks, the logical plan is already this node: the refusal
-        // there is a planning error, not a fallback. So the engine is checked here, where the
-        // existing plan is still the answer. A file-engine table is the concrete case: its
-        // scanner is a `SinglePartitionScanner`, which leaves `raw_series_schema` at the
-        // default `None`. A metric-engine selector is admitted through its verified logical
-        // rewrite, with no separate multi-selector exclusion: each input is a metric logical
-        // table served through that rewrite, and the ids those rewrites carry are what tells
-        // two different ones apart below. Two occurrences of one logical table stay two
-        // scans of the one physical table, answered where that table's region runs them.
+        // An engine without a raw-series scanner has no frame to give this node, and by the time the physical
+        // planner asks, the logical plan is already this node: the refusal there is a planning error, not a
+        // fallback. So the engine is checked here. A file-engine table is the concrete case, since its
+        // `SinglePartitionScanner` leaves `raw_series_schema` at the default `None`. A metric-engine selector is
+        // admitted through its verified logical rewrite.
         if !supports_native_raw_series(&table_meta.engine)
             || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
         {
@@ -333,23 +311,20 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        // A partition column that is not a tag splits one series across regions, and a bare scan
-        // cannot reconcile the fragments. A raw source can, so such a selector is admitted and its
-        // input is bound per source below; only the shapes that read a bare scan need the
-        // reconciliation to happen in one region.
+        // A partition column that is not a tag splits one series across regions, and a bare scan cannot
+        // reconcile the fragments; a raw source can, so such a selector is admitted and its input is bound per
+        // source below.
         let split_series = !table_meta
             .partition_column_names()
             .all(|column| tags.iter().any(|tag| tag == column));
-        // This route declares one output column per field, so every field it binds carries
-        // one kind: `Float64`, or the canonical native histogram struct. A field of any
-        // other type - an integer, a `Float32`, a decimal, a string - keeps the existing
-        // plan, and so does a statement whose fields disagree: one column cannot carry two
-        // kinds.
+        // This route declares one output column per field, so every field it binds carries one kind:
+        // `Float64`, or the canonical native histogram struct. A field of any other type - an integer, a
+        // `Float32`, a decimal, a string - keeps the existing plan, and so does a statement whose fields
+        // disagree.
         //
-        // `Float64` fields are answered by the columnar series-index reader when a region
-        // prepares one. A histogram field is not: the logical plan cannot tell which reader
-        // a region will prepare, so such a selection falls back to the ordinary scan, whose
-        // converter already turns the persisted struct into histogram samples.
+        // `Float64` fields are answered by the columnar series-index reader when a region prepares one. A
+        // histogram field is not, since the logical plan cannot tell which reader a region will prepare, so
+        // such a selection falls back to the ordinary scan.
         let Some(field_kind) = uniform_field_kind(
             fields
                 .iter()
@@ -409,22 +384,15 @@ impl PromPlanner {
 
     /// The one native attempt at `prom_expr`, in the representation the caller needs from it.
     ///
-    /// The whole expression is offered first: the compiler folds a range function and the math
-    /// functions over it into one node, which is the statement's answer whenever it can bind every
-    /// selector at once. What it cannot bind that way - two selectors carrying different field
-    /// kinds, or an operand that is itself a composition - is admitted as a composition of two
-    /// frames instead.
+    /// The whole expression is offered first: the compiler folds a range function and the math functions
+    /// over it into one node. What it cannot bind that way - two selectors carrying different field kinds,
+    /// or an operand that is itself a composition - is admitted as a composition of two frames instead.
     ///
-    /// Both attempts write the planner's selector state, so each one is handed the context it was
-    /// called with, and this restores it before returning whatever the attempt answered. That is
-    /// what lets a refused operand leave nothing behind for the next one, or for the caller that
-    /// keeps planning around this expression.
+    /// Both attempts write the planner's selector state, so this restores the context it was called with
+    /// before returning whatever the attempt answered, which lets a refused operand leave nothing behind.
     ///
-    /// `Box::pin` is here only because a composition and this attempt call each other, which an
-    /// anonymous async future cannot be sized for. It is not the termination guard: the recursion
-    /// below descends through a parsed expression's own operands. Both futures below are pinned for
-    /// that reason - a level of the descent keeps this block on the stack, so the block holds the
-    /// whole-expression attempt behind a pointer rather than by value.
+    /// `Box::pin` is here only because a composition and this attempt call each other, which an anonymous
+    /// async future cannot be sized for.
     fn try_plan_native<'a>(
         &'a mut self,
         prom_expr: &'a PromExpr,
@@ -455,17 +423,12 @@ impl PromPlanner {
 
     /// Combines two native operands without a legacy join.
     ///
-    /// Each operand is planned the way the whole expression is - as its own tree where that tree
-    /// binds every one of its selectors, as a composition of its own operands where it does not -
-    /// and bound as one evaluated series frame. What admits the pair is the composition itself: the
-    /// two grids must agree, and the matching, its cardinality, its fill values and the output
-    /// column's kind must all be ones the kernels answer. A shape they refuse declines to the
-    /// existing plan rather than to an error.
+    /// Each operand is planned the way the whole expression is and bound as one evaluated series frame.
+    /// What admits the pair is the composition itself: the two grids must agree, and the matching, its
+    /// cardinality, its fill values and the output column's kind must all be ones the kernels answer. A
+    /// shape they refuse declines to the existing plan rather than to an error.
     ///
-    /// Only a binary expression composes, and only its own two operands are offered below: the
-    /// recursion descends the parsed expression rather than re-offering it, so it ends at a leaf.
-    /// A scalar, a raw sample and an aggregate state are not frames, so an operand that is one is
-    /// refused by the attempt that would have had to produce it.
+    /// Only a binary expression composes, and only its own two operands are offered below.
     async fn try_plan_native_composed_binary(
         &mut self,
         expr: &PromExpr,
@@ -623,20 +586,17 @@ impl PromPlanner {
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
-    /// The compiler's bound tree and selector schemas determine the native output names; the
-    /// existing planner is not consulted for capability or schema approval.
+    /// The compiler's bound tree and selector schemas determine the native output names; the existing
+    /// planner is not consulted for capability or schema approval.
     ///
-    /// The route is offered a whole expression because the compiler folds a range function and the
-    /// math functions over it into one tree: offering a sub-expression instead would compile a tree
-    /// that computes something the reader did not write. Everything else about the node comes from
-    /// the planner's resolved selector context: the table name, the time index column, the tag
-    /// columns and the field columns, which are exactly the raw series schema the tree's input
-    /// has to be compiled against. Selectors with a `__field__` matcher keep legacy planning.
+    /// The route is offered a whole expression because the compiler folds a range function and the math
+    /// functions over it into one tree: offering a sub-expression would compile a tree that computes
+    /// something the reader did not write. The node's table, time index, tag and field columns come from
+    /// the planner's resolved selector context, which is the raw series schema the tree's input is
+    /// compiled against. Selectors with a `__field__` matcher keep legacy planning.
     ///
-    /// `None` is not a failure. It says this query cannot take the route unchanged, and the caller
-    /// plans it with the existing planner as if this method did not exist. The aggregate split only
-    /// admits shapes the split can carry; other vector-wide operations, subqueries, alternative
-    /// matchers, and unbindable scans keep existing planning.
+    /// `None` is not a failure: the caller plans the query with the existing planner as if this method did
+    /// not exist.
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,
@@ -646,13 +606,9 @@ impl PromPlanner {
         if !self.native_fused {
             return Ok(None);
         }
-        // A range selector returns raw samples, which have no evaluation grid to bind. A subquery
-        // root instead returns its inner expression on the subquery's child grid, and a range
-        // query has no grid to bind a matrix root to at all.
-        //
-        // A composition reads this admission as its own: a subquery root is compiled on its child
-        // grid, which is the grid its rows carry, so an operand whose grid is not the one a
-        // composition binds declines rather than being evaluated on the statement's grid.
+        // A range selector returns raw samples, which have no evaluation grid to bind. A subquery root
+        // instead returns its inner expression on the subquery's child grid, and a range query has no grid
+        // to bind a matrix root to.
         let subquery_root = root_subquery(prom_expr);
         if prom_expr.value_type() == ValueType::Matrix
             && (subquery_root.is_none() || self.ctx.start != self.ctx.end)
@@ -663,11 +619,9 @@ impl PromPlanner {
         let Some(stmt) = self.native_statement(prom_expr) else {
             return Ok(None);
         };
-        // The subquery root's inner expression is compiled on the child grid, with the statement
-        // left untouched: `@ start()` and `@ end()` inside it resolve against the statement's own
-        // bounds, not against the child's. A statement whose grid cannot be built is not one this
-        // route can evaluate, so it keeps the existing plan. The child grid is the compiler's own
-        // derivation, so both halves of the route agree on the step, the range and the anchor.
+        // The subquery root's inner expression is compiled on the child grid, with the statement left
+        // untouched: `@ start()` and `@ end()` inside it resolve against the statement's bounds. A statement
+        // whose grid cannot be built keeps the existing plan.
         let child_grid = if let Some(subquery) = subquery_root {
             let Ok(outer) = statement_grid(&stmt) else {
                 return Ok(None);
@@ -699,10 +653,8 @@ impl PromPlanner {
         ) {
             return Ok(None);
         }
-        // The compiler decides which calls and shapes this route answers: a name it has no kernel
-        // for comes back as `NotImplemented`, which is a decline below. A second list of names here
-        // refused expressions the compiler does fold - a call under an aggregate was admitted while
-        // the same call on its own was not - so there is one place that decides.
+        // The compiler decides which calls and shapes this route answers: a name it has no kernel for comes
+        // back as `NotImplemented`, which is a decline below.
         let Ok(statement) = statement_grid(&stmt) else {
             return Ok(None);
         };
@@ -821,10 +773,9 @@ impl PromPlanner {
                 if !selector.matchers.or_matchers.is_empty() {
                     return Ok(None);
                 }
-                // A selector that names no metric is answered by enumerating the schema's logical
-                // metric tables: one input per metric, each reading its own region. The tag walk
-                // then sees every input's own labels, so each series keeps the identity the
-                // expression itself cannot name.
+                // A selector that names no metric is answered by enumerating the schema's logical metric
+                // tables: one input per metric, each reading its own region, so every series keeps the
+                // identity the expression itself cannot name.
                 if discovers_metric_name(selector) {
                     let name_matchers = selector.matchers.find_matchers(METRIC_NAME);
                     let mut ordinary_matchers = selector.matchers.clone();
@@ -906,18 +857,14 @@ impl PromPlanner {
                         .context(DataFusionPlanningSnafu);
                     }
                     if metrics.is_empty() {
-                        // Nothing matches the selector, so the query still has an answer: the
-                        // empty vector. Planning it here rather than declining is what keeps a
-                        // nameless selector that matches nothing from reaching the existing
-                        // planner, which has no table to bind and raises `TableNameNotFound`: no
-                        // table matching is a result, not a failure to plan.
+                        // Nothing matches the selector, so the query still has an answer: the empty vector.
+                        // Planning it here keeps a nameless selector that matches nothing from reaching the
+                        // existing planner, which has no table to bind and raises `TableNameNotFound`.
                         //
-                        // An empty raw series frame is an ordinary input to the node. Multi-input
-                        // placement and partition normalization are decided after compilation.
-                        // A `__field__` matcher narrows the field set in a projection the existing
-                        // planner builds, and this route declines it for a scan it can read; the
-                        // same refusal keeps the empty input from claiming a field layout the
-                        // matcher would have decided.
+                        // An empty raw series frame is an ordinary input to the node; multi-input placement
+                        // and partition normalization are decided after compilation. A `__field__` matcher
+                        // is declined for a scan this route can read, and the same refusal keeps the empty
+                        // input from claiming a field layout the matcher would have decided.
                         if self.ctx.field_column_matcher.is_some() {
                             return Ok(None);
                         }
@@ -964,8 +911,8 @@ impl PromPlanner {
                         };
                         discovered_partitioned |= partitioned;
                         discovered_split_series |= split_series;
-                        // The union reads every discovered metric, so the whole input stays inside
-                        // one region only when every metric it reads does.
+                        // The union reads every discovered metric, so it is region-local only when
+                        // every metric it reads is.
                         let Some(metric) = metric else {
                             return Ok(None);
                         };
@@ -1077,16 +1024,13 @@ impl PromPlanner {
         let Some((mut prepared, logical_ids_differ, statement_kind)) = preparation? else {
             return Ok(None);
         };
-        // `absent_over_time` reads its window through a fold that keeps the metric name, so the
-        // segment that runs it reports names across a boundary. A nameless selector that discovery
-        // expands into more than one metric binds no single name for that boundary, and the fused
-        // node refuses a tree declaring `__name__` without one at physical planning. A fold that
-        // dropped the name would plan, but it would read two metrics sharing their ordinary labels
-        // as one series, so the route declines instead of planning either tree.
+        // `absent_over_time` reads its window through a fold that keeps the metric name, so the segment that
+        // runs it reports names across a boundary. A nameless selector that discovery expands into more
+        // than one metric binds no single name for that boundary, and the fused node refuses a tree
+        // declaring `__name__` without one. A fold that dropped the name would plan, but it would read two
+        // metrics sharing their ordinary labels as one series, so the route declines.
         //
-        // A selector that matched no table at all is not that shape: its typed empty input holds no
-        // series, so a presence read over it answers at every point and needs no name to hand one
-        // over.
+        // A selector that matched no table is not that shape: its typed empty input holds no series.
         if reads_presence(prom_expr)
             && prepared
                 .iter()
@@ -1094,39 +1038,30 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        // Selectors over one table share one region, so the node runs there over every scan. When
-        // they read more than one table, each scan answers from its own region and the node runs
-        // above them; see `RawSeriesSource`. A metric logical table's id is part of the identity it
-        // reads: two ids are two metrics even when one physical table holds both, so two selectors
-        // that differ only by that id still read different series and are bound as two inputs.
+        // Selectors over one table share one region, so the node runs there over every scan. When they read
+        // more than one table, each scan answers from its own region and the node runs above them; see
+        // `RawSeriesSource`. A metric logical table's id is part of the identity it reads: two ids are two
+        // metrics even when one physical table holds both.
         //
-        // The typed empty input of a selector that matched no table reads no region, so it takes no
-        // part in this: it is not a second table beside the others, and counting it as one would
-        // ask the others' binding to name a metric it does not have.
+        // The typed empty input of a selector that matched no table reads no region and counts as no
+        // second table.
         let cross_table = !same_table_scans(
             prepared
                 .iter()
                 .map(|(scan, ..)| scan)
                 .filter(|scan| !is_empty_discovered_input(scan)),
         ) || logical_ids_differ;
-        // A multi-selector tree over a partitioned table has no region-local placement: one node
-        // over several scans reads neither the other scans nor the fragments another region holds.
-        // It does have a frontend placement - each occurrence reads the table through its own raw
-        // source and the node matches above every region's contribution - so the tree is admitted
-        // on both routes and nothing is refused here.
-        // An empty selector has no table layout of its own: it reads no table, so the layout it is
-        // compiled against is the one the set operation it takes part in compares it as. A set
-        // operator pairs the fields of its two sides by position, so an operand that reads no real
-        // input is laid out by the first real selector in the other operand - which is also how the
-        // compiler's left-biased set output names the real field when empty is first. That layout
-        // reaches every empty selector of the operand, the ones a set operation of its own nests
-        // included: a subtree that reads no table has no sibling inside it to take a layout from,
-        // and the operation above compares the whole subtree as one side. A layout taken from the
-        // first real input anywhere in the statement is not that sibling's: it can carry a
-        // different number of fields, and the set operator refuses the two sides.
-        // An empty selector with no such operand above it - under an operator that is not a set
-        // operation - takes the statement's first real layout, and the default layout of
-        // [`empty_discovered_input`] when every selector is empty.
+        // A multi-selector tree over a partitioned table has no region-local placement, but it does have a
+        // frontend one - each occurrence reads the table through its own raw source and the node matches
+        // above every region's contribution - so the tree is admitted on both routes.
+        //
+        // An empty selector has no table layout of its own: the set operator pairs its two sides' fields by
+        // position, so an operand that reads no real input is laid out by the first real selector in the
+        // other operand. That layout reaches every empty selector of the operand, nested set operations
+        // included; a layout taken from the statement's first real input is not that sibling's and can
+        // carry a different number of fields. With no such operand above it, an empty selector takes the
+        // statement's first real layout, and the default layout of [`empty_discovered_input`] when every
+        // selector is empty.
         let local_layouts = local_empty_layouts(&set_operations, &prepared);
         let statement_layout = prepared
             .iter()
@@ -1227,11 +1162,10 @@ impl PromPlanner {
             if compiled_input.source_index != index {
                 return Ok(None);
             }
-            // The range this selector reads is the compiler's own: a window and an instant differ
-            // in which side of the lookback or range their scan starts on, and an anchor can move
-            // the whole range outside the statement's. The bound belongs to the scan, so it is
-            // pushed down before two occurrences are compared: two selectors over different windows
-            // or offsets read different rows even when nothing else about them differs.
+            // The range this selector reads is the compiler's own: a window and an instant differ in which
+            // side of the lookback or range their scan starts on, and an anchor can move the whole range
+            // outside the statement's. Two occurrences over different windows or offsets read different
+            // rows even when nothing else about them differs.
             let (start, end, inclusive) = compiled_input
                 .requirement
                 .raw_scan_bounds()
@@ -1326,13 +1260,10 @@ impl PromPlanner {
             .iter()
             .map(|(_, _, _, _, tags, _, _)| tags.clone())
             .collect::<Vec<_>>();
-        // The complete runtime label set of each input: a scan bound to one metric names every
-        // series it hands over, so `__name__` is one of its labels even though it is not a tag
-        // column. The canonical pass judges a rewrite by the labels it writes and the ones its input
-        // carries, so rewriting the name of a named scan is a rewrite of an existing label - and a
-        // discovered source declares the name among its tags itself. The output-column walks keep
-        // `source_tags`: the name becomes a column only when a rewrite writes one, or when the
-        // source declares it.
+        // The complete runtime label set of each input: a scan bound to one metric names every series it
+        // hands over, so `__name__` is one of its labels even though it is not a tag column. Rewriting the
+        // name of a named scan is therefore a rewrite of an existing label, and a discovered source
+        // declares the name among its tags itself.
         let runtime_source_tags = prepared
             .iter()
             .map(|(_, _, metric, _, tags, _, _)| {
@@ -1343,17 +1274,14 @@ impl PromPlanner {
                 tags
             })
             .collect::<Vec<_>>();
-        // Whether any input's table is split into regions along a partition column. The canonical
-        // boundary is the only part of this route that claims a whole-query label-set answer, and a
-        // region-local producer cannot see the pieces another region holds, so this fact decides
-        // whether that boundary may be claimed at all.
+        // Whether any input's table is split into regions along a partition column. Only the canonical
+        // boundary claims a whole-query label-set answer, and a region-local producer cannot see the pieces
+        // another region holds.
         let any_partitioned = prepared.iter().any(|input| input.5);
-        // Admission and placement are separate: `independent_scan_pair` admits nested native
-        // matches, while the physical locality classification decides whether their inputs need
-        // gathering or segmentation.
-        // A label rewrite can give two series one label set, which every consumer that answers a
-        // whole label set has to see as one series. The pass puts a [`NativeExpr::Merge`] where that
-        // matters and nowhere else, so a tree with no collapsing rewrite keeps every partition.
+        // Admission and placement are separate: `independent_scan_pair` admits nested native matches, while
+        // the physical locality classification decides whether their inputs need gathering or segmentation.
+        // The pass puts a [`NativeExpr::Merge`] where a label rewrite can give two series one label set, so
+        // a tree with no collapsing rewrite keeps every partition.
         let tree = match promql::native::canonicalize::merge_label_rewrites(
             &compiled.tree,
             &runtime_source_tags,
@@ -1369,12 +1297,9 @@ impl PromPlanner {
         let computed_key_case =
             matches!(locality, InputLocality::SinglePartition) && matching_operands_drop_key(root);
         let required_placement = !per_partition || computed_key_case;
-        // The node reads more than one input when the tree has more than one selector occurrence:
-        // the compiler binds one input per occurrence. What it needs from them is that each is
-        // bound to its own source - a raw source where the plan is split over regions - or, where a
-        // region can run the node itself, one bare scan per occurrence. Either way the consumer
-        // above them reads every occurrence's contribution, so the metric-id fact this used to turn
-        // on is not what admission turns on.
+        // The node reads more than one input when the tree has more than one selector occurrence: the
+        // compiler binds one input per occurrence. Each is bound to its own source where the plan is split
+        // over regions, or to one bare scan per occurrence where a region can run the node itself.
         let multi_input = selectors.len() > 1;
         // A region runs one node over its own scans only when the table it reads is not split into
         // regions and the tree's root is per-partition work: a partitioned table's region reads
@@ -1382,9 +1307,8 @@ impl PromPlanner {
         // consumer has no region-local placement. Such a tree runs above the regions, and then each
         // occurrence reads through its own raw source. An empty frame likewise requires sourced
         // scans: physical planning accepts either all frames or all bare scans, not a mixture.
-        // A read that spans regions is planned above them, so each occurrence reads through its
-        // own source. A read one region holds entire needs none: the region runs the tree over its
-        // own scans, at the widths it would use anyway.
+        // With a distributed planner every read is planned above the regions, so each occurrence
+        // reads through its own source.
         let spans_regions = query_engine_state.with_dist_planner();
         let per_source_inputs = cross_table
             || spans_regions
@@ -1420,21 +1344,16 @@ impl PromPlanner {
                         LogicalPlan::Extension(extension)
                             if extension.node.as_any().is::<RawSeriesSource>()
                     );
-                // The typed empty frame of a selector that matched no table is already the input:
-                // it reads no region, so there is no source to wrap it in and no metric to bind to
-                // it. Wrapping it would name a metric it does not have, which is why it stays
-                // itself on both routes.
+                // The typed empty frame of a selector that matched no table is already the input: it reads
+                // no region and has no metric to bind, so it stays itself on both routes.
                 if is_empty_discovered_input(&scan) {
                     return Ok(scan);
                 }
-                // A scan stays bare only where a region runs the node over it. A plan split over
-                // regions reads every input through a raw source, whichever table it reads: the
-                // source is what each region's half names, and it is also what reconciles the
-                // fragments of a series that several regions hold. A partition that splits one
+                // A scan stays bare only where a region runs the node over it. A plan split over regions
+                // reads every input through a raw source: the source names each region's half and
+                // reconciles the fragments of a series several regions hold. A partition that splits one
                 // series across regions has to be read through a raw source even where no split is
-                // planned: a bare scan would hand a region only its own fragment. A tree the regions
-                // cannot run as one node reads its occurrences through their own sources too, so the
-                // consumer above matches every region's contribution instead of the rows of one.
+                // planned, since a bare scan would hand a region only its own fragment.
                 if (!per_source_inputs && !split_series) || already_sourced {
                     return Ok(scan);
                 }
@@ -1457,44 +1376,32 @@ impl PromPlanner {
         // A canonical boundary routes each label set to one owner above its own producer, and a
         // region-local producer only sees the partitions of the region it runs in.
         //
-        // One placement is left out of that, and the reason is not coverage: a partitioned table's
-        // region read has no raw-series frame to give a canonical producer, so physical planning
-        // cannot convert the node and the query fails with "no installed planner was able to convert
-        // the custom node" - after the plan is committed and with no fallback left. That holds even
-        // when the read is proven to be one region, so a partitioned table whose boundary is not
-        // placed over sources declines here, and the existing planner - which reads every region and
-        // reports what Prometheus reports - answers instead.
+        // A partitioned table's region read has no raw-series frame to give a canonical producer, so
+        // physical planning cannot convert the node and the query fails after the plan is
+        // committed, so such a statement declines here.
         //
         // The other placement is not a decline. A canonical boundary whose pieces of one label set
         // can be spread over regions reads `RawSeriesSource` children, one per region: the analyzer
         // expands them into merge scans, and the producer runs on the frontend above every region
-        // with its canonical router above all of them - `Categorizer::check_extension_plan` admits
-        // a producer inside a region only on the same proof this statement carries - so each label
-        // set is collected from every region's contribution, and a collision across regions is
-        // reported as Prometheus reports it.
+        // with its canonical router above all of them, so each label set is collected from every
+        // region's contribution, and a collision across regions is reported as Prometheus reports
+        // it.
         //
         // A tree with no canonical merge claims no label-set answer, so it is untouched: a
         // per-series query on a partitioned table keeps fusing.
         if !spans_regions && any_partitioned && contains_canonical_merge(root) {
             return Ok(None);
         }
-        // The kind the tree's root answers with, which every output column follows. It is not the
-        // kind the inputs carry: `count_over_time`, `histogram_count` and `timestamp` reduce a
-        // histogram to a float, while a selector, a histogram-answering range function and a label
-        // rewrite pass it on.
-        //
-        // Only a histogram statement can answer a histogram column, so only then does the walk
-        // have to name one; a float statement keeps the float schema it always had, and a shape
-        // whose kind cannot be named keeps the existing plan rather than declaring a column the
+        // The kind the tree's root answers with, which every output column follows. It is not the kind the
+        // inputs carry: `count_over_time`, `histogram_count` and `timestamp` reduce a histogram to a
+        // float, while a selector, a histogram-answering range function and a label rewrite pass it on.
+        // A shape whose kind cannot be named keeps the existing plan rather than declaring a column the
         // first batch might not fill.
         let root_kind = match statement_kind {
             Some(FieldKind::Histogram) => {
                 // A histogram answer standing on a canonical merge would run through the canonical
-                // boundary carrying histogram frames, a pairing nothing exercises yet. The
-                // follow-up that teaches the aggregate state to hold histograms owns it, and until
-                // then the statement keeps the existing plan - its answer, not its semantics, is
-                // out of this route's reach. Every merge counts, not only a root one: a merge below
-                // a float-producing map is still a boundary that would carry histograms.
+                // boundary carrying histogram frames, a pairing nothing exercises yet, so such a
+                // statement keeps the existing plan. Every merge counts, not only a root one.
                 if merge_answers_histogram(root, FieldKind::Histogram) {
                     return Ok(None);
                 }
@@ -1520,18 +1427,11 @@ impl PromPlanner {
         } else {
             None
         };
-        // A tree over more than one input needs no split: each input already answers from its own
-        // source, and the one node above them folds every partition in one execution. The split is
-        // an optimization for the one-input shapes it can carry, and so is the segmentation below;
-        // the node over the inputs is what admits the rest.
-        //
-        // The aggregate split folds float state, and a node reading several sources runs over
-        // frames it reconciled rather than over its own scans, so a histogram keeps the existing
-        // plan for both rather than running a tree whose output the runtime could not finish. A
-        // node over bare scans is not that shape: a region runs it over each scan itself, exactly
-        // as it does for one selector. The kind entering each aggregate is what decides, not the
-        // shape of the root: `sum(h) * 2` has a binary root and would otherwise hide the aggregate
-        // under it.
+        // A tree over more than one input needs no split: each input already answers from its own source,
+        // and the one node above them folds every partition in one execution. The aggregate split folds
+        // float state, and a node reading several sources runs over frames it reconciled rather than over
+        // its own scans, so a histogram keeps the existing plan for both. The kind entering each
+        // aggregate is what decides, not the shape of the root: `sum(h) * 2` has a binary root.
         if let Some(kind @ FieldKind::Histogram) = statement_kind
             && ((multi_input && per_source_inputs) || aggregate_reads_histogram(root, kind))
         {
@@ -1544,31 +1444,25 @@ impl PromPlanner {
             return Ok(None);
         }
         // The native output schema can name only compiled value fields, the time index and the tag
-        // columns a source declares. A discovered source declares `__name__` because the name is
-        // what tells two metrics with equal labels apart, so a nameless selector's names survive a
-        // grouping by `__name__` (#10106). A named selector's source does not declare it - the table
-        // name is the metric name - so a tree reading more than one such source cannot report the
-        // distinct groups and declines instead of claiming they are interchangeable.
+        // columns a source declares. A discovered source declares `__name__` because the name tells two
+        // metrics with equal labels apart (#10106); a named source does not, so a tree reading more than
+        // one such source cannot report the distinct groups and declines.
         if multi_input && groups_by_metric_name(root) {
             return Ok(None);
         }
         // Catch construction-time refusals before choosing native execution: errors raised during
-        // physical planning cannot fall back. This includes unsupported aggregates and `topk`,
-        // `limitk` or CountValues groupings; it does not cover data-dependent errors raised while
-        // executing the tree. A plan split over regions commits to the fused node without the
-        // split or a segment above it, so it validates itself the same way before that choice.
+        // physical planning cannot fall back. This does not cover data-dependent errors raised while
+        // executing the tree.
         if (multi_input || per_source_inputs)
             && NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
                 .is_err()
         {
             return Ok(None);
         }
-        // A tree that ends in a canonical merge answers one series per label set, and the pieces of
-        // one set were spread over the scan's partitions by the rewrite that created them. Lowering
-        // that boundary keeps the scan width: each partition merges the pieces it holds and exports
-        // series frames, and a canonical router collects the pieces of one label set from every
-        // partition. Declining here would hand the statement back to a path that answers it per
-        // partition.
+        // A tree that ends in a canonical merge answers one series per label set, and the pieces of one
+        // set were spread over the scan's partitions by the rewrite that created them. Lowering that
+        // boundary keeps the scan width: each partition merges the pieces it holds and a canonical
+        // router collects a label set from every partition.
         if selectors.len() == 1
             && matches!(&tree.root().expr, NativeExpr::Merge { input } if pointwise_operand(input) && canonical_local_prefix(input) && !contains_global_consumer(input))
             && let Some((plan, _)) = canonical_boundary_stages(
@@ -1594,14 +1488,10 @@ impl PromPlanner {
             )));
         }
         if required_placement {
-            // A tree whose fold can be split keeps that plan: it exports aggregate state rather
-            // than whole samples, so it moves less between the two halves than a sample boundary
-            // would. The general segmentation below is the fallback for the trees it declines,
-            // which are the ones its per-series prefix cannot express. The split is decided before
-            // anything consumes a child, so a tree it declines keeps the plan it would have built
-            // without this route. Its producer reads whatever input the statement prepared: over
-            // the wire that is the raw series source, and the partial/final halves stay on the
-            // frontend above the regions, so per-series work keeps the scan width.
+            // A tree whose fold can be split keeps that plan: it exports aggregate state rather than
+            // whole samples. The general segmentation below is the fallback for the trees it declines,
+            // and the split is decided before anything consumes a child. Its producer reads whatever
+            // input the statement prepared.
             let split = if selectors.len() == 1 {
                 FusedSeries::split_aggregate(&tree, &time).context(DataFusionPlanningSnafu)?
             } else {
@@ -1680,13 +1570,9 @@ impl PromPlanner {
                 contains_canonical_merge(root),
                 root_kind,
                 // A cut must keep the source whenever a region's own read cannot hold what the cut
-                // evaluates: a per-region prefix would evaluate a window over one region's
-                // fragment, so `rate` never sees the samples the other region holds. That is a
-                // partition on a column that is not a tag, and a partitioned table whose
-                // occurrences are source-backed. How many regions can serve the read is not part of
-                // it: a series a partition keeps whole is whole in every region that holds it, so an
-                // ordinary per-series cut stays regional wherever the regions are, and it is the
-                // canonical boundary that the region count places.
+                // evaluates: a per-region prefix would evaluate a window over one region's fragment, so
+                // `rate` never sees the samples the other region holds. That is a partition on a column
+                // that is not a tag, and a partitioned table whose occurrences are source-backed.
                 any_split_series || (per_source_inputs && any_partitioned),
                 fused_output_tags,
                 PromPlanner::fused_root_schema,
@@ -1702,9 +1588,8 @@ impl PromPlanner {
             }
             // One input with no split or segment above it leaves a raw scan doing the work of a
             // cross-series consumer, and a single scan does not prove its region holds every
-            // contribution the consumer needs. Keep that consumer on the existing plan. A tree over
-            // more than one input is not this shape: every occurrence reaches it through its own
-            // source, so the node itself is the collection.
+            // contribution the consumer needs. Keep that consumer on the existing plan; a tree over more
+            // than one input is not this shape.
             if required_placement && !multi_input {
                 return Ok(None);
             }
@@ -1747,12 +1632,10 @@ impl PromPlanner {
                 )
             }
         };
-        // The children a node reads bind it: a `RawSeriesSource` child carries the frames and names
-        // the metric it reads, so a node over them binds neither tags nor one metric name of its
-        // own. A node whose children stay direct scans of one table reads that table through the
-        // one metric and tag set they share, and keeps this binding, which is the same identity
-        // those scans carry. The same holds for a plan split over regions, where every input is a
-        // raw source.
+        // The children a node reads bind it: a `RawSeriesSource` child carries the frames and names the
+        // metric it reads, so a node over them binds neither tags nor one metric name of its own. A node
+        // whose children stay direct scans of one table reads that table through the one metric and tag
+        // set they share.
         let (tags, metric) = if per_source_inputs {
             (Vec::new(), None)
         } else {
@@ -1790,11 +1673,11 @@ impl PromPlanner {
 
     /// The columns a [`FusedSeries`] node over `tree` produces.
     ///
-    /// Field and tag names are derived from the native tree. If this walk cannot derive a tag
-    /// set, the native route declines rather than consulting the legacy planner.
+    /// Field and tag names are derived from the native tree; a walk that cannot derive a tag set declines
+    /// rather than consulting the legacy planner.
     ///
-    /// `None` when the root is not a value the node can publish, or when a field would share a
-    /// name with a tag or the time index: the output names each column once.
+    /// `None` when the root is not a value the node can publish, or when a field would share a name with a
+    /// tag or the time index.
     fn fused_root_schema(
         tree: &NativeTree,
         source_tags: &[Vec<String>],
@@ -1816,22 +1699,18 @@ impl PromPlanner {
         if !columns.clone().all(|name| column_names.insert(name)) {
             return None;
         }
-        // The kind is the one the statement's own root answers, derived before segmentation cut
-        // anything. It cannot be recomputed here: a cut prefix is replaced by an input leaf whose
-        // samples are already evaluated, so walking this tree would read every such leaf as the
-        // kind its scan carried. `count_over_time(h[5m]) + on (__name__) ...` answers floats, and
-        // its replaced leaf carries floats, while the scan below was a histogram.
+        // The kind is the one the statement's own root answers, derived before segmentation cut anything.
+        // It cannot be recomputed here: a cut prefix is replaced by an input leaf whose samples are
+        // already evaluated.
         fused_output_schema(&root_fields, &output_tags, time, root_kind).ok()
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
     ///
-    /// The compiler reads the statement's grid, lookback and `@` anchors rather than the planner's
-    /// mutable state. A nested binary is offered only while `ctx.start` and `ctx.end` are still
-    /// the statement's bounds; anchored windows and subqueries can rewrite those bounds.
-    ///
-    /// `None` means the bounds are not representable as a [`SystemTime`], which is not a grid a
-    /// tree can be evaluated on either.
+    /// The compiler reads the statement's grid, lookback and `@` anchors rather than the planner's mutable
+    /// state. A nested binary is offered only while `ctx.start` and `ctx.end` are still the statement's
+    /// bounds; anchored windows and subqueries can rewrite those bounds. `None` means the bounds are not
+    /// representable as a [`SystemTime`].
     fn native_statement(&self, prom_expr: &PromExpr) -> Option<EvalStmt> {
         let start = epoch_millis(self.ctx.stmt_start)?;
         let end = epoch_millis(self.ctx.stmt_end)?;
@@ -1847,20 +1726,14 @@ impl PromPlanner {
 
 /// The typed empty input of a discovered selector that matched no metric table.
 ///
-/// No table matched, so there is no scan and no metric name: the input is an empty raw series
-/// frame, the one input a [`FusedSeries`] node and every operator above it already read. It is
-/// bound to a series schema of one field and no grid because that is the layout this route compiles
-/// a selector against, and a schema with no field is refused by the compiler for the shapes that
-/// read one. That default is only what this input is built with: the planner re-lays it out in the
-/// schema of the set operation it takes part in - the first real selector beside it, or the
-/// statement's first real layout - so the fields and the grid it ends up carrying are that layout's
-/// whenever the statement reads a table at all. No row of either is ever read, so a name that
-/// survives decides only what an operator that answers on its own - `absent` - calls its value
-/// column.
+/// No table matched, so there is no scan and no metric name: the input is an empty raw series frame, the
+/// one input a [`FusedSeries`] node already reads. It is bound to a schema of one field and no grid
+/// because that is the layout this route compiles a selector against; the planner re-lays it out in the
+/// schema of the set operation it takes part in. No row is ever read, so a surviving name decides only
+/// what an operator answering on its own - `absent` - calls its value column.
 ///
-/// The empty plan declares the frame a scan would declare, so the physical planner reads it as the
-/// frame producer it is instead of looking for a region scan below the node. Its labels are
-/// explicit, which is the mode a producer names each series in rather than a scan's storage key.
+/// The empty plan declares the frame a scan would declare, so physical planning reads it as the frame
+/// producer it is, with explicit labels rather than a scan's storage key.
 fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
     let schema = empty_discovered_series_schema();
     let input = empty_discovered_frame(&schema)?;
@@ -1914,9 +1787,8 @@ fn reads_presence(expr: &PromExpr) -> bool {
 
 /// The moment `millis` milliseconds from the Unix epoch, on whichever side of it that lands.
 ///
-/// A pre-epoch statement (`TQL EVAL ('-60', '-60', '1m')`) reaches the planner as a negative
-/// millisecond, which `PromPlannerContext::from_eval_stmt` keeps on purpose. `None` means the bound
-/// is outside what a [`SystemTime`] represents.
+/// A pre-epoch statement reaches the planner as a negative millisecond. `None` means the bound is
+/// outside what a [`SystemTime`] represents.
 fn epoch_millis(millis: i64) -> Option<SystemTime> {
     if millis.is_negative() {
         UNIX_EPOCH.checked_sub(Duration::from_millis(millis.unsigned_abs()))
@@ -1967,20 +1839,16 @@ fn fused_output_schema(
 /// Builds the two nodes a split native aggregate runs in.
 ///
 /// The first is a [`FusedSeries`] over `rawinput` running the per-series prefix and a `Partial`
-/// aggregate at its root, so each partition exports the state it folded. The second is a
-/// [`FusedSeries`] over the first running the `Final` aggregate and everything the split moved
-/// above it: it reads state where the first reads series, and answers the statement's rows. Between
-/// them the physical planner puts a `SeriesRepartitionExec`, which is what makes every row of a
-/// group reach one final partition.
+/// aggregate at its root, so each partition exports the state it folded. The second runs the `Final`
+/// aggregate and everything the split moved above it: it reads state where the first reads series.
+/// Between them the physical planner puts a `SeriesRepartitionExec`, which is what makes every row of
+/// a group reach one final partition.
 ///
 /// `format` is the representation the caller needs from the second node: the statement's row table,
-/// or the evaluated series frame another native node reads as an operand. The producer is
-/// unaffected, because partial state is a frame either way.
+/// or the evaluated series frame another native node reads as an operand.
 ///
-/// `value_schema` is the statement's row-value layout, and the output value columns it declares
-/// must match the partial state's accumulator count; a mismatch means the declared output shape
-/// does not match the state schema of the split tree. Only the row layout is counted: a frame
-/// declares the values inside its own encoding, so it names no float column to count.
+/// `value_schema` is the statement's row-value layout; its value columns must match the partial
+/// state's accumulator count.
 fn plan_split_aggregate(
     promql: Arc<str>,
     partial: NativeTree,
@@ -2052,9 +1920,6 @@ fn plan_split_aggregate(
 }
 
 /// The time-range filter a selector's scan reads, from the bounds its compiled requirement names.
-///
-/// The selector bounds are already checked against the millisecond timestamp schema during
-/// admission; preserve the requirement's inclusive or exclusive lower edge exactly.
 fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) -> DfExpr {
     let column = DfExpr::Column(datafusion::common::Column::from_name(time_column));
     let lower = DfExpr::Literal(
@@ -2075,10 +1940,8 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
 
 /// Whether any aggregate in `node` consumes histogram samples, wherever it sits in the tree.
 ///
-/// The walk asks each aggregate what kind enters it rather than what the tree's root answers,
-/// because an operator above an aggregate hides it: `sum(h) * 2` has a binary root. Only a
-/// histogram entering an aggregate is refused; a float-producing prefix such as
-/// `count_over_time` over a histogram stays eligible.
+/// The walk asks each aggregate what kind enters it rather than what the root answers, because an
+/// operator above an aggregate hides it: `sum(h) * 2` has a binary root.
 fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
     // Only `sum` and `avg` fold the payload, and this route has no histogram aggregate state yet:
     // `count` and `group` count a histogram as one present sample, `min`/`max`/`stddev`/`stdvar`
@@ -2113,16 +1976,14 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
 
 /// The most metric tables one discovered selector will scan.
 ///
-/// Every one of them costs a scan of the physical region behind it, and the union is as wide as
-/// the schema, so a selector that matches everything is answered by narrowing it rather than by
-/// planning one query that reads the whole schema at once.
+/// A selector that matches everything is answered by narrowing it rather than by planning one query
+/// that reads the whole schema at once.
 const MAX_DISCOVERED_METRICS: usize = 1024;
 
-/// Whether a selector names no single table and has to enumerate the schema's metric tables to
-/// answer.
+/// Whether a selector names no single table and has to enumerate the schema's metric tables.
 ///
 /// Exported so the authorization layer can ask the same question before it authorizes what the
-/// planner will scan; the two answers have to agree. #10107 uses it from the frontend.
+/// planner will scan; the two answers have to agree.
 pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
     let name_matchers = selector.matchers.find_matchers(METRIC_NAME);
     let has_non_equal_name_matcher = name_matchers
@@ -2142,17 +2003,11 @@ pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
 
 /// Whether `node` holds an operation whose answer depends on the order its input arrives in.
 ///
-/// `limitk` keeps the first `k` series of each group *in input order* ([`promql::select::limitk`]).
-/// A node with more than one input reads its inputs' partitions through a gather that hands over
-/// whichever partition became ready first, so the schedule would decide which series a query keeps
-/// and the same data could answer differently between two runs. Prometheus defines the selection
-/// over a series set, not over an arrival order.
-///
-/// Only this operation's *selection* depends on that order. `topk` breaks ties by label and
-/// `limit_ratio` selects by a label hash, so a reordered gather changes neither. The instant
-/// `sort`s keep tied series in the order they arrived, and a floating-point fold such as `stdvar`
-/// can differ in its last bits, but neither changes which series a statement keeps. The aggregate
-/// split declines `LimitK` for the same reason, and only a multi-input node repeats that refusal.
+/// `limitk` keeps the first `k` series of each group *in input order* ([`promql::select::limitk`]),
+/// and a node with more than one input reads them through a gather that hands over whichever
+/// partition became ready first, so the schedule would decide which series a query keeps. Only this
+/// operation's selection depends on that order: `topk` breaks ties by label and `limit_ratio`
+/// selects by a label hash.
 fn depends_on_input_order(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
@@ -2190,9 +2045,7 @@ fn depends_on_input_order(node: &NativeNode) -> bool {
 
 /// One side of a set operation, as the slice of the pre-order selector list it reads.
 ///
-/// The slice is the side's whole subtree, so it is also what says whether the side reads a table at
-/// all: a side that reads none is the side whose selectors have to be laid out by the comparison
-/// itself rather than by a scan they hold.
+/// The slice is the side's whole subtree, so it also says whether the side reads a table at all.
 #[derive(Clone, Copy, Debug)]
 struct SetOperand {
     start: usize,
@@ -2208,8 +2061,7 @@ struct SetOperation {
 
 /// [`collect_selectors`], also recording the set operations it passes.
 ///
-/// The operands are recorded as index ranges of `out`, which is the same pre-order the compiler
-/// binds its inputs in, so a recorded index is an index of the prepared input list.
+/// The operands are recorded as index ranges of `out`, which is the pre-order the compiler binds its inputs in.
 fn collect_selectors_with_set_operations<'a>(
     stmt: &EvalStmt,
     expr: &'a PromExpr,
@@ -2348,11 +2200,9 @@ fn collect_selectors_with_set_operations<'a>(
                 }
             }
         }
-        // The compiler compiles an aggregate's input and then its parameter (`topk`/`bottomk` take
-        // an expression where the others take a number or a label), so a parameter that reads a
-        // selector is a second source bound after the input. Walking both here is what keeps the
-        // prepared scan and the bound input at the same position; a literal or a grouping-only
-        // parameter contributes no selector, so the walk is a no-op for it.
+        // The compiler compiles an aggregate's input and then its parameter (`topk`/`bottomk` take an expression
+        // where the others take a number or a label), so a parameter that reads a selector is a second source
+        // bound after the input. Walking both keeps the prepared scan and the bound input at the same position.
         PromExpr::Aggregate(aggregate) => {
             return collect_selectors_with_set_operations(
                 stmt,
@@ -2391,14 +2241,9 @@ fn collect_selectors_with_set_operations<'a>(
 
 /// The index of the real input each zero-match input is laid out by, in `prepared` order.
 ///
-/// A set operation pairs its two sides' fields by position, so an operand that reads no real input
-/// is laid out by the first real selector in the other operand: that sibling is the layout the
-/// comparison gives the side. The layout reaches every zero-match selector in the operand, the ones
-/// written there directly and the ones a set operation of their own nests: an operand whose whole
-/// subtree reads no table has no sibling inside it to take a layout from, and the operation above
-/// it compares that subtree as one side. A zero-match selector with a real sibling of its own
-/// operation keeps that sibling's layout, which is the more local one. An empty input with no such
-/// operand above it has no entry here.
+/// A set operation pairs its two sides' fields by position, so an operand that reads no real input is laid out
+/// by the first real selector in the other operand, and that layout reaches every zero-match selector of the
+/// operand, nested set operations included. An empty input with no such operand above it has no entry here.
 fn local_empty_layouts(
     set_operations: &[SetOperation],
     prepared: &[PreparedInput],
@@ -2440,8 +2285,7 @@ fn local_empty_layouts(
 
 /// Whether `engine` can serve raw series frames to the fused-series node.
 ///
-/// This is a scanner capability boundary: it avoids probing a region during logical planning, and
-/// declining leaves the existing plan available.
+/// A scanner capability boundary: it avoids probing a region during logical planning.
 fn supports_native_raw_series(engine: &str) -> bool {
     matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
 }
@@ -2883,10 +2727,9 @@ mod tests {
                 "{query}"
             );
         }
-        // An aggregate reports the grouping labels its input carries: `by` keeps exactly those,
-        // and `without` keeps the rest and drops the metric name.
-        // `x` is bound to the three tag columns below, so `without (instance)` keeps all three:
-        // `instance` is not one of them, and the metric name is not a column here at all.
+        // An aggregate reports the grouping labels its input carries: `by` keeps exactly those, and `without`
+        // keeps the rest and drops the metric name. `x` is bound to the three tag columns below, so
+        // `without (instance)` keeps all three: `instance` is not one of them.
         for (query, expected) in [
             ("sum by (host) (x)", vec!["host"]),
             ("sum without (instance) (x)", vec!["host", "kind", "zone"]),
