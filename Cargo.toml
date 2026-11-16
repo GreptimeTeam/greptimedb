@@ -164,10 +164,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-# TODO(narthex-merge): temporary pre-merge pin. Points at the fork branch carrying
-# PR GreptimeTeam/greptime-proto#355 (RawSeriesSource on top of main's 5870f5adc).
-# Replace with the GreptimeTeam rev once #355 lands.
-greptime-proto = { git = "https://github.com/discord9/greptime-proto.git", rev = "b9159cd680ac2b88d155cbc9effd6df9694e8597" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "5fc04135bde7f30adea63c33a53533f69fe194b2" }
 hdfs-native = "0.14.6"
 hex = "0.4"
 hostname = "0.4.0"
