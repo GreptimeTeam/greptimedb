@@ -1,0 +1,23 @@
+src/object-store/src/layers/mock.rs
+  s_c06578f466c2ea::t_9567f0a15f86dd 31,33,48-49,60,80,92,134-136
+  s_c06578f466c2ea::t_31ad1f96a75c47 16-17,32
+src/mito2/src/compaction/compactor.rs
+  s_c06578f466c2ea::t_9567f0a15f86dd 489-493,495,510-516,519,986-990,1071-1073,1075-1078,1397-1481,1569-1572,1599-1604
+  s_c06578f466c2ea::t_d4aa528b07ca9a 1074
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9dd04faef93ed787cd5c1236539cc3f6fb3cc984",
+  "prompts": {},
+  "sessions": {
+    "s_c06578f466c2ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c374-3547-7b31-9c5c-4ab96c5f5115",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
