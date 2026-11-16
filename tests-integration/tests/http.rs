@@ -5652,12 +5652,18 @@ pub async fn test_remote_write_v2_histogram_native_partitions(store_type: Storag
     }
     for result in results {
         let job = result["metric"]["job"].as_str().expect("a job label");
+        // Take the entry rather than reading it: a duplicated `job` would then fail as unexpected,
+        // and a missing one is caught by the emptiness check below.
+        let expected = written
+            .remove(job)
+            .unwrap_or_else(|| panic!("unexpected or duplicate series: `{job}`"));
         assert_eq!(
             result["histogram"][1]["count"].as_str(),
-            written.get(job).map(String::as_str),
+            Some(expected.as_str()),
             "the histogram of `{job}` as {PROMETHEUS_REFERENCE} renders it"
         );
     }
+    assert!(written.is_empty(), "missing series: {written:?}");
     let fused = observer.take("histogram partitions");
     assert_eq!(fused.name(), "FusedSeriesExec");
     let metrics = fused.metrics().expect("fused metrics");
@@ -5676,9 +5682,19 @@ pub async fn test_remote_write_v2_histogram_native_partitions(store_type: Storag
         4,
         "expected all four scan partitions to report output: {partitions:?}"
     );
+    // Routing hashes each series' label set, so eight series over four partitions can legitimately
+    // leave one of them empty. What the topology has to guarantee is that the series are spread
+    // over more than one partition - otherwise the merge this test exists for is never exercised -
+    // and that the routing loses none of them.
+    let non_empty = partitions.values().filter(|count| **count > 0).count();
     assert!(
-        partitions.values().all(|count| *count > 0),
-        "empty native output partition: {partitions:?}"
+        non_empty >= 2,
+        "the fused producer must run on more than one partition: {partitions:?}"
+    );
+    assert_eq!(
+        8,
+        partitions.values().sum::<usize>(),
+        "every series must produce exactly one value: {partitions:?}"
     );
 }
 
