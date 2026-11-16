@@ -22,6 +22,7 @@ use cache::{
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
 use common_datasource::object_store::LocalFileAccess;
@@ -92,6 +93,7 @@ pub struct GreptimeDbStandaloneBuilder {
     auto_create_table: bool,
     logical_batcher: Option<BatcherOptions>,
     table_batcher: BatcherOptions,
+    max_in_flight_write_bytes: ReadableSize,
     mito_config: Option<mito2::config::MitoConfig>,
     pipeline_options: pipeline::PipelineOptions,
 }
@@ -114,6 +116,7 @@ impl GreptimeDbStandaloneBuilder {
             auto_create_table: true,
             logical_batcher: None,
             table_batcher: BatcherOptions::default(),
+            max_in_flight_write_bytes: ReadableSize(0),
             mito_config: None,
             pipeline_options: pipeline::PipelineOptions::default(),
         }
@@ -137,6 +140,13 @@ impl GreptimeDbStandaloneBuilder {
     #[must_use]
     pub fn with_table_batcher(mut self, options: BatcherOptions) -> Self {
         self.table_batcher = options;
+        self
+    }
+
+    /// Configures the shared protocol and conversion memory quota.
+    #[must_use]
+    pub fn with_write_memory_limit(mut self, bytes: u64) -> Self {
+        self.max_in_flight_write_bytes = ReadableSize(bytes);
         self
     }
 
@@ -411,6 +421,7 @@ impl GreptimeDbStandaloneBuilder {
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
             pipeline: self.pipeline_options.clone(),
+            max_in_flight_write_bytes: self.max_in_flight_write_bytes,
             pending_rows_batcher: PendingRowsBatcherOptions {
                 logical_table: self.logical_batcher.clone(),
                 table: self.table_batcher.clone(),

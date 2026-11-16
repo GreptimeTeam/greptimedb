@@ -30,6 +30,9 @@ static GREPTIME_VALUE_CELL: OnceCell<String> = OnceCell::new();
 /// Default native histogram column name.
 static GREPTIME_NATIVE_HISTOGRAM_CELL: OnceCell<String> = OnceCell::new();
 
+/// Default exemplar labels column name.
+static GREPTIME_EXEMPLAR_LABELS_CELL: OnceCell<String> = OnceCell::new();
+
 pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
     // Strip surrounding double quotes as a defensive measure against upstream
     // sources (scripts, CI, template engines, incorrect shell escaping) that may
@@ -46,12 +49,14 @@ pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| GREPTIME_TIMESTAMP.to_string());
             GREPTIME_VALUE_CELL.get_or_init(|| GREPTIME_VALUE.to_string());
             GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| NATIVE_HISTOGRAM_FIELD.to_string());
+            GREPTIME_EXEMPLAR_LABELS_CELL.get_or_init(|| GREPTIME_EXEMPLAR_LABELS.to_string());
         }
         Some(s) if s.trim().is_empty() => {
             // use "" to disable prefix
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| "timestamp".to_string());
             GREPTIME_VALUE_CELL.get_or_init(|| "value".to_string());
             GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| "native_histogram".to_string());
+            GREPTIME_EXEMPLAR_LABELS_CELL.get_or_init(|| "exemplar_labels".to_string());
         }
         Some(x) => {
             ensure!(
@@ -61,6 +66,7 @@ pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| format!("{}_timestamp", x));
             GREPTIME_VALUE_CELL.get_or_init(|| format!("{}_value", x));
             GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| format!("{}_native_histogram", x));
+            GREPTIME_EXEMPLAR_LABELS_CELL.get_or_init(|| format!("{}_exemplar_labels", x));
         }
     }
     Ok(())
@@ -87,6 +93,14 @@ pub fn greptime_native_histogram() -> &'static str {
         .map_or(NATIVE_HISTOGRAM_FIELD, String::as_str)
 }
 
+/// Returns the configured exemplar labels column name, or `greptime_exemplar_labels` if not set.
+#[inline]
+pub fn greptime_exemplar_labels() -> &'static str {
+    GREPTIME_EXEMPLAR_LABELS_CELL
+        .get()
+        .map_or(GREPTIME_EXEMPLAR_LABELS, String::as_str)
+}
+
 /// Default timestamp column name constant for backward compatibility.
 const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 /// Default value column name constant for backward compatibility.
@@ -94,7 +108,7 @@ const GREPTIME_VALUE: &str = "greptime_value";
 /// Query-visible source metric name stored in the exemplar table.
 pub const EXEMPLAR_METRIC_COLUMN: &str = "greptime_metric";
 /// JSON2 object containing exemplar-owned labels.
-pub const EXEMPLAR_LABELS_COLUMN: &str = "exemplar_labels";
+const GREPTIME_EXEMPLAR_LABELS: &str = "greptime_exemplar_labels";
 /// Stored series label that opts ordinary float samples into raw-delta math.
 pub const OTLP_AGGREGATION_TEMPORALITY_LABEL: &str = "otlp_aggregation_temporality";
 /// Authoritative raw-delta value for [`OTLP_AGGREGATION_TEMPORALITY_LABEL`].
@@ -115,6 +129,7 @@ mod tests {
         assert_eq!(greptime_timestamp(), "greptime_timestamp");
         assert_eq!(greptime_value(), "greptime_value");
         assert_eq!(greptime_native_histogram(), "greptime_native_histogram");
+        assert_eq!(greptime_exemplar_labels(), "greptime_exemplar_labels");
     }
 
     #[test]
@@ -123,6 +138,7 @@ mod tests {
         assert_eq!(greptime_timestamp(), "timestamp");
         assert_eq!(greptime_value(), "value");
         assert_eq!(greptime_native_histogram(), "native_histogram");
+        assert_eq!(greptime_exemplar_labels(), "exemplar_labels");
     }
 
     #[test]
@@ -132,6 +148,7 @@ mod tests {
         assert_eq!(greptime_timestamp(), "timestamp");
         assert_eq!(greptime_value(), "value");
         assert_eq!(greptime_native_histogram(), "native_histogram");
+        assert_eq!(greptime_exemplar_labels(), "exemplar_labels");
     }
 
     #[test]
@@ -140,6 +157,7 @@ mod tests {
         assert_eq!(greptime_timestamp(), "mydb_timestamp");
         assert_eq!(greptime_value(), "mydb_value");
         assert_eq!(greptime_native_histogram(), "mydb_native_histogram");
+        assert_eq!(greptime_exemplar_labels(), "mydb_exemplar_labels");
     }
 
     #[test]
