@@ -2291,40 +2291,32 @@ mod tests {
     fn test_truncate_request_wire() {
         use prost::Message;
 
-        let region_id = RegionId::new(1024, 1);
-        let fixtures: [(&[u8], fn(&RegionRequest) -> bool); 2] = [
-            (
-                include_bytes!(
-                    "../../../tests/compatibility/wire/truncate_pending_tails/legacy_truncate_unflushed.pb"
-                ),
-                |request| {
-                    matches!(
-                        request,
-                        RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
-                    )
-                },
-            ),
-            (
-                include_bytes!(
-                    "../../../tests/compatibility/wire/truncate_pending_tails/truncate_pending_tails.pb"
-                ),
-                |request| {
-                    matches!(
-                        request,
-                        RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 7 })
-                    )
-                },
-            ),
-        ];
-        for (bytes, expected) in fixtures {
+        // Decodes `bytes`, checks they encode back unchanged and returns the region request.
+        let decode = |bytes: &[u8]| {
             let truncate = TruncateRequest::decode(bytes).unwrap();
             assert_eq!(truncate.encode_to_vec(), bytes);
-            let requests =
+            let mut requests =
                 RegionRequest::try_from_request_body(region_request::Body::Truncate(truncate))
                     .unwrap();
-            assert_eq!(region_id, requests[0].0);
-            assert!(expected(&requests[0].1), "{:?}", requests[0].1);
-        }
+            let (region_id, request) = requests.remove(0);
+            assert_eq!(RegionId::new(1024, 1), region_id);
+            request
+        };
+
+        let legacy = decode(include_bytes!(
+            "../../../tests/compatibility/wire/truncate_pending_tails/legacy_truncate_unflushed.pb"
+        ));
+        assert!(matches!(
+            legacy,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
+        ));
+        let pending_tails = decode(include_bytes!(
+            "../../../tests/compatibility/wire/truncate_pending_tails/truncate_pending_tails.pb"
+        ));
+        assert!(matches!(
+            pending_tails,
+            RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 7 })
+        ));
     }
 
     #[test]
