@@ -317,15 +317,12 @@ enum CountdownCommand {
 /// A region lease received in a heartbeat response.
 #[derive(Debug)]
 struct ResetLease {
-    /// The role granted to the region.
     role: RegionRole,
     /// When the heartbeat was sent.
     sent_at: Instant,
     /// The new countdown deadline.
     deadline: Instant,
-    /// The candidate lease id the lease carries, if any.
     candidate_lease_id: Option<u64>,
-    /// The extensions the lease carries.
     extensions: HashMap<String, Vec<u8>>,
 }
 

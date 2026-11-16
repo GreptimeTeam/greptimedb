@@ -96,7 +96,6 @@ impl NodeLease {
 /// A region lease the metasrv granted for a heartbeat sent at `sent_at`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GrantedLease {
-    /// The candidate lease id the lease carries, if any.
     pub(crate) candidate_lease_id: Option<u64>,
     /// When the heartbeat that carried the lease was sent.
     pub(crate) sent_at: Instant,
