@@ -96,7 +96,7 @@ pub fn map_compare_series(
 /// `max_of(a, b)` and `min_of(a, b)`, which Prometheus evaluates with Go's `math.Max` and
 /// `math.Min`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScalarFunction {
+pub(crate) enum ScalarFunction {
     MaxOf,
     MinOf,
 }
@@ -104,7 +104,10 @@ pub enum ScalarFunction {
 impl ScalarFunction {
     /// Go's `math.Max` / `math.Min`: an infinity of the function's own sign wins over NaN, NaN
     /// over any other value, and `+0` is greater than `-0`.
-    pub fn apply(self, a: f64, b: f64) -> f64 {
+    ///
+    /// Both are symmetric in their arguments, signed zero included, so the kernel does not depend
+    /// on which operand came first.
+    pub(crate) fn apply(self, a: f64, b: f64) -> f64 {
         let (wins, signed_zero_wins) = match self {
             Self::MaxOf => (f64::INFINITY, false),
             Self::MinOf => (f64::NEG_INFINITY, true),
@@ -127,28 +130,12 @@ impl ScalarFunction {
     }
 }
 
-/// Applies `function` to two time-varying scalars, aligned by absolute grid index; a point where
-/// either has no value has no result. Both operands must be unlabelled single-field series.
-pub fn map_scalar_function(
-    schema: &Arc<SeriesSchema>,
-    function: ScalarFunction,
-    left: &Series,
-    right: &Series,
-) -> Result<Option<Series>> {
-    validate_scalar(schema, left)?;
-    let (output, _) = map_grid_scalar(
-        schema,
-        left,
-        ScalarSeriesOperand::Right(right),
-        left.metric.clone(),
-        NonFloatSample::Impossible,
-        |left, right, _| Some(function.apply(left, right)),
-    )?;
-    Ok(output)
-}
-
 /// A math function whose parameters are scalar expressions, which Prometheus evaluates at every
 /// step, with those parameters as time-varying scalars.
+///
+/// All but `max_of` and `min_of` map an evaluated vector's fields onto the same fields; those two
+/// are functions of two scalars, so the series they map is the unlabelled one-field scalar the
+/// call's first operand evaluates to.
 #[derive(Clone, Copy, Debug)]
 pub enum ParameterizedMath<'a> {
     /// `round(v, to_nearest)`.
@@ -159,6 +146,12 @@ pub enum ParameterizedMath<'a> {
     ClampMin { min: &'a Series },
     /// `clamp_max(v, max)`.
     ClampMax { max: &'a Series },
+    /// `max_of(a, b)`, whose two operands are scalars: the input of the call is `a` and `other` is
+    /// `b`.
+    MaxOf { other: &'a Series },
+    /// `min_of(a, b)`, whose two operands are scalars: the input of the call is `a` and `other` is
+    /// `b`.
+    MinOf { other: &'a Series },
 }
 
 impl<'a> ParameterizedMath<'a> {
@@ -169,19 +162,53 @@ impl<'a> ParameterizedMath<'a> {
             Self::Clamp { min, max } => vec![min, max],
             Self::ClampMin { min } => vec![min],
             Self::ClampMax { max } => vec![max],
+            Self::MaxOf { other } | Self::MinOf { other } => vec![other],
         }
     }
 
     /// The function with the parameter values of one point, in argument order.
-    fn at(self, values: &[f64]) -> MathOp {
+    fn at(self, values: &[f64]) -> PointMath {
         match self {
-            Self::Round { .. } => MathOp::Round { nearest: values[0] },
-            Self::Clamp { .. } => MathOp::Clamp {
+            Self::Round { .. } => PointMath::Math(MathOp::Round { nearest: values[0] }),
+            Self::Clamp { .. } => PointMath::Math(MathOp::Clamp {
                 min: values[0],
                 max: values[1],
+            }),
+            Self::ClampMin { .. } => PointMath::Math(MathOp::ClampMin { min: values[0] }),
+            Self::ClampMax { .. } => PointMath::Math(MathOp::ClampMax { max: values[0] }),
+            Self::MaxOf { .. } => PointMath::Scalar {
+                function: ScalarFunction::MaxOf,
+                other: values[0],
             },
-            Self::ClampMin { .. } => MathOp::ClampMin { min: values[0] },
-            Self::ClampMax { .. } => MathOp::ClampMax { max: values[0] },
+            Self::MinOf { .. } => PointMath::Scalar {
+                function: ScalarFunction::MinOf,
+                other: values[0],
+            },
+        }
+    }
+}
+
+/// What one point's parameter values make of a parameterized math function: the kernel that reads
+/// the input's own value, with everything else the point decides already bound.
+#[derive(Clone, Copy, Debug)]
+enum PointMath {
+    /// A math function of the input's value, as `round` is.
+    Math(MathOp),
+    /// The larger or smaller of the input's value and the parameter's, which are the two operands
+    /// of `max_of` and `min_of`.
+    Scalar {
+        function: ScalarFunction,
+        other: f64,
+    },
+}
+
+impl PointMath {
+    /// The value the function answers for `value`, or `None` where it answers nothing: a `clamp`
+    /// whose bounds were written the wrong way round has no result at that point.
+    fn calculate(self, value: f64) -> Option<f64> {
+        match self {
+            Self::Math(op) => (!op.is_empty_clamp()).then(|| op.calculate(value)),
+            Self::Scalar { function, other } => Some(function.apply(value, other)),
         }
     }
 }
@@ -193,6 +220,10 @@ impl<'a> ParameterizedMath<'a> {
 /// A point where a parameter has no value has no result. `clamp` with `max < min` at a point has
 /// no result there, as Prometheus returns an empty vector for that step. `None` means no point
 /// holds a result. Same-labelset merging is left to the caller.
+///
+/// `series` is one evaluated series, which for `max_of` and `min_of` is the unlabelled one-field
+/// scalar their first argument evaluates to: those two are functions of two scalars, so what they
+/// map is the first of them and what they read per point is the second.
 pub fn map_math_with_parameters(
     schema: &Arc<SeriesSchema>,
     series: &Series,
@@ -221,16 +252,14 @@ pub fn map_math_with_parameters(
             });
             values.extend(value);
         }
-        let op = (values.len() == parameters.len())
-            .then(|| function.at(&values))
-            .filter(|op| !op.is_empty_clamp());
+        let op = (values.len() == parameters.len()).then(|| function.at(&values));
         row.clear();
         for cursor in &mut field_cursors {
             let sample = cursor
                 .at(index)
                 .expect("the axis and the fields are aligned");
             row.push(match (op, sample) {
-                (Some(op), SampleRef::Float(value)) => Some(op.calculate(value)),
+                (Some(op), SampleRef::Float(value)) => op.calculate(value),
                 _ => None,
             });
         }

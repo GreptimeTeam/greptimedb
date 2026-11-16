@@ -691,33 +691,13 @@ fn math_drops_reserved_metadata_and_empty_labels_with_the_name() {
     assert_eq!(names, ["__other__", "host"]);
 }
 
-/// `max_of` / `min_of` against Go's `math.Max` / `math.Min`, whose signed-zero, NaN and infinity
-/// rules differ from `f64::max` / `f64::min`.
-#[test]
-fn max_of_and_min_of_follow_go() {
-    let bits = |text: &str| f64::from_bits(u64::from_str_radix(text, 16).unwrap());
-    let same = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
-    let mut checked = 0;
-    for line in include_str!("max_min_cases.txt")
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-    {
-        let values: Vec<f64> = line.split_whitespace().map(bits).collect();
-        let (a, b) = (values[0], values[1]);
-        assert!(
-            same(ScalarFunction::MaxOf.apply(a, b), values[2]),
-            "max_of({a}, {b})"
-        );
-        assert!(
-            same(ScalarFunction::MinOf.apply(a, b), values[3]),
-            "min_of({a}, {b})"
-        );
-        checked += 1;
-    }
-    assert_eq!(checked, 64);
-}
-
 /// Time-varying scalars pair by absolute position; a point either one lacks has no result.
+///
+/// `max_of(a, b)` and `min_of(a, b)` are functions of two scalars, so the compiler binds the call's
+/// first operand as the map's input and the second as its one parameter: this is that kernel, with
+/// two scalars that overlap in three positions, against the values it has to answer there. The
+/// fixture is not reachable from a compiled tree -- every scalar a tree produces covers its whole
+/// grid -- so what is pinned here is the kernel's own pairing rather than a query's shape.
 #[test]
 fn scalar_functions_pair_scalars_by_position() {
     let schema = Arc::new(schema(&["scalar"]));
@@ -734,9 +714,12 @@ fn scalar_functions_pair_scalars_by_position() {
     };
     let left = scalar(2, &[Some(1.0), Some(5.0), None, Some(-0.0)]);
     let right = scalar(3, &[Some(2.0), Some(7.0), Some(0.0), Some(9.0)]);
-    let result = map_scalar_function(&schema, ScalarFunction::MaxOf, &left, &right)
-        .unwrap()
-        .unwrap();
+    // A position only one side carries, or one whose sample is missing, has no result, so `max_of`
+    // answers at 3 (5 against 2) and at 5 (-0 against +0) and nowhere else.
+    let result =
+        map_math_with_parameters(&schema, &left, ParameterizedMath::MaxOf { other: &right })
+            .unwrap()
+            .unwrap();
     assert_eq!(
         run_floats(&result, 0),
         vec![((3, 1), vec![Some(5.0)]), ((5, 1), vec![Some(0.0)])]

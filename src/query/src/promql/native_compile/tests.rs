@@ -2273,6 +2273,105 @@ fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
     ));
 }
 
+/// `max_of` and `min_of` take two scalars and answer a scalar, so the call binds the first argument
+/// as the map's input and the second as its one parameter. The two are `(scalar, scalar) -> scalar`
+/// in Prometheus, which is why neither of them carries a vector here.
+#[test]
+fn a_call_of_two_scalars_binds_them_as_a_scalar_map() {
+    let compiled = |query: &str| {
+        compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
+    };
+    let parts = |tree: &NativeTree| match &tree.root().expr {
+        NativeExpr::ParameterizedMap {
+            input,
+            op,
+            parameters,
+        } => (input.as_ref().clone(), *op, parameters.clone()),
+        other => panic!("expected a parameterized map, got {other:?}"),
+    };
+
+    // The first argument varies and the second is a constant.
+    let tree = compiled("max_of(time(), 2)").tree;
+    assert!(
+        matches!(tree.root().output, NativeType::Scalar(_)),
+        "the answer is a scalar, not a vector"
+    );
+    let (input, op, parameters) = parts(&tree);
+    assert_eq!(op, ParameterizedOp::MaxOf);
+    assert!(matches!(input.expr, NativeExpr::EvalTime { date: None }));
+    assert_eq!(constant(&parameters[0]), Some(2.0));
+
+    // A constant first argument is bound as the number it folds to; the map materializes it.
+    let tree = compiled("min_of(2, scalar(x))").tree;
+    let (input, op, parameters) = parts(&tree);
+    assert_eq!(op, ParameterizedOp::MinOf);
+    assert_eq!(constant(&input), Some(2.0));
+    assert!(matches!(
+        parameters.as_slice(),
+        [NativeNode {
+            expr: NativeExpr::ScalarOf { .. },
+            ..
+        }]
+    ));
+
+    // Two constants are still a map: the runtime answers the one number they compute, and the
+    // binding keeps the call's shape rather than folding it here.
+    let tree = compiled("max_of(1, 2)").tree;
+    let (input, op, parameters) = parts(&tree);
+    assert_eq!(op, ParameterizedOp::MaxOf);
+    assert_eq!(constant(&input), Some(1.0));
+    assert_eq!(constant(&parameters[0]), Some(2.0));
+}
+
+/// A vector argument is refused by the compiler that binds the call, in the shape the parser rules
+/// out: Prometheus types both functions as two scalars, so a vector is not a shape the kernel could
+/// compute. The parser rejects the written query, so the argument is swapped in on a tree it
+/// accepted.
+#[test]
+fn a_scalar_function_over_a_vector_is_refused() {
+    let stmt = with_call_arguments("max_of(1, 2)", |args| {
+        *args[0] = a_bare_selector();
+    });
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("`max_of(x, 2)` compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "the refusal did not report NotImplemented, so the statement would not fall back: {error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("a call to `max_of`"), "{message}");
+    assert!(
+        message.contains("where the function takes scalars"),
+        "the refusal did not say what the function takes: {message}"
+    );
+}
+
+/// A call of two scalars written with one argument is refused by name, as every other call's arity
+/// is: Prometheus has no one-argument `max_of`.
+#[test]
+fn a_scalar_function_with_one_argument_is_refused() {
+    let stmt = with_call_arguments("max_of(1, 2)", |args| {
+        args.pop();
+    });
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("`max_of(1)` compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "the refusal did not report NotImplemented: {error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("a call to `max_of`"), "{message}");
+    assert!(
+        message.contains("where it takes two scalars"),
+        "the refusal did not name the arguments it takes: {message}"
+    );
+}
+
 /// A vector-matching modifier has nothing to match when one operand is a constant, and the tree's
 /// matching has no field for a fill value. Both are refused rather than dropped: dropping one would
 /// compile a query into an operation other than the one it wrote. `bool` is not a matching modifier

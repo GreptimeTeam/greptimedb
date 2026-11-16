@@ -818,6 +818,12 @@ pub struct BoundMap {
 /// A math function whose scalar parameters are bound as nodes, because at least one of them varies
 /// per grid point; Prometheus reads each parameter at every step. With constant parameters the same
 /// function is a [`MathOp`] in a [`BoundMap`].
+///
+/// Every function here reads one parameter per point except `max_of` and `min_of`, which are
+/// functions of two scalars: their input is the one scalar the call wrote first and their one
+/// parameter is the other. [`Self::takes_a_scalar_input`] says which shape a function has, so the
+/// node's input and output are checked against the function it carries rather than against a
+/// convention the functions no longer all share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum ParameterizedOp {
     /// `round(v, to_nearest)`.
@@ -828,15 +834,28 @@ pub enum ParameterizedOp {
     ClampMin,
     /// `clamp_max(v, max)`.
     ClampMax,
+    /// `max_of(a, b)`: the larger of two scalars.
+    MaxOf,
+    /// `min_of(a, b)`: the smaller of two scalars.
+    MinOf,
 }
 
 impl ParameterizedOp {
-    /// How many parameters the function reads after its vector.
+    /// How many parameters the function reads after its input.
     pub fn arity(self) -> usize {
         match self {
             Self::Clamp => 2,
-            Self::Round | Self::ClampMin | Self::ClampMax => 1,
+            Self::Round | Self::ClampMin | Self::ClampMax | Self::MaxOf | Self::MinOf => 1,
         }
+    }
+
+    /// Whether the function's input is a scalar, which is what a function of two scalars has.
+    ///
+    /// A parameterized map otherwise maps a vector's fields onto the same fields; `max_of` and
+    /// `min_of` answer one scalar from one, so their input carries a scalar's single unlabelled
+    /// field and their answer is a scalar on that field's grid.
+    pub fn takes_a_scalar_input(self) -> bool {
+        matches!(self, Self::MaxOf | Self::MinOf)
     }
 }
 
@@ -1012,6 +1031,11 @@ pub enum NativeExpr {
     },
     /// A point-wise math function over its input whose parameters are scalar nodes, in argument
     /// order.
+    ///
+    /// The input is the evaluated vector the function maps, or -- for `max_of` and `min_of`, which
+    /// are functions of two scalars -- the scalar the call wrote first, which the node answers as
+    /// one scalar on the same grid. A constant input has no chunk of its own and is read off its
+    /// binding, as a constant parameter is.
     ParameterizedMap {
         input: Box<NativeNode>,
         op: ParameterizedOp,
@@ -1670,11 +1694,25 @@ impl NativeNode {
                 parameters,
             } => {
                 input.validate()?;
-                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
-                    return Err(invalid(&format!(
-                        "a map consumes an evaluated vector, not {}",
-                        input.output.describe()
-                    )));
+                // `max_of` and `min_of` are functions of two scalars, so their input is the first
+                // of the two rather than a vector's fields; every other function here maps an
+                // evaluated vector and answers one of the same shape.
+                let input_grid = if op.takes_a_scalar_input() {
+                    let NativeType::Scalar(input_grid) = &input.output else {
+                        return Err(invalid(&format!(
+                            "{op:?} consumes a scalar, not {}",
+                            input.output.describe()
+                        )));
+                    };
+                    Arc::clone(input_grid)
+                } else {
+                    let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                        return Err(invalid(&format!(
+                            "a map consumes an evaluated vector, not {}",
+                            input.output.describe()
+                        )));
+                    };
+                    Arc::clone(input_grid)
                 };
                 if parameters.len() != op.arity() {
                     return Err(invalid(&format!(
@@ -1692,9 +1730,18 @@ impl NativeNode {
                         ));
                     }
                 }
-                ensure_samples(&self.output, "a parameterized map")?;
-                ensure_same_fields(&input.output, &self.output, "a parameterized map")?;
-                ensure_grid(&self.output, input_grid, "a parameterized map")?;
+                if op.takes_a_scalar_input() {
+                    if !matches!(&self.output, NativeType::Scalar(grid) if grid.spec() == input_grid.spec())
+                    {
+                        return Err(invalid(
+                            "a map over a scalar does not answer a scalar on its input's grid",
+                        ));
+                    }
+                } else {
+                    ensure_samples(&self.output, "a parameterized map")?;
+                    ensure_same_fields(&input.output, &self.output, "a parameterized map")?;
+                    ensure_grid(&self.output, &input_grid, "a parameterized map")?;
+                }
             }
             NativeExpr::ParameterizedTopK {
                 input,

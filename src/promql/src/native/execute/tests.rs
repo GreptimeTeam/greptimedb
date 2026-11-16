@@ -1453,6 +1453,101 @@ fn a_closing_chunk_that_keeps_no_value_is_handed_over_empty() {
     assert_eq!(chunk.series.metric.get("job"), Some("a"));
 }
 
+/// `max_of(a, b)` and `min_of(a, b)` against Go's `math.Max` / `math.Min`, whose signed-zero, NaN
+/// and infinity rules differ from `f64::max` / `f64::min`; `max_min_cases.txt` holds Go's answers
+/// for each pair.
+///
+/// The cases run through the executor, as a compiled `max_of(a, b)` call does: the call's first
+/// operand is the map's scalar input and its second is the map's constant parameter.
+#[test]
+fn max_of_and_min_of_follow_go() {
+    let bits = |text: &str| f64::from_bits(u64::from_str_radix(text, 16).unwrap());
+    let same = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+    let mut checked = 0;
+    for line in include_str!("../../map/max_min_cases.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+    {
+        let values: Vec<f64> = line.split_whitespace().map(bits).collect();
+        let (a, b) = (values[0], values[1]);
+        for (op, expected) in [
+            (ParameterizedOp::MaxOf, values[2]),
+            (ParameterizedOp::MinOf, values[3]),
+        ] {
+            let grid = grid(0, 1_000, 1);
+            let root = parameterized(
+                scalar_of(evaluated_input(Arc::clone(&grid))),
+                op,
+                vec![scalar(b, grid)],
+            );
+            let answer = sample_values(&run_parameterized(root, vec![Some(a)]));
+            assert_eq!(answer.len(), 1, "{op:?}({a}, {b})");
+            let answered = answer[0].expect("the one point holds a value");
+            assert!(
+                same(answered, expected),
+                "{op:?}({a}, {b}) answered {answered}"
+            );
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 64);
+}
+
+/// A constant input is materialized by the map, as a constant parameter is: `max_of(0, time())`
+/// reads the call's first operand off its binding and pairs it with the varying second one.
+#[test]
+fn a_constant_input_is_read_against_its_parameter() {
+    // `time()` reports 1 and 10 seconds on this grid.
+    let grid = grid(1_000, 9_000, 2);
+    let root = parameterized(
+        scalar(0.0, Arc::clone(&grid)),
+        ParameterizedOp::MaxOf,
+        vec![eval_time(None, grid)],
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.end_of_input().unwrap();
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(
+        chunk.series.metric,
+        SeriesLabels::try_new(None, Vec::new()).unwrap(),
+        "a scalar carries no metric name and no labels"
+    );
+    assert_eq!(sample_values(&chunk), vec![Some(1.0), Some(10.0)]);
+    assert!(chunk.is_last, "the one chunk closes the value it reports");
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a scalar owes one chunk and no second one"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// The scalar `min_of` answers is what `vector(...)` materializes, so the value a call computes
+/// reaches a vector consumer unchanged: `vector(min_of(time(), 1))` is `min(time(), 1)`.
+#[test]
+fn a_scalar_function_answers_the_vector_it_is_wrapped_in() {
+    let grid = grid(0, 1_000, 3);
+    let root = vector_of(parameterized(
+        eval_time(None, Arc::clone(&grid)),
+        ParameterizedOp::MinOf,
+        vec![scalar(1.0, grid)],
+    ));
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.end_of_input().unwrap();
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(chunk.series.fields.len(), 1);
+    assert_eq!(sample_values(&chunk), vec![Some(0.0), Some(1.0), Some(1.0)]);
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the vector owes one chunk and no second one"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
 fn scalar_of(input: NativeNode) -> NativeNode {
     let grid = input
         .output
