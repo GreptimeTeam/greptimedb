@@ -450,8 +450,42 @@ async fn test_direct_follower_waits_for_pending_checkpoint() {
         "follower transition held the manifest lock while waiting for the checkpoint"
     );
 
+    // Requests that observe the region as a follower wait for the same checkpoint.
+    let mut concurrent_requests = Vec::new();
+    for state in [
+        SettableRegionRoleState::Follower,
+        SettableRegionRoleState::DowngradingLeader,
+    ] {
+        let wait_started = region
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .checkpointer()
+            .pending_checkpoint_wait_started();
+        let wait_started = wait_started.notified();
+        let cloned_engine = engine.clone();
+        let request = tokio::spawn(async move {
+            cloned_engine
+                .set_region_role_state_gracefully(region_id, state)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), wait_started)
+            .await
+            .expect("concurrent request did not start waiting for the checkpoint");
+        assert!(
+            !request.is_finished(),
+            "concurrent request returned before checkpoint cleanup finished"
+        );
+        concurrent_requests.push(request);
+    }
+    assert_eq!(RegionRoleState::Follower, region.state());
+
     blocker.release();
     assert_success_response(&set_follower.await.unwrap().unwrap(), 1);
+    for request in concurrent_requests {
+        assert_success_response(&request.await.unwrap().unwrap(), 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

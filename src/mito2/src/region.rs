@@ -697,8 +697,10 @@ impl MitoRegion {
                         wait_for_checkpoint = true;
                     }
                     RegionRoleState::Follower => {
-                        // Already in desired state - no-op
+                        // Already in desired state. The change that made it a follower may
+                        // still wait for the checkpoint.
                         info!("Region {} already in follower mode", self.region_id);
+                        wait_for_checkpoint = true;
                     }
                 }
                 None
@@ -731,6 +733,7 @@ impl MitoRegion {
                             "Cannot start downgrade for region {} from state {:?}",
                             self.region_id, current_state
                         );
+                        wait_for_checkpoint = true;
                     }
                     RegionRoleState::Leader(_) => {
                         // The region may become writable again when the
