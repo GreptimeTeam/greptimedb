@@ -1021,12 +1021,6 @@ pub trait RegionEngine: Send + Sync {
     /// Name of this engine
     fn name(&self) -> &str;
 
-    /// Returns registered child regions that are removed when this region is dropped or closed.
-    /// Callers capture these before the operation and unregister them only after it succeeds.
-    fn dependent_regions(&self, _region_id: RegionId) -> Vec<RegionId> {
-        Vec::new()
-    }
-
     /// Handles batch open region requests.
     async fn handle_batch_open_requests(
         &self,

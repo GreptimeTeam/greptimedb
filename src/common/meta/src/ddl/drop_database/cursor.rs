@@ -14,22 +14,23 @@
 
 use std::any::Any;
 use std::collections::HashSet;
+use std::pin::Pin;
 
 use common_catalog::format_full_table_name;
 use common_procedure::Status;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ensure};
 use table::metadata::{TableId, TableType};
 use table::table_name::TableName;
 
-use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
-use crate::ddl::drop_database::executor::{DropDatabaseBatchExecutor, DropDatabaseExecutor};
+use crate::ddl::drop_database::executor::{
+    DropDatabaseBatchExecutor, DropDatabaseExecutor, DropDatabaseViewExecutor,
+};
 use crate::ddl::drop_database::metadata::DropDatabaseRemoveMetadata;
 use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
 use crate::error::{Result, TableInfoNotFoundSnafu, UnexpectedSnafu};
-use crate::instruction::CacheIdent;
 use crate::key::table_route::TableRouteValue;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,24 +50,69 @@ impl DropDatabaseCursor {
         ddl_ctx: &DdlContext,
         ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        const MAX_TABLES: usize = 64;
-        const MAX_NAME_BYTES: usize = 32 * 1024;
-
-        let mut page = Vec::new();
-        let mut bytes = 0;
-        while page.len() < MAX_TABLES && bytes < MAX_NAME_BYTES {
-            // The stream is initialized by next().
-            let Some((name, value)) = ctx.tables.as_mut().unwrap().try_next().await? else {
-                break;
-            };
-            bytes +=
-                name.len() + ctx.catalog.len() + ctx.schema.len() + std::mem::size_of::<TableId>();
-            page.push((name, value.table_id()));
-        }
+        let page = Self::collect_page(ctx).await?;
         if page.is_empty() {
             return self.handle_reach_end(ctx);
         }
+        let tables = Self::logical_tables(ddl_ctx, ctx, page).await?;
+        if tables.is_empty() {
+            return Ok((Box::new(Self::new(self.target)), Status::executing(false)));
+        }
+        Ok((
+            Box::new(DropDatabaseBatchExecutor { tables }),
+            Status::executing(true),
+        ))
+    }
 
+    // Leave 512 KiB below etcd's default 1.5 MiB request limit, plus room within
+    // the budget for the procedure envelope, metadata key prefixes and protobuf framing.
+    const MAX_BATCH_BYTES: usize = 1024 * 1024;
+    const BATCH_OVERHEAD: usize = 64 * 1024;
+
+    fn estimated_table_bytes(catalog: &str, schema: &str, name: &str) -> usize {
+        // The procedure JSON is itself a string in ProcedureMessage. Quotes and
+        // backslashes are escaped twice; control characters may become \u00XX.
+        // The fixed allowance covers IDs, field names and all four delete keys.
+        256 + [catalog, schema, name]
+            .into_iter()
+            .flat_map(str::bytes)
+            .map(|byte| match byte {
+                0..=31 => 8,
+                b'"' | b'\\' => 4,
+                _ => 1,
+            })
+            .sum::<usize>()
+    }
+
+    async fn collect_page(ctx: &mut DropDatabaseContext) -> Result<Vec<(String, TableId)>> {
+        let mut page = Vec::new();
+        let mut bytes = Self::BATCH_OVERHEAD;
+        let tables = ctx.tables.as_mut().unwrap();
+        loop {
+            match Pin::new(&mut *tables).peek().await {
+                Some(Ok((name, _))) => {
+                    let size = Self::estimated_table_bytes(&ctx.catalog, &ctx.schema, name);
+                    if !page.is_empty() && bytes.saturating_add(size) > Self::MAX_BATCH_BYTES {
+                        break;
+                    }
+                    // A single oversized name must still make progress. Procedure storage
+                    // already splits oversized values; never strand an existing table here.
+                    bytes = bytes.saturating_add(size);
+                }
+                Some(Err(_)) => {} // Consume below to propagate the owned error.
+                None => break,
+            }
+            let (name, value) = tables.try_next().await?.unwrap();
+            page.push((name, value.table_id()));
+        }
+        Ok(page)
+    }
+
+    async fn logical_tables(
+        ddl_ctx: &DdlContext,
+        ctx: &mut DropDatabaseContext,
+        page: Vec<(String, TableId)>,
+    ) -> Result<Vec<(TableId, TableName)>> {
         let manager = &ddl_ctx.table_metadata_manager;
         let ids = page.iter().map(|(_, id)| *id).collect::<Vec<_>>();
         let infos = manager.table_info_manager().batch_get(&ids).await?;
@@ -108,19 +154,22 @@ impl DropDatabaseCursor {
                     physical.table_info.catalog_name == ctx.catalog
                         && physical.table_info.schema_name == ctx.schema,
                     UnexpectedSnafu {
-                        err_msg: "Logical table belongs to a physical table outside the dropped database",
+                        err_msg: format!(
+                            "Logical table {} references physical table {} (id {}) outside the dropped database",
+                            format_full_table_name(&ctx.catalog, &ctx.schema, &name),
+                            format_full_table_name(
+                                &physical.table_info.catalog_name,
+                                &physical.table_info.schema_name,
+                                &physical.table_info.name,
+                            ),
+                            route.physical_table_id(),
+                        ),
                     }
                 );
                 tables.push((id, TableName::new(&ctx.catalog, &ctx.schema, name)));
             }
         }
-        if tables.is_empty() {
-            return Ok((Box::new(Self::new(self.target)), Status::executing(false)));
-        }
-        Ok((
-            Box::new(DropDatabaseBatchExecutor { tables }),
-            Status::executing(true),
-        ))
+        Ok(tables)
     }
 
     fn handle_reach_end(
@@ -165,40 +214,6 @@ impl DropDatabaseCursor {
             )),
         }
     }
-
-    async fn handle_view(
-        &self,
-        ddl_ctx: &DdlContext,
-        ctx: &mut DropDatabaseContext,
-        table_name: String,
-        table_id: TableId,
-    ) -> Result<(Box<dyn State>, Status)> {
-        let view_name = TableName::new(&ctx.catalog, &ctx.schema, &table_name);
-        ddl_ctx
-            .table_metadata_manager
-            .destroy_view_info(table_id, &view_name)
-            .await?;
-
-        let cache_invalidator = &ddl_ctx.cache_invalidator;
-        let ctx = Context {
-            subject: Some("Invalidate table cache by dropping table".to_string()),
-        };
-
-        cache_invalidator
-            .invalidate(
-                &ctx,
-                &[
-                    CacheIdent::TableName(view_name),
-                    CacheIdent::TableId(table_id),
-                ],
-            )
-            .await?;
-
-        Ok((
-            Box::new(DropDatabaseCursor::new(self.target)),
-            Status::executing(false),
-        ))
-    }
 }
 
 #[async_trait::async_trait]
@@ -209,21 +224,35 @@ impl State for DropDatabaseCursor {
         ddl_ctx: &DdlContext,
         ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        if ctx.tables.as_deref().is_none() {
+        if ctx.tables.is_none() {
             let tables = ddl_ctx
                 .table_metadata_manager
                 .table_name_manager()
                 .tables(&ctx.catalog, &ctx.schema);
-            ctx.tables = Some(tables);
+            ctx.tables = Some(tables.peekable());
         }
-        if self.target == DropTableTarget::Logical {
-            let result = self.collect_logical_tables(ddl_ctx, ctx).await;
-            if result.is_err() {
-                // The page was consumed but no deletion plan was persisted. Rescan on retry.
-                ctx.tables.take();
-            }
-            return result;
+        let result = match self.target {
+            DropTableTarget::Logical => self.collect_logical_tables(ddl_ctx, ctx).await,
+            DropTableTarget::Physical => self.collect_physical_table(ddl_ctx, ctx).await,
+        };
+        if result.is_err() {
+            // The entry was consumed but no deletion plan was persisted. Rescan on retry.
+            ctx.tables.take();
         }
+        result
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl DropDatabaseCursor {
+    async fn collect_physical_table(
+        &mut self,
+        ddl_ctx: &DdlContext,
+        ctx: &mut DropDatabaseContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         // Safety: must exist
         match ctx.tables.as_mut().unwrap().try_next().await? {
             Some((table_name, table_name_value)) => {
@@ -239,7 +268,13 @@ impl State for DropDatabaseCursor {
                     })?;
 
                 if table_info_value.table_info.table_type == TableType::View {
-                    return self.handle_view(ddl_ctx, ctx, table_name, table_id).await;
+                    return Ok((
+                        Box::new(DropDatabaseViewExecutor {
+                            table_id,
+                            table_name: TableName::new(&ctx.catalog, &ctx.schema, table_name),
+                        }),
+                        Status::executing(true),
+                    ));
                 }
 
                 match ddl_ctx
@@ -262,10 +297,6 @@ impl State for DropDatabaseCursor {
             None => self.handle_reach_end(ctx),
         }
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 #[cfg(test)]
@@ -280,6 +311,162 @@ mod tests {
     use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
     use crate::ddl::test_util::{create_logical_table, create_physical_table};
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
+
+    #[tokio::test]
+    async fn test_cursor_read_failure_rescans() {
+        use crate::key::table_name::TableNameValue;
+        use futures::StreamExt;
+        for target in [DropTableTarget::Logical, DropTableTarget::Physical] {
+            let ddl = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+            let physical = create_physical_table(&ddl, "physical").await;
+            let mut ctx = DropDatabaseContext {
+                catalog: DEFAULT_CATALOG_NAME.into(),
+                schema: DEFAULT_SCHEMA_NAME.into(),
+                drop_if_exists: false,
+                retrying: false,
+                tables: Some(
+                    futures::stream::iter(vec![Ok(("missing".into(), TableNameValue::new(99999)))])
+                        .boxed()
+                        .peekable(),
+                ),
+            };
+            let mut cursor = DropDatabaseCursor::new(target);
+            assert!(cursor.next(&ddl, &mut ctx).await.is_err());
+            assert!(ctx.tables.is_none());
+            let (state, _) = cursor.next(&ddl, &mut ctx).await.unwrap();
+            if target == DropTableTarget::Physical {
+                assert!(state.as_any().is::<DropDatabaseExecutor>());
+            } else {
+                assert!(state.as_any().is::<DropDatabaseCursor>());
+            }
+            assert!(
+                ddl.table_metadata_manager
+                    .table_info_manager()
+                    .get(physical)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_page_oversized_singleton_makes_progress() {
+        use crate::key::table_name::TableNameValue;
+        use futures::StreamExt;
+        let mut ctx = DropDatabaseContext {
+            catalog: DEFAULT_CATALOG_NAME.into(),
+            schema: DEFAULT_SCHEMA_NAME.into(),
+            drop_if_exists: false,
+            retrying: false,
+            tables: Some(
+                futures::stream::iter(vec![
+                    Ok((
+                        "x".repeat(DropDatabaseCursor::MAX_BATCH_BYTES),
+                        TableNameValue::new(1),
+                    )),
+                    Ok(("small".into(), TableNameValue::new(2))),
+                ])
+                .boxed()
+                .peekable(),
+            ),
+        };
+        let page = DropDatabaseCursor::collect_page(&mut ctx).await.unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].1, 1);
+        assert_eq!(
+            DropDatabaseCursor::collect_page(&mut ctx).await.unwrap(),
+            vec![("small".into(), 2)]
+        );
+        assert!(
+            DropDatabaseCursor::collect_page(&mut ctx)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_page_limits_and_request_headroom() {
+        use common_procedure::store::ProcedureMessage;
+        use futures::StreamExt;
+        use table::table_name::TableName;
+
+        use crate::ddl::drop_database::DropDatabaseProcedure;
+        use crate::key::TableMetadataManager;
+        use crate::key::table_name::TableNameValue;
+        for name in [
+            "short".to_string(),
+            "x".repeat(64 * 1024),
+            "\"\\\n\u{0001}中文".repeat(4096),
+        ] {
+            let ddl = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+            let count = if name.len() < 1024 { 5000 } else { 65 };
+            let entries = (0..count)
+                .map(|id| Ok((name.clone(), TableNameValue::new(id))))
+                .collect::<Vec<_>>();
+            let mut ctx = DropDatabaseContext {
+                catalog: DEFAULT_CATALOG_NAME.into(),
+                schema: DEFAULT_SCHEMA_NAME.into(),
+                drop_if_exists: false,
+                tables: Some(futures::stream::iter(entries).boxed().peekable()),
+                retrying: false,
+            };
+            let mut collected = Vec::new();
+            loop {
+                let page = DropDatabaseCursor::collect_page(&mut ctx).await.unwrap();
+                if page.is_empty() {
+                    break;
+                }
+                let estimated = DropDatabaseCursor::BATCH_OVERHEAD
+                    + page
+                        .iter()
+                        .map(|(name, _)| {
+                            DropDatabaseCursor::estimated_table_bytes(
+                                &ctx.catalog,
+                                &ctx.schema,
+                                name,
+                            )
+                        })
+                        .sum::<usize>();
+                assert!(estimated <= DropDatabaseCursor::MAX_BATCH_BYTES);
+                let tables = page
+                    .iter()
+                    .map(|(name, id)| (*id, TableName::new(&ctx.catalog, &ctx.schema, name)))
+                    .collect::<Vec<_>>();
+                // Each delete has one bytes field nested in two messages. Allow
+                // 32 bytes per key for tags and length varints, plus a txn envelope.
+                let delete_bytes = 64
+                    + tables
+                        .iter()
+                        .flat_map(|(id, name)| TableMetadataManager::table_identity_keys(*id, name))
+                        .map(|key| key.len() + 32)
+                        .sum::<usize>();
+                assert!(delete_bytes <= estimated);
+                let mut procedure = DropDatabaseProcedure::new(
+                    ctx.catalog.clone(),
+                    ctx.schema.clone(),
+                    false,
+                    ddl.clone(),
+                );
+                procedure.state = Box::new(DropDatabaseBatchExecutor { tables });
+                let message = ProcedureMessage {
+                    type_name: DropDatabaseProcedure::TYPE_NAME.into(),
+                    data: common_procedure::Procedure::dump(&procedure).unwrap(),
+                    parent_id: None,
+                    subprocedure_recovery: common_procedure::SubprocedureRecovery::Discard,
+                    step: u32::MAX,
+                    error: None,
+                    context: Default::default(),
+                };
+                let serialized = serde_json::to_vec(&message).unwrap();
+                assert!(serialized.len() <= estimated);
+                assert!(serialized.len() + 512 * 1024 < 1536 * 1024);
+                collected.extend(page.into_iter().map(|(_, id)| id));
+            }
+            assert_eq!(collected, (0..count).collect::<Vec<_>>());
+        }
+    }
 
     #[tokio::test]
     async fn test_next_without_logical_tables() {

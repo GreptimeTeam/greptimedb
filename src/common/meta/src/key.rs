@@ -994,9 +994,14 @@ impl TableMetadataManager {
         Ok(())
     }
 
+    const TABLE_IDENTITY_KEYS: usize = 4;
+
     /// Keys shared by physical and logical tables, independent of region placement.
-    fn table_identity_keys(table_id: TableId, table_name: &TableName) -> Vec<Vec<u8>> {
-        vec![
+    pub(crate) fn table_identity_keys(
+        table_id: TableId,
+        table_name: &TableName,
+    ) -> [Vec<u8>; Self::TABLE_IDENTITY_KEYS] {
+        [
             TableNameKey::new(
                 &table_name.catalog_name,
                 &table_name.schema_name,
@@ -1024,7 +1029,7 @@ impl TableMetadataManager {
         } else {
             vec![]
         };
-        let mut keys = Self::table_identity_keys(table_id, table_name);
+        let mut keys = Vec::from(Self::table_identity_keys(table_id, table_name));
         let datanode_table_keys = datanode_ids
             .into_iter()
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
@@ -1324,18 +1329,19 @@ impl TableMetadataManager {
         Ok(())
     }
 
+    /// Number of logical tables whose identity keys fit in one backend transaction.
+    pub fn destroy_logical_tables_metadata_chunk_size(&self) -> usize {
+        (self.kv_backend.max_txn_ops() / Self::TABLE_IDENTITY_KEYS).max(1)
+    }
+
     /// Permanently deletes a batch of logical tables. The caller holds their schema write lock
     /// and persists the deletion plan before calling, since backend requests may partially succeed.
     pub async fn destroy_logical_tables_metadata(
         &self,
         tables: &[(TableId, TableName)],
     ) -> Result<()> {
-        let Some((table_id, table_name)) = tables.first() else {
-            return Ok(());
-        };
         let max_ops = self.kv_backend.max_txn_ops().max(1);
-        let keys_per_table = Self::table_identity_keys(*table_id, table_name).len();
-        let tables_per_request = (max_ops / keys_per_table).max(1);
+        let tables_per_request = self.destroy_logical_tables_metadata_chunk_size();
         // Keep a table's keys together whenever they fit in one backend request. A backend
         // limit smaller than a single table still requires splitting, as with single-table drop.
         for tables in tables.chunks(tables_per_request) {

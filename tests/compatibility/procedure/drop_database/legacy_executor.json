@@ -1,1 +1,0 @@
-{"catalog":"greptime","schema":"public","drop_if_exists":false,"state":{"drop_database_state":"DropDatabaseExecutor","table_id":1025,"physical_table_id":1025,"table_name":{"catalog_name":"greptime","schema_name":"public","table_name":"logical"},"physical_region_routes":[],"target":"Logical"}}

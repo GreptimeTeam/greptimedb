@@ -196,9 +196,13 @@ async fn test_drop_database_batches_recover_after_metadata_deletion() {
     use store_api::storage::RegionId;
 
     // A full batch, multiple batches, and a trailing partial batch.
-    for (count, name_padding, expected_batches) in
-        [(0, 0, 0), (1, 0, 1), (64, 0, 1), (129, 0, 3), (20, 2048, 2)]
-    {
+    for (count, name_padding, expected_batches) in [
+        (0, 0, 0),
+        (1, 0, 1),
+        (64, 0, 1),
+        (129, 0, 1),
+        (20, 65536, 2),
+    ] {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let ddl = new_ddl_context(Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx))));
         ddl.table_metadata_manager
@@ -238,7 +242,6 @@ async fn test_drop_database_batches_recover_after_metadata_deletion() {
                 .as_any()
                 .downcast_ref::<DropDatabaseBatchExecutor>()
             {
-                assert!(batch.tables.len() <= 64);
                 ids.extend(batch.tables.iter().map(|(id, _)| *id));
                 // Crash after keys are gone but before cache invalidation and cursor advancement.
                 let dump = procedure.dump().unwrap();
@@ -289,9 +292,24 @@ async fn test_drop_database_batches_recover_after_metadata_deletion() {
 #[tokio::test]
 async fn test_drop_database_legacy_state_fixture() {
     let ddl = new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)));
-    let fixture = include_str!(
-        "../../../../../../tests/compatibility/procedure/drop_database/legacy_executor.json"
-    );
+    // Single-table executor state from f8d8fe1071, before logical-table batching.
+    let fixture = r#"{
+    "catalog": "greptime",
+    "schema": "public",
+    "drop_if_exists": false,
+    "state": {
+        "drop_database_state": "DropDatabaseExecutor",
+        "table_id": 1025,
+        "physical_table_id": 1025,
+        "table_name": {
+            "catalog_name": "greptime",
+            "schema_name": "public",
+            "table_name": "logical"
+        },
+        "physical_region_routes": [],
+        "target": "Logical"
+    }
+}"#;
     let mut procedure = DropDatabaseProcedure::from_json(fixture, ddl).unwrap();
     procedure.recover().unwrap();
     assert!(procedure.state().as_any().is::<DropDatabaseExecutor>());
@@ -329,48 +347,173 @@ async fn test_drop_database_batch_cache_failure_recovery() {
             Ok(())
         }
     }
-    let invalidator = Arc::new(FailingInvalidator {
-        fail: AtomicBool::new(false),
-        calls: Mutex::new(Vec::new()),
-    });
-    let mut ddl = new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)));
-    ddl.cache_invalidator = invalidator.clone();
-    ddl.table_metadata_manager
-        .schema_manager()
-        .create(
-            SchemaNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
-            None,
+    for view in [false, true] {
+        let invalidator = Arc::new(FailingInvalidator {
+            fail: AtomicBool::new(false),
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut ddl = new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)));
+        ddl.cache_invalidator = invalidator.clone();
+        ddl.table_metadata_manager
+            .schema_manager()
+            .create(
+                SchemaNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        if view {
+            let mut task = crate::ddl::tests::create_view::test_create_view_task("view");
+            task.view_info.ident.table_id = 20001;
+            ddl.table_metadata_manager
+                .create_view_metadata(
+                    task.view_info,
+                    task.create_view.logical_plan,
+                    Default::default(),
+                    vec![],
+                    vec![],
+                    "definition".into(),
+                )
+                .await
+                .unwrap();
+        } else {
+            let physical = create_physical_table(&ddl, "physical").await;
+            create_logical_table(ddl.clone(), physical, "logical").await;
+        }
+        let mut procedure = DropDatabaseProcedure::new(
+            DEFAULT_CATALOG_NAME.into(),
+            DEFAULT_SCHEMA_NAME.into(),
             false,
-        )
-        .await
-        .unwrap();
-    let physical = create_physical_table(&ddl, "physical").await;
-    create_logical_table(ddl.clone(), physical, "logical").await;
-    let mut procedure = DropDatabaseProcedure::new(
-        DEFAULT_CATALOG_NAME.into(),
-        DEFAULT_SCHEMA_NAME.into(),
-        false,
-        ddl.clone(),
-    );
-    execute_procedure_until(&mut procedure, |p| {
-        p.state().as_any().is::<DropDatabaseBatchExecutor>()
-    })
-    .await;
-    let dump = procedure.dump().unwrap();
-    invalidator.calls.lock().unwrap().clear();
-    invalidator.fail.store(true, Ordering::Relaxed);
-    let ctx = ProcedureContext {
-        procedure_id: ProcedureId::random(),
-        provider: Arc::new(MockContextProvider::default()),
-        event_context: None,
-    };
-    assert!(procedure.execute(&ctx).await.is_err());
-    assert_eq!(procedure.dump().unwrap(), dump);
-    let mut restored = DropDatabaseProcedure::from_json(&dump, ddl).unwrap();
-    restored.recover().unwrap();
-    restored.execute(&ctx).await.unwrap();
-    let calls = invalidator.calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0], calls[1]);
-    assert_eq!(calls[0].len(), 2);
+            ddl.clone(),
+        );
+        execute_procedure_until(&mut procedure, |p| {
+            if view {
+                p.state()
+                    .as_any()
+                    .is::<crate::ddl::drop_database::executor::DropDatabaseViewExecutor>()
+            } else {
+                p.state().as_any().is::<DropDatabaseBatchExecutor>()
+            }
+        })
+        .await;
+        let dump = procedure.dump().unwrap();
+        invalidator.calls.lock().unwrap().clear();
+        invalidator.fail.store(true, Ordering::Relaxed);
+        let ctx = ProcedureContext {
+            procedure_id: ProcedureId::random(),
+            provider: Arc::new(MockContextProvider::default()),
+            event_context: None,
+        };
+        assert!(procedure.execute(&ctx).await.is_err());
+        assert_eq!(procedure.dump().unwrap(), dump);
+        let mut restored = DropDatabaseProcedure::from_json(&dump, ddl).unwrap();
+        restored.recover().unwrap();
+        restored.execute(&ctx).await.unwrap();
+        let calls = invalidator.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], calls[1]);
+        assert_eq!(calls[0].len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn test_drop_database_mixed_table_order_and_recovery() {
+    use crate::ddl::test_util::create_table::test_create_table_task;
+    use crate::ddl::tests::create_view::{test_create_view_task, test_table_names};
+    use crate::key::table_route::TableRouteValue;
+    use itertools::Itertools;
+    use std::collections::HashMap;
+
+    // Every relative ordering of metric physical, logical, mito and view names.
+    for names in ["a", "b", "c", "d"].into_iter().permutations(4) {
+        for recover in [false, true] {
+            let ddl = new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)));
+            let manager = &ddl.table_metadata_manager;
+            manager
+                .schema_manager()
+                .create(
+                    SchemaNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+                    None,
+                    false,
+                )
+                .await
+                .unwrap();
+            let physical = create_physical_table(&ddl, names[0]).await;
+            let logical = create_logical_table(ddl.clone(), physical, names[1]).await;
+            let mito = test_create_table_task(names[2], 20000);
+            manager
+                .create_table_metadata(
+                    mito.table_info,
+                    TableRouteValue::physical(vec![]),
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+            let mut view = test_create_view_task(names[3]);
+            view.view_info.ident.table_id = 20001;
+            manager
+                .create_view_metadata(
+                    view.view_info,
+                    view.create_view.logical_plan,
+                    test_table_names(),
+                    vec![],
+                    vec![],
+                    "definition".into(),
+                )
+                .await
+                .unwrap();
+            let mut procedure = DropDatabaseProcedure::new(
+                DEFAULT_CATALOG_NAME.into(),
+                DEFAULT_SCHEMA_NAME.into(),
+                false,
+                ddl.clone(),
+            );
+            let ctx = ProcedureContext {
+                procedure_id: ProcedureId::random(),
+                provider: Arc::new(MockContextProvider::default()),
+                event_context: None,
+            };
+            let mut done = false;
+            for _ in 0..40 {
+                let status = procedure.execute(&ctx).await.unwrap();
+                if status.is_done() {
+                    done = true;
+                    break;
+                }
+                if recover && status.need_persist() {
+                    let dump = procedure.dump().unwrap();
+                    drop(procedure);
+                    procedure = DropDatabaseProcedure::from_json(&dump, ddl.clone()).unwrap();
+                    procedure.recover().unwrap();
+                }
+            }
+            assert!(done, "{names:?}, recovery={recover}");
+            assert!(
+                manager
+                    .table_name_manager()
+                    .tables(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                manager
+                    .table_info_manager()
+                    .batch_get(&[physical, logical, 20000, 20001])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                manager
+                    .view_info_manager()
+                    .get(20001)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 }

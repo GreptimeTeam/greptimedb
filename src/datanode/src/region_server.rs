@@ -1999,18 +1999,11 @@ impl RegionServerInner {
             CurrentEngine::EarlyReturn(rows) => return Ok(RegionResponse::new(rows)),
         };
 
-        let dependent_regions = if matches!(region_change, RegionChange::Deregisters) {
-            engine
-                .dependent_regions(region_id)
-                .into_iter()
-                .filter_map(|id| self.region_map.get(&id).map(|status| (id, status.clone())))
-                .collect::<Vec<_>>()
+        let logical_regions = if matches!(region_change, RegionChange::Deregisters) {
+            self.prepare_logical_regions_for_deregistration(&engine, region_id)
         } else {
             Vec::new()
         };
-        for (dependent, _) in &dependent_regions {
-            self.set_region_status_not_ready(*dependent, &engine, &RegionChange::Deregisters);
-        }
 
         // Sets corresponding region status to registering/deregistering before the operation.
         self.set_region_status_not_ready(region_id, &engine, &region_change);
@@ -2024,9 +2017,9 @@ impl RegionServerInner {
         }
         match result {
             Ok(result) => {
-                for (dependent, _) in dependent_regions {
+                for (logical_region, _) in logical_regions {
                     self.set_region_status_ready(
-                        dependent,
+                        logical_region,
                         engine.clone(),
                         RegionChange::Deregisters,
                     )
@@ -2043,8 +2036,8 @@ impl RegionServerInner {
                 })
             }
             Err(err) => {
-                for (dependent, status) in dependent_regions {
-                    self.region_map.insert(dependent, status);
+                for (logical_region, status) in logical_regions {
+                    self.region_map.insert(logical_region, status);
                 }
                 // Removes the region status if the operation fails.
                 self.unset_region_status(region_id, &engine, region_change);
@@ -2179,6 +2172,26 @@ impl RegionServerInner {
             }
         }
         Ok(())
+    }
+
+    /// Captures only existing registrations so failures cannot resurrect closed logical regions.
+    fn prepare_logical_regions_for_deregistration(
+        &self,
+        engine: &RegionEngineRef,
+        physical_region_id: RegionId,
+    ) -> Vec<(RegionId, RegionEngineWithStatus)> {
+        let Some(metric_engine) = engine.as_any().downcast_ref::<MetricEngine>() else {
+            return Vec::new();
+        };
+        let logical_regions = metric_engine
+            .loaded_logical_regions(physical_region_id)
+            .into_iter()
+            .filter_map(|id| self.region_map.get(&id).map(|status| (id, status.clone())))
+            .collect::<Vec<_>>();
+        for (region_id, _) in &logical_regions {
+            self.set_region_status_not_ready(*region_id, engine, &RegionChange::Deregisters);
+        }
+        logical_regions
     }
 
     async fn register_logical_regions(
@@ -3833,10 +3846,10 @@ mod tests {
             }
             let physical = RegionId::new(10, 0);
             let logical = RegionId::new(11, 0);
-            let mut dependents = metric.dependent_regions(physical);
+            let mut dependents = metric.loaded_logical_regions(physical);
             dependents.sort_unstable();
             assert_eq!(dependents, vec![logical, RegionId::new(12, 0)]);
-            assert!(metric.dependent_regions(logical).is_empty());
+            assert!(metric.loaded_logical_regions(logical).is_empty());
             // Rejection must leave both registrations usable for a subsequent forced drop.
             assert!(
                 server
@@ -3947,12 +3960,12 @@ mod tests {
             for id in [physical, logical] {
                 assert!(!server.inner.region_map.contains_key(&id));
             }
-            assert!(metric.dependent_regions(physical).is_empty());
+            assert!(metric.loaded_logical_regions(physical).is_empty());
             for id in [RegionId::new(20, 0), RegionId::new(21, 0)] {
                 assert!(server.inner.region_map.contains_key(&id));
             }
             assert_eq!(
-                metric.dependent_regions(RegionId::new(20, 0)),
+                metric.loaded_logical_regions(RegionId::new(20, 0)),
                 vec![RegionId::new(21, 0)]
             );
             server.stop().await.unwrap();

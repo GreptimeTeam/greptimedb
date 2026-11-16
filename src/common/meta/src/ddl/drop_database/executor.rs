@@ -207,6 +207,48 @@ impl State for DropDatabaseBatchExecutor {
     }
 }
 
+/// Persists a view's identity so cache invalidation can be retried after metadata deletion.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DropDatabaseViewExecutor {
+    pub(crate) table_id: TableId,
+    pub(crate) table_name: TableName,
+}
+
+#[async_trait::async_trait]
+#[typetag::serde]
+impl State for DropDatabaseViewExecutor {
+    async fn next(
+        &mut self,
+        ddl_ctx: &DdlContext,
+        _ctx: &mut DropDatabaseContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        ddl_ctx
+            .table_metadata_manager
+            .destroy_view_info(self.table_id, &self.table_name)
+            .await?;
+        ddl_ctx
+            .cache_invalidator
+            .invalidate(
+                &Context {
+                    subject: Some("Invalidate view cache by dropping database".to_string()),
+                },
+                &[
+                    CacheIdent::TableName(self.table_name.clone()),
+                    CacheIdent::TableId(self.table_id),
+                ],
+            )
+            .await?;
+        Ok((
+            Box::new(DropDatabaseCursor::new(DropTableTarget::Physical)),
+            Status::executing(false),
+        ))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;

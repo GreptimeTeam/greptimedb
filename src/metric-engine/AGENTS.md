@@ -83,7 +83,7 @@ cargo nextest run -p metric-engine
   write lock and invalidate the cache after the Mito2 write succeeds; preserve
   that ordering when adding a metadata mutation path.
 - Always convert ids via `utils::to_data_region_id` / `to_metadata_region_id`.
-- `RegionEngine::dependent_regions` exposes physical regions' loaded logical
+- `MetricEngine::loaded_logical_regions` exposes physical regions' loaded logical
   children. RegionServer captures them before drop/close and unregisters them
   after success; physical removal must also clear logical column caches.
 
