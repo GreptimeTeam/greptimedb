@@ -14,8 +14,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, UInt32Array, UInt32Builder};
-use arrow::compute::concat;
+use arrow::array::{Array, Float64Array, UInt32Array};
 use snafu::OptionExt;
 
 use crate::error::{InvalidSeriesSnafu, Result};
@@ -31,14 +30,6 @@ fn invalid<T>(reason: impl Into<String>) -> Result<T> {
         reason: reason.into(),
     }
     .build())
-}
-fn arrow_result<T>(r: std::result::Result<T, arrow::error::ArrowError>) -> Result<T> {
-    r.map_err(|e| {
-        InvalidSeriesSnafu {
-            reason: e.to_string(),
-        }
-        .build()
-    })
 }
 
 /// Histogram references for each time position, backed by one immutable table.
@@ -372,138 +363,6 @@ impl Samples {
                 }
                 Self::try_from_chunks(out)
             }
-        }
-    }
-    /// Materialize chunks into one dense array. When all histogram-bearing chunks reference the
-    /// same Arrow table view, reuse it; otherwise concatenate tables per chunk and remap indices.
-    pub fn into_dense(self) -> Result<Self> {
-        let SampleStorage::Chunks(chunks, total_len) = self.storage else {
-            return Ok(self);
-        };
-        let all_float = chunks
-            .iter()
-            .all(|s| matches!(s.storage, SampleStorage::Float(_)));
-        if all_float {
-            let arrays: Vec<&dyn Array> = chunks
-                .iter()
-                .filter_map(|s| match &s.storage {
-                    SampleStorage::Float(a) => Some(a as &dyn Array),
-                    _ => None,
-                })
-                .collect();
-            let array = arrow_result(concat(&arrays))?;
-            let values = array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| {
-                    InvalidSeriesSnafu {
-                        reason: "float concatenation returned a non-float array",
-                    }
-                    .build()
-                })?;
-            return Ok(Self::from_float(values.clone()));
-        }
-
-        let mut histogram_batches = chunks.iter().filter_map(|chunk| match &chunk.storage {
-            SampleStorage::Histogram(histogram) => Some(&histogram.batch),
-            SampleStorage::Mixed(mixed) => Some(&mixed.histograms.batch),
-            SampleStorage::Float(_) | SampleStorage::Chunks(_, _) => None,
-        });
-        let mut first_data = None;
-        let shared_batch = histogram_batches.next().filter(|first| {
-            histogram_batches.all(|batch| {
-                if Arc::ptr_eq(first, batch) {
-                    return true;
-                }
-                first_data
-                    .get_or_insert_with(|| first.as_arrow().to_data())
-                    .ptr_eq(&batch.as_arrow().to_data())
-            })
-        });
-        let needs_float = chunks.iter().any(|chunk| {
-            matches!(
-                chunk.storage,
-                SampleStorage::Float(_) | SampleStorage::Mixed(_)
-            )
-        });
-        let mut tables: Vec<&dyn Array> = Vec::new();
-        let mut indices = UInt32Builder::with_capacity(total_len);
-        let mut floats =
-            needs_float.then(|| arrow::array::Float64Builder::with_capacity(total_len));
-        let mut base = 0u32;
-        for chunk in chunks.iter() {
-            let (float_values, histogram) = match &chunk.storage {
-                SampleStorage::Float(values) => (Some(values), None),
-                SampleStorage::Histogram(histogram) => (None, Some(histogram)),
-                SampleStorage::Mixed(mixed) => (Some(&mixed.floats), Some(&mixed.histograms)),
-                SampleStorage::Chunks(_, _) => {
-                    return invalid("nested sample chunks were not flattened");
-                }
-            };
-            if shared_batch.is_none()
-                && let Some(histogram) = histogram
-            {
-                tables.push(histogram.batch.as_arrow());
-            }
-            for position in 0..chunk.len() {
-                if let Some(floats) = &mut floats {
-                    match float_values {
-                        Some(values) if values.is_valid(position) => {
-                            floats.append_value(values.value(position));
-                        }
-                        _ => floats.append_null(),
-                    }
-                }
-                match histogram {
-                    Some(histogram) if histogram.indices.is_valid(position) => {
-                        indices.append_value(
-                            base.checked_add(histogram.indices.value(position))
-                                .context(InvalidSeriesSnafu {
-                                    reason: "histogram remapped index overflow",
-                                })?,
-                        );
-                    }
-                    _ => indices.append_null(),
-                }
-            }
-            if shared_batch.is_none()
-                && let Some(histogram) = histogram
-            {
-                base = base
-                    .checked_add(u32::try_from(histogram.batch.len()).map_err(|_| {
-                        InvalidSeriesSnafu {
-                            reason: "histogram table too large",
-                        }
-                        .build()
-                    })?)
-                    .context(InvalidSeriesSnafu {
-                        reason: "histogram table index overflow",
-                    })?;
-            }
-        }
-        let batch = if let Some(batch) = shared_batch {
-            Arc::clone(batch)
-        } else {
-            let table = arrow_result(concat(&tables))?;
-            let struct_array = table
-                .as_any()
-                .downcast_ref::<arrow::array::StructArray>()
-                .ok_or_else(|| {
-                    InvalidSeriesSnafu {
-                        reason: "histogram concatenation returned a non-struct array",
-                    }
-                    .build()
-                })?
-                .clone();
-            Arc::new(HistogramBatch::try_from_arrow(struct_array)?)
-        };
-        let histogram = HistogramSamples::try_new(indices.finish(), batch)?;
-        if let Some(mut floats) = floats {
-            Self::try_from_mixed(floats.finish(), histogram)
-        } else {
-            Ok(Self {
-                storage: SampleStorage::Histogram(histogram),
-            })
         }
     }
 }
