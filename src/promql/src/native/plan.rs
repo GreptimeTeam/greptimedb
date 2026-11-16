@@ -1307,9 +1307,10 @@ impl NativeNode {
 /// A canonical label set is the identity a [`NativeExpr::Merge`] groups by: the metric name plus the
 /// ordinary labels, which is exactly what [`SeriesLabels`] holds. One scan partition holds one
 /// series per such set - a stored series is one identity, and the scan splits rows by storage key
-/// rather than by label set - so only a computation that *writes* an existing label can turn two of
-/// those identities into one. A `label_replace` or `label_join` does exactly that, and it may name
-/// the very label that told its input's series apart.
+/// rather than by label set - so only a computation that *writes* an existing label, or drops one,
+/// can turn two of those identities into one. A `label_replace` or a `label_join` writes one, and it
+/// may name the very label that told its input's series apart; a range function that drops the
+/// metric name, and `timestamp` in either of its forms, drop one.
 ///
 /// The rewrite is judged by the labels it writes and the ones its input carries, which is why the
 /// caller supplies what it knows about each source's tags, indexed by the `source_index` the leaves
@@ -1331,23 +1332,47 @@ impl NativeNode {
 ///
 /// Everything else either keeps the set it read or answers a set of its own:
 ///
-/// - A map of math drops the metric name, and an arithmetic broadcast does too, but within one
-///   metric the remaining tags are the primary key: two stored series of one metric that agree on
-///   every other label are the same series, so dropping the name cannot make them one. Each of
-///   those nodes hands its input's answer on rather than claiming one of its own.
+/// - A map of math drops the metadata labels, and so do a histogram map, a parameterized map, an
+///   arithmetic or `bool` scalar broadcast, a range function that computes its result and a
+///   `timestamp` in either of its forms. Such a node is judged by two facts
+///   ([`metadata_drop_keeps_series_apart`]): the labels it and its input report, and the scan's own
+///   key columns. A source bound to one metric names every series it hands over, so the name the
+///   drop removes told none of them apart, and a source that may hand over several is collected; and
+///   because the drop removes every empty label value with the name, a key column that holds `NULL`
+///   in one series and `''` in another - an absent and an empty value, which is one label set once
+///   the empty one is gone - is collected too. `keys_survive` is that second fact, stated by the
+///   caller for the scan below the tree
+///   ([`keys_survive_metadata_drop`](crate::extension_plan::keys_survive_metadata_drop), which is
+///   the same rule the physical per-series scan applies); a caller that cannot state it passes
+///   `false`, and the conservative answer is the one that collects.
 /// - An `Aggregate` answers its groups, a `Vector` that folds series answers its result sets, and a
 ///   `Binary` that reads whole vectors files its rows by the label set a sample *ends* under and
 ///   refuses two values of a field at one point. A `Set` does the same, and `info` merges the
 ///   results that share a label set. Each answers one series per set it names.
-/// - A node that hands its input's series over unchanged - a selection, a window, a timestamp, a
-///   parameterized map, `topk` and its ranking siblings - passes the answer on: an alias below it is
-///   still an alias above it.
+/// - A `Window` that drops the metadata labels, and the two timestamps, claim one of their own: the
+///   name is part of the identity a merge groups by, so two series that shared every other label are
+///   one label set from there on - unless the drop tells them apart by the same two-fact rule the
+///   kernels above are judged by.
+/// - The empty-value half of that proof is answered by a [`Merge`](NativeExpr::Merge) at or below the
+///   drop ([`canonical_below`]): a merge hands over one series per canonical label set - the
+///   comparison that treats an empty label value as no label - so no drop above it can fold two of
+///   its series by removing an empty value. What a merge does not answer is the metadata labels
+///   themselves, which the labels half below still has to prove. That is what keeps a chain of drops
+///   over one metric to the one collection at its bottom rather than one per drop.
+/// - A node that hands its input's series over unchanged - a selection, a name-keeping window,
+///   `topk` and its ranking siblings - passes the answer on: an alias below it is still an alias
+///   above it.
 ///
 /// This is the fact [`merge_label_rewrites`](crate::native::canonicalize::merge_label_rewrites)
 /// inserts a `Merge` for: a consumer that reads a whole label set cannot answer from pieces, and this
 /// says where pieces of one set can exist at all. A `Merge` is the collection itself, so it answers
 /// `false` - which is what makes the pass idempotent.
-pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>]) -> bool {
+pub fn duplicates_canonical_labels(
+    node: &NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+    keys_survive: bool,
+) -> bool {
     match &node.expr {
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
@@ -1355,13 +1380,50 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
         | NativeExpr::VectorOf { .. } => false,
         // The collection itself: one series per label set comes out of it.
         NativeExpr::Merge { .. } => false,
-        // These hand each series over as they read it, so what aliases below them still aliases.
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::ParameterizedMap { input, .. }
-        | NativeExpr::ParameterizedTopK { input, .. } => {
-            duplicates_canonical_labels(input, source_tags)
+        // These hand each series over as they read it, so what aliases below them still aliases --
+        // except `timestamp`, which reports a sample's own time under the metadata labels dropped
+        // and is therefore a source of duplicates in its own right. A merge below it already hands
+        // over one series per label set, so nothing the drop can fold is left there.
+        NativeExpr::Instant { input, op } => {
+            (op.value == InstantValue::Timestamp
+                && !metadata_drop_keeps_series_apart(
+                    input,
+                    source_tags,
+                    source_metrics,
+                    keys_survive,
+                ))
+                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+        }
+        // A window that drops the metadata labels can fold two series that agreed on every other
+        // label into one set, so it is a source of duplicates whether or not its input was one -
+        // unless the labels and the scan's key columns provably tell those series apart still, or a
+        // merge below it already collected them.
+        NativeExpr::Window { input, op } => {
+            (op.function.drops_metric_name()
+                && !metadata_drop_keeps_series_apart(
+                    input,
+                    source_tags,
+                    source_metrics,
+                    keys_survive,
+                ))
+                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+        }
+        // `timestamp` always drops the metadata labels, so two series it reads can become one set -
+        // unless the labels below it are all bound to one metric and the scan's keys survive the
+        // drop.
+        NativeExpr::Timestamp { input } => {
+            !metadata_drop_keeps_series_apart(input, source_tags, source_metrics, keys_survive)
+                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+        }
+        // A parameterized map is a math kernel - `round`, `clamp` - and drops the metadata labels as
+        // a math map does, so it answers for the same reason. Its parameter is a scalar and carries
+        // no labels of the input's.
+        NativeExpr::ParameterizedMap { input, .. } => {
+            !metadata_drop_keeps_series_apart(input, source_tags, source_metrics, keys_survive)
+                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+        }
+        NativeExpr::ParameterizedTopK { input, .. } => {
+            duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
         }
         // `scalar()` answers one value, which names no label set at all.
         NativeExpr::ScalarOf { .. } => false,
@@ -1373,9 +1435,21 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
         // leaves every series' identity distinct. `map_writes_existing_label` is that question, and
         // an input whose labels this walk cannot derive is collected rather than trusted. Even a
         // whole-vector consumer can emit distinct series whose labels a later rewrite makes equal.
+        // A math or histogram kernel in the same map drops the metadata labels, which is a source of
+        // duplicates of its own unless the labels and the scan's keys tell its input's series apart -
+        // see the doc comment above.
         NativeExpr::Map { input, op } => {
-            map_writes_existing_label(input, op, source_tags).unwrap_or(true)
-                || duplicates_canonical_labels(input, source_tags)
+            (op.ops
+                .iter()
+                .any(|operation| matches!(operation, MapOp::Math(_) | MapOp::Histogram(_)))
+                && !metadata_drop_keeps_series_apart(
+                    input,
+                    source_tags,
+                    source_metrics,
+                    keys_survive,
+                ))
+                || map_writes_existing_label(input, op, source_tags).unwrap_or(true)
+                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
         }
         // A fold answers one series per group, which is one label set per group.
         NativeExpr::Aggregate { .. } => false,
@@ -1384,23 +1458,49 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
             BoundVectorOp::TopK { .. }
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
-            | BoundVectorOp::Sort(_) => duplicates_canonical_labels(input, source_tags),
+            | BoundVectorOp::Sort(_) => {
+                duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+            }
             // `absent` reports one series, `count_values` one per distinct value, and the histogram
             // functions fold the bucket series of one histogram into one series.
             BoundVectorOp::Absent { .. }
             | BoundVectorOp::Histogram(_)
             | BoundVectorOp::CountValues { .. } => false,
         },
-        NativeExpr::Binary { left, right, .. } => {
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => {
             let vector = |side: &NativeNode| side.output.samples().is_some();
-            if vector(left) && vector(right) {
+            match (vector(left), vector(right)) {
                 // Two vectors are matched by label, and the kernel files its rows by the label set a
                 // sample ends under, refusing two values of one field at one point.
-                false
-            } else {
-                // A broadcast reaches each series of its vector side as it is.
-                let carried = if vector(left) { left } else { right };
-                duplicates_canonical_labels(carried, source_tags)
+                (true, true) => false,
+                // A broadcast reaches each series of its vector side as it is. An arithmetic one and
+                // one that reports a `bool` drop the metadata labels, which is a source of
+                // duplicates of its own unless the labels and the scan's keys tell its series apart;
+                // a filtering comparison keeps the set it read. A merge below the vector side already
+                // handed over one series per label set, so the drop has nothing left to fold there.
+                (true, false) | (false, true) => {
+                    let carried = if vector(left) { left } else { right };
+                    let drops_metadata = !matching.op.is_comparison() || matching.return_bool;
+                    (drops_metadata
+                        && !metadata_drop_keeps_series_apart(
+                            carried,
+                            source_tags,
+                            source_metrics,
+                            keys_survive,
+                        ))
+                        || duplicates_canonical_labels(
+                            carried,
+                            source_tags,
+                            source_metrics,
+                            keys_survive,
+                        )
+                }
+                // Two scalars name no label set at all.
+                (false, false) => false,
             }
         }
         // A set operation keeps each side's samples and files them by result label set, refusing two
@@ -1447,6 +1547,313 @@ fn map_writes_existing_label(
     }
     Some(existing)
 }
+
+/// Whether the metadata labels a rewrite drops are the only ones telling `node`'s series apart.
+///
+/// A range function that computes its result and `timestamp` in either of its forms drop
+/// [`PROMQL_METADATA_LABELS`] - the metric name, `__type__` and `__unit__` - and a consumer above
+/// them that reads a whole label set has to establish those series cannot collide once the three are
+/// gone. Two series of one input collide only if they differed in one of the three alone,
+/// so the drop is injective - and nothing has to be collected - when neither can tell two of them
+/// apart:
+///
+/// - The name: a source bound to one metric names every series it hands over, so the name is the
+///   same for all of them and removing it merges nothing (see [`single_metric_name`]). A source that
+///   may hand over several - one selector that discovered several metrics, or a caller that cannot
+///   tell - is not proved, and the conservative answer is the one that collects.
+/// - `__type__` and `__unit__`: both are removed along with the name, and neither is a label this
+///   walk can prove constant across a source's series. They are ordinary labels when a source
+///   carries them as tags or a rewrite writes them, and two series that agree on everything else are
+///   one label set once they are gone. Their presence anywhere in `node`'s output is therefore
+///   enough to withhold the proof.
+///
+/// A node whose labels already lost the name - `abs`, a name-dropping window below it - has no name
+/// of its own left to remove, and what its surviving labels tell apart is then only as good as the
+/// metrics below it: a drop that happened on the way there removed a name without asking this walk,
+/// so the proof asks instead that every source it reads is bound to the same one metric
+/// ([`single_source_metric`]). Over a selector that discovered several metrics that drop folds them
+/// together, and the answer is the one that collects.
+///
+/// `false` when the walk cannot derive `node`'s labels at all, because an unknown set proves nothing.
+///
+/// This is the whole of the drop's proof: every arm of [`duplicates_canonical_labels`] that decides
+/// whether a collection is needed asks it, and so does [`unifies_its_own_contributions`] at run
+/// time. What it cannot see is a key column that holds `NULL` in one series and `''` in another,
+/// both of which decode to no label once the empty value is dropped with the name. That fact is not
+/// derivable from a tree - it is read from the resolved table - so the caller states it as
+/// `keys_survive`, using the same rule the physical per-series scan applies
+/// ([`keys_survive_metadata_drop`](crate::extension_plan::keys_survive_metadata_drop)).
+/// [`leaves_a_drop_to_the_storage_keys`] is what makes the statements collected for that reason
+/// countable.
+fn metadata_drop_keeps_series_apart(
+    node: &NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+    keys_survive: bool,
+) -> bool {
+    // The empty-value half is asked first, because it is the cheap one and because a merge at or
+    // below `node` answers it for the tree ([`canonical_below`]): a merge hands over one series per
+    // canonical label set - the comparison that treats an empty label value as no label - so two of
+    // its series are already distinct under it, and no drop above can fold them by removing an empty
+    // value. What a merge does *not* answer is the metadata labels themselves: it keeps two series
+    // that differ in the name, `__type__` or `__unit__`, and those are exactly what the drop
+    // removes, so the labels half still has to hold on its own.
+    //
+    // A caller that cannot state the key half - one holding no table, or a tree whose scans
+    // disagree - passes `keys_survive = false`, and only a merge below it can then carry the drop.
+    (keys_survive || canonical_below(node))
+        && metadata_labels_keep_series_apart(node, source_tags, source_metrics)
+}
+
+/// Whether the labels alone tell two of `node`'s series apart once the metadata labels are dropped.
+///
+/// This is the half of [`metadata_drop_keeps_series_apart`] a tree can answer about itself; the other
+/// half is the empty values the drop removes - the scan's key columns, or a merge that has already
+/// told those apart. See that function's doc comment for the rule itself.
+fn metadata_labels_keep_series_apart(
+    node: &NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+) -> bool {
+    let Some(tags) = fused_output_tags(node, source_tags) else {
+        return false;
+    };
+    if tags
+        .iter()
+        .any(|tag| tag == "__type__" || tag == "__unit__")
+    {
+        return false;
+    }
+    if !tags.iter().any(|tag| tag == METRIC_NAME) {
+        // No name is left to lose, so what the surviving labels tell apart is decided by the sources
+        // below: every one of them reading the same single metric is what says a name dropped on the
+        // way here could not have folded two metrics together either. `abs` and a name-dropping
+        // window both drop the name without asking, so without that fact nothing below is proved.
+        return single_source_metric(node, source_metrics).is_some();
+    }
+    single_metric_name(node, source_metrics).is_some()
+}
+
+/// Whether a [`NativeExpr::Merge`] collects the series `node` hands over, at it or below it.
+///
+/// A merge holds one series per canonical label set, so the series above one are not stored series
+/// any more: a merge with nothing to merge hands its input's pieces through, and one that does
+/// merge keeps the first piece's labels and drops the pieces it folded, so what comes out is unique
+/// under the label set Prometheus compares (`label_set` in `grid_series`) - the one that treats an
+/// empty label value as no label. Two pieces that came out of one merge are therefore distinct under
+/// that comparison even though their rows may still spell an empty value, which is what makes a
+/// second drop above the merge unable to fold them by removing an empty value. What it does not make
+/// impossible is the rest of such a drop: a merge keeps two series that differ in `__name__`,
+/// `__type__` or `__unit__`, and removing those is exactly what a metadata drop does.
+///
+/// Only the children that carry samples are searched: a parameter is a scalar or a vector of
+/// constants, and a merge below one reads series this node's own samples did not come from.
+fn canonical_below(node: &NativeNode) -> bool {
+    matches!(node.expr, NativeExpr::Merge { .. })
+        || node
+            .expr
+            .children()
+            .into_iter()
+            .filter(|child| matches!(child.output, NativeType::Samples(_)))
+            .any(canonical_below)
+}
+
+/// Whether `node` drops [`PROMQL_METADATA_LABELS`] on its own over series whose labels are proved to
+/// tell apart and whose keys do not.
+///
+/// This is the question of what the drop costs: the labels half of the proof
+/// ([`metadata_labels_keep_series_apart`]) holds, nothing at or below the drop has collected already
+/// ([`canonical_below`]), and the only reason a collection is still needed is the scan's key columns,
+/// a primary-key column that holds `NULL` in one series and `''` in another. Those two decode to an
+/// absent and to an empty label, and the drop normalizes them into one. Such a statement is now
+/// collected for that reason alone ([`metadata_drop_keeps_series_apart`]), and this is the count
+/// that says so.
+///
+/// Every node that drops the metadata labels on its own counts: a map of math, a histogram map, a
+/// parameterized map and an arithmetic or `bool` scalar broadcast, and the three that rewrite a
+/// sample's own value - a name-dropping range function, `timestamp(x)` and a `timestamp` over an
+/// evaluated input.
+fn drops_metadata_labels_over_one_metric(
+    node: &NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+    keys_survive: bool,
+) -> bool {
+    // The statement is counted exactly when the drop is collected for the key columns alone: the
+    // labels prove it ([`metadata_labels_keep_series_apart`]), nothing at or below it has collected
+    // already ([`canonical_below`]), and the keys do not survive it - which is the one fact the pass
+    // read from the resolved table and the reason the merge is there.
+    let decided_by_the_keys = |carried: &NativeNode| {
+        !keys_survive
+            && metadata_labels_keep_series_apart(carried, source_tags, source_metrics)
+            && !canonical_below(carried)
+    };
+    let dropped = match &node.expr {
+        NativeExpr::Instant { input, op } => {
+            op.value == InstantValue::Timestamp && decided_by_the_keys(input)
+        }
+        NativeExpr::Timestamp { input } => decided_by_the_keys(input),
+        NativeExpr::Window { input, op } => {
+            op.function.drops_metric_name() && decided_by_the_keys(input)
+        }
+        NativeExpr::ParameterizedMap { input, .. } => decided_by_the_keys(input),
+        NativeExpr::Map { input, op } => {
+            op.ops
+                .iter()
+                .any(|operation| matches!(operation, MapOp::Math(_) | MapOp::Histogram(_)))
+                && decided_by_the_keys(input)
+        }
+        // A broadcast reaches each series of its vector side as it is; an arithmetic one and one
+        // that reports a `bool` drop the metadata labels, a filtering comparison keeps them.
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => {
+            let carried = match (
+                left.output.samples().is_some(),
+                right.output.samples().is_some(),
+            ) {
+                (true, false) => Some(left.as_ref()),
+                (false, true) => Some(right.as_ref()),
+                _ => None,
+            };
+            carried.is_some_and(|carried| {
+                (!matching.op.is_comparison() || matching.return_bool)
+                    && decided_by_the_keys(carried)
+            })
+        }
+        _ => false,
+    };
+    dropped
+        || node.expr.children().into_iter().any(|child| {
+            drops_metadata_labels_over_one_metric(child, source_tags, source_metrics, keys_survive)
+        })
+}
+
+/// Whether `tree` holds a node that drops the metadata labels over series whose labels are proved to
+/// tell apart and whose keys do not (see [`drops_metadata_labels_over_one_metric`]).
+///
+/// A statement this answers `true` for is one the canonical pass collects for the key columns alone:
+/// the labels prove the drop injective, nothing below it has collected already, and the scan below it
+/// keys its series by a column that can hold `NULL` in one series and `''` in another
+/// (`keys_survive` is `false`, and the caller states that fact from the resolved table). Those
+/// statements are the price of reading that fact instead of the label-set check the physical scan
+/// only states for itself, so the caller counts them by this answer.
+pub fn leaves_a_drop_to_the_storage_keys(
+    tree: &NativeTree,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+    keys_survive: bool,
+) -> bool {
+    drops_metadata_labels_over_one_metric(tree.root(), source_tags, source_metrics, keys_survive)
+}
+
+/// The one metric every source `node` reads is bound to, or `None` when they are not all one.
+///
+/// This is the facts-free question about the leaves alone: a node can drop the metric name on the
+/// way (a math map, a range function) whatever its sources hold, so what the surviving labels tell
+/// apart is only as good as the set of metrics below them.
+fn single_source_metric(
+    node: &NativeNode,
+    source_metrics: &[Option<Arc<str>>],
+) -> Option<Arc<str>> {
+    let mut pending = vec![node];
+    let mut metric: Option<&Arc<str>> = None;
+    while let Some(node) = pending.pop() {
+        match &node.expr {
+            // A source that may hand over several metrics proves nothing about their names.
+            NativeExpr::Input(input) => {
+                let bound = source_metrics.get(input.source_index)?.as_ref()?;
+                match metric {
+                    None => metric = Some(bound),
+                    Some(seen) if seen == bound => {}
+                    Some(_) => return None,
+                }
+            }
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::ScalarOf { input } => pending.push(input),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            }
+            | NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                pending.push(input);
+                pending.extend(parameters.iter());
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                pending.push(input);
+                pending.push(parameter);
+            }
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
+                pending.push(left);
+                pending.push(right);
+            }
+        }
+    }
+    metric.cloned()
+}
+
+/// The one metric every series `node` hands over is named, or `None` when this walk cannot say.
+///
+/// Only the nodes that hand their input's label set on unchanged can carry a name: every kernel that
+/// reports a value of its own drops it, so a name above one of those is one a rewrite wrote. What is
+/// left is the boundary the leaves are bound to - where `source_metrics` answers, indexed by the
+/// `source_index` the leaf reads - and the nodes that pass a set through.
+fn single_metric_name(node: &NativeNode, source_metrics: &[Option<Arc<str>>]) -> Option<Arc<str>> {
+    match &node.expr {
+        NativeExpr::Input(input) => source_metrics.get(input.source_index).cloned().flatten(),
+        // These report the label set they read rather than one of their own, so the name is their
+        // input's. A map that computes a value or writes a name is not one of them.
+        NativeExpr::Merge { input }
+        | NativeExpr::ParameterizedTopK { input, .. }
+        | NativeExpr::Vector {
+            input,
+            op:
+                BoundVectorOp::TopK { .. }
+                | BoundVectorOp::LimitK { .. }
+                | BoundVectorOp::LimitRatio { .. }
+                | BoundVectorOp::Sort(_),
+        } => single_metric_name(input, source_metrics),
+        NativeExpr::Instant { input, op } if op.value != InstantValue::Timestamp => {
+            single_metric_name(input, source_metrics)
+        }
+        NativeExpr::Window { input, op } if !op.function.drops_metric_name() => {
+            single_metric_name(input, source_metrics)
+        }
+        NativeExpr::Map { input, op }
+            if op.ops.iter().all(|operation| {
+                matches!(
+                    operation,
+                    MapOp::Label(rewrite) if rewrite.destination() != METRIC_NAME
+                )
+            }) =>
+        {
+            single_metric_name(input, source_metrics)
+        }
+        // A kernel that reports a value of its own drops the name, and a fold, a set operation, an
+        // `info` lookup and a rewrite writing the name answer a set this walk does not follow.
+        _ => None,
+    }
+}
+
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
 /// An `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two vectors' series
@@ -1464,11 +1871,16 @@ fn map_writes_existing_label(
 /// Both a region-side placement and the native route's admission ask this, and they must agree: a
 /// tree admitted here but refused there becomes a node the physical layer cannot build, and one
 /// refused here but admitted there would be pushed to a region that holds part of the metric.
+///
+/// The walk asks the facts-free form of [`unifies_its_own_contributions`]: a placement reads a tree
+/// without the binding that says which metric each of its inputs reads, and every reader of this
+/// answer - the admission below, the region-side classification and the locality of a built node -
+/// asks it of the same tree, so the conservative answer is the one that keeps them agreeing.
 pub fn reads_across_series(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
         NativeExpr::Window { input, .. } => {
-            matches!(unifies_its_own_contributions(input), Some(false))
+            matches!(unifies_its_own_contributions(input, &[], &[]), Some(false))
                 || reads_across_series(input)
         }
         NativeExpr::Instant { input, .. }
@@ -2492,8 +2904,37 @@ fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
 ///
 /// The collection condition is `matches!(answer, Some(false))`: the Window `MergeInput` collector
 /// at runtime and the `limitk` collector both ask this predicate of their input.
+///
+/// `source_tags` and `source_metrics` are the same facts
+/// [`duplicates_canonical_labels`] judges a whole label set by, indexed the same way: a node that
+/// drops the metadata labels reports fragments only when
+/// [`metadata_labels_keep_series_apart`] cannot prove the labels tell its series apart. That is the
+/// labels half of the drop's proof, and it is the half a tree can answer about itself. The other half
+/// is whether the scan's key columns can spell one series as `NULL` and another as `''`, both of
+/// which the drop normalizes into one label set: it is stated for the tree as a whole and is asked by
+/// the canonical pass ([`duplicates_canonical_labels`], which reads it as
+/// [`metadata_drop_keeps_series_apart`]). Where that half does not hold, the pass has put its merge
+/// above this node already, so this predicate is asked of the merge instead, which is why asking the
+/// labels half here cannot disagree with the pass about a drop. The statements that half collects
+/// are counted by [`leaves_a_drop_to_the_storage_keys`].
+///
+/// This predicate is only ever asked of a node by the consumer directly above it - the `Window`
+/// `MergeInput` collector and the `limitk` one, both in [`execute`](crate::native::execute) - and
+/// that is exactly where the canonical pass puts its [`NativeExpr::Merge`] when a collection is
+/// needed: it collects the input of a `Window`, an `Aggregate`, a `Vector`, a `Map`, a
+/// `ParameterizedMap` and each side of a `Binary`/`Set`/`Info`
+/// ([`merge_label_rewrites`](crate::native::canonicalize::merge_label_rewrites)). The collector
+/// then reads the merge's `Some(true)` - a merge *is* the collection - so the weaker answer this
+/// function gives about the node beneath it is never the one acted on. Where the pass left the tree
+/// alone, the proof held, and the answer asked here is the same one. A caller without these facts
+/// (placement, which reads a tree without a binding) passes empty slices and gets the conservative
+/// answer.
 #[allow(clippy::match_same_arms)] // Keep each expression's contribution guarantee explicit.
-pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
+pub fn unifies_its_own_contributions(
+    node: &NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+) -> Option<bool> {
     match &node.expr {
         // A boundary hands over the pieces some upstream execution produced: what it holds is one
         // storage series at a time for a scan and one partition's fragments of a label set for an
@@ -2510,7 +2951,20 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
         // arrive one whole storage series at a time, so it answers one series per series it read,
         // under the label set it read. `timestamp(x)` is the exception: it reports the sample's own
         // time under the metric name dropped, which can give two series one label set.
-        NativeExpr::Instant { op, .. } => Some(op.value != InstantValue::Timestamp),
+        NativeExpr::Instant { input, op } => {
+            if op.value == InstantValue::Timestamp {
+                // `timestamp` drops the metadata labels, so what it emits aliases unless the drop
+                // provably tells its series apart. The labels half is asked here; the keys half is
+                // what the pass collects with, above this node - see this function's docs.
+                Some(metadata_labels_keep_series_apart(
+                    input,
+                    source_tags,
+                    source_metrics,
+                ))
+            } else {
+                Some(true)
+            }
+        }
         // The merge is the collection: whatever its input handed over, it groups the fragments by
         // canonical label set and emits one series per set, so what it emits shares none.
         NativeExpr::Merge { .. } => Some(true),
@@ -2528,20 +2982,46 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
         //   folds each contribution on its own, so what it emits does alias its input's fragments,
         //   and `Some(false)` is exact.
         NativeExpr::Window { input, op } => {
-            Some(!op.function.drops_metric_name() && unifies_its_own_contributions(input).is_some())
+            let child = unifies_its_own_contributions(input, source_tags, source_metrics);
+            if child.is_none() {
+                // A boundary hands the pieces of one series over one at a time, and the window folds
+                // them without ever seeing the whole series: what it emits aliases whatever the
+                // labels say.
+                Some(false)
+            } else if op.function.drops_metric_name() {
+                // The function drops the metadata labels, so the window answers `Some(true)` exactly
+                // when the labels say the drop tells its input's series apart. The keys half is the
+                // pass's to ask: where it fails, the pass has already put its merge above this
+                // window and the collector reads that merge's answer - see this function's docs.
+                Some(metadata_labels_keep_series_apart(
+                    input,
+                    source_tags,
+                    source_metrics,
+                ))
+            } else {
+                Some(true)
+            }
         }
-        // A map can rewrite labels, so two series can end under one label set and the runtime
-        // records what it wrote in an `Emitted` table.
+        // A map can rewrite labels, so two series can end under one label set: what it hands out is
+        // not one series per set until a canonical merge has collected the set.
         NativeExpr::Map { .. } | NativeExpr::ParameterizedMap { .. } => Some(false),
         // `topk` hands back the series it read with their labels, so the input's answer is its own -
         // exactly as for the bound operation.
-        NativeExpr::ParameterizedTopK { input, .. } => unifies_its_own_contributions(input),
+        NativeExpr::ParameterizedTopK { input, .. } => {
+            unifies_its_own_contributions(input, source_tags, source_metrics)
+        }
         // A histogram function groups its rows by label set itself, so it emits one series per set.
         NativeExpr::ParameterizedHistogram { .. } => Some(true),
         // `scalar()` answers one value per point, which is not several series.
         NativeExpr::ScalarOf { .. } => Some(true),
-        // A timestamp reports a position under the metric name dropped.
-        NativeExpr::Timestamp { .. } => Some(false),
+        // A timestamp reports a position under the metadata labels dropped, and the labels half
+        // asked here is answered for the same reason the `timestamp` selection's is: the keys half
+        // is the one the pass turns into a merge above this node - see this function's docs.
+        NativeExpr::Timestamp { input } => Some(metadata_labels_keep_series_apart(
+            input,
+            source_tags,
+            source_metrics,
+        )),
         NativeExpr::Binary {
             left,
             right,
@@ -2575,7 +3055,7 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
                     !matches!(node.expr, NativeExpr::Scalar(BoundScalar { .. }))
                 };
                 let vector = if carries_series(left) { left } else { right };
-                unifies_its_own_contributions(vector)
+                unifies_its_own_contributions(vector, source_tags, source_metrics)
             }
         }
         // A set operation keeps each side's samples and files them by label set, one series per
@@ -2603,7 +3083,7 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
             if whole {
                 Some(true)
             } else {
-                unifies_its_own_contributions(input)
+                unifies_its_own_contributions(input, source_tags, source_metrics)
             }
         }
     }

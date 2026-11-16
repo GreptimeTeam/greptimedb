@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -22,16 +23,17 @@ use datatypes::series::histogram::{
 use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 
+use super::float_histogram::copies;
 use super::float_histogram::{AddOutcome, FloatHistogram};
 use super::{
     HistogramAggregate, HistogramFunction, HistogramParameters, NativeHistogramFunction,
     aggregate_histograms, evaluate_histograms, evaluate_histograms_with_annotations,
-    histogram_quantiles, histogram_string, map_native_histogram,
+    histogram_quantiles, histogram_string, map_native_histogram, sum_or_avg,
 };
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
-    GoldenCase, Labels, OwnedHistogram, Points, canonical_bits, close, golden_cases, labels_of,
-    metric_of, mixed_series, points_by_labels, points_of,
+    GoldenCase, Labels, OwnedHistogram, Points, assert_histogram_close, canonical_bits, close,
+    golden_cases, labels_of, metric_of, mixed_series, points_by_labels, points_of,
 };
 
 fn schema(case: &GoldenCase) -> Arc<SeriesSchema> {
@@ -1064,4 +1066,82 @@ fn classic_histograms_keep_metadata_identity_until_after_evaluation() {
             "overlapping metadata-distinct outputs must collide: {metadata}"
         );
     }
+}
+
+/// A window of native histograms is folded by reference: the sum copies the accumulator it starts
+/// from and nothing else, so four samples cost one deep copy rather than four. The fold itself is
+/// the one the owned samples go through, bit for bit.
+#[test]
+fn a_histogram_sum_copies_one_sample_of_a_window() {
+    let window: Vec<FloatHistogram> = [
+        "0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///",
+        "0/0/0/4000000000000000/4008000000000000/0/1_1/4000000000000000///",
+        "0/0/0/4008000000000000/4010000000000000/0/1_1/4008000000000000///",
+        "0/0/0/4010000000000000/4014000000000000/0/1_1/4010000000000000///",
+    ]
+    .iter()
+    .map(|text| FloatHistogram::try_from_view(&OwnedHistogram::parse(text).view()).unwrap())
+    .collect();
+
+    copies::take_clones();
+    let (sum, reconciled) = sum_or_avg(
+        HistogramAggregate::Sum,
+        window.iter().map(|h| Ok(Cow::Borrowed(h))),
+    )
+    .unwrap();
+    assert_eq!(
+        copies::take_clones(),
+        1,
+        "the sum copied every sample of the window, not only the accumulator it starts from"
+    );
+    assert!(!reconciled);
+
+    // The same window as owned samples, taken before the count: the accumulator arrives by value,
+    // so the fold copies nothing and must produce the result the borrowed fold produced.
+    let owned_samples: Vec<Cow<'_, FloatHistogram>> =
+        window.iter().cloned().map(Cow::Owned).collect();
+    copies::take_clones();
+    let (owned, _) =
+        sum_or_avg(HistogramAggregate::Sum, owned_samples.into_iter().map(Ok)).unwrap();
+    assert_eq!(copies::take_clones(), 0, "an owned sample was copied");
+
+    let sum = sum.expect("the window sums to a histogram");
+    assert_histogram_close(
+        &sum,
+        &owned.expect("the window sums to a histogram"),
+        0.0,
+        "the borrowed sum",
+    );
+}
+
+/// The mean reads the window by reference too, and takes the same samples by value as the owned
+/// fold does: the sum `kahan_add` keeps is copied either way, and the values agree bit for bit.
+#[test]
+fn a_histogram_mean_reads_its_window_by_reference() {
+    let window: Vec<FloatHistogram> = [
+        "0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///",
+        "0/0/0/4000000000000000/4008000000000000/0/1_1/4000000000000000///",
+        "0/0/0/4008000000000000/4010000000000000/0/1_1/4008000000000000///",
+    ]
+    .iter()
+    .map(|text| FloatHistogram::try_from_view(&OwnedHistogram::parse(text).view()).unwrap())
+    .collect();
+
+    let borrowed = sum_or_avg(
+        HistogramAggregate::Avg,
+        window.iter().map(|h| Ok(Cow::Borrowed(h))),
+    )
+    .unwrap();
+    let owned = sum_or_avg(
+        HistogramAggregate::Avg,
+        window.iter().cloned().map(|h| Ok(Cow::Owned(h))),
+    )
+    .unwrap();
+    assert_eq!(borrowed.1, owned.1);
+    assert_histogram_close(
+        &borrowed.0.expect("the window averages to a histogram"),
+        &owned.0.expect("the window averages to a histogram"),
+        0.0,
+        "the borrowed mean",
+    );
 }

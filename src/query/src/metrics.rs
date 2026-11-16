@@ -126,6 +126,35 @@ lazy_static! {
         &["result"]
     )
     .unwrap();
+
+    /// Statements the native PromQL route handed to the existing planner, by the cause it recorded.
+    ///
+    /// A declined statement is not an error and not a different answer: the existing planner
+    /// computes the same rows, so a fallback is only visible as a slower query. This counter and
+    /// the log line beside it are what make its rate observable per cause.
+    pub static ref NATIVE_PROMQL_DECLINED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_native_promql_declined_total",
+        "native PromQL expressions planned by the existing planner, by cause",
+        &["reason"]
+    )
+    .unwrap();
+
+    /// Statements whose metadata drop the native PromQL planner collected for its key columns, by
+    /// reason.
+    ///
+    /// The canonical pass collects the pieces of one label set before a consumer that reads whole
+    /// series, and it decides that from the labels a tree reports and the key columns its scan
+    /// reads. A primary-key column that holds `NULL` in one series and `''` in another decodes to an
+    /// absent and to an empty label, and a name-dropping kernel drops the empty one with the
+    /// metadata labels, so a drop over such a key is collected rather than trusted. This counter is
+    /// what makes the collections paid for that reason observable.
+    pub static ref DUPLICATE_LABELSET_CHECK_COLLECTED_TOTAL: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_query_duplicate_labelset_check_collected_total",
+            "native PromQL statements whose metadata drop was collected for its key columns, by reason",
+            &["reason"]
+        )
+        .unwrap();
 }
 
 /// A stream to call the callback once a RecordBatch stream is done.
