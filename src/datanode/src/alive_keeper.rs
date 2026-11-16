@@ -320,7 +320,6 @@ struct ResetLease {
     role: RegionRole,
     /// When the heartbeat was sent.
     sent_at: Instant,
-    /// The new countdown deadline.
     deadline: Instant,
     candidate_lease_id: Option<u64>,
     extensions: HashMap<String, Vec<u8>>,
