@@ -728,7 +728,7 @@ lazy_static! {
         "greptime_mito_tail_replay_elapsed",
         "mito tail replay elapsed",
         &[TYPE_LABEL],
-        // 1 ~ 625
+        // 1 ~ 3125
         exponential_buckets(1.0, 5.0, 6).unwrap(),
     )
     .unwrap();

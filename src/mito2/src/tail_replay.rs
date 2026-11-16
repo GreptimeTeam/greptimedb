@@ -87,7 +87,7 @@ pub(crate) struct TailReplayTask<S> {
     pub(crate) wal: Wal<S>,
     /// Writes the chunks, built by [TailReplayLimits::new_sst_writer].
     pub(crate) sst_writer: MemtableSstWriter,
-    /// Told of the task's steps.
+    /// Test listener told of failed rounds, lease and fence checks and commits.
     pub(crate) listener: WorkerListener,
     /// Sends the task's results and its end to the worker.
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
