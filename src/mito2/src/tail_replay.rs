@@ -73,7 +73,7 @@ pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
 /// take the later tail's sequence and outrank rows that a leader between the two tails flushed. A
 /// tail's chunks only bound memory: writes accepted during the replay already take sequences
 /// above every tail's. A chunk is written once it reaches 64 MiB, or once it grows above its floor
-/// and the node's [TailReplayMemory] pool cannot cover the growth. The edit adds the SSTs, clears
+/// and the node's replay memory pool cannot cover the growth. The edit adds the SSTs, clears
 /// the tails and advances the flushed entry id and sequence. Another node's listed tail is only a
 /// bound, so until the region receives a Leader lease after a catchup made it writable, the edit
 /// keeps its unread part, which a second edit clears once a lease arrives. A failed round is
@@ -554,9 +554,9 @@ pub(crate) struct TailReplayLimits {
 }
 
 impl TailReplayLimits {
-    /// Creates the limits of a node from `config`: [MAX_CONCURRENT_TAIL_REPLAYS] replays,
-    /// `max_background_flushes` SST writes and `global_write_buffer_size /`
-    /// [TAIL_REPLAY_MEMORY_FACTOR] bytes of chunk memory.
+    /// Creates the limits of a node from `config`: `MAX_CONCURRENT_TAIL_REPLAYS` replays,
+    /// `max_background_flushes` SST writes and
+    /// `global_write_buffer_size / TAIL_REPLAY_MEMORY_FACTOR` bytes of chunk memory.
     pub(crate) fn new(config: &MitoConfig) -> Self {
         Self {
             replay_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TAIL_REPLAYS)),
