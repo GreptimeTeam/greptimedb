@@ -11048,8 +11048,8 @@ async fn cte_native_statement_runs_the_fused_plan() {
         "a fused plan joins nothing, but these nodes ran: {joins:?}\n{}",
         cte_native_observed_plan_trees(&observer)
     );
-    // One logical table keeps both occurrences region-local: the node reads one scan per
-    // occurrence instead of one raw source per occurrence.
+    // Every selector reads through its own raw source, so the two occurrences of the repeated
+    // selector name two of them, and each source wraps the region scan it reads.
     let scans = observed_series_scans(&observer);
     assert_eq!(
         scans.len(),
@@ -11057,9 +11057,11 @@ async fn cte_native_statement_runs_the_fused_plan() {
         "one independent scan per occurrence of the repeated selector:\n{}",
         cte_native_observed_plan_trees(&observer)
     );
-    assert!(
-        observer.take_raw_sources().is_empty(),
-        "one logical table keeps both scans region-local instead of one raw source per input"
+    assert_eq!(
+        2,
+        observer.take_raw_sources().len(),
+        "each occurrence of the repeated selector reads its own raw source:\n{}",
+        cte_native_observed_plan_trees(&observer)
     );
     assert_eq!(
         native_schema,
