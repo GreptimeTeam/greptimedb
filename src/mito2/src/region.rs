@@ -599,7 +599,8 @@ impl MitoRegion {
         }
     }
 
-    /// Sets the region role state gracefully. This acquires the manifest write lock.
+    /// Sets the region role state gracefully. This acquires the manifest write lock, and releases
+    /// it while a change to follower or downgrading leader waits for the pending checkpoint.
     ///
     /// Ending staging awaits `drain_stalled_writes` (see [Self::end_staging]); other changes
     /// drop it.
@@ -748,11 +749,15 @@ impl MitoRegion {
             }
         };
 
-        // The state is changed before waiting, so no new writable-leader work
-        // can race with the barrier. Keep the manager lock while joining to
-        // serialize the barrier with checkpoint scheduling.
+        // The checkpoint task is taken under the lock after the state change, so every commit
+        // that could start a checkpoint has registered it: a follower takes no commit, and a
+        // commit of a downgrading leader starts no checkpoint. The wait holds no lock, so the
+        // worker and other users of the manifest are not blocked while the checkpoint finishes.
         if wait_for_checkpoint {
-            manager.wait_for_pending_checkpoint().await;
+            let checkpoint_done = manager.pending_checkpoint_completion();
+            drop(manager);
+            checkpoint_done.await;
+            manager = self.manifest_ctx.manifest_manager.write().await;
         }
 
         // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata.

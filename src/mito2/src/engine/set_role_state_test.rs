@@ -309,6 +309,10 @@ async fn test_downgrading_waits_for_checkpoint_and_stops_new_checkpoints() {
         !downgrade.is_finished(),
         "downgrade returned before checkpoint cleanup finished"
     );
+    assert!(
+        region.manifest_ctx.manifest_manager.try_read().is_ok(),
+        "downgrade held the manifest lock while waiting for the checkpoint"
+    );
 
     blocker.release();
     assert_success_response(&downgrade.await.unwrap().unwrap(), 2);
@@ -441,6 +445,10 @@ async fn test_direct_follower_waits_for_pending_checkpoint() {
         !set_follower.is_finished(),
         "follower transition returned before checkpoint cleanup finished"
     );
+    assert!(
+        region.manifest_ctx.manifest_manager.try_read().is_ok(),
+        "follower transition held the manifest lock while waiting for the checkpoint"
+    );
 
     blocker.release();
     assert_success_response(&set_follower.await.unwrap().unwrap(), 1);
@@ -514,9 +522,9 @@ async fn test_retried_downgrade_waits_after_first_request_is_cancelled() {
         "first downgrade did not wait for checkpoint cleanup"
     );
 
-    // Cancelling the first caller must not remove the checkpoint handle from
-    // the manifest manager. A retried migration request observes Downgrading
-    // and must wait for the same checkpoint task before it can proceed.
+    // Cancelling the first caller does not cancel the checkpoint. A retried
+    // migration request observes Downgrading and waits for the same checkpoint
+    // task before it proceeds.
     first_downgrade.abort();
     assert!(first_downgrade.await.unwrap_err().is_cancelled());
     assert_eq!(
@@ -545,6 +553,10 @@ async fn test_retried_downgrade_waits_after_first_request_is_cancelled() {
     assert!(
         !retry_downgrade.is_finished(),
         "retried downgrade did not wait for checkpoint cleanup"
+    );
+    assert!(
+        region.manifest_ctx.manifest_manager.try_read().is_ok(),
+        "retried downgrade held the manifest lock while waiting for the checkpoint"
     );
 
     blocker.release();
