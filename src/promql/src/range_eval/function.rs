@@ -831,30 +831,54 @@ mod tests {
             }
         }
 
-        // A synthetic zero at 2000ms with real samples at 3000ms and 5000ms, evaluated at 6500ms
-        // over a 6000ms range, gives the histogram route a sampled interval of 3000ms and the
-        // 2000ms average interval between the real samples. The start lies past 1.1 * 2000ms, so it
-        // falls back to half of it and the counter's zero point then takes it to 0; the end is
-        // 1500ms from the range end, inside that threshold, so it stays:
-        // (3000 + 0 + 1500) / 3000 = 1.5. A float sample carries no start timestamp, so the float
-        // route samples the same 2000ms it measures its average over and answers
-        // (2000 + 0 + 1500) / 2000 = 1.75. The two fills disagree, which is what makes reading one
-        // anchor for the other observable rather than a change of arguments with no effect: were
-        // the histogram route to collapse its sampled anchor onto the average one, it would answer
-        // the float route's 1.75 and these two pins fail.
+        // A synthetic zero at 2000ms with real samples at 2500ms and 4500ms, evaluated at 7000ms
+        // over a 6000ms range, gives the histogram route a sampled interval of 2500ms and the
+        // 2000ms average interval between the real samples. The end is 2500ms from the range end,
+        // past 1.1 * 2000ms, so it falls back to half the average interval; the start is 1500ms
+        // from the range start, inside that threshold, and the counter's zero point then takes it
+        // to 0: (2500 + 0 + 1000) / 2500 = 1.4. A float sample carries no start timestamp, so the
+        // float route samples the same 2000ms it measures its average over and answers
+        // (2000 + 0 + 1000) / 2000 = 1.5. The two fills disagree, which is what makes reading one
+        // anchor for the other observable rather than a change of arguments with no effect.
         let two_anchor = Window {
             sampled_from: 2_000,
-            average_from: 3_000,
-            last: 5_000,
+            average_from: 2_500,
+            last: 4_500,
             samples_minus_one: 1,
-            eval_ts: 6_500,
+            eval_ts: 7_000,
             range_ms: 6_000,
             is_counter: true,
             is_rate: false,
             zero_point: Some(0.0),
         };
-        assert_eq!(two_anchor.as_histogram().to_bits(), 1.5f64.to_bits());
-        assert_eq!(two_anchor.as_float().to_bits(), 1.75f64.to_bits());
+        assert_eq!(two_anchor.as_histogram().to_bits(), 1.4f64.to_bits());
+        assert_eq!(two_anchor.as_float().to_bits(), 1.5f64.to_bits());
+        // Both directions an anchor can be replaced in are pinned, so neither the divisor nor the
+        // end's fallback can absorb the swap. Reading the average anchor for the sampled one
+        // shortens the sampled interval to 2000ms and answers 1.5; reading the sampled anchor for
+        // the average one widens the average interval to 2500ms, which puts the end back inside the
+        // threshold so it stays at 2500ms, and answers 2.0. The zero point takes the start to 0
+        // whatever the average interval says, so the end has to fall past one threshold and inside
+        // the other for that: an end falling back under both average intervals, or under neither,
+        // answers the same either way and pins nothing.
+        assert_eq!(
+            Window {
+                sampled_from: two_anchor.average_from,
+                ..two_anchor
+            }
+            .as_histogram()
+            .to_bits(),
+            1.5f64.to_bits()
+        );
+        assert_eq!(
+            Window {
+                average_from: two_anchor.sampled_from,
+                ..two_anchor
+            }
+            .as_histogram()
+            .to_bits(),
+            2.0f64.to_bits()
+        );
     }
 
     /// A synthetic zero puts the sampled anchor before the average anchor, and no float window
