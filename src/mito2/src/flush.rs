@@ -21,7 +21,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
-use common_base::cancellation::CancellableFuture;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
@@ -240,6 +239,8 @@ pub enum FlushReason {
     RemoteWalPrune,
     /// Flush before closing a region.
     Closing,
+    /// Writes a chunk of pending WAL tails replayed in the background.
+    TailReplay,
 }
 
 impl FlushReason {
@@ -420,7 +421,10 @@ impl RegionFlushTask {
             }
             Err(e) => {
                 let err = Arc::new(e);
-                let failed = FlushFailed { err: err.clone() };
+                let failed = FlushFailed {
+                    err: err.clone(),
+                    senders: std::mem::take(&mut self.senders),
+                };
                 if failed.is_cancelled() {
                     info!("Flush cancelled for region {}", self.region_id);
                 } else {
@@ -430,7 +434,6 @@ impl RegionFlushTask {
                 timer.stop_and_discard();
                 uncommitted.cleanup().await;
 
-                self.on_failure(err.clone());
                 WorkerRequest::Background {
                     region_id: self.region_id,
                     notify: BackgroundNotify::FlushFailed(failed),
@@ -440,17 +443,14 @@ impl RegionFlushTask {
         self.send_worker_request(worker_request).await;
     }
 
-    /// Flushes memtables to level 0 SSTs and updates the manifest.
-    /// Returns the [RegionEdit] to apply.
-    async fn flush_memtables(
+    /// Writes the immutable memtables of `version` to level 0 SSTs, which `uncommitted`
+    /// tracks until a manifest edit references them, and returns their file metas.
+    pub(crate) async fn write_ssts(
         &self,
-        version_data: &VersionControlData,
+        version: &VersionRef,
         state: &CancellableTaskState,
         uncommitted: &UncommittedSsts,
-    ) -> Result<RegionEdit> {
-        // We must use the immutable memtables list and entry ids from the `version_data`
-        // for consistency as others might already modify the version in the `version_control`.
-        let version = &version_data.version;
+    ) -> Result<Vec<FileMeta>> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["flush_memtables"])
             .start_timer();
@@ -515,15 +515,32 @@ impl RegionFlushTask {
                 .await;
         }
 
+        Ok(file_metas)
+    }
+
+    /// Flushes memtables to level 0 SSTs and updates the manifest.
+    /// Returns the [RegionEdit] to apply.
+    async fn flush_memtables(
+        &self,
+        version_data: &VersionControlData,
+        state: &CancellableTaskState,
+        uncommitted: &UncommittedSsts,
+    ) -> Result<RegionEdit> {
+        // We must use the immutable memtables list and entry ids from the `version_data`
+        // for consistency as others might already modify the version in the `version_control`.
+        let file_metas = self
+            .write_ssts(&version_data.version, state, uncommitted)
+            .await?;
+
         // The manifest may name only a durable entry as flushed. A log store
         // that acknowledges appends before their entries are durable can have
         // handed out `last_entry_id` for an entry that is still in its backlog.
         // A DDL that cancels the flush must not wait behind that upload.
-        let durable = self.durability_barrier.wait(version_data.last_entry_id);
-        tokio::pin!(durable);
-        match CancellableFuture::new(durable.as_mut(), state.cancel_handle()).await {
-            Ok(result) => result?,
-            Err(_) => return FlushCancelledSnafu.fail(),
+        let cancellation = state.cancel_token();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return FlushCancelledSnafu.fail(),
+            result = self.durability_barrier.wait(version_data.last_entry_id) => result?,
         }
 
         let edit = RegionEdit {
@@ -785,12 +802,17 @@ impl RegionFlushTask {
             .collect::<Vec<_>>();
         let join_all = futures::future::join_all(tasks);
         tokio::pin!(join_all);
-        let results = match CancellableFuture::new(join_all.as_mut(), state.cancel_handle()).await {
-            Ok(results) => results
+        let cancellation = state.cancel_token();
+        let results = match tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            results = join_all.as_mut() => Some(results),
+        } {
+            Some(results) => results
                 .into_iter()
                 .map(|result| result.context(JoinSnafu))
                 .collect::<Result<Vec<_>>>()?,
-            Err(_) => {
+            None => {
                 for handle in abort_handles {
                     handle.abort();
                 }
@@ -833,7 +855,7 @@ impl RegionFlushTask {
             num_rows: sst_info.num_rows as u64,
             num_row_groups: sst_info.num_row_groups,
             sequence: NonZeroU64::new(max_sequence),
-            partition_expr,
+            partition_expr: partition_expr.map(Into::into),
             num_series: sst_info.num_series,
             primary_key_min,
             primary_key_max,
@@ -888,17 +910,25 @@ impl RegionFlushTask {
                 "Failed to notify flush job status for region {}, request: {:?}",
                 self.region_id, request
             );
-            if let WorkerRequest::Background {
-                notify: BackgroundNotify::FlushFinished(mut finished),
-                ..
-            } = request
-            {
-                finished.on_failure(
-                    RegionClosedSnafu {
-                        region_id: self.region_id,
+            if let WorkerRequest::Background { notify, .. } = request {
+                let err = RegionClosedSnafu {
+                    region_id: self.region_id,
+                }
+                .build();
+                match notify {
+                    BackgroundNotify::FlushFinished(mut finished) => {
+                        finished.on_failure(err);
                     }
-                    .build(),
-                );
+                    BackgroundNotify::FlushFailed(failed) => {
+                        let err = Arc::new(err);
+                        for sender in failed.senders {
+                            sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                                region_id: self.region_id,
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1290,13 +1320,13 @@ impl FlushScheduler {
             return Ok(());
         }
 
-        let closing = task.reason == FlushReason::Closing;
+        let reason = task.reason;
         let state = self.schedule_flush_task(version_control, task)?;
 
         // Add this region to status map.
         let _ = self.region_status.insert(
             region_id,
-            FlushStatus::new(region_id, version_control.clone(), state, closing),
+            FlushStatus::new(region_id, version_control.clone(), state, reason),
         );
 
         Ok(())
@@ -1488,13 +1518,13 @@ impl FlushScheduler {
         status.pending_bulk_writes.push(request);
     }
 
-    /// Whether an ALTER owns a turn while waiting for its memtables to flush.
-    pub(crate) fn has_pending_alter(&self, region_id: RegionId) -> bool {
+    /// Whether staging is waiting for its memtables to flush.
+    pub(crate) fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
         self.region_status.get(&region_id).is_some_and(|status| {
             status
                 .pending_ddls
                 .iter()
-                .any(|ddl| matches!(ddl.request, DdlRequest::Alter(_)))
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
         })
     }
 
@@ -1550,14 +1580,14 @@ impl FlushStatus {
         region_id: RegionId,
         version_control: VersionControlRef,
         state: CancellableTaskState,
-        closing: bool,
+        reason: FlushReason,
     ) -> FlushStatus {
         FlushStatus {
             region_id,
             version_control,
             state,
             pending_task: None,
-            closing,
+            closing: reason == FlushReason::Closing,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
             pending_bulk_writes: Vec::new(),
@@ -1954,6 +1984,82 @@ mod tests {
 
         let output = output_rx.await.expect("waiter must receive explicit error");
         assert!(output.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flush_failure_defers_waiter_notification_to_worker() {
+        let env = SchedulerEnv::new().await;
+        let (tx, mut rx) = mpsc::channel(1);
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = builder.build();
+        let version_data = version_control.current();
+        let manifest_ctx = env
+            .mock_manifest_context(version_data.version.metadata.clone())
+            .await;
+        let mut task = new_test_flush_task(&env, region_id, FlushReason::Closing, tx, manifest_ctx);
+        let (output_tx, mut output_rx) = oneshot::channel();
+        task.push_sender(OptionOutputTx::from(output_tx));
+        let state = CancellableTaskState::new();
+        state.request_cancel();
+
+        // Cancellation exercises the job's failure path without depending on I/O or scheduling.
+        task.do_flush(version_data, state).await;
+        let request = rx.try_recv().unwrap().request;
+        assert!(matches!(
+            output_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let WorkerRequest::Background {
+            region_id: failed_region_id,
+            notify: BackgroundNotify::FlushFailed(failed),
+        } = request
+        else {
+            panic!("expected a flush failure notification");
+        };
+        assert_eq!(failed_region_id, region_id);
+        assert_eq!(failed.senders.len(), 1);
+        assert!(failed.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_send_worker_request_failure_notifies_flush_failed_waiter() {
+        let env = SchedulerEnv::new().await;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Manual,
+            tx,
+            manifest_ctx,
+        );
+        let (output_tx, output_rx) = oneshot::channel();
+        let request = WorkerRequest::Background {
+            region_id: builder.region_id(),
+            notify: BackgroundNotify::FlushFailed(FlushFailed {
+                err: Arc::new(
+                    RegionBusySnafu {
+                        region_id: builder.region_id(),
+                    }
+                    .build(),
+                ),
+                senders: vec![OutputTx::new(output_tx)],
+            }),
+        };
+
+        task.send_worker_request(request).await;
+
+        let err = output_rx
+            .await
+            .expect("waiter must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Cancelled);
     }
 
     #[tokio::test]

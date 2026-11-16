@@ -51,8 +51,8 @@ use crate::error::{
     CompactionCancelledSnafu, Error, ManualCompactionAlreadyRunningSnafu, RegionClosedSnafu,
     RegionDroppedSnafu, RegionTruncatedSnafu, Result, UnsupportedOperationSnafu,
 };
+use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
 use crate::schedule::RequestCancelResult;
 use crate::worker::WorkerListener;
@@ -516,6 +516,23 @@ impl CompactionScheduler {
         status.pending_ddl_requests.push(request);
         Ok(())
     }
+
+    /// Pending and handed-off DDLs retain their turn until the final reply.
+    pub(crate) fn blocks_region_edits(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(|status| status.has_ddl())
+    }
+
+    /// Whether a staging request is still waiting for compaction cancellation.
+    pub(crate) fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
+        self.region_status.get(&region_id).is_some_and(|status| {
+            status
+                .pending_ddl_requests
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
+        })
+    }
 }
 
 // Internal state-machine helpers.
@@ -569,7 +586,7 @@ impl CompactionScheduler {
             return Ok(false);
         }
         let current_state = manifest_ctx.current_state();
-        if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
+        if current_state.in_staging_session() {
             info!(
                 "Skipping compaction for region {} in staging mode, options: {:?}",
                 region_id, compact_options

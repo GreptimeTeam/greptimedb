@@ -436,6 +436,10 @@ pub(crate) fn build_file_appender(
         builder = builder.latest_symlink(kind.current_link_name());
     }
 
+    // FIXME(tokio-rs/tracing#3612): tracing-appender lists the directory to prune old logs
+    // before creating it, so a missing directory prints a misleading error. If this fails,
+    // `build` reports it.
+    let _ = fs::create_dir_all(&opts.dir);
     let appender = builder.build(&opts.dir).unwrap_or_else(|error| {
         panic!(
             "initializing rolling file appender at {} failed: {}",

@@ -212,6 +212,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Engine is stopped"))]
+    EngineStopped {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to recv result"))]
     Recv {
         #[snafu(source)]
@@ -510,6 +516,15 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to read the WAL of node {} for region {}", node_id, region_id))]
+    ReadNodeWal {
+        region_id: RegionId,
+        node_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to decode WAL entry, region_id: {}", region_id))]
     DecodeWal {
         region_id: RegionId,
@@ -737,6 +752,32 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Region {} cannot read pending WAL tails of node {}",
+        region_id,
+        node_id
+    ))]
+    RemoteWalUnsupported {
+        region_id: RegionId,
+        node_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} cannot read entry {} of the WAL of node {}, where its pending tail ends",
+        region_id,
+        entry_id,
+        node_id
+    ))]
+    TailEntryMissing {
+        region_id: RegionId,
+        node_id: u64,
+        entry_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
     RegionLeaseExpired {
         region_id: RegionId,
@@ -766,6 +807,24 @@ pub enum Error {
     EditRegion {
         region_id: RegionId,
         source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to end staging of region {}, which is still staging",
+        region_id
+    ))]
+    EndStaging {
+        region_id: RegionId,
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} waits for a retry of its end-of-staging commit", region_id))]
+    EndStagingPending {
+        region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1339,6 +1398,9 @@ pub enum Error {
     #[snafu(display("Compaction is cancelled."))]
     CompactionCancelled {},
 
+    #[snafu(display("SST write is cancelled."))]
+    SstWriteCancelled {},
+
     #[snafu(display("Flush is cancelled."))]
     FlushCancelled {},
 
@@ -1558,6 +1620,7 @@ impl Error {
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
             | Error::RegionLeaseExpired { .. }
+            | Error::EndStagingPending { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
             Error::OpenDal { error, .. } => !matches!(
@@ -1597,6 +1660,7 @@ impl ErrorExt for Error {
             | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. }
             | ReadWal { source, .. }
+            | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | CheckWalHistory { source, .. } => source.status_code(),
@@ -1651,6 +1715,7 @@ impl ErrorExt for Error {
             | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
+            | EngineStopped { .. }
             | Recv { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
@@ -1696,12 +1761,14 @@ impl ErrorExt for Error {
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } | RejectWriteInStaging { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
-            EditRegion { source, .. } => source.status_code(),
+            EditRegion { source, .. } | EndStaging { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
             RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
             RegionPendingTails { .. } => StatusCode::RegionNotReady,
+            RemoteWalUnsupported { .. } => StatusCode::Unsupported,
+            TailEntryMissing { .. } => StatusCode::StorageUnavailable,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1744,7 +1811,7 @@ impl ErrorExt for Error {
             | StatsNotPresent { .. }
             | InvalidPrimaryKeyRange { .. }
             | DecodePrimaryKeyRange { .. } => StatusCode::Internal,
-            RegionBusy { .. } => StatusCode::RegionBusy,
+            RegionBusy { .. } | EndStagingPending { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
 
@@ -1754,9 +1821,10 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
-                StatusCode::Cancelled
-            }
+            ManualCompactionOverride {}
+            | CompactionCancelled {}
+            | FlushCancelled {}
+            | SstWriteCancelled {} => StatusCode::Cancelled,
 
             // A concurrent manual compaction fails fast instead of being queued;
             // the conflict is reported to the caller, which decides whether to
@@ -1815,6 +1883,8 @@ impl ErrorExt for Error {
             | RegionStopped { .. }
             | RegionBusy { .. }
             | RegionPendingTails { .. }
+            | EndStaging { .. }
+            | EndStagingPending { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
             | ManifestDeltaNotFound { .. }
@@ -1828,6 +1898,7 @@ impl ErrorExt for Error {
 
             WriteWal { source, .. }
             | ReadWal { source, .. }
+            | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | CheckWalHistory { source, .. }
@@ -2039,6 +2110,14 @@ mod tests {
         }
         .build();
         assert!(!error.may_have_persisted_manifest_update());
+        // Staging that waits for a retried end commit refuses before storage I/O.
+        let error = EndStagingPendingSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert!(error.retry_hint().is_retryable());
+        assert_eq!(error.status_code(), StatusCode::RegionBusy);
+        // Other busy errors keep the conservative classification.
+        let error = RegionBusySnafu { region_id }.build();
+        assert!(error.may_have_persisted_manifest_update());
 
         // A commit refused before its PUT because the Leader deadline has passed.
         let error = RegionLeaseExpiredSnafu { region_id }.build();

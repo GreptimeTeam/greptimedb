@@ -42,6 +42,7 @@ use crate::error::{InvalidNativeHistogramFieldIdSnafu, InvalidNativeHistogramSub
 use crate::sst::parquet::flat_format::time_index_column_index;
 
 pub mod file;
+pub mod file_metadata;
 pub mod file_purger;
 pub mod file_ref;
 pub mod index;
@@ -49,6 +50,7 @@ pub mod location;
 pub mod parquet;
 pub(crate) mod primary_key;
 pub mod range_index;
+pub(crate) mod upload;
 pub(crate) mod version;
 
 /// Default write buffer size, it should be greater than the default minimum upload part of S3 (5mb).

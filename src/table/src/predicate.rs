@@ -121,12 +121,27 @@ impl Predicate {
 
     /// Returns the dynamic filter physical exprs. Notice this return a live dynamic filters which
     /// can change during query execution.
+    ///
+    /// # Precondition: pruning only, never row filtering
+    ///
+    /// A consumer may only use these expressions to *prune*: to skip a region, a file or a
+    /// row group whose statistics prove that no row can match, as
+    /// [`Self::prune_with_stats`] does. A remote dynamic filter is a bounded pruning hint,
+    /// not a copy of the producer's predicate — the coordinator ships the join's build-key
+    /// list as `IN`/`NOT IN` and drops the top-level conjuncts it cannot ship, so the
+    /// predicate can be *wider* than the one the producer evaluates (see
+    /// `DynFilterPayload::decode_datafusion_expr` in `common-query`). Over-approximating is
+    /// free for pruning but loses rows for filtering, so row filtering must not consume
+    /// these expressions unconditionally.
     pub fn dyn_filters(&self) -> Arc<Vec<Arc<DynamicFilterPhysicalExpr>>> {
         self.dyn_filters.load_full()
     }
 
     /// Returns the dynamic filter as physical exprs. Notice this return a "snapshot" of
     /// dynamic filters at the time of calling this method.
+    ///
+    /// Pruning only: see [`Self::dyn_filters`] for why these expressions must not filter
+    /// rows.
     pub fn dyn_filter_phy_exprs(&self) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
         self.dyn_filters
             .load()

@@ -57,7 +57,7 @@ mod merge_mode_test;
 #[cfg(test)]
 mod object_store_wal_recovery_test;
 #[cfg(test)]
-mod object_store_wal_test;
+pub(crate) mod object_store_wal_test;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
@@ -90,6 +90,8 @@ mod sync_test;
 #[cfg(feature = "enterprise")]
 pub mod table_compaction;
 #[cfg(test)]
+mod tail_replay_test;
+#[cfg(test)]
 mod truncate_test;
 
 #[cfg(test)]
@@ -105,7 +107,7 @@ mod puffin_index;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use api::region::RegionResponse;
@@ -156,9 +158,9 @@ use crate::compaction::CompactionState;
 use crate::config::{MitoConfig, ScanMemoryMode};
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
-    IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
-    RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu, SerdeJsonSnafu,
-    SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
+    EngineStoppedSnafu, IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu,
+    MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -171,9 +173,9 @@ use crate::metrics::{
 };
 use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
 use crate::read::stream::ScanBatchStream;
-use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::options::parse_wal_options;
+use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
@@ -274,7 +276,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let inner = EngineInner {
             workers,
             config,
-            wal_raw_entry_reader,
+            wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
             scan_memory_tracker,
             region_hook,
             #[cfg(feature = "enterprise")]
@@ -855,8 +857,9 @@ struct EngineInner {
     workers: WorkerGroup,
     /// Config of the engine.
     config: Arc<MitoConfig>,
-    /// The Wal raw entry reader.
-    wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    /// The Wal raw entry reader. `None` once the engine is stopped, so that it no longer holds
+    /// the log store and the owner of the log store can close it.
+    wal_raw_entry_reader: RwLock<Option<Arc<dyn RawEntryReader>>>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
     /// The region hook (if any) registered via plugins; exposed for the GC worker
@@ -909,7 +912,19 @@ impl EngineInner {
 
     /// Stop the inner engine.
     async fn stop(&self) -> Result<()> {
-        self.workers.stop().await
+        self.workers.stop().await?;
+        // Release the log store once the workers no longer use it.
+        let _ = self.wal_raw_entry_reader.write().unwrap().take();
+        Ok(())
+    }
+
+    /// Returns the Wal raw entry reader, or an error once the engine is stopped.
+    fn wal_raw_entry_reader(&self) -> Result<Arc<dyn RawEntryReader>> {
+        self.wal_raw_entry_reader
+            .read()
+            .unwrap()
+            .clone()
+            .context(EngineStoppedSnafu)
     }
 
     fn find_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
@@ -940,7 +955,7 @@ impl EngineInner {
         let provider = Provider::kafka_provider(topic);
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
-            self.wal_raw_entry_reader.clone(),
+            self.wal_raw_entry_reader()?,
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
@@ -1036,7 +1051,7 @@ impl EngineInner {
             .collect::<Vec<_>>();
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
-            self.wal_raw_entry_reader.clone(),
+            self.wal_raw_entry_reader()?,
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
@@ -1311,8 +1326,23 @@ impl EngineInner {
     /// does not check whether the region waits for a reload.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
+        let was_leader = region.region_role() == RegionRole::Leader;
+        let was_writable = region.is_writable();
         region.set_role(role);
+        if role == RegionRole::Leader && !was_leader {
+            // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
+            region.manifest_ctx.record_leader_lease(Instant::now());
+        }
+        self.notify_if_became_writable(&region, was_writable);
         Ok(())
+    }
+
+    /// Asks the worker to replay the pending tails of `region` if a role change made it
+    /// writable. The worker may already have started an ALTER or an edit of the region.
+    fn notify_if_became_writable(&self, region: &MitoRegion, was_writable: bool) {
+        if !was_writable && region.can_replay_tails() {
+            self.workers.notify_writable(region);
+        }
     }
 
     /// Sets read-only for a region and ensures no more writes in the region after it returns.
@@ -1660,9 +1690,12 @@ impl RegionEngine for MitoEngine {
             region.manifest_ctx.leader_deadline.extend(deadline);
         }
         if role == RegionRole::Leader {
-            return Ok(region
+            let was_writable = region.is_writable();
+            let promoted = region
                 .manifest_ctx
-                .promote_unless_downgrade_started_after(sent_at, region_id));
+                .promote_unless_downgrade_started_after(sent_at, region_id);
+            self.inner.notify_if_became_writable(&region, was_writable);
+            return Ok(promoted);
         }
         region.set_role(role);
         Ok(true)
@@ -1821,7 +1854,7 @@ impl MitoEngine {
                 )
                 .await?,
                 config,
-                wal_raw_entry_reader,
+                wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
                 scan_memory_tracker,
                 region_hook: None,
                 #[cfg(feature = "enterprise")]

@@ -51,7 +51,7 @@ use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
-use crate::sst::parquet::writer::ParquetWriter;
+use crate::sst::parquet::writer::{ParquetWriter, SstWriteContext};
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_CONCURRENCY, FormatType};
 
@@ -376,18 +376,13 @@ impl AccessLayer {
             .await
     }
 
-    /// Writes an SST whose output is registered with `context.guard`.
-    ///
-    /// The write cache is bypassed, upload concurrency is fixed to one, and
-    /// the guard runs before either the SST or its index becomes visible.
-    /// `context.limits` bounds the encoder and footer workspace.
-    #[cfg(feature = "enterprise")]
-    pub(crate) async fn write_sst_with_guard(
+    /// Writes SSTs with explicit ownership and cooperative cancellation.
+    pub(crate) async fn write_sst_with_context(
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
-        context: crate::sst::parquet::writer::SstWriteContext,
+        context: SstWriteContext,
     ) -> Result<SstInfoArray> {
         self.write_sst_inner(request, write_opts, metrics, Some(context))
             .await
@@ -398,10 +393,12 @@ impl AccessLayer {
         request: SstWriteRequest,
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
-        context: Option<crate::sst::parquet::writer::SstWriteContext>,
+        context: Option<SstWriteContext>,
     ) -> Result<SstInfoArray> {
-        let limits = context.as_ref().map(|context| context.limits);
-        let guard = context.map(|context| context.guard);
+        let context = context.unwrap_or_default();
+        let limits = context.limits;
+        let guard = context.guard.clone();
+        let cancellation = context.cancellation.clone();
         let op_type = request.op_type;
         let region_id = request.metadata.region_id;
         let region_metadata = request.metadata.clone();
@@ -413,11 +410,11 @@ impl AccessLayer {
         };
 
         let sst_info = if let Some(write_cache) = cache_manager.write_cache()
-            && guard.is_none()
+            && limits.is_none()
         {
             // Write to the write cache.
             write_cache
-                .write_and_upload_sst(
+                .write_and_upload_sst_with_context(
                     request,
                     SstUploadRequest {
                         dest_path_provider: RegionFilePathFactory::new(
@@ -428,10 +425,12 @@ impl AccessLayer {
                     },
                     write_opts,
                     metrics,
+                    context,
                 )
                 .await?
         } else {
-            // Write cache is disabled, or bypassed by an SST write guard.
+            // The write cache does not enforce SstWriteLimits, so bounded writes
+            // bypass it.
             let store = self.object_store.clone();
             let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
             let puffin_factory = if limits.is_some() {
@@ -469,12 +468,13 @@ impl AccessLayer {
             )
             .await
             .with_file_cleaner(cleaner)
-            .with_write_concurrency(if guard.is_some() {
+            .with_write_concurrency(if limits.is_some() {
                 1
             } else {
                 crate::sst::DEFAULT_WRITE_CONCURRENCY
             })
             .with_write_guard(guard)
+            .with_cancellation(cancellation)
             .with_memory_limits(limits);
             match request.sst_write_format {
                 FormatType::PrimaryKey => {
@@ -1102,6 +1102,104 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(0, warm.num_reads);
         assert_eq!(1, warm.mem_cache_hit);
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn test_cancelled_write_cleans_rolled_ssts(
+        #[values(false, true)] enable_write_cache: bool,
+        #[values(FormatType::Flat, FormatType::PrimaryKey)] format: FormatType,
+    ) {
+        use crate::read::FlatSource;
+        use crate::sst::file::UncommittedSsts;
+        use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
+        use tokio_util::sync::CancellationToken;
+
+        let mut env = TestEnv::new().await;
+        let store = env.init_object_store_manager();
+        let local_dir = create_temp_dir("cancelled-sst-cache");
+        let local_store = new_fs_store(local_dir.path().to_str().unwrap());
+        let write_cache = if enable_write_cache {
+            Some(
+                env.create_write_cache(local_store.clone(), ReadableSize::mb(10))
+                    .await,
+            )
+        } else {
+            None
+        };
+        let cache = Arc::new(CacheManager::builder().write_cache(write_cache).build());
+        let layer = Arc::new(AccessLayer::new(
+            "cancelled",
+            PathType::Bare,
+            store.clone(),
+            env.get_puffin_manager(),
+            env.get_intermediate_manager(),
+        ));
+        let metadata = Arc::new(sst_region_metadata());
+        let uncommitted =
+            UncommittedSsts::new(metadata.region_id, layer.clone(), Some(cache.clone()));
+        let cancellation = CancellationToken::new();
+        let signal = cancellation.clone();
+        let tracked = uncommitted.clone();
+        let schema = new_record_batch_by_range(&["a", "b"], 0, 8).schema();
+        let source = FlatSource::new_stream(
+            schema,
+            Box::pin(async_stream::try_stream! {
+                for i in 0..64 {
+                    if tracked.num_tracked_files() >= 3 {
+                        signal.cancel();
+                    }
+                    let tag = format!("{i:04}");
+                    yield new_record_batch_by_range(&[&tag, "b"], 0, 4096);
+                }
+            }),
+        );
+        let result = layer
+            .write_sst_with_context(
+                SstWriteRequest {
+                    index_build_inputs: None,
+                    op_type: OperationType::Compact,
+                    metadata,
+                    source,
+                    cache_manager: cache,
+                    max_sequence: None,
+                    sst_write_format: format,
+                    preserve_row_sequence: false,
+                    index_options: Default::default(),
+                    index_config: Default::default(),
+                    inverted_index_config: Default::default(),
+                    fulltext_index_config: Default::default(),
+                    bloom_filter_index_config: Default::default(),
+                },
+                &WriteOptions {
+                    max_file_size: Some(1),
+                    row_group_size: 8,
+                    ..Default::default()
+                },
+                &mut Metrics::new(WriteType::Compaction),
+                SstWriteContext {
+                    guard: Some(Arc::new(uncommitted.clone())),
+                    cancellation: Some(cancellation),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::SstWriteCancelled { .. })
+        ));
+        assert!(
+            uncommitted.num_tracked_files() >= 2,
+            "must cover files finalized before cancellation"
+        );
+        uncommitted.cleanup_for_test().await.unwrap();
+        for object_store in [&store, &local_store] {
+            let entries = object_store.list_with("/").recursive(true).await.unwrap();
+            assert!(
+                entries.iter().all(|entry| entry.metadata().is_dir()),
+                "uncommitted files remain: {entries:?}"
+            );
+        }
     }
 
     #[tokio::test]

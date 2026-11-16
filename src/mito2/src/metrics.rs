@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod file_metadata;
 pub(crate) mod manifest_size;
 
 use std::time::Duration;
@@ -67,6 +68,12 @@ lazy_static! {
             exponential_buckets(0.01, 10.0, 7).unwrap(),
         )
         .unwrap();
+
+    /// Close-time WAL releases that the log store failed to admit.
+    pub static ref WAL_RELEASE_ADMISSION_FAILURE_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_wal_release_admission_failure_total",
+        "Close-time WAL release admission failures"
+    ).unwrap();
 
     // ------ Flush related metrics
     /// Counter of scheduled flush requests.
