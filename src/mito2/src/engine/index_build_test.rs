@@ -2771,8 +2771,10 @@ async fn test_async_flush_without_sketch_provider_builds_builtin_indexes() {
     let mut env = TestEnv::new().await;
     let plugins = Plugins::new();
     plugins.insert::<IndexKindProviderRef>(Arc::new(RebuildSketchProvider::default()));
+    let mut setup_config = async_build_mode_config(false);
+    setup_config.index.build_mode = IndexBuildMode::Sync;
     let engine = env
-        .create_engine_with_plugins(async_build_mode_config(false), plugins)
+        .create_engine_with_plugins(setup_config, plugins)
         .await;
     let region_id = RegionId::new(1, 1);
     let mut request = CreateRequestBuilder::new().build_with_index();
