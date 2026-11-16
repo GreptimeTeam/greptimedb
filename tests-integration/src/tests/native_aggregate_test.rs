@@ -16,30 +16,33 @@
 //! the real datanode in a single process.
 //!
 //! The table is ordinary - one region, no `PARTITION` clause - and its five series sit in four SST
-//! files and one memtable range. With the scan asked for four partitions, each of them ends up with
-//! at least one series; the per-partition metric assertion below checks that instead of assuming it.
+//! files and one memtable range. The region's scan still splits them into the four partitions the
+//! request asks for, but that split stays in the region: above the boundary the raw frames are
+//! routed by stored key over the four owners the execution asks for, so the metric assertion below
+//! checks that every owner runs the fold and the fixture's totals check what they fold together.
 //! Every query runs twice: once with the native route asked for per request, once on the plan the
 //! existing planner builds. Both are compared with expectations worked out from the fixture, so
 //! neither run is the other's oracle.
 //!
-//! The native run plans two trees, and both are checked in the plans the engines really executed.
-//! The region's tree must hold one fused producer reading the raw series scan directly - the scan
-//! itself, or the one transparent cooperative-scheduling wrapper the engine may put above it, but
-//! never an exchange - and `native.root.output_values` for every one of the four scan partitions;
-//! the metric is read after the result stream was drained, the only point at which it is complete.
-//! The frontend tree holds a Final `FusedSeriesExec` over a `SeriesRepartitionExec` and its
-//! `MergeScanExec` leaf. The Partial producer and its raw `SeriesScanExec` input are in the
-//! separately captured region physical plan, not in that frontend tree. Both trees are checked
-//! independently through [`PhysicalPlanWrapper`], which both query engines install, so what is
-//! checked is the plan that ran rather than a re-plan made for an `EXPLAIN`.
+//! The native run plans a split aggregate above the region boundary, and that tree is checked in the
+//! plan the engine really executed. Both halves of the split live there: the Partial
+//! `FusedSeriesExec` reads the regions' raw frames through a `SeriesRepartitionExec` that routes
+//! whole series by their stored key out to the four partitions the execution was asked for, and the
+//! Final `FusedSeriesExec` above it reads that state through a second `SeriesRepartitionExec` that
+//! gathers each group's contributions where they are folded. `native.root.output_values` is reported
+//! by the Partial producer for every one of the four owners; the metric is read after the result
+//! stream was drained, the only point at which it is complete. A per-series segment the analyzer
+//! accepts instead runs beside the region's scan, where its input is that scan itself. Each chain is
+//! checked through [`PhysicalPlanWrapper`], which both query engines install, so what is checked is
+//! the plan that ran rather than a re-plan made for an `EXPLAIN`.
 //!
 //! Two tables carry the queries. [`COUNTER_TABLE`] holds the same five series in the same four
 //! persisted files and one memtable range as [`GAUGE_TABLE`], but its samples are a counter's, so
 //! `rate` over it is a nonzero number that is derived by hand in [`COUNTER_SERIES`]: the gauge's
 //! constant value has a rate of exactly zero and cannot tell a computed rate from a dropped one. The
-//! counter queries are the acceptance ones for the state bridge - four nonempty partitions fold
-//! partial states that only a merge over *all* of them turns into `sum`, `avg`, `count` and
-//! `stddev` - while the gauge queries keep covering the shapes with round answers.
+//! counter queries are the acceptance ones for the state bridge - every owner folds a partial state
+//! and only a merge over *all* of them turns them into `sum`, `avg`, `count` and `stddev` - while
+//! the gauge queries keep covering the shapes with round answers.
 //!
 //! The counter table carries one tag the gauge table does not, `region`: the four flushed series -
 //! the four files - are in one region and the series left in the memtable range is in another, so
@@ -242,9 +245,10 @@ impl PhysicalPlanWrapper for NativePlanObserver {
     }
 }
 
-/// The native nodes one query's captured plans hold: region-side Partial producers and frontend
-/// Final merges. The two are observed in different trees, so the lists are never matched by `Arc`; the
-/// region producer's typed state-frame schema and the frontend routing chain are checked separately.
+/// The native nodes one query's captured plans hold: Partial producers and Final merges. Both halves
+/// of a split aggregate are planned in the frontend tree above the region boundary, so a Final reads
+/// the Partial producer itself through its own state router; [`assert_finalize_routes_partial_state`]
+/// matches the two by identity, and the producer's typed state-frame schema is checked separately.
 #[derive(Default)]
 struct NativeCapture {
     fused: Vec<Arc<dyn ExecutionPlan>>,
@@ -410,12 +414,14 @@ impl QueryResult {
 struct AggregateCase {
     promql: String,
     expected: Vec<ResultRow>,
-    /// Whether every one of the four scan partitions must report a folded value.
+    /// Whether the fold must be spread over more than one of the four owners the raw-frame router
+    /// assigns. Which owner a series lands on is that router's decision, so this is not a claim that
+    /// every owner folds something - the fixture's five series need not fill four of them.
     per_partition: bool,
-    /// The number of values the partitions' producers must report together, when the answer fixes
-    /// that figure: one value per series that folded, which is what the counter fixture's queries
-    /// make checkable. With `per_partition` those are all four partitions' values and their spread
-    /// is bounded too. `None` leaves only "some value" to the assertion.
+    /// The number of values the owners' producers must report together, when the answer fixes that
+    /// figure: one value per series that folded, which is what the counter fixture's queries make
+    /// checkable. With `per_partition` the fold must also not collapse onto one owner. `None` leaves
+    /// only "some value" to the assertion.
     root_values: Option<usize>,
     /// The stage marker the producer must show (`sum by [hostname] partial`), when the fixture
     /// fixes which aggregate the split cut out. The producer then exports that aggregate's *state*,
@@ -452,13 +458,13 @@ fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool
     }
 }
 
-/// A case over [`COUNTER_TABLE`], which additionally pins the values the four partitions fold and
-/// the state the producer exports.
+/// A case over [`COUNTER_TABLE`], which additionally pins the total the producers fold and the
+/// state the producer exports.
 ///
 /// Every counter series is one series the scan keeps whole, and each of them decides exactly one
-/// `rate` at the single grid point [`tql_eval`] evaluates, so the four partitions' producers together
-/// report exactly as many values as there are counter series - and, because each partition folds at
-/// least one of them, no partition can fold more than `series - (partitions - 1)`.
+/// `rate` at the single grid point [`tql_eval`] evaluates, so the owners' producers together report
+/// exactly as many values as there are counter series. Which owner folds which series is the
+/// raw-frame router's decision, so only the total is pinned.
 ///
 /// `partial_state` is the aggregate the split cut out, as the producer's plan line names it: the
 /// innermost aggregate of the tree, whose state the partitions export.
@@ -1380,15 +1386,27 @@ fn final_input_samples_per_partition(capture: &NativeCapture, context: &str) -> 
     per_partition
 }
 
-/// Asserts the fused producer reads the raw series scan itself, with no exchange between them.
+/// Asserts the fused producer reads its raw source at the scan width, wherever it was placed.
 ///
-/// One node may sit in between: the cooperative-scheduling decorator clones its input's properties,
-/// changes only the scheduling type, and forwards `execute` unchanged, so it neither re-partitions
-/// nor re-orders the frames. It is accepted only as a single typed wrapper above the scan, never as
-/// a wildcard. An exchange above the scan would re-partition the frames, and the producer's
-/// per-partition fold would then no longer be one series at a time - so the plan would be wrong even
-/// if a result appeared.
-fn assert_fused_reads_scan_directly(fused: &Arc<dyn ExecutionPlan>, context: &str) {
+/// The dist analyzer decides where a producer runs, and both placements execute at the session's
+/// `target_partitions` (here [`SCAN_PARTITIONS`]), so each is pinned to its own chain:
+///
+/// - A producer the analyzer accepts runs beside the region's scan, and its input is that
+///   `SeriesScanExec` itself, already [`SCAN_PARTITIONS`] wide. One node may sit in between: the
+///   cooperative-scheduling decorator clones its input's properties, changes only the scheduling
+///   type and forwards `execute` unchanged, so it neither re-partitions nor re-orders the frames.
+/// - A producer the analyzer keeps above the regions reads the `MergeScanExec` that gathers them.
+///   That stream is narrower than the width the producer folds at, so the fused node's physical
+///   planner routes the raw frames by their stored primary key out to [`SCAN_PARTITIONS`] owners.
+///   One stored key routes to exactly one owner, so each owner's fold still sees whole series, and
+///   the router re-declares the frames the merge scan publishes instead of reshaping them.
+///
+/// Both chains are pinned rather than allowed: the exchange in the frontend chain is exactly one
+/// `SeriesRepartitionExec` with raw-key routing over the merge scan, the merge scan is its single
+/// leaf input, and the region chain has no exchange above the scan. A `CoalesceExec`, a second
+/// exchange, a narrower scan, or a producer over anything else is a different topology and fails
+/// here.
+fn assert_fused_reads_raw_source(fused: &Arc<dyn ExecutionPlan>, context: &str) {
     let plan = displayable(fused.as_ref()).indent(false).to_string();
     assert_eq!(
         SCAN_PARTITIONS,
@@ -1401,36 +1419,76 @@ fn assert_fused_reads_scan_directly(fused: &Arc<dyn ExecutionPlan>, context: &st
         children.len(),
         "{context}: the fused producer must take exactly one input:\n{plan}"
     );
-    let child = children[0];
-    // At most one transparent wrapper is allowed between the producer and the scan.
-    let scan = if child.is::<CooperativeExec>() {
-        let wrapper_children = child.children();
-        assert_eq!(
-            1,
-            wrapper_children.len(),
-            "{context}: the cooperative wrapper must wrap exactly one input:\n{plan}"
-        );
+    let input = through_cooperative(children[0]);
+    if input.is::<SeriesScanExec>() {
+        // Region-local: the producer runs beside the scan it reads, at the scan's own width.
         assert_eq!(
             SCAN_PARTITIONS,
-            child.properties().output_partitioning().partition_count(),
-            "{context}: the cooperative wrapper must not change the {SCAN_PARTITIONS} scan \
-             partitions:\n{plan}"
+            input.properties().output_partitioning().partition_count(),
+            "{context}: the region-local producer must keep the {SCAN_PARTITIONS} partitions the \
+             region scan was planned with:\n{plan}"
         );
-        wrapper_children[0]
-    } else {
-        child
-    };
+        return;
+    }
     assert!(
-        scan.is::<SeriesScanExec>(),
-        "{context}: the fused producer must read the raw series scan directly, with no \
-         `CoalesceExec` or `RepartitionExec` between them, but its input is `{}`:\n{plan}",
-        scan.name()
+        input.is::<SeriesRepartitionExec>(),
+        "{context}: the producer must read the region scan directly or the merge scan through the \
+         raw-frame router, but its input is `{}`:\n{plan}",
+        input.name()
     );
+    let repartition = input
+        .downcast_ref::<SeriesRepartitionExec>()
+        .expect("the producer's input is a SeriesRepartitionExec");
     assert_eq!(
         SCAN_PARTITIONS,
-        scan.properties().output_partitioning().partition_count(),
-        "{context}: `SeriesScanExec` must expose the {SCAN_PARTITIONS} scan partitions the fused \
-         producer reads:\n{plan}"
+        repartition.outputs(),
+        "{context}: the raw-frame router must widen the region stream to the {SCAN_PARTITIONS} \
+         scan partitions:\n{plan}"
+    );
+    assert_eq!(
+        &SeriesRouting::RawPrimaryKey,
+        repartition.routing_policy(),
+        "{context}: the raw-frame router must route whole series by their stored key, so one series \
+         reaches exactly one owner:\n{plan}"
+    );
+    let routed = repartition.children();
+    assert_eq!(
+        1,
+        routed.len(),
+        "{context}: the raw-frame router must have one input:\n{plan}"
+    );
+    assert_eq!(
+        repartition.schema(),
+        routed[0].schema(),
+        "{context}: the raw-frame router must re-declare the frames the region stream publishes:\n{plan}"
+    );
+    let boundary = through_cooperative(routed[0]);
+    assert!(
+        boundary.is::<MergeScanExec>(),
+        "{context}: the raw-frame router must read the region `MergeScanExec` itself, with no other \
+         exchange between them, but it reads `{}`:\n{plan}",
+        boundary.name()
+    );
+    assert!(
+        boundary.children().is_empty(),
+        "{context}: `MergeScanExec` must be a leaf:\n{plan}"
+    );
+    let merged = boundary
+        .properties()
+        .output_partitioning()
+        .partition_count();
+    assert_eq!(
+        merged,
+        routed[0]
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "{context}: the router's input must be the merge scan's own {merged} partition(s):\n{plan}"
+    );
+    assert!(
+        merged < SCAN_PARTITIONS,
+        "{context}: the raw-frame router exists because the merged region stream is narrower than \
+         the {SCAN_PARTITIONS} owners the producer folds on, but it is {merged} partition(s) wide:\n{plan}"
     );
 }
 
@@ -1474,14 +1532,28 @@ fn through_cooperative(node: &Arc<dyn ExecutionPlan>) -> &Arc<dyn ExecutionPlan>
     }
 }
 
-/// Asserts the frontend Final node routes through the unified series repartitioner into the region boundary.
-fn assert_finalize_reads_region_state(
+/// Asserts the frontend Final folds the Partial producer's state through its own state router.
+///
+/// A split aggregate exports one `Partial` state per group per owner, and the `Final` half finishes
+/// every group's contributions where they meet, so the Final's physical planning routes its state
+/// input: to a single owner when it folds one group or one histogram's bounds
+/// (`histogram_quantile` over a `le`-only grouping), and out to the session's width otherwise. Both
+/// halves of the split are planned in the frontend above the region boundary, so the router reads the
+/// captured Partial producer itself - not a region merge scan - and the producer keeps the width its
+/// raw-frame router gave it. The router re-declares the Partial state frame and routes canonical
+/// labels, never raw keys.
+fn assert_finalize_routes_partial_state(
     finalize: &Arc<dyn ExecutionPlan>,
     producer: &Arc<dyn ExecutionPlan>,
     expect_single_owner: bool,
     context: &str,
 ) {
     let plan = displayable(finalize.as_ref()).indent(false).to_string();
+    let (owners, stage) = if expect_single_owner {
+        (1, "single-owner")
+    } else {
+        (SCAN_PARTITIONS, "grouped")
+    };
     let children = finalize.children();
     assert_eq!(
         1,
@@ -1489,81 +1561,71 @@ fn assert_finalize_reads_region_state(
         "{context}: Final node must have one input:\n{plan}"
     );
     let input = through_cooperative(children[0]);
-    if expect_single_owner {
-        assert!(
-            input.is::<MergeScanExec>(),
-            "{context}: the specified single-owner Final must read MergeScanExec directly, got {}:\n{plan}",
-            input.name()
-        );
-        assert_eq!(
-            1,
-            input.properties().output_partitioning().partition_count(),
-            "{context}: single-owner Final input must have one partition:\n{plan}"
-        );
-        assert_eq!(
-            1,
-            finalize
-                .properties()
-                .output_partitioning()
-                .partition_count(),
-            "{context}: single-owner Final must have one partition:\n{plan}"
-        );
-        assert!(
-            input.children().is_empty(),
-            "{context}: MergeScanExec must be a leaf:\n{plan}"
-        );
-    } else {
-        let repartition = input;
-        assert!(
-            repartition.is::<SeriesRepartitionExec>(),
-            "{context}: Final must route its input through SeriesRepartitionExec, got {}:\n{plan}",
-            repartition.name()
-        );
-        assert_eq!(
-            SCAN_PARTITIONS,
-            repartition
-                .properties()
-                .output_partitioning()
-                .partition_count(),
-            "{context}: grouped Final input router must have {SCAN_PARTITIONS} partitions:\n{plan}"
-        );
-        assert_eq!(
-            SCAN_PARTITIONS,
-            finalize
-                .properties()
-                .output_partitioning()
-                .partition_count(),
-            "{context}: grouped Final must have {SCAN_PARTITIONS} partitions:\n{plan}"
-        );
-        let routed = repartition.children();
-        assert_eq!(
-            1,
-            routed.len(),
-            "{context}: repartition must have one input:\n{plan}"
-        );
-        let boundary = through_cooperative(routed[0]);
-        assert!(
-            boundary.is::<MergeScanExec>(),
-            "{context}: Final repartition must read the region MergeScanExec, got {}:\n{plan}",
-            boundary.name()
-        );
-        assert!(
-            boundary.children().is_empty(),
-            "{context}: MergeScanExec must be a leaf:\n{plan}"
-        );
-        assert_eq!(
-            producer.schema(),
-            repartition.schema(),
-            "{context}: frontend router must preserve the Partial state-frame schema:\n{plan}"
-        );
-    }
+    assert!(
+        input.is::<SeriesRepartitionExec>(),
+        "{context}: the {stage} Final must route the Partial state through `SeriesRepartitionExec`, \
+         got `{}`:\n{plan}",
+        input.name()
+    );
+    let repartition = input
+        .downcast_ref::<SeriesRepartitionExec>()
+        .expect("the Final's input is a SeriesRepartitionExec");
+    assert_eq!(
+        owners,
+        repartition.outputs(),
+        "{context}: the {stage} Final's state router must publish {owners} owner(s):\n{plan}"
+    );
+    assert_eq!(
+        owners,
+        input.properties().output_partitioning().partition_count(),
+        "{context}: the {stage} Final's state router must declare {owners} partition(s):\n{plan}"
+    );
+    assert!(
+        matches!(
+            repartition.routing_policy(),
+            SeriesRouting::CanonicalLabels | SeriesRouting::CanonicalLabelsExcept(_)
+        ),
+        "{context}: aggregate state must be routed by canonical labels, got {:?}:\n{plan}",
+        repartition.routing_policy()
+    );
+    assert_eq!(
+        owners,
+        finalize
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "{context}: the {stage} Final must have {owners} partition(s):\n{plan}"
+    );
+    let routed = repartition.children();
+    assert_eq!(
+        1,
+        routed.len(),
+        "{context}: the state router must have one input:\n{plan}"
+    );
+    let partial = through_cooperative(routed[0]);
+    assert!(
+        partial.is::<FusedSeriesExec>(),
+        "{context}: the {stage} Final's state router must read the Partial producer itself, got \
+         `{}`:\n{plan}",
+        partial.name()
+    );
+    assert!(
+        Arc::ptr_eq(partial, producer),
+        "{context}: the {stage} Final must fold the captured Partial producer, not a node from \
+         another tree:\n{plan}"
+    );
+    assert_eq!(
+        SCAN_PARTITIONS,
+        partial.properties().output_partitioning().partition_count(),
+        "{context}: the Partial producer must fold on the {SCAN_PARTITIONS} scan partitions:\n{plan}"
+    );
+    assert_eq!(
+        producer.schema(),
+        repartition.schema(),
+        "{context}: the state router must preserve the Partial state-frame schema:\n{plan}"
+    );
 
     let producer_schema = producer.schema();
-    assert_eq!(
-        producer_schema,
-        input.schema(),
-        "{context}: Final input must preserve the Partial state-frame schema:\n{plan}"
-    );
     let producer_plan = NodeDisplay(producer.as_ref()).to_string();
     let root_line = producer_plan
         .lines()
@@ -1572,7 +1634,7 @@ fn assert_finalize_reads_region_state(
         .unwrap_or_default();
     assert!(
         root_line.contains("Aggregate") && root_line.contains("partial"),
-        "{context}: captured region producer must have a Partial root, got `{root_line}`:\n{producer_plan}"
+        "{context}: the captured Partial producer must have a Partial root, got `{root_line}`:\n{producer_plan}"
     );
     let declaration =
         SeriesFrameDeclaration::parse(producer_schema.as_ref()).unwrap_or_else(|error| {
@@ -1768,7 +1830,7 @@ async fn check_two_source_segregation(
             segment.children().len(),
             "`{query}`: segment {index} must have one child; plan:\n{plan}"
         );
-        assert_fused_reads_scan_directly(segment, &format!("native `{query}` segment {index}"));
+        assert_fused_reads_raw_source(segment, &format!("native `{query}` segment {index}"));
         vectors.push(fused_node_metric_per_partition(
             segment,
             ROOT_OUTPUT_VALUES_METRIC,
@@ -1783,18 +1845,28 @@ async fn check_two_source_segregation(
         let plan = displayable(segments[index].as_ref())
             .indent(false)
             .to_string();
-        if values.iter().all(Option::is_none) {
-            panic!(
-                "`{query}`: segment {index} does not publish `{ROOT_OUTPUT_VALUES_METRIC}`; \
-                 both segment vectors: {vectors:?}; parent plan:\n{parent_display}; segment plan:\n{plan}"
-            );
-        }
         assert!(
-            values
-                .iter()
-                .all(|count| count.is_some_and(|count| count > 0)),
-            "`{query}`: each source segment must produce values on all {SCAN_PARTITIONS} partitions; \
-             both segment vectors: {vectors:?}; parent plan:\n{parent_display}; segment plan:\n{plan}"
+            values.iter().all(Option::is_some),
+            "`{query}`: segment {index} must run on every owner it is planned with, but one of them \
+             reported no `{ROOT_OUTPUT_VALUES_METRIC}`; both segment vectors: {vectors:?}; parent \
+             plan:\n{parent_display}; segment plan:\n{plan}"
+        );
+        // What each owner folds is the placement's decision: a region-local segment keeps the
+        // region scan's partitions, while a frontend one is spread by the raw-key router over the
+        // target width, so the same series can leave an owner empty. The totals are what the
+        // fixture fixes - both fixture tables hold the same five series, and a segment answers one
+        // value per series of its source - so those are asserted instead of the spread.
+        assert_eq!(
+            COUNTER_SERIES.len(),
+            values.iter().flatten().sum::<usize>(),
+            "`{query}`: segment {index} must answer one value per series of its source; both \
+             segment vectors: {vectors:?}; parent plan:\n{parent_display}; segment plan:\n{plan}"
+        );
+        assert!(
+            values.iter().flatten().filter(|count| **count > 0).count() > 1,
+            "`{query}`: segment {index} must produce values on more than one owner, otherwise the \
+             segment is not parallel at all; both segment vectors: {vectors:?}; parent plan:\n\
+             {parent_display}; segment plan:\n{plan}"
         );
     }
 }
@@ -1872,7 +1944,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     );
     for fused in &capture.fused {
         let producer_plan = NodeDisplay(fused.as_ref()).to_string();
-        assert_fused_reads_scan_directly(fused, &format!("native `{query}`"));
+        assert_fused_reads_raw_source(fused, &format!("native `{query}`"));
         let declaration =
             SeriesFrameDeclaration::parse(fused.schema().as_ref()).unwrap_or_else(|error| {
                 panic!("`{query}`: invalid Partial frame declaration: {error}:\n{producer_plan}")
@@ -1946,9 +2018,9 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
             );
         }
     }
-    // Validate the outer-to-inner state chain and the Partial node's region boundary.
+    // Validate the outer-to-inner chain: the Final's state router down to the Partial producer.
     for finalize in &capture.finalize {
-        assert_finalize_reads_region_state(
+        assert_finalize_routes_partial_state(
             finalize,
             &capture.fused[0],
             case.single_owner,
@@ -1982,24 +2054,39 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     common_telemetry::info!(
         "`{query}` native per-partition `{ROOT_OUTPUT_VALUES_METRIC}` counts: {per_partition:?}"
     );
-    if case.per_partition {
-        for (partition, values) in per_partition.iter().enumerate() {
-            assert!(
-                values.is_some_and(|values| values > 0),
-                "`{query}`: every one of the {SCAN_PARTITIONS} scan partitions must fold at least \
-                 one value, but partition {partition} reported {values:?}; all partitions: \
-                 {per_partition:?}"
-            );
-        }
-    } else {
+    // The producer's owners are the raw-frame router's buckets, not the region scan's partitions:
+    // every one of the four runs the producer, but which of them a series lands on is the router's
+    // decision, and five series spread over four owners need not fill each one. What the fixture
+    // fixes is the fold's *total*, which the `native.root.input_samples` check below pins, so this
+    // block asserts that every owner is live and, for a whole-vector fold, that the work was spread
+    // rather than collapsed onto one owner.
+    for (partition, values) in per_partition.iter().enumerate() {
         assert!(
-            per_partition.iter().flatten().sum::<usize>() > 0,
-            "`{query}`: the fused producer must report folded values, got {per_partition:?}"
+            values.is_some(),
+            "`{query}`: the fused producer must run on all {SCAN_PARTITIONS} owners the raw-frame \
+             router gives it, but owner {partition} reported no `{ROOT_OUTPUT_VALUES_METRIC}`; all \
+             owners: {per_partition:?}"
+        );
+    }
+    let folded_owners = per_partition
+        .iter()
+        .flatten()
+        .filter(|values| **values > 0)
+        .count();
+    assert!(
+        folded_owners > 0,
+        "`{query}`: the fused producer must report folded values, got {per_partition:?}"
+    );
+    if case.per_partition {
+        assert!(
+            folded_owners > 1,
+            "`{query}`: the fold must be spread over more than one of the {SCAN_PARTITIONS} owners, \
+             otherwise no partition of the split did any work; got {per_partition:?}"
         );
     }
     if let Some(root_values) = case.root_values {
-        // One value per series that folded, so the partitions' counts add up to the number of series
-        // the scan selected - every counter series, or only the ones a matcher kept.
+        // One value per series that folded, so the owners' counts add up to the number of series the
+        // scan selected - every counter series, or only the ones a matcher kept.
         let input_samples = fused_root_metric_per_partition(
             &capture,
             ROOT_INPUT_SAMPLES_METRIC,
@@ -2009,22 +2096,23 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
             "`{query}` native per-partition `{ROOT_INPUT_SAMPLES_METRIC}` counts: {input_samples:?}"
         );
         assert!(
-            input_samples
-                .iter()
-                .all(|samples| samples.is_some_and(|n| n > 0)),
-            "`{query}`: every partition must report positive root input samples, got {input_samples:?}"
+            input_samples.iter().all(Option::is_some),
+            "`{query}`: every owner must report root input samples, got {input_samples:?}"
         );
         assert_eq!(
             root_values,
             input_samples.iter().flatten().sum::<usize>(),
             "`{query}`: root input sample total must match the selected fixture series"
         );
-        if root_values == COUNTER_SERIES.len() {
-            assert_eq!(2, input_samples.iter().flatten().copied().max().unwrap());
+        if case.per_partition {
+            assert!(
+                input_samples.iter().flatten().copied().max().unwrap_or(0) < root_values,
+                "`{query}`: the split must not fold every series on one owner, got {input_samples:?}"
+            );
         }
         // Root output counts are grid points grouped into output series, not input-series
-        // contributions. Keep the per-partition activity check above; contribution totals belong
-        // to the exact native root input_samples metric checked here.
+        // contributions. Keep the owner activity check above; contribution totals belong to the
+        // exact native root input_samples metric checked here.
     }
 }
 
@@ -2212,19 +2300,6 @@ async fn native_aggregate_clamp_executes_on_both_routes() {
     // aggregate leaves null.
     assert_eq!(3, native.columns.len(), "native `{query}` columns");
     assert_eq!("__name__", native.columns[2], "native `{query}` columns");
-    assert_eq!(1, capture.fused.len(), "native `{query}` fused producers");
-    for fused in &capture.fused {
-        assert_fused_reads_scan_directly(fused, &format!("native `{query}`"));
-        let plan = displayable(fused.as_ref()).indent(false).to_string();
-        assert!(
-            plan.contains("sum by [] partial"),
-            "native `{query}` must export the aggregate partial state:\n{plan}"
-        );
-    }
-    assert!(
-        !capture.finalize.is_empty(),
-        "native `{query}` must execute the frontend aggregate finalize"
-    );
 
     // The planner unit harness uses a bare MemoryCatalogManager and rejects clamp in legacy
     // planning. The standalone query context registers clamp for legacy, so this test deliberately
@@ -2237,6 +2312,36 @@ async fn native_aggregate_clamp_executes_on_both_routes() {
     assert!(
         close_enough(legacy.rows[0].value.unwrap(), 10.0),
         "legacy `{query}` value"
+    );
+    // The two routes answer the same row: the comparison runs before the shape assertions below, so
+    // a shape regression cannot hide it.
+    assert_rows(
+        &native.rows,
+        &legacy.rows,
+        &format!("native `{query}` vs legacy"),
+    );
+
+    // The plan the native run really executed: one Partial producer over the region boundary, and
+    // the frontend aggregate finalize above it.
+    assert_eq!(1, capture.fused.len(), "native `{query}` fused producers");
+    for fused in &capture.fused {
+        assert_fused_reads_raw_source(fused, &format!("native `{query}`"));
+        let plan = displayable(fused.as_ref()).indent(false).to_string();
+        assert!(
+            plan.contains("sum by [] partial"),
+            "native `{query}` must export the aggregate partial state:\n{plan}"
+        );
+    }
+    assert_eq!(
+        1,
+        capture.finalize.len(),
+        "native `{query}` must execute the frontend aggregate finalize"
+    );
+    assert_finalize_routes_partial_state(
+        &capture.finalize[0],
+        &capture.fused[0],
+        true,
+        &format!("native `{query}`"),
     );
 }
 
@@ -2672,6 +2777,21 @@ async fn native_histogram_over_the_cut_splits_and_matches_legacy() {
 
         let mark = observer.mark();
         let (native, capture) = run_query(&instance, promql, true, &observer).await;
+        // The rows come first: the equivalence the admission rests on - the rows the same statement
+        // reports over the complete input, labels included - is compared before the plan shape, so a
+        // shape regression cannot hide it.
+        let tags: &[&str] = if *single_owner { &[] } else { &["job"] };
+        assert_native_column_layout(&native, tags, &query);
+        assert_native_schema(&native, "v", &legacy.rows, &query);
+        assert_native_columns(&native, &legacy, &query, "v");
+        assert_rows(
+            &native.rows,
+            &legacy.rows,
+            &format!("native `{query}` vs legacy"),
+        );
+
+        // Then the plan that really ran: the histogram suffix in the Final, over the state router
+        // that gathers the Partial producer's contributions where the function folds them.
         assert!(
             !capture.finalize.is_empty(),
             "`{query}`: a histogram suffix must run above a Final aggregate"
@@ -2681,22 +2801,11 @@ async fn native_histogram_over_the_cut_splits_and_matches_legacy() {
             .iter()
             .find(|fused| NodeDisplay(fused.as_ref()).to_string().contains(" partial"))
             .unwrap_or_else(|| panic!("`{query}`: no Partial state producer found"));
-        assert_finalize_reads_region_state(
+        assert_finalize_routes_partial_state(
             &capture.finalize[0],
             partial,
             *single_owner,
             &format!("native `{query}`"),
-        );
-        let tags: &[&str] = if *single_owner { &[] } else { &["job"] };
-        assert_native_column_layout(&native, tags, &query);
-        assert_native_schema(&native, "v", &legacy.rows, &query);
-        assert_native_columns(&native, &legacy, &query, "v");
-        // The equivalence the admission rests on: the rows the same statement reports over the
-        // complete input, labels included.
-        assert_rows(
-            &native.rows,
-            &legacy.rows,
-            &format!("native `{query}` vs legacy"),
         );
 
         let plans = observer
@@ -2986,8 +3095,8 @@ async fn native_bare_selector_aggregate_value_columns() {
             capture.finalize.len(),
             "`{query}` must have one Final merge"
         );
-        assert_fused_reads_scan_directly(&capture.fused[0], &format!("native `{query}`"));
-        assert_finalize_reads_region_state(
+        assert_fused_reads_raw_source(&capture.fused[0], &format!("native `{query}`"));
+        assert_finalize_routes_partial_state(
             &capture.finalize[0],
             &capture.fused[0],
             single_owner,
