@@ -3509,11 +3509,23 @@ mod tests {
         assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
 
         // Set region role too Downgrading Leader
-        manifest_ctx.set_role(RegionRole::Leader, region_id);
-        manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Leader, region_id),
+            Some(RegionRoleState::Follower)
+        );
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id),
+            Some(RegionRoleState::Leader(RegionLeaderState::Writable))
+        );
         assert_eq!(
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        );
+
+        // Downgrading Leader -> Downgrading Leader
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::DowngradingLeader, region_id),
+            None
         );
 
         // Downgrading Leader -> Leader
@@ -3526,6 +3538,9 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
 
+        // Leader -> Leader
+        assert_eq!(manifest_ctx.set_role(RegionRole::Leader, region_id), None);
+
         // Altering Leader -> Follower
         let altering = RegionRoleState::Leader(RegionLeaderState::Altering);
         manifest_ctx.state.store(altering);
@@ -3533,6 +3548,7 @@ mod tests {
             manifest_ctx.set_role(RegionRole::Follower, region_id),
             Some(altering)
         );
+        assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
 
         // Staging Leader -> Follower
         let staging = RegionRoleState::Leader(RegionLeaderState::Staging);
@@ -3542,6 +3558,17 @@ mod tests {
             Some(staging)
         );
         assert_eq!(manifest_ctx.state.load(), RegionRoleState::Follower);
+
+        // Staging Leader -> Leader
+        manifest_ctx.state.store(staging);
+        assert_eq!(
+            manifest_ctx.set_role(RegionRole::Leader, region_id),
+            Some(staging)
+        );
+        assert_eq!(
+            manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
     }
 
     #[tokio::test]
