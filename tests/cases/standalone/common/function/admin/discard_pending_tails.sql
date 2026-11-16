@@ -2,14 +2,17 @@ CREATE TABLE discard_pending_tails_test (
     host STRING PRIMARY KEY,
     val DOUBLE,
     ts TIMESTAMP TIME INDEX
+) PARTITION ON COLUMNS (host) (
+    host < 'm',
+    host >= 'm'
 ) ENGINE = mito;
 
-INSERT INTO discard_pending_tails_test VALUES ('kept', 1, 1);
+INSERT INTO discard_pending_tails_test VALUES ('kept', 1, 1), ('remains', 2, 2);
 
--- The table has no pending tails from the node, so nothing is discarded.
+-- No region of the table has pending tails from the node, so nothing is discarded.
 ADMIN discard_pending_tails('discard_pending_tails_test', 1);
 
-SELECT host, val FROM discard_pending_tails_test;
+SELECT host, val FROM discard_pending_tails_test ORDER BY host;
 
 -- The function must only be available through ADMIN.
 -- SQLNESS REPLACE \nDid\syou\smean.*

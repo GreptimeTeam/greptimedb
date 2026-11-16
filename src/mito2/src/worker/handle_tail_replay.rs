@@ -22,15 +22,17 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
 use crate::config::IndexBuildMode;
-use crate::error::RegionBusySnafu;
+use crate::error::{RegionBusySnafu, RegionStateSnafu};
 use crate::manifest::action::{
     PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, WalRecoveryEdit,
 };
-use crate::region::{MitoRegionRef, TailPublication};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState, TailPublication};
 use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
 use crate::schedule::CancellableTaskState;
 use crate::sst::index::IndexBuildType;
-use crate::tail_replay::{TailReplayTask, notify_worker, release_wal, should_replay_tails};
+use crate::tail_replay::{
+    TailReplayTask, notify_worker, release_wal_after_tails_edit, should_replay_tails,
+};
 use crate::worker::RegionWorkerLoop;
 use crate::worker::handle_reload::notify_if_fenced;
 
@@ -75,10 +77,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// sends 0 and changes nothing.
     ///
     /// The edit removes the tails, keeps the others in order and raises the flushed entry id
-    /// to the largest `upto` of the removed tails, as a replay of them would. It is committed
-    /// outside the worker against the tails the version records now, so a replay or a sync
-    /// that changed them first makes it fail as busy, and a running replay of the region is
-    /// left to find the tails changed.
+    /// to the largest `upto` of the removed tails, for a listed tail too. Entries of this node
+    /// at or below it are then never replayed, which relies on the obligation of whoever
+    /// records a tail (see
+    /// [RegionManifest::wal_replay_start](crate::manifest::action::RegionManifest::wal_replay_start)).
+    ///
+    /// The edit is committed outside the worker against the tails the version records now, so
+    /// a replay or a sync that changed them first makes it fail as busy, and a running replay
+    /// of the region is left to find the tails changed. It also fails as busy while the
+    /// region's last manifest update has an unknown result, which a replay of the tails could
+    /// have saved (see
+    /// [RegionManifestManager::has_unconfirmed_update](crate::manifest::manager::RegionManifestManager::has_unconfirmed_update));
+    /// the next manifest update that succeeds, such as a flush, clears it.
     pub(crate) fn handle_discard_pending_tails(
         &mut self,
         region_id: RegionId,
@@ -125,27 +135,56 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
             match region
                 .manifest_ctx
-                .update_manifest_for_tails(&tails, action_list)
+                .update_manifest_for_tails(&tails, action_list, |manager| {
+                    !manager.has_unconfirmed_update()
+                })
                 .await
             {
                 Ok(TailPublication::Committed(manifest_version)) => {
                     info!(
                         "Discarded the pending WAL tails of region {region_id} from node {node_id} in manifest version {manifest_version}"
                     );
-                    release_wal(&region, &wal, local_node_id, "discarding its tails").await;
+                    // The worker applies the edit before a replay that found the tails changed
+                    // can restart from the old ones.
                     let notify = BackgroundNotify::PendingTailsDiscarded {
-                        region,
+                        region: region.clone(),
                         edit,
                         tails,
+                        discarded: discarded.len(),
                         sender,
                     };
                     notify_worker(&request_sender, region_id, notify).await;
+                    release_wal_after_tails_edit(&region, &wal, local_node_id).await;
                 }
-                Ok(TailPublication::Busy | TailPublication::Stale) => {
+                Ok(TailPublication::Unconfirmed) => {
                     info!(
-                        "Region {region_id} changed its state or pending tails, not discarding the tails from node {node_id}"
+                        "An earlier manifest update of region {region_id} is unconfirmed, not discarding the tails from node {node_id}"
                     );
                     sender.send(RegionBusySnafu { region_id }.fail());
+                }
+                Ok(TailPublication::Busy) => {
+                    info!(
+                        "Region {region_id} is altering or editing, not discarding the tails from node {node_id}"
+                    );
+                    sender.send(RegionBusySnafu { region_id }.fail());
+                }
+                Ok(TailPublication::Stale) => {
+                    let state = region.state();
+                    if state == RegionRoleState::Leader(RegionLeaderState::Writable) {
+                        info!(
+                            "Region {region_id} changed its pending tails, not discarding the tails from node {node_id}"
+                        );
+                        sender.send(RegionBusySnafu { region_id }.fail());
+                    } else {
+                        sender.send(
+                            RegionStateSnafu {
+                                region_id,
+                                state,
+                                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
+                            }
+                            .fail(),
+                        );
+                    }
                 }
                 Err(e) => {
                     error!(e; "Failed to discard the pending WAL tails of region {region_id} from node {node_id}");
@@ -157,18 +196,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Applies a published edit that discards pending tails, see [Self::apply_tails_edit], and
-    /// sends the number of discarded tails, which the edit removed from `tails`, even if the
-    /// region changed since.
+    /// sends the number of `discarded` tails, even if the region changed since.
     pub(crate) async fn handle_pending_tails_discarded(
         &mut self,
         region_id: RegionId,
         region: MitoRegionRef,
         edit: RegionEdit,
         tails: Vec<PendingTail>,
+        discarded: usize,
         sender: OptionOutputTx,
     ) {
-        let kept = edit.wal_recovery.pending_tails.as_ref().map_or(0, Vec::len);
-        let discarded = tails.len() - kept;
         self.apply_tails_edit(region_id, &region, edit, &tails)
             .await;
         sender.send(Ok(discarded));

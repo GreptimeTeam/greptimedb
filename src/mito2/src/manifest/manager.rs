@@ -906,6 +906,13 @@ impl RegionManifestManager {
         version
     }
 
+    /// Returns whether the last manifest update failed after it took its version, so it may
+    /// have been saved without being applied here. Only an update without conditional
+    /// publication takes its version before saving; the next update that succeeds clears this.
+    pub(crate) fn has_unconfirmed_update(&self) -> bool {
+        self.last_version() > self.manifest.manifest_version
+    }
+
     pub fn last_version(&self) -> ManifestVersion {
         self.last_version.load(Ordering::Relaxed)
     }

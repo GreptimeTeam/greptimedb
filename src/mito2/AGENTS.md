@@ -133,7 +133,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   dropped once the flushed entry id reaches them, in
   `RegionManifestBuilder::try_build`. While a
   region has pending tails, scans and memtable/SST stats fail with
-  `RegionPendingTails`, and so do truncate (other than discarding pending tails), entering staging, a repartition flush,
+  `RegionPendingTails`, and so do truncate (other than discarding pending tails),
+  entering staging, a repartition flush,
   a close with `flush_on_close`, and every ALTER other than adding nullable columns
   without a default or changing options; compaction pauses. These checks run
   before any region state changes. Full-listing GC skips a region that has pending
@@ -151,9 +152,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   flushed entry id skips them. A node bounds its replays' concurrency and SST writes apart
   from flushes, and their chunk memory within the global write buffer (`TailReplayLimits`).
   Replayed SSTs build indexes as flushed ones (`IndexBuildType::Flush`), under
-  `create_on_flush`. `RegionTruncateRequest::PendingTails` discards one node's tails without
-  replaying them through the same commit (`worker/handle_tail_replay.rs`); its flushed entry
-  id is the largest discarded `upto`, so the same entry id rule applies.
+  `create_on_flush`. `RegionTruncateRequest::PendingTails` discards one node's tails
+  without replaying them; it commits through `update_manifest_for_tails` too
+  (`worker/handle_tail_replay.rs`) and raises the flushed entry id to the largest
+  discarded `upto`, so the same entry id rule applies.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.

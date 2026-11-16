@@ -32,7 +32,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         req: RegionTruncateRequest,
         sender: OptionOutputTx,
     ) {
-        // Discarding pending tails lets a region pass the pending tails check below.
+        // A discard of pending tails must not be rejected by the pending tails check below, and
+        // waits for no flush or compaction.
         if let RegionTruncateRequest::PendingTails { node_id } = req {
             self.handle_discard_pending_tails(region_id, node_id, sender);
             return;

@@ -272,6 +272,8 @@ impl RegionEngine for MetricEngine {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }
             }
+            // Only the data region's unflushed data or pending tails are discarded; the
+            // metadata region's pending tails are not discarded.
             RegionRequest::Truncate(
                 request @ (RegionTruncateRequest::Unflushed
                 | RegionTruncateRequest::PendingTails { .. }),
@@ -805,7 +807,7 @@ mod test {
         env.init_metric_region().await;
         let request =
             || RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 1 });
-        // The data region has no pending tails; reaching that result proves forwarding.
+        // A physical region accepts the request; neither of its Mito regions has pending tails.
         let response = env
             .metric()
             .handle_request(env.default_physical_region_id(), request())

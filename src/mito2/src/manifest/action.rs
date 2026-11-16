@@ -254,8 +254,8 @@ pub struct RegionManifest {
     /// `after < upto`: a new segment of a node takes as `after` the largest of the
     /// flushed entry id, the `upto`s of the node's existing segments and its handoff
     /// floor, and is added only if that is below its `upto`. So the entries of a node
-    /// between two of its segments are flushed or at or below a handoff floor of the
-    /// node, and need no replay.
+    /// between two of its segments are flushed, discarded or at or below a handoff floor
+    /// of the node, and need no replay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_tails: Vec<PendingTail>,
     /// The [HandoffFloor] of each node, removed once the flushed entry id reaches it.
@@ -265,8 +265,8 @@ pub struct RegionManifest {
 
 impl RegionManifest {
     /// Returns the entry id after which node `node_id` replays its WAL when it opens
-    /// the region. Entries up to it are flushed, left to the pending tails, or below
-    /// the handoff floor of the node.
+    /// the region. Entries up to it are flushed, discarded, left to the pending tails,
+    /// or below the handoff floor of the node.
     ///
     /// Entries of the node in `(after, upto]` of one of its tails belong to that tail.
     /// Whoever adds a tail ensures that every entry id the node allocates afterwards is

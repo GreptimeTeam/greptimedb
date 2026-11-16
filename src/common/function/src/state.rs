@@ -224,22 +224,23 @@ impl FunctionState {
                 Ok(ROWS)
             }
 
+            // Return the node id, offset per form, so callers can check what was called.
             async fn discard_pending_tails(
                 &self,
                 _region_id: RegionId,
-                _node_id: u64,
+                node_id: u64,
                 _ctx: QueryContextRef,
             ) -> Result<AffectedRows> {
-                Ok(ROWS)
+                Ok(node_id as AffectedRows)
             }
 
             async fn discard_pending_tails_by_table(
                 &self,
                 _table_name: TableName,
-                _node_id: u64,
+                node_id: u64,
                 _ctx: QueryContextRef,
             ) -> Result<AffectedRows> {
-                Ok(ROWS)
+                Ok(ROWS + node_id as AffectedRows)
             }
         }
 

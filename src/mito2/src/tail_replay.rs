@@ -67,13 +67,12 @@ pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
 }
 
 /// Releases the WAL of `region` on node `node_id` up to where the region now replays it on
-/// open, keeping the node's remaining tails, after `commit` changed its tails. A failure is
+/// open, keeping the node's remaining tails, after an edit of its pending tails. A failure is
 /// only logged.
-pub(crate) async fn release_wal<S: LogStore>(
+pub(crate) async fn release_wal_after_tails_edit<S: LogStore>(
     region: &MitoRegion,
     wal: &Wal<S>,
     node_id: Option<u64>,
-    commit: &str,
 ) {
     let manifest = region.manifest_ctx.manifest().await;
     let entry_id = cap_wal_release(
@@ -85,7 +84,7 @@ pub(crate) async fn release_wal<S: LogStore>(
         .obsolete(region.region_id, entry_id, &region.provider)
         .await
     {
-        error!(e; "Failed to release the WAL of region {} after {commit}", region.region_id);
+        error!(e; "Failed to release the WAL of region {} after its pending tails changed", region.region_id);
     }
 }
 
@@ -430,7 +429,7 @@ impl<S: LogStore> TailReplayTask<S> {
             match self
                 .region
                 .manifest_ctx
-                .update_manifest_for_tails(tails, action_list.clone())
+                .update_manifest_for_tails(tails, action_list.clone(), |_| true)
                 .await
             {
                 Ok(TailPublication::Committed(manifest_version)) => {
@@ -438,13 +437,7 @@ impl<S: LogStore> TailReplayTask<S> {
                     info!(
                         "Published the replayed WAL tails of region {region_id} in manifest version {manifest_version}"
                     );
-                    release_wal(
-                        &self.region,
-                        &self.wal,
-                        self.node_id,
-                        "publishing its tails",
-                    )
-                    .await;
+                    release_wal_after_tails_edit(&self.region, &self.wal, self.node_id).await;
                     self.listener.on_tail_commit_end(region_id).await;
                     let region = self.region.clone();
                     let tails = tails.to_vec();
@@ -456,7 +449,8 @@ impl<S: LogStore> TailReplayTask<S> {
                     notify_worker(&self.request_sender, region_id, notify).await;
                     return Ok(true);
                 }
-                Ok(TailPublication::Busy) => {}
+                // A replay commits its own unknown update again, so it accepts every manifest.
+                Ok(TailPublication::Busy | TailPublication::Unconfirmed) => {}
                 Ok(TailPublication::Stale) => {
                     info!("Region {region_id} changed its role or tails, dropping the replay");
                     uncommitted.cleanup().await;

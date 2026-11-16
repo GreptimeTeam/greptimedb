@@ -1181,11 +1181,13 @@ pub(crate) enum BackgroundNotify {
     PendingTailsDiscarded {
         /// The instance the tails were discarded from.
         region: MitoRegionRef,
-        /// The published edit, whose tails are those of `tails` it keeps.
+        /// The published edit.
         edit: RegionEdit,
         /// The tails the manifest recorded when the edit was published.
         tails: Vec<PendingTail>,
-        /// Receives the number of discarded tails.
+        /// The number of tails the edit removed.
+        discarded: usize,
+        /// Receives `discarded`.
         sender: OptionOutputTx,
     },
 }

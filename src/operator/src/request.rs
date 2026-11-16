@@ -27,7 +27,7 @@ use common_catalog::consts::METRIC_ENGINE;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit as TimestampUnit;
 use futures_util::future;
@@ -280,17 +280,27 @@ impl Requester {
         table_name: TableName,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
-        self.truncate_table_regions(
-            table_name,
-            truncate_request::Kind::Unflushed(Unflushed {}),
-            "discard unflushed data",
-            "discarding unflushed data from a Metric Engine logical table",
+        let requests = self
+            .table_truncate_requests(
+                &table_name,
+                truncate_request::Kind::Unflushed(Unflushed {}),
+                "discarding unflushed data from a Metric Engine logical table",
+            )
+            .await?;
+
+        info!("Handle table discard unflushed data request: {table_name}");
+        self.do_request(
+            requests,
+            Some(build_db_string(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+            )),
             &ctx,
         )
         .await
     }
 
-    /// Discards the pending WAL tails that datanode `node_id` wrote from the region.
+    /// Discards the region's pending WAL tails that datanode `node_id` wrote.
     pub async fn handle_discard_pending_tails(
         &self,
         region_id: RegionId,
@@ -315,43 +325,58 @@ impl Requester {
         Ok(discarded)
     }
 
-    /// Discards the pending WAL tails that datanode `node_id` wrote from all regions of the
-    /// table.
+    /// Discards the pending WAL tails that datanode `node_id` wrote in every region of the
+    /// table. If a region fails, the tails discarded in the other regions are logged before
+    /// the first error is returned.
     pub async fn handle_discard_pending_tails_by_table(
         &self,
         table_name: TableName,
         node_id: u64,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
+        let requests = self
+            .table_truncate_requests(
+                &table_name,
+                truncate_request::Kind::PendingTails(PendingTails { node_id }),
+                "discarding pending WAL tails from a Metric Engine logical table",
+            )
+            .await?;
+
         info!(
             user = ctx.current_user().username(),
             "Handle table discard pending tails request: {table_name}, node: {node_id}"
         );
-        let discarded = self
-            .truncate_table_regions(
-                table_name.clone(),
-                truncate_request::Kind::PendingTails(PendingTails { node_id }),
-                "discard pending tails",
-                "discarding pending WAL tails from a Metric Engine logical table",
+        let results = self
+            .do_requests(
+                requests,
+                Some(build_db_string(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                )),
                 &ctx,
             )
             .await?;
+        let discarded = results.iter().flatten().sum::<AffectedRows>();
+        if let Some(Err(e)) = results.into_iter().find(Result::is_err) {
+            warn!(
+                "Discarded {discarded} pending tails from node {node_id} in table {table_name} before a region failed"
+            );
+            return Err(e);
+        }
         if discarded == 0 {
             info!("No pending tails from node {node_id} in table {table_name}");
         }
         Ok(discarded)
     }
 
-    /// Sends a truncate request of `kind`, logged as `request`, to every region of the table. A
-    /// Metric Engine logical table is rejected as `feat` before any request is sent.
-    async fn truncate_table_regions(
+    /// Returns a truncate request of `kind` for every region of the table. A Metric Engine
+    /// logical table is rejected as `feat`.
+    async fn table_truncate_requests(
         &self,
-        table_name: TableName,
+        table_name: &TableName,
         kind: truncate_request::Kind,
-        request: &str,
         feat: &'static str,
-        ctx: &QueryContextRef,
-    ) -> Result<AffectedRows> {
+    ) -> Result<Vec<RegionRequestBody>> {
         let table = self
             .catalog_manager
             .table(
@@ -380,7 +405,7 @@ impl Requester {
                 table_name: table_name.to_string(),
             })?
             .partitions;
-        let requests = partitions
+        Ok(partitions
             .iter()
             .map(|partition| {
                 RegionRequestBody::Truncate(TruncateRequest {
@@ -388,18 +413,7 @@ impl Requester {
                     kind: Some(kind.clone()),
                 })
             })
-            .collect();
-
-        info!("Handle table {request} request: {table_name}");
-        self.do_request(
-            requests,
-            Some(build_db_string(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-            )),
-            ctx,
-        )
-        .await
+            .collect())
     }
 }
 
@@ -447,6 +461,19 @@ impl Requester {
         db_string: Option<String>,
         ctx: &QueryContextRef,
     ) -> Result<AffectedRows> {
+        self.do_requests(requests, db_string, ctx)
+            .await?
+            .into_iter()
+            .sum()
+    }
+
+    /// Sends `requests` to their region leaders and returns the result of each.
+    async fn do_requests(
+        &self,
+        requests: Vec<RegionRequestBody>,
+        db_string: Option<String>,
+        ctx: &QueryContextRef,
+    ) -> Result<Vec<Result<AffectedRows>>> {
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: db_string.unwrap_or_else(|| ctx.get_db_string()),
@@ -470,12 +497,10 @@ impl Requester {
         });
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
-        let affected_rows = results
+        Ok(results
             .into_iter()
             .map(|resp| resp.map(|r| r.affected_rows))
-            .sum::<Result<AffectedRows>>()?;
-
-        Ok(affected_rows)
+            .collect())
     }
 
     async fn find_region_leader_by_request(

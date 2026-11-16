@@ -114,6 +114,15 @@ fn signature() -> Signature {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{StringArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field};
+    use datafusion_expr::ColumnarValue;
+
+    use super::*;
+    use crate::function::FunctionContext;
+    use crate::function_factory::ScalarFunctionFactory;
     use crate::function_registry::{FUNCTION_REGISTRY, get_admin_function};
 
     #[test]
@@ -124,5 +133,64 @@ mod tests {
                 .get_function("discard_pending_tails")
                 .is_none()
         );
+    }
+
+    /// Calls the function with `args`; the mock handler returns the node id for a region and
+    /// 42 plus the node id for a table.
+    async fn call(args: Vec<(ColumnarValue, DataType)>) -> datafusion_common::Result<u64> {
+        let factory: ScalarFunctionFactory = DiscardPendingTailsFunction::factory().into();
+        let function = factory.provide(FunctionContext::mock());
+        let (args, arg_fields): (Vec<_>, Vec<_>) = args
+            .into_iter()
+            .enumerate()
+            .map(|(i, (arg, data_type))| {
+                (
+                    arg,
+                    Arc::new(Field::new(format!("arg_{i}"), data_type, false)),
+                )
+            })
+            .unzip();
+        let args = datafusion::logical_expr::ScalarFunctionArgs {
+            args,
+            arg_fields,
+            return_field: Arc::new(Field::new("result", DataType::UInt64, false)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let ColumnarValue::Array(array) = function
+            .as_async()
+            .unwrap()
+            .invoke_async_with_args(args)
+            .await?
+        else {
+            panic!("expected array output");
+        };
+        Ok(array
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0))
+    }
+
+    fn uint64(value: u64) -> (ColumnarValue, DataType) {
+        let array = Arc::new(UInt64Array::from(vec![value]));
+        (ColumnarValue::Array(array), DataType::UInt64)
+    }
+
+    fn string(value: &str) -> (ColumnarValue, DataType) {
+        let array = Arc::new(StringArray::from(vec![value]));
+        (ColumnarValue::Array(array), DataType::Utf8)
+    }
+
+    #[tokio::test]
+    async fn test_discard_pending_tails_of_region_or_table() {
+        assert_eq!(7, call(vec![uint64(99), uint64(7)]).await.unwrap());
+        assert_eq!(49, call(vec![string("my_table"), uint64(7)]).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_discard_pending_tails_requires_two_arguments() {
+        let error = call(vec![uint64(99)]).await.unwrap_err();
+        assert!(error.to_string().contains("expect 2, have: 1"), "{error}");
     }
 }

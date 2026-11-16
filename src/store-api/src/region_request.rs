@@ -2005,13 +2005,11 @@ pub enum RegionTruncateRequest {
         /// so no guarantee that all data in the time range will be truncated.
         time_ranges: Vec<(Timestamp, Timestamp)>,
     },
-    /// Discards the WAL entries that node `node_id` wrote and the region still has to
-    /// recover, without replaying them. Returns the number of discarded ranges.
-    ///
-    /// Only a writable leader that is not staging accepts it. A region with no such
-    /// entries returns 0 and changes nothing, so a retry after a success returns 0.
+    /// Discards the region's pending WAL tails, the WAL ranges it still has to recover, that
+    /// datanode `node_id` wrote, without replaying them. Returns the number of discarded
+    /// tails; a region without such tails returns 0 and changes nothing.
     PendingTails {
-        /// The datanode that wrote the entries.
+        /// The datanode that wrote the tails.
         node_id: u64,
     },
 }

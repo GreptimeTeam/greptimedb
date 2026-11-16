@@ -1328,14 +1328,19 @@ pub(crate) enum IndexPublication {
     Stale(IndexPublicationStale),
 }
 
-/// Result of publishing the result of a pending tail replay to the manifest.
+/// Result of publishing an edit of the pending tails, a replay's result or a discard, to the
+/// manifest.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TailPublication {
-    /// The result was committed.
+    /// The edit was committed.
     Committed(ManifestVersion),
-    /// The region is altering or applying an edit, so the result waits.
+    /// The region is altering or applying an edit.
     Busy,
-    /// The region is no longer a writable leader with the replayed tails.
+    /// The caller does not commit over the region's last manifest update, whose result is
+    /// unknown, see [RegionManifestManager::has_unconfirmed_update].
+    Unconfirmed,
+    /// The region is no longer a writable leader, or its manifest no longer records the
+    /// expected tails.
     Stale,
 }
 
@@ -1759,12 +1764,14 @@ impl ManifestContext {
         })
     }
 
-    /// Publishes the result of a replay of the pending tails `replayed`, if the region is
-    /// still a writable leader whose manifest records exactly those tails.
+    /// Publishes an edit of the pending tails `expected`, a replay's result or a discard, if
+    /// the region is still a writable leader whose manifest records exactly those tails and
+    /// `can_commit` accepts the manifest under the same lock.
     pub(crate) async fn update_manifest_for_tails(
         &self,
-        replayed: &[PendingTail],
+        expected: &[PendingTail],
         action_list: RegionMetaActionList,
+        can_commit: impl FnOnce(&RegionManifestManager) -> bool,
     ) -> Result<TailPublication> {
         let manager = self.manifest_manager.write().await;
         match self.state.load() {
@@ -1774,8 +1781,11 @@ impl ManifestContext {
             }
             _ => return Ok(TailPublication::Stale),
         }
-        if manager.manifest().pending_tails != replayed {
+        if manager.manifest().pending_tails != expected {
             return Ok(TailPublication::Stale);
+        }
+        if !can_commit(&manager) {
+            return Ok(TailPublication::Unconfirmed);
         }
         let manifest_version = self.update_and_fire(manager, action_list, false).await?;
         Ok(TailPublication::Committed(manifest_version))

@@ -1819,10 +1819,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region,
                 edit,
                 tails,
+                discarded,
                 sender,
             } => {
-                self.handle_pending_tails_discarded(region_id, region, edit, tails, sender)
-                    .await
+                self.handle_pending_tails_discarded(
+                    region_id, region, edit, tails, discarded, sender,
+                )
+                .await
             }
         }
         // Completion handlers may return early after releasing their scheduler. Dispatch
