@@ -1952,6 +1952,110 @@ async fn test_postgres_copy_in_prom_write_held_body_quota() {
     server.shutdown().await.unwrap();
 }
 
+/// Existing table-less formats enforce the same receive budget as Prometheus.
+/// An oversized body is rejected before either format's decoder runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_buffered_receive_quota() {
+    let server = quota_test_server(
+        "pg_copy_buffered_receive_quota",
+        common_memory_manager::OnExhaustedPolicy::Fail,
+    )
+    .await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    for format in ["influxdb", "otlp"] {
+        let error = feed_copy_in(
+            &client,
+            &format!("COPY FROM STDIN WITH (FORMAT {format})"),
+            vec![Bytes::from(vec![b'x'; 65 * 1024])],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .as_db_error()
+                .unwrap()
+                .message()
+                .to_lowercase()
+                .contains("memory")
+        );
+        assert!(!client.simple_query("SELECT 1").await.unwrap().is_empty());
+    }
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_held_body_quota() {
+    use std::time::Duration;
+
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        Exemplar, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, exemplar, metric,
+        number_data_point,
+    };
+    use prost::Message;
+
+    init_default_ut_logging();
+    let server = quota_test_server(
+        "pg_copy_in_otlp_held_body",
+        common_memory_manager::OnExhaustedPolicy::Wait {
+            timeout: Duration::from_secs(30),
+        },
+    )
+    .await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "copy_otlp_held_body".into(),
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: vec![NumberDataPoint {
+                            time_unix_nano: 1_700_000_000_000_000_000,
+                            value: Some(number_data_point::Value::AsDouble(1.0)),
+                            attributes: vec![KeyValue {
+                                key: "host".into(),
+                                value: Some(AnyValue {
+                                    value: Some(any_value::Value::StringValue(
+                                        "x".repeat(13 * 1024),
+                                    )),
+                                }),
+                            }],
+                            exemplars: vec![Exemplar {
+                                time_unix_nano: 1_700_000_000_000_000_000,
+                                value: Some(exemplar::Value::AsDouble(1.0)),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = request.encode_to_vec();
+    let conversion = servers::otlp::metrics::to_grpc_insert_requests(
+        request,
+        &mut session::protocol_ctx::OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(conversion.exemplars.len(), 1);
+    let expansion =
+        servers::exemplar::estimated_row_bytes([conversion.exemplars.as_slice()]).unwrap();
+    assert!(body.len() < 64 * 1024);
+    assert!(expansion < 64 * 1024);
+    assert!(body.len() + expansion > 64 * 1024);
+
+    assert_copy_rejects_held_body(&client, "COPY FROM STDIN WITH (FORMAT otlp)", body).await;
+    server.shutdown().await.unwrap();
+}
+
 async fn assert_copy_rejects_held_body(client: &tokio_postgres::Client, sql: &str, body: Vec<u8>) {
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(5),
