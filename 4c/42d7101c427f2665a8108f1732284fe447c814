@@ -1,0 +1,14 @@
+src/mito2/src/compaction/multi_region/tests.rs
+  h_623774b620da8e 2522-2525
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4c42d7101c427f2665a8108f1732284fe447c814",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
