@@ -1557,6 +1557,30 @@ mod tests {
         }
     }
 
+    /// The engine-wide option is the outer gate: a request that asks for the native route is
+    /// still planned through the legacy path while `experimental_native_promql` keeps its
+    /// default. `plan_native_promql_with_query_options` always sets the request extension, so
+    /// passing `QueryOptions::default()` here is exactly that case.
+    #[tokio::test]
+    async fn test_default_engine_option_keeps_a_native_request_on_the_legacy_route() {
+        let plan = plan_native_promql_with_query_options(
+            crate::options::QueryOptions::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !plan.contains("FusedSeries"),
+            "a default deployment planned natively: {plan}"
+        );
+        assert!(
+            !plan.contains("RawSeriesSource"),
+            "a default deployment planned a raw-series source: {plan}"
+        );
+    }
+
     /// The fallback hint names a query option, so a value that is not a boolean is rejected instead
     /// of silently leaving the fallback off.
     #[tokio::test]
