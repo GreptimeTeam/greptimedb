@@ -359,20 +359,21 @@ pub(crate) fn check_column_metadata_invariants(
 }
 
 /// Builds a [`TableMeta`] from the provided [`ColumnMetadata`]s, preserving schema column order
-/// and primary key order from `table_meta`.
+/// from `table_meta` and taking the primary key order from the input tags.
 ///
 /// The input [`ColumnMetadata`]s determine which columns currently exist in region metadata:
 /// - Columns present in `table_meta` but missing from `column_metadata` are dropped.
 /// - Columns present in both retain the column order from `table_meta.schema`.
 /// - Columns present only in `column_metadata` are appended.
-/// - Primary key order is preserved from `table_meta.primary_key_indices`, and any newly added
-///   tag columns from `column_metadata` are appended to the primary key.
+/// - Primary key order follows the tag columns in `column_metadata`, which the reconcile paths
+///   feed in the regions' key order. `table_meta.primary_key_indices` only determines which
+///   columns must remain tags.
 ///
 /// Returns an error if:
 /// - Any column is missing in the `name_to_ids`(if `name_to_ids` is provided).
 /// - The column id in table metadata is not the same as the column id in the column metadata.(if `name_to_ids` is provided)
 /// - The table index is missing in the column metadata.
-/// - Any mapped primary key column is not [`SemanticType::Tag`].
+/// - Any primary key column of `table_meta` is not [`SemanticType::Tag`] in `column_metadata`.
 /// - The primary key or partition key columns are missing in the column metadata.
 pub(crate) fn build_table_meta_from_column_metadatas(
     table_id: TableId,
@@ -486,42 +487,34 @@ pub(crate) fn build_table_meta_from_column_metadatas(
         column_name_to_index.insert(col.column_schema.name.as_str(), idx);
     }
 
-    let mut seen_primary_key_indices = HashSet::with_capacity(ordered_column_metadatas.len());
-
-    // Preserves the order of primary keys as defined in the original table info.
-    for old_idx in &table_meta.primary_key_indices {
-        let Some(col_schema) = column_schemas.get(*old_idx) else {
+    // Takes the primary key order from the input tags, which the reconcile paths feed in the
+    // regions' key order; the column order still comes from `table_meta`.
+    for col in column_metadata.iter().filter(|c| c.semantic_type == SemanticType::Tag) {
+        let Some(&new_idx) = column_name_to_index.get(col.column_schema.name.as_str()) else {
             continue;
         };
-        let Some(&new_idx) = column_name_to_index.get(col_schema.name.as_str()) else {
-            continue;
-        };
-        let col_meta = ordered_column_metadatas[new_idx];
-        ensure!(
-            col_meta.semantic_type == SemanticType::Tag,
-            UnexpectedSnafu {
-                err_msg: format!(
-                    "Primary key column '{}' has invalid semantic type '{:?}', expected Tag, table: {}, table_id: {}",
-                    col_schema.name, col_meta.semantic_type, table_ref, table_id
-                ),
-            }
-        );
         primary_key_indices.push(new_idx);
-        seen_primary_key_indices.insert(new_idx);
     }
-    // Appends any newly added tag columns that were not part of the original primary keys.
-    for (idx, col) in ordered_column_metadatas.iter().enumerate() {
-        if col.semantic_type == SemanticType::Tag && !seen_primary_key_indices.contains(&idx) {
-            primary_key_indices.push(idx);
-            seen_primary_key_indices.insert(idx);
+
+    // Ensures every stored primary key column is still a tag in the region metadata.
+    for old_idx in &table_meta.primary_key_indices {
+        let col_schema = &column_schemas[*old_idx];
+        if let Some(col) = column_in_column_metadata.get(col_schema.name.as_str()) {
+            ensure!(
+                col.semantic_type == SemanticType::Tag,
+                UnexpectedSnafu {
+                    err_msg: format!(
+                        "Primary key column '{}' has invalid semantic type '{:?}', expected Tag, table: {}, table_id: {}",
+                        col_schema.name, col.semantic_type, table_ref, table_id
+                    ),
+                }
+            );
         }
     }
 
     // Preserves the order of partition keys as defined in the original table info.
     for old_idx in &table_meta.partition_key_indices {
-        let Some(col_schema) = column_schemas.get(*old_idx) else {
-            continue;
-        };
+        let col_schema = &column_schemas[*old_idx];
         let Some(&new_idx) = column_name_to_index.get(col_schema.name.as_str()) else {
             continue;
         };
@@ -1386,7 +1379,7 @@ mod tests {
         ];
 
         // 1. Consistent case where region columns match table schema order:
-        // Table meta must remain identical (including column order and PK indices [2, 1]).
+        // Column order comes from table_meta; the primary key order follows the input tags.
         let new_table_meta = build_table_meta_from_column_metadatas(
             table_id,
             table_ref,
@@ -1396,7 +1389,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(new_table_meta, table_meta);
+        assert_eq!(new_table_meta.primary_key_indices, vec![1, 2]);
+        assert_eq!(
+            new_table_meta.partition_key_indices,
+            table_meta.partition_key_indices
+        );
+        assert_eq!(new_table_meta.column_ids, table_meta.column_ids);
 
         // 2. Case where input column metadata has reordered tags (e.g. ts, b, a):
         // Table schema column order must still be preserved according to table_meta.schema.
@@ -1444,7 +1442,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ts", "a", "b", "c"]
         );
-        assert_eq!(new_table_meta.primary_key_indices, vec![2, 1]);
+        assert_eq!(new_table_meta.primary_key_indices, vec![1, 2]);
         assert_eq!(new_table_meta.value_indices, vec![0, 3]);
         assert_eq!(new_table_meta.column_ids, vec![1, 2, 3, 4]);
     }
