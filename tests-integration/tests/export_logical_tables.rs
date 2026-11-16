@@ -510,7 +510,7 @@ async fn database_export_rejects_invalid_members_before_output() {
     assert!(matches!(result,
         Err(frontend::error::Error::TableOperation {
             source: operator::error::Error::InvalidDatabaseExport { reason }, ..
-        }) if reason == "duplicate output name: foo"));
+        }) if reason == "duplicate output name: foo conflicts with Foo (foo.parquet)"));
     assert!(!case_path.exists());
     case_req.location = "s3://export-bucket/data/".into();
     case_req.connection.extend([
@@ -610,13 +610,90 @@ async fn database_export_rejects_invalid_members_before_output() {
         .await;
     assert!(matches!(result,
         Err(operator::error::Error::InvalidDatabaseExport { reason })
-            if reason == format!("duplicate output name: {duplicate_name}")));
+            if reason == format!("duplicate output name: {duplicate_name} conflicts with {duplicate_name} ({duplicate_name}.parquet)")));
     assert_eq!(
         std::fs::read_dir(destination.path().join("data"))
             .unwrap()
             .count(),
         0
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn database_export_rejects_unsafe_local_names_before_output() {
+    use servers::query_handler::sql::SqlQueryHandler;
+
+    let standalone = GreptimeDbStandaloneBuilder::new("unsafe_export_names")
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    let mut cases = vec![vec!["Events", "events"]];
+    if cfg!(windows) {
+        cases.extend(
+            [
+                "job:rate5m",
+                "job:http:rate5m",
+                "a:b",
+                ":leading",
+                "con",
+                "nul.part",
+                "com0",
+                "lpt9",
+            ]
+            .map(|name| vec![name]),
+        );
+    }
+    for (index, names) in cases.into_iter().enumerate() {
+        let schema = format!("unsafe_names_{index}");
+        sql(instance, &format!("CREATE DATABASE {schema}")).await;
+        for name in std::iter::once("aaa_valid").chain(names.iter().copied()) {
+            sql(
+                instance,
+                &format!("CREATE TABLE {schema}.\"{name}\" (ts TIMESTAMP TIME INDEX)"),
+            )
+            .await;
+            sql(
+                instance,
+                &format!("INSERT INTO {schema}.\"{name}\" VALUES (1)"),
+            )
+            .await;
+        }
+        for (format, experimental) in [
+            ("parquet", false),
+            ("csv", false),
+            ("json", false),
+            ("parquet", true),
+        ] {
+            for existing in [false, true] {
+                let path = destination
+                    .path()
+                    .join(format!("{index}-{format}-{experimental}-{existing}"));
+                let sentinel = path.join(format!("aaa_valid.{format}"));
+                if existing {
+                    std::fs::create_dir(&path).unwrap();
+                    std::fs::write(&sentinel, "preserved").unwrap();
+                }
+                let uri = url::Url::from_directory_path(&path).unwrap();
+                let statement = format!(
+                    "COPY DATABASE {schema} TO '{uri}' WITH (FORMAT='{format}', experimental_metric_export='{experimental}')"
+                );
+                let mut results = instance.do_query(&statement, QueryContext::arc()).await;
+                assert_eq!(results.len(), 1);
+                let error = results.remove(0).unwrap_err().to_string();
+                assert!(error.contains("Invalid database export"), "{error}");
+                for name in &names {
+                    assert!(error.contains(name), "{error}");
+                }
+                if existing {
+                    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "preserved");
+                    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 1);
+                } else {
+                    assert!(!path.exists());
+                }
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1416,6 +1493,92 @@ async fn export_http(instance: Arc<Instance>) -> (String, tokio::task::JoinHandl
     (addr, task)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn data_cli_propagates_copy_failures() {
+    let standalone = GreptimeDbStandaloneBuilder::new("cli_copy_failures")
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    for name in ["Events", "events", "aaa_valid"] {
+        sql(
+            instance,
+            &format!("CREATE TABLE \"{name}\" (ts TIMESTAMP TIME INDEX)"),
+        )
+        .await;
+        sql(instance, &format!("INSERT INTO \"{name}\" VALUES (1)")).await;
+    }
+    let (addr, server) = export_http(instance.clone()).await;
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    let legacy = destination.path().join("legacy");
+    let error = run_data_cli(&[
+        "export",
+        "--addr",
+        &addr,
+        "--database",
+        "greptime-public",
+        "--target",
+        "data",
+        "--output-dir",
+        legacy.to_str().unwrap(),
+        "--no-proxy",
+    ])
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate output name"),
+        "{error}"
+    );
+    let directory = legacy.join("greptime/public");
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+
+    let uri = url::Url::from_directory_path(destination.path().join("v2")).unwrap();
+    let error = run_data_cli(&[
+        "export-v2",
+        "create",
+        "--addr",
+        &addr,
+        "--schemas",
+        "public",
+        "--to",
+        uri.as_str(),
+        "--no-proxy",
+        "--progress",
+        "never",
+    ])
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate output name"),
+        "{error}"
+    );
+
+    std::fs::write(directory.join("aaa_valid.parquet"), "invalid parquet").unwrap();
+    std::fs::write(
+        directory.join("copy_from.sql"),
+        "COPY DATABASE public FROM '<PATH/TO/FILES>' WITH (FORMAT='parquet');",
+    )
+    .unwrap();
+    let error = run_data_cli(&[
+        "import",
+        "--addr",
+        &addr,
+        "--database",
+        "greptime-public",
+        "--target",
+        "data",
+        "--input-dir",
+        legacy.to_str().unwrap(),
+        "--no-proxy",
+    ])
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("parquet file metadata"),
+        "{error}"
+    );
+    server.abort();
+}
+
 #[derive(Default)]
 struct ImportRequests {
     batches: std::sync::atomic::AtomicUsize,
@@ -1609,6 +1772,23 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
     )
     .await;
     sql(instance, "INSERT INTO audit VALUES ('a',1,1),('z',NULL,3)").await;
+    if packed {
+        for (name, engine) in [
+            ("ordinary:record", ""),
+            (
+                "metric:record",
+                "ENGINE=metric WITH (on_physical_table='v2_a')",
+            ),
+        ] {
+            sql(instance, &format!("CREATE TABLE \"{name}\" (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX) {engine}")).await;
+            sql(
+                instance,
+                &format!("INSERT INTO \"{name}\" VALUES ('a',1,1),('z',2,3)"),
+            )
+            .await;
+            names.push(name.into());
+        }
+    }
     sql(instance, "CREATE VIEW dashboard AS SELECT * FROM audit").await;
     let special_name = "audit.dashboard";
     let quoted_special = special_name.replace('"', "\"\"");

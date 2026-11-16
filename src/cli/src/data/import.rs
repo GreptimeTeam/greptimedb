@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::ext::BoxedError;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{info, warn};
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
@@ -172,19 +172,11 @@ impl Import {
             })
         }
 
-        let success = futures::future::join_all(tasks)
-            .await
-            .into_iter()
-            .filter(|r| match r {
-                Ok(_) => true,
-                Err(e) => {
-                    error!(e; "import {filename} job failed");
-                    false
-                }
-            })
-            .count();
+        for result in futures::future::join_all(tasks).await {
+            result?;
+        }
         let elapsed = timer.elapsed();
-        info!("Success {success}/{db_count} `{filename}` jobs, cost: {elapsed:?}");
+        info!("Success {db_count}/{db_count} `{filename}` jobs, cost: {elapsed:?}");
 
         Ok(())
     }

@@ -290,11 +290,59 @@ fn normalize_untrusted_path(path: &Path) -> std::result::Result<PathBuf, String>
             Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
             Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
             Component::CurDir => {}
-            Component::Normal(value) => normalized.push(value),
+            Component::Normal(value) => {
+                #[cfg(windows)]
+                validate_windows_file_name(&value.to_string_lossy())?;
+                normalized.push(value);
+            }
             Component::ParentDir => return Err("'..' path components are not allowed".to_string()),
         }
     }
     Ok(normalized)
+}
+
+/// Rejects Windows aliases and names that cannot be used as ordinary local files.
+pub fn validate_windows_file_name(name: &str) -> std::result::Result<(), String> {
+    if name.chars().any(|c| c < ' ' || "<>:\"/\\|?*".contains(c)) || name.ends_with([' ', '.']) {
+        return Err(format!("invalid Windows file name: {name}"));
+    }
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    if matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM0"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "COM¹"
+            | "COM²"
+            | "COM³"
+            | "LPT0"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+            | "LPT¹"
+            | "LPT²"
+            | "LPT³"
+    ) {
+        return Err(format!("reserved Windows file name: {name}"));
+    }
+    Ok(())
 }
 
 /// Returns `(schema, Option<host>, path)`
@@ -486,6 +534,71 @@ mod tests {
         );
         assert_eq!(handle_windows_path("https://google.com"), None);
         assert_eq!(handle_windows_path("s3://bucket/path/to"), None);
+    }
+
+    #[test]
+    fn test_windows_file_names() {
+        for name in [
+            "job:rate5m.parquet",
+            "a:b.parquet",
+            ":leading.parquet",
+            "bad?.csv",
+            "trailing.",
+            "trailing ",
+        ] {
+            assert!(super::validate_windows_file_name(name).is_err(), "{name}");
+        }
+        for name in [
+            "con", "NUL", "aux", "prn", "com0", "COM9", "lpt0", "LPT9", "COM¹", "LPT³",
+        ] {
+            for suffix in ["", ".parquet", ".part.parquet"] {
+                let name = format!("{name}{suffix}");
+                assert!(super::validate_windows_file_name(&name).is_err(), "{name}");
+            }
+        }
+        for name in [
+            "events.parquet",
+            "job.rate5m.parquet",
+            "conifer.csv",
+            "com10.json",
+            "metric#b.parquet",
+        ] {
+            super::validate_windows_file_name(name).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_windows_paths_rejected_before_creating_backend() {
+        let dir = create_temp_dir("windows_copy_paths");
+        let access = LocalFileAccess::sandboxed(dir.path()).unwrap();
+        let sentinel = dir.path().join("b.parquet");
+        fs::write(&sentinel, "preserved").unwrap();
+        for filename in [
+            "job:rate5m.parquet",
+            "job:http:rate5m.parquet",
+            "a:b.parquet",
+            ":leading.parquet",
+            "con.parquet",
+            "nul.part.parquet",
+        ] {
+            let relative = format!("new/{filename}");
+            let absolute = format!("{}/new/{filename}", dir.path().display());
+            let file_url = format!(
+                "{}new/{filename}",
+                Url::from_directory_path(dir.path()).unwrap()
+            );
+            for location in [relative, absolute, file_url] {
+                let result =
+                    build_backend_for_write_with_path(&location, &HashMap::new(), &access).await;
+                assert!(
+                    matches!(result, Err(Error::LocalFileAccessDenied { .. })),
+                    "{location}"
+                );
+                assert!(!dir.path().join("new").exists());
+                assert_eq!(fs::read_to_string(&sentinel).unwrap(), "preserved");
+            }
+        }
     }
 
     #[cfg(windows)]

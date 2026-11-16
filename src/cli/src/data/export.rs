@@ -19,7 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_error::ext::BoxedError;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, info};
 use object_store::ObjectStore;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -548,9 +548,11 @@ impl Export {
             });
         }
 
-        let success = self.execute_tasks(tasks).await;
+        for result in futures::future::join_all(tasks).await {
+            result?;
+        }
         let elapsed = timer.elapsed();
-        info!("Success {success}/{db_count} jobs, costs: {elapsed:?}");
+        info!("Success {db_count}/{db_count} jobs, costs: {elapsed:?}");
 
         Ok(())
     }
@@ -569,23 +571,6 @@ impl Export {
             .await
             .context(OpenDalSnafu)
             .map(|_| ())
-    }
-
-    async fn execute_tasks(
-        &self,
-        tasks: Vec<impl std::future::Future<Output = Result<()>>>,
-    ) -> usize {
-        futures::future::join_all(tasks)
-            .await
-            .into_iter()
-            .filter(|r| match r {
-                Ok(_) => true,
-                Err(e) => {
-                    error!(e; "export job failed");
-                    false
-                }
-            })
-            .count()
     }
 }
 
