@@ -6393,16 +6393,13 @@ async fn a_constant_broadcast_prefix_exports_the_values_the_constant_computes() 
             let fields = batch.fields().unwrap();
             (0..batch.time().len())
                 .map(move |position| {
-                    fields
-                        .is_present(0, position)
-                        .unwrap()
-                        .then(|| {
-                            fields
-                                .field_values(0, StateComponent::Value)
-                                .unwrap()
-                                .expect("the count state carries a value component")
-                                .value(position)
-                        })
+                    fields.is_present(0, position).unwrap().then(|| {
+                        fields
+                            .field_values(0, StateComponent::Value)
+                            .unwrap()
+                            .expect("the count state carries a value component")
+                            .value(position)
+                    })
                 })
                 .collect::<Vec<_>>()
         })
