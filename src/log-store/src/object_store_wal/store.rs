@@ -53,7 +53,7 @@ use crate::metrics::{
     METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL, METRIC_OBJECT_STORE_WAL_CREATED_OBJECTS_TOTAL,
     METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL, METRIC_OBJECT_STORE_WAL_FAILED_DELETES_TOTAL,
     METRIC_OBJECT_STORE_WAL_FAILING, METRIC_OBJECT_STORE_WAL_INDEXED_BYTES,
-    METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS,
+    METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS, METRIC_OBJECT_STORE_WAL_IO_PERMISSION_UNAVAILABLE,
     METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL, METRIC_OBJECT_STORE_WAL_OBJECT_BYTES,
     METRIC_OBJECT_STORE_WAL_OBJECT_ENTRIES, METRIC_OBJECT_STORE_WAL_POISONED_TOTAL,
     METRIC_OBJECT_STORE_WAL_READ_SECONDS, METRIC_OBJECT_STORE_WAL_RECOVERED_OBJECTS_TOTAL,
@@ -448,7 +448,7 @@ impl ObjectStoreLogStore {
             stopped: stopped.clone(),
             io_permit: io_permit.clone(),
             io_blocked: false,
-            lease_expired: false,
+            io_permission_unavailable: false,
             command_rx,
             append_rx,
             ack_mode: config.ack_mode,
@@ -1580,8 +1580,8 @@ struct Actor {
     io_permit: IoPermitSlot,
     /// Work that must be retried on a timer tick after permission returns.
     io_blocked: bool,
-    /// Whether lease expiry has been reported, including for an idle store.
-    lease_expired: bool,
+    /// Whether this actor is counted as lacking I/O permission, even when idle.
+    io_permission_unavailable: bool,
     command_rx: mpsc::Receiver<Command>,
     append_rx: mpsc::Receiver<QueuedAppend>,
     ack_mode: AckMode,
@@ -1670,8 +1670,9 @@ impl Actor {
                     if !self.io_allowed() {
                         self.expire_io_permission();
                     } else {
-                        if std::mem::take(&mut self.lease_expired) {
-                            info!("Object store WAL I/O permission restored; {} sealed batches retained", self.sealed.len());
+                        if std::mem::take(&mut self.io_permission_unavailable) {
+                            METRIC_OBJECT_STORE_WAL_IO_PERMISSION_UNAVAILABLE.dec();
+                            info!("Object store WAL I/O permission available; {} sealed batches retained", self.sealed.len());
                         }
                         if !self.is_stopped() {
                             self.flush_open_batch();
@@ -3028,9 +3029,10 @@ impl Actor {
     /// unless stop began: then the backlog is dropped and `stop_error` reports it.
     /// Durable batches abandoned here must never be indexed by late completions.
     fn expire_io_permission(&mut self) {
-        if !std::mem::replace(&mut self.lease_expired, true) {
-            warn!(
-                "Object store WAL I/O permission expired; {} sealed batches, open batch empty: {}, {} pending releases",
+        if !std::mem::replace(&mut self.io_permission_unavailable, true) {
+            METRIC_OBJECT_STORE_WAL_IO_PERMISSION_UNAVAILABLE.inc();
+            info!(
+                "Object store WAL I/O permission unavailable; {} sealed batches, open batch empty: {}, {} pending releases",
                 self.sealed.len(),
                 self.open_batch.is_empty(),
                 self.pending_releases.len()
@@ -3085,6 +3087,9 @@ impl Drop for Actor {
         self.deleting.abandon_all();
         self.take_stalled();
         self.leave_failing("its actor exited");
+        if self.io_permission_unavailable {
+            METRIC_OBJECT_STORE_WAL_IO_PERMISSION_UNAVAILABLE.dec();
+        }
         #[cfg(test)]
         LIVE_ACTORS.fetch_sub(1, Ordering::SeqCst);
     }
@@ -3674,6 +3679,41 @@ mod tests {
     impl ObjectStoreWalIoPermit for TestIoPermit {
         fn allows_object_store_io(&self) -> bool {
             self.0.load(Ordering::Acquire)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_permission_metric_lifecycle() {
+        let _serialized = SERIALIZED.lock().await;
+        wait_until(|| LIVE_ACTORS.load(Ordering::SeqCst) == 0).await;
+        let unavailable = || METRIC_OBJECT_STORE_WAL_IO_PERMISSION_UNAVAILABLE.get();
+        assert_eq!(0, unavailable());
+        let config = config(MIN_FLUSH_INTERVAL, u64::MAX);
+        for config in [config.clone(), enqueued(config)] {
+            for stop in [false, true] {
+                let store = open(memory_store(), &config).await;
+                assert_eq!(0, unavailable());
+                // The first heartbeat has not granted permission yet. This
+                // counts an idle store too, without calling the lease expired.
+                let permit = Arc::new(TestIoPermit::default());
+                store.set_io_permit(permit.clone()).unwrap();
+                wait_until(|| unavailable() == 1).await;
+                for _ in 0..3 {
+                    assert!(store.seal_open_batch().await.is_err());
+                    assert_eq!(1, unavailable());
+                }
+                permit.0.store(true, Ordering::Release);
+                wait_until(|| unavailable() == 0).await;
+                // Expiry after a renewal has the same permission contract.
+                permit.0.store(false, Ordering::Release);
+                wait_until(|| unavailable() == 1).await;
+                if stop {
+                    store.stop().await.unwrap();
+                }
+                drop(store);
+                wait_until(|| LIVE_ACTORS.load(Ordering::SeqCst) == 0).await;
+                assert_eq!(0, unavailable());
+            }
         }
     }
 
