@@ -589,35 +589,32 @@ mod tests {
             Arc::new(Field::new("trace_id", DataType::Utf8, false)),
             Arc::new(StringArray::from(vec!["trace"; 4])) as ArrayRef,
         )]);
-        let columns = vec![
+        let columns: Vec<(&str, ArrayRef)> = vec![
             (
                 DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-                Arc::new(UInt32Array::from(vec![1, 1, 2, 2])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![1, 1, 2, 2])),
             ),
             (
                 DATA_SCHEMA_TSID_COLUMN_NAME,
-                Arc::new(UInt64Array::from(vec![u64::MAX, u64::MAX, u64::MAX, 2])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![u64::MAX, u64::MAX, u64::MAX, 2])),
             ),
             (
                 EXEMPLAR_METRIC_COLUMN,
-                Arc::new(StringArray::from(vec!["metric"; 4])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["metric"; 4])),
             ),
             (
                 "job",
-                Arc::new(StringArray::from(vec![Some(""), Some(""), Some(""), None])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some(""), Some(""), Some(""), None])),
             ),
             (
                 greptime_timestamp(),
-                Arc::new(TimestampNanosecondArray::from(vec![1; 4])) as ArrayRef,
+                Arc::new(TimestampNanosecondArray::from(vec![1; 4])),
             ),
-            (
-                greptime_value(),
-                Arc::new(Float64Array::from(vec![1.0; 4])) as ArrayRef,
-            ),
-            (greptime_exemplar_labels(), Arc::new(labels) as ArrayRef),
+            (greptime_value(), Arc::new(Float64Array::from(vec![1.0; 4]))),
+            (greptime_exemplar_labels(), Arc::new(labels)),
             (
                 "unrelated_tag",
-                Arc::new(StringArray::from(vec!["other"; 4])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["other"; 4])),
             ),
         ];
         let schema = Arc::new(Schema::new(
@@ -657,27 +654,28 @@ mod tests {
         let source_tags = BTreeSet::from(["job".into(), "sample_only_tag".into()]);
         let (projection, tags) = exemplar_projection(&info, Some(&source_tags));
         assert_eq!(tags, ["job"]);
+        assert_eq!(
+            projection,
+            [
+                EXEMPLAR_METRIC_COLUMN,
+                greptime_timestamp(),
+                greptime_value(),
+                greptime_exemplar_labels(),
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                "job",
+            ]
+            .map(column)
+        );
         let (full_projection, full_tags) = exemplar_projection(&info, None);
-        assert_eq!(full_projection.len(), 8);
+        let mut expected_full = projection.clone();
+        expected_full.push(column("unrelated_tag"));
+        assert_eq!(full_projection, expected_full);
         assert_eq!(full_tags, ["job", "unrelated_tag"]);
         let (no_tag_projection, no_tags) = exemplar_projection(&info, Some(&BTreeSet::new()));
-        assert_eq!(no_tag_projection.len(), 6);
+        assert_eq!(no_tag_projection, projection[..6]);
         assert!(no_tags.is_empty());
-        let indices = projection
-            .into_iter()
-            .map(|expr| {
-                let Expr::Column(column) = expr else {
-                    panic!("expected projected column")
-                };
-                batch
-                    .df_record_batch()
-                    .schema()
-                    .index_of(&column.name)
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(indices, [2, 4, 5, 6, 0, 1, 3]);
-        let projected = batch.try_project(&indices).unwrap();
+        let projected = batch.try_project(&[2, 4, 5, 6, 0, 1, 3]).unwrap();
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
         let mut reservation = MemoryConsumer::new("projection test").register(&pool);
         let mut full = Observations::new();
@@ -697,8 +695,14 @@ mod tests {
             assert!(narrow.keys().any(|labels| {
                 labels[DATA_SCHEMA_TABLE_ID_COLUMN_NAME] == table_id
                     && labels[DATA_SCHEMA_TSID_COLUMN_NAME] == u64::MAX.to_string()
+                    && labels.get("job").is_some_and(String::is_empty)
             }));
         }
+        assert!(narrow.keys().any(|labels| {
+            labels[DATA_SCHEMA_TABLE_ID_COLUMN_NAME] == "2"
+                && labels[DATA_SCHEMA_TSID_COLUMN_NAME] == "2"
+                && !labels.contains_key("job")
+        }));
         assert!(
             narrow
                 .keys()

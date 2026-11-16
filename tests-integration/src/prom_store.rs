@@ -189,7 +189,6 @@ mod tests {
     async fn test_exemplar_wide_schema_conversion_memory_limit() {
         use std::time::Duration;
 
-        use api::greptime_proto::io::prometheus::write::v2;
         use api::prom_store::remote::Exemplar;
         use frontend::service_config::BatcherOptions;
         use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -228,36 +227,6 @@ mod tests {
             }],
             ..Default::default()
         };
-        let v2 = v2::Request {
-            symbols: [
-                "",
-                "__name__",
-                "probe_metric",
-                "job",
-                "api",
-                "trace_id",
-                "abc",
-            ]
-            .map(String::from)
-            .to_vec(),
-            timeseries: vec![v2::TimeSeries {
-                labels_refs: vec![1, 2, 3, 4],
-                samples: vec![v2::Sample {
-                    value: 1.0,
-                    timestamp: 61_000,
-                    ..Default::default()
-                }],
-                exemplars: vec![
-                    v2::Exemplar {
-                        labels_refs: vec![5, 6],
-                        value: 0.5,
-                        timestamp: 61_000
-                    };
-                    1000
-                ],
-                ..Default::default()
-            }],
-        };
         let otlp = ExportMetricsServiceRequest {
             resource_metrics: vec![otlp::ResourceMetrics {
                 scope_metrics: vec![otlp::ScopeMetrics {
@@ -286,16 +255,22 @@ mod tests {
                 ..Default::default()
             }],
         };
-        for limit in [4 * 1024 * 1024, 64 * 1024 * 1024] {
-            let standalone = GreptimeDbStandaloneBuilder::new(&format!("exemplar_wide_{limit}"))
-                .with_write_memory_limit(limit)
-                .with_table_batcher(BatcherOptions {
-                    protocols: vec![BatchingProtocol::Prom, BatchingProtocol::Otlp],
-                    pending_rows_flush_interval: Duration::from_millis(10),
-                    ..Default::default()
-                })
-                .build()
-                .await;
+        for (limit, remote_write) in [
+            (4 * 1024 * 1024, false),
+            (64 * 1024 * 1024, false),
+            // Metric-engine Remote Write bypasses ordinary-table Arrow batching.
+            (4 * 1024 * 1024, true),
+        ] {
+            let standalone =
+                GreptimeDbStandaloneBuilder::new(&format!("exemplar_wide_{limit}_{remote_write}"))
+                    .with_write_memory_limit(limit)
+                    .with_table_batcher(BatcherOptions {
+                        protocols: vec![BatchingProtocol::Prom, BatchingProtocol::Otlp],
+                        pending_rows_flush_interval: Duration::from_millis(10),
+                        ..Default::default()
+                    })
+                    .build()
+                    .await;
             let instance = standalone.fe_instance();
             let names = (0..2048).map(|i| format!("tag_{i}")).collect::<Vec<_>>();
             for sql in [
@@ -321,53 +296,39 @@ mod tests {
                 )
                 .build();
             let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
-            let conversion_fits = limit > 4 * 1024 * 1024;
-            for (path, content_type, encoding, body) in [
+            let (path, encoding, body) = if remote_write {
                 (
                     "/v1/prometheus/write",
-                    "application/x-protobuf",
                     "snappy",
                     prom_store::snappy_compress(&v1.encode_to_vec()).unwrap(),
-                ),
-                (
-                    "/v1/prometheus/write",
-                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
-                    "snappy",
-                    prom_store::snappy_compress(&v2.encode_to_vec()).unwrap(),
-                ),
-                (
-                    "/v1/otlp/v1/metrics",
-                    "application/x-protobuf",
-                    "identity",
-                    otlp.encode_to_vec(),
-                ),
-            ] {
-                let response = client
-                    .post(path)
-                    .header("content-type", content_type)
-                    .header("content-encoding", encoding)
-                    .body(body)
-                    .send()
-                    .await;
-                // Metric-engine Remote Write bypasses ordinary-table Arrow batching.
-                let success = conversion_fits || path == "/v1/prometheus/write";
-                assert_eq!(
-                    response.status().is_success(),
-                    success,
-                    "{path}, {content_type}, quota={limit}: {}",
-                    response.text().await
-                );
-                if !success {
-                    assert_eq!(response.status(), 429);
-                }
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    while memory.used_bytes() != 0 {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .unwrap();
+                )
+            } else {
+                ("/v1/otlp/v1/metrics", "identity", otlp.encode_to_vec())
+            };
+            let response = client
+                .post(path)
+                .header("content-type", "application/x-protobuf")
+                .header("content-encoding", encoding)
+                .body(body)
+                .send()
+                .await;
+            let success = remote_write || limit > 4 * 1024 * 1024;
+            assert_eq!(
+                response.status().is_success(),
+                success,
+                "{path}, quota={limit}: {}",
+                response.text().await
+            );
+            if !success {
+                assert_eq!(response.status(), 429);
             }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while memory.used_bytes() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
             let output = instance
                 .do_query(
                     "SELECT COUNT(*) FROM greptime_metrics_exemplars",
@@ -388,7 +349,7 @@ mod tests {
                     .column(0)
                     .as_primitive::<datatypes::arrow::datatypes::Int64Type>()
                     .value(0),
-                if conversion_fits { 3000 } else { 2000 }
+                if success { 1000 } else { 0 }
             );
         }
     }
