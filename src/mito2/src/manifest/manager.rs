@@ -442,7 +442,12 @@ impl RegionManifestManager {
         Ok(Some(manager))
     }
 
-    /// Stops the manager.
+    /// Stops the manager. A stopped manager takes no update and starts no checkpoint, but a
+    /// checkpoint already running keeps writing the manifest directory until it ends.
+    ///
+    /// A caller that hands the storage to another instance waits for that checkpoint with
+    /// [Self::pending_checkpoint_done] after the stop, as engine stop and reload do. Close and
+    /// drop, which run in the region worker loop, deliberately do not.
     pub async fn stop(&mut self) {
         self.stopped = true;
     }

@@ -1535,7 +1535,11 @@ impl ManifestContext {
     /// reentrant. Under the lock, use [RegionManifestManager::wait_for_pending_checkpoint]
     /// instead. The wait itself holds no lock.
     pub(crate) async fn wait_for_checkpoint_after_stop(&self) {
-        let done = self.manifest_manager.read().await.pending_checkpoint_done();
+        let done = {
+            let manager = self.manifest_manager.read().await;
+            debug_assert!(manager.is_stopped());
+            manager.pending_checkpoint_done()
+        };
         done.await;
     }
 
