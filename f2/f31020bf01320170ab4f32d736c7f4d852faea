@@ -1,0 +1,21 @@
+docs/rfcs/2026-09-06-object-store-wal.md
+  s_b7d7dd5280bd00::t_cdda2eb499300d 161
+src/log-store/src/object_store_wal/store.rs
+  s_b7d7dd5280bd00::t_b0e301a0c0d199 433-434,1516-1519,1772-1777,1780-1781,2162-2165,2231-2234,9422-9468
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f2f31020bf01320170ab4f32d736c7f4d852faea",
+  "prompts": {},
+  "sessions": {
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
