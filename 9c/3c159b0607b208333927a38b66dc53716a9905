@@ -1,0 +1,19 @@
+src/log-store/src/object_store_wal/store.rs
+  s_b7d7dd5280bd00::t_cbc546ab39e306 9582-9597,9600
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9c3c159b0607b208333927a38b66dc53716a9905",
+  "prompts": {},
+  "sessions": {
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
