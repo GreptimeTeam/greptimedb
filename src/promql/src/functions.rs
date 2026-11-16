@@ -18,6 +18,7 @@ mod deriv;
 mod double_exponential_smoothing;
 mod edge_count;
 mod extrapolate_rate;
+mod go_time;
 mod idelta;
 mod ieee_float;
 mod native_histogram;
@@ -48,6 +49,7 @@ use datatypes::arrow::datatypes::{DataType, Int64Type};
 pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
+pub use go_time::{DateUnit, GoDatePart};
 pub use idelta::IDelta;
 pub use ieee_float::{IeeeComparison, IeeeSqrt};
 pub use native_histogram::{
@@ -244,6 +246,10 @@ pub fn register_promql_functions(session_state: &mut SessionState) {
         let _ = session_state.register_udf(Arc::new(udf));
     }
     let _ = session_state.register_udf(Arc::new(IeeeSqrt::scalar_udf()));
+
+    for udf in GoDatePart::all() {
+        let _ = session_state.register_udf(Arc::new(udf));
+    }
 
     let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
     let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));

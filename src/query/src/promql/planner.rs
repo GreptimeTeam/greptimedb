@@ -44,7 +44,7 @@ use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::functions_aggregate::variance::var_pop_udaf;
 use datafusion::functions_window::row_number::RowNumber;
-use datafusion::logical_expr::expr::{Alias, Case, ScalarFunction, TryCast, WindowFunction};
+use datafusion::logical_expr::expr::{Alias, Case, ScalarFunction, WindowFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     BinaryExpr, Cast, EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
@@ -82,6 +82,7 @@ use promql::functions::{
     PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime, Rate, Resets, Round,
     StddevOverTime, StdvarOverTime, SumOverTime, UniqueMatchGroup, quantile_udaf,
 };
+use promql::functions::{DateUnit, GoDatePart};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
@@ -3832,10 +3833,28 @@ impl PromPlanner {
                     "days_in_month" => None,
                     _ => unreachable!("not a date function: {}", func.name),
                 };
+                // The unit for the sample-value path, which uses the Go-date UDF
+                // instead of `date_part` (Chrono drops finite values past ~year
+                // 262143, e.g. 1e13, and its Unix epoch mapping for non-finite
+                // values disagrees with Prometheus).
+                let go_date_unit = match func.name {
+                    "minute" => DateUnit::Minute,
+                    "hour" => DateUnit::Hour,
+                    "month" => DateUnit::Month,
+                    "year" => DateUnit::Year,
+                    "day_of_month" => DateUnit::DayOfMonth,
+                    "day_of_week" => DateUnit::DayOfWeek,
+                    "day_of_year" => DateUnit::DayOfYear,
+                    "days_in_month" => DateUnit::DaysInMonth,
+                    _ => unreachable!("not a date function: {}", func.name),
+                };
                 if has_input_arg {
                     // With an argument, Prometheus reads each sample value as a Unix
                     // timestamp in seconds (truncated towards zero, UTC), not as the time
-                    // index of the sample.
+                    // index of the sample. Compute the calendar fields from the raw
+                    // Float64 value with Go's absolute-date arithmetic so finite values
+                    // beyond Chrono's range are kept and non-finite values match
+                    // Prometheus (saturating cast, NaN -> 0).
                     for value in &self.ctx.field_columns {
                         if Self::field_column_is_native_histogram(input_schema, value) {
                             // Prometheus skips native histogram samples. An alternative
@@ -3848,22 +3867,18 @@ impl PromPlanner {
                             }
                             continue;
                         }
-                        let timestamp_expr = Self::sample_value_timestamp_expr(value);
-                        let output = match date_part {
-                            Some(date_part) => DfExpr::ScalarFunction(ScalarFunction {
-                                func: datafusion_functions::datetime::date_part(),
-                                args: vec![date_part.lit(), timestamp_expr],
-                            }),
-                            None => Self::days_in_month_expr(timestamp_expr),
-                        };
-                        // Name the column after the function call: the timestamp
-                        // conversion above would otherwise become the column name of
-                        // the instant-vector result.
+                        let output = DfExpr::ScalarFunction(ScalarFunction {
+                            func: Arc::new(GoDatePart::scalar_udf(go_date_unit)),
+                            args: vec![DfExpr::Column(Column::from_name(value))],
+                        });
+                        // Name the column after the function call so the instant-vector
+                        // result keeps the same column name as before.
                         exprs.push(output.alias(format!("{}({value})", func.name)));
                     }
                 } else {
                     // Without an argument, they read the evaluation instant, which the
-                    // time index of the input table carries.
+                    // time index of the input table carries. The time index is a proper
+                    // timestamp well inside Chrono's range, so `date_part` is fine here.
                     exprs.push(match date_part {
                         Some(date_part) => self.date_part_on_time_index(date_part)?,
                         None => {
@@ -6534,36 +6549,6 @@ impl PromPlanner {
             args: vec![date_part.lit(), input_expr],
         });
         Ok(fn_expr)
-    }
-
-    /// Reads a sample value as a Unix timestamp in seconds, truncated towards zero,
-    /// like `int64(value)` in Prometheus' date functions.
-    ///
-    /// No portable Prometheus result exists for NaN, the infinities and values beyond
-    /// the `int64` range: Go leaves the conversion implementation-defined
-    /// (`golang/go#76264`, unimplemented) and `time.Unix` wraps saturated values.
-    /// Those samples are harmonized on the Unix epoch — what `int64(NaN)` yields on
-    /// arm64 today — instead of failing the whole query or dropping the row.
-    /// A NULL value is not a sample and stays NULL.
-    fn sample_value_timestamp_expr(value: &str) -> DfExpr {
-        let column = DfExpr::Column(Column::from_name(value));
-        DfExpr::Case(Case::new(
-            None,
-            vec![(
-                Box::new(DfExpr::IsNotNull(Box::new(column.clone()))),
-                Box::new(DfExpr::ScalarFunction(ScalarFunction {
-                    func: coalesce(),
-                    args: vec![
-                        DfExpr::TryCast(TryCast::new(
-                            Box::new(column),
-                            ArrowDataType::Timestamp(ArrowTimeUnit::Second, None),
-                        )),
-                        DfExpr::Literal(ScalarValue::TimestampSecond(Some(0), None), None),
-                    ],
-                })),
-            )],
-            None,
-        ))
     }
 
     /// Generate an expr that yields the number of days in the month the timestamp
