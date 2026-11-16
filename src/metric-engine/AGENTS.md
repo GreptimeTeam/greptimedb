@@ -48,6 +48,9 @@ data region.
 is rewritten to add a `__table_id == <logical_id>` filter and forwarded to the
 Mito2 data region. Queries against a physical region pass straight through.
 
+Sketch `stat`/`query` requests support physical regions only and forward through
+`utils::to_data_region_id`; logical-region sketch reads are unsupported.
+
 ## Public surface
 
 - Entry: `MetricEngine` in `src/metric-engine/src/engine.rs`, built via `try_new(mito, config)`.

@@ -514,6 +514,10 @@ impl RegionEngine for MetricEngine {
         }
     }
 
+    fn sketch_reader(&self) -> Option<&dyn store_api::sketch::SketchReader> {
+        self.inner.mito.sketch_reader().map(|_| self as _)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use common_telemetry::{debug, error, tracing};
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{self, Expr, Operator};
@@ -22,15 +24,59 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::region_engine::{RegionEngine, RegionScannerRef};
+use store_api::sketch::{SketchReader, SketchRequest, SketchResponse};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
-use crate::engine::MetricEngineInner;
+use crate::engine::{MetricEngine, MetricEngineInner};
 use crate::error::{
     InvalidMetadataSnafu, InvalidRequestSnafu, LogicalRegionNotFoundSnafu, MitoReadOperationSnafu,
     Result,
 };
 use crate::metrics::MITO_OPERATION_ELAPSED;
 use crate::utils;
+
+#[async_trait::async_trait]
+impl SketchReader for MetricEngine {
+    async fn stat(
+        &self,
+        region_id: RegionId,
+        request: SketchRequest,
+    ) -> std::result::Result<SketchResponse, BoxedError> {
+        self.physical_sketch_reader(region_id)?
+            .stat(utils::to_data_region_id(region_id), request)
+            .await
+    }
+
+    async fn query(
+        &self,
+        region_id: RegionId,
+        request: SketchRequest,
+    ) -> std::result::Result<SketchResponse, BoxedError> {
+        self.physical_sketch_reader(region_id)?
+            .query(utils::to_data_region_id(region_id), request)
+            .await
+    }
+}
+
+impl MetricEngine {
+    fn physical_sketch_reader(
+        &self,
+        region_id: RegionId,
+    ) -> std::result::Result<&dyn SketchReader, BoxedError> {
+        if !self.inner.is_physical_region(region_id) {
+            return Err(BoxedError::new(PlainError::new(
+                "sketch reads require a physical metric region".to_string(),
+                StatusCode::Unsupported,
+            )));
+        }
+        self.inner.mito.sketch_reader().ok_or_else(|| {
+            BoxedError::new(PlainError::new(
+                "sketch reader is unavailable".to_string(),
+                StatusCode::Unsupported,
+            ))
+        })
+    }
+}
 
 impl MetricEngineInner {
     #[tracing::instrument(skip_all)]
@@ -392,6 +438,89 @@ mod test {
         .unwrap()
         .into_iter()
         .sum()
+    }
+
+    #[tokio::test]
+    async fn test_sketch_reads_forward_only_physical_regions() {
+        use common_base::Plugins;
+        use common_time::Timestamp;
+        use mito2::sst::index::sketch_reader::{
+            SketchReadContext, SketchReadHandler, SketchReadHandlerRef,
+        };
+        use store_api::sketch::{SketchQuery, SketchTimeRange};
+
+        #[derive(Debug)]
+        struct Handler;
+
+        #[async_trait::async_trait]
+        impl SketchReadHandler for Handler {
+            async fn stat(
+                &self,
+                context: &SketchReadContext<'_>,
+                _: &SketchRequest,
+            ) -> std::result::Result<SketchResponse, BoxedError> {
+                assert_eq!(
+                    context.metadata.region_id,
+                    utils::to_data_region_id(RegionId::new(1, 2))
+                );
+                Ok(SketchResponse {
+                    results: vec![],
+                    sampling_info: None,
+                })
+            }
+
+            async fn query(
+                &self,
+                context: &SketchReadContext<'_>,
+                request: &SketchRequest,
+            ) -> std::result::Result<SketchResponse, BoxedError> {
+                self.stat(context, request).await
+            }
+        }
+
+        let mut mito_env = mito2::test_util::TestEnv::new().await;
+        let plugins = Plugins::new();
+        plugins.insert::<SketchReadHandlerRef>(Arc::new(Handler));
+        let mito = mito_env
+            .create_engine_with_plugins(MitoConfig::default(), plugins)
+            .await;
+        let env = TestEnv::with_mito_engine(mito_env, mito);
+        env.init_metric_region().await;
+        let request = SketchRequest {
+            time_range: SketchTimeRange {
+                start: Timestamp::new_millisecond(0),
+                end: Timestamp::new_millisecond(1),
+            },
+            columns: vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME.into()],
+            queries: vec![SketchQuery::DistinctCount],
+            sampling: None,
+        };
+        let engine = env.metric();
+        let reader = RegionEngine::sketch_reader(&engine).unwrap();
+        assert!(
+            reader
+                .stat(env.default_physical_region_id(), request.clone())
+                .await
+                .unwrap()
+                .results
+                .is_empty()
+        );
+        assert!(
+            reader
+                .query(env.default_physical_region_id(), request.clone())
+                .await
+                .unwrap()
+                .results
+                .is_empty()
+        );
+        assert_eq!(
+            reader
+                .stat(env.default_logical_region_id(), request)
+                .await
+                .unwrap_err()
+                .status_code(),
+            StatusCode::Unsupported
+        );
     }
 
     #[tokio::test]
