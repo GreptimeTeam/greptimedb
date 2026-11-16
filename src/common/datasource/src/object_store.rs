@@ -303,6 +303,11 @@ fn normalize_untrusted_path(path: &Path) -> std::result::Result<PathBuf, String>
 
 /// Rejects Windows aliases and names that cannot be used as ordinary local files.
 pub fn validate_windows_file_name(name: &str) -> std::result::Result<(), String> {
+    if name.encode_utf16().count() > 255 {
+        return Err(format!(
+            "Windows file name exceeds 255 UTF-16 units: {name}"
+        ));
+    }
     if name.chars().any(|c| c < ' ' || "<>:\"/\\|?*".contains(c)) || name.ends_with([' ', '.']) {
         return Err(format!("invalid Windows file name: {name}"));
     }
@@ -538,6 +543,12 @@ mod tests {
 
     #[test]
     fn test_windows_file_names() {
+        super::validate_windows_file_name(&format!("{}.parquet", "z".repeat(247))).unwrap();
+        assert!(
+            super::validate_windows_file_name(&format!("{}.parquet", "z".repeat(248))).is_err()
+        );
+        super::validate_windows_file_name(&format!("{}a", "😀".repeat(127))).unwrap();
+        assert!(super::validate_windows_file_name(&"😀".repeat(128)).is_err());
         for name in [
             "job:rate5m.parquet",
             "a:b.parquet",

@@ -628,6 +628,7 @@ async fn database_export_rejects_unsafe_local_names_before_output() {
         .await;
     let instance = standalone.fe_instance();
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    let overlong_name = "z".repeat(252);
     let mut cases = vec![vec!["Events", "events"]];
     if cfg!(windows) {
         cases.extend(
@@ -643,6 +644,7 @@ async fn database_export_rejects_unsafe_local_names_before_output() {
             ]
             .map(|name| vec![name]),
         );
+        cases.push(vec![&overlong_name]);
     }
     for (index, names) in cases.into_iter().enumerate() {
         let schema = format!("unsafe_names_{index}");
@@ -705,6 +707,7 @@ async fn database_export_preserves_valid_table_names() {
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     sql(instance, "CREATE TABLE names_physical (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE=metric WITH (physical_metric_table='')").await;
     let mut names = vec!["ordinary#b".to_string(), "metric#b".to_string()];
+    names.push("z".repeat(247));
     if !cfg!(windows) {
         names.extend(["ordinary:b".to_string(), "metric:b".to_string()]);
     }
@@ -1773,7 +1776,9 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
     .await;
     sql(instance, "INSERT INTO audit VALUES ('a',1,1),('z',NULL,3)").await;
     if packed {
+        let overlong_name = "z".repeat(252);
         for (name, engine) in [
+            (overlong_name.as_str(), ""),
             ("ordinary:record", ""),
             (
                 "metric:record",

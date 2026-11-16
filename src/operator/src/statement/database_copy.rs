@@ -279,7 +279,15 @@ mod tests {
                 if reason.contains("Events") && reason.contains("events") && reason.contains("events.parquet"))
             );
         }
-        for name in ["job:rate5m", "a:b", ":leading", "con", "nul.part"] {
+        let overlong_name = "z".repeat(252);
+        for name in [
+            "job:rate5m",
+            "a:b",
+            ":leading",
+            "con",
+            "nul.part",
+            &overlong_name,
+        ] {
             let local = prepare_database_export_files("backup/", [name.into()], ".parquet", false);
             assert_eq!(local.is_err(), cfg!(windows), "{name}");
             prepare_database_export_files("backup/", [name.into()], ".parquet", true).unwrap();
@@ -291,12 +299,13 @@ mod tests {
                 "events".into(),
                 "job:rate5m".into(),
                 "con".into(),
+                overlong_name,
             ],
             ".parquet",
             false,
         )
         .unwrap();
-        assert_eq!(remote.len(), 4);
+        assert_eq!(remote.len(), 5);
     }
 
     #[test]
