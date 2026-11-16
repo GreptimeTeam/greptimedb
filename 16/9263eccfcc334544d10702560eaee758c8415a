@@ -1,0 +1,113 @@
+Cargo.lock
+  s_b7d7dd5280bd00::t_698cd58709d8c5 2817,3775,3827,3851,3874,3900,3910,3946,3970,3993,4016,4048,4053,4078,4102,4113,4144,4164,4175,4199,4214,4230,4239,4249,4297,4320,4334,4351,4370,4407,4433,4443,4453,4468,4482,4501
+Cargo.toml
+  s_b7d7dd5280bd00::t_b6afc8a6a9d6a0 375-390
+src/common/function/src/permission.rs
+  s_b7d7dd5280bd00::t_58ae6921bcc5fa 30-40
+src/common/function/src/system/database.rs
+  s_b7d7dd5280bd00::t_b9e5a2d92d7fab 62-64
+src/common/function/src/system/pg_catalog.rs
+  s_b7d7dd5280bd00::t_76d9014e5dc186 93-95,163-164,168-171
+src/common/query/Cargo.toml
+  s_b7d7dd5280bd00::t_c670a420ec818e 8-10,27,31,43
+src/common/query/src/error.rs
+  s_b7d7dd5280bd00::t_58e0a8f5721c8c 221-241,274-276,421-429
+src/common/query/src/request.rs
+  s_b7d7dd5280bd00::t_4c3f1e2e6a0357 17-18,24,26-27,30-31,41-42,53-55,61-92,114-185,190,192-199,201-205,216-231,265-399,433-441,446,450-458,464,466-477,479-485,489-515,518-546,549-570,572-694,730-801,908-943,950,952,1100-1111,1113-1116,1128-1138,1141-1339,1341,1345,1362-1367,1376-1380,1382-1396,1398-1402,1476-1572,1574-1669,1676-2539
+src/common/query/src/request/remote_membership_test_support.rs
+  s_b7d7dd5280bd00::t_117d50f453ed07 1-194
+src/frontend/AGENTS.md
+  s_b7d7dd5280bd00::t_580f8b3e3999eb 30,47-49
+src/frontend/src/instance.rs
+  s_b7d7dd5280bd00::t_e1569b07f72c2f 33,400-409,575-576,798-800,855-863,1020-1021,3505-3927
+src/frontend/src/instance/schema_selection.rs
+  s_b7d7dd5280bd00::t_3762067a96cdb6 1-218
+src/metric-engine/src/data_region.rs
+  s_b7d7dd5280bd00::t_8751d251f64386 15-16,31,49,60-61,65-69,83,85-89,99,105-108,114,121-147,163,231,302-309,396-513
+src/metric-engine/src/engine.rs
+  s_b7d7dd5280bd00::t_2630ac8b923213 28,62-63,611,650-685
+src/metric-engine/src/engine/alter.rs
+  s_b7d7dd5280bd00::t_59b45e828add1d 32-33,166,175-178,182-196,198-207,218-222,301-303,312,314,464-568
+src/metric-engine/src/engine/create.rs
+  s_b7d7dd5280bd00::t_e910786e7282da 48-50,292,304-321,323-332,346
+src/metric-engine/src/engine/state.rs
+  s_b7d7dd5280bd00::t_4d8e6e67815d2f 46-54,79,83-87
+src/metric-engine/src/error.rs
+  s_b7d7dd5280bd00::t_3ec6d4ef16adc1 258-269,466-469
+src/mito2/AGENTS.md
+  s_b7d7dd5280bd00::t_4d439f293fc305 191-193
+src/mito2/src/compaction/scheduler.rs
+  s_b7d7dd5280bd00::t_eee019521ff766 519-535
+src/mito2/src/engine/apply_staging_manifest_test.rs
+  s_b7d7dd5280bd00::t_1635b6a240f872 1530-1539
+src/mito2/src/engine/close_test.rs
+  s_b7d7dd5280bd00::t_7de160298366af 280-413
+src/mito2/src/engine/compaction_test.rs
+  s_b7d7dd5280bd00::t_2c8ce95bb7cf20 2690-2709
+src/mito2/src/engine/edit_region_test.rs
+  s_b7d7dd5280bd00::t_9d028e99097be8 1274,1324-1834
+src/mito2/src/engine/object_store_wal_test.rs
+  s_b7d7dd5280bd00::t_be18cd17105292 880-887,889-902,905,1212-1215,1240-1241,1258-1259,1435-1442,1444-1457,1460
+src/mito2/src/engine/staging_test.rs
+  s_b7d7dd5280bd00::t_15f4fcffba0e96 752-759,1555,1562-1574,1912-1919,2009,2028-2032,2376-2383,2591-2741
+src/mito2/src/flush.rs
+  s_b7d7dd5280bd00::t_bdbbd99d907d99 1319,1325,1517-1518,1523,1579,1586
+src/mito2/src/request.rs
+  s_b7d7dd5280bd00::t_58e745fb23f8c9 1175-1212
+src/mito2/src/worker.rs
+  s_b7d7dd5280bd00::t_cae057dc0bb7ae 39,50,795,1096-1178,1248-1249,1523,1570-1578,1583-1584,1586,1588-1593,1595-1654,1656,1687,1767-1771
+src/mito2/src/worker/handle_close.rs
+  s_b7d7dd5280bd00::t_427e25ebbdefe1 24,56,62,71,82-84,89,91-93,133,150-167
+src/mito2/src/worker/handle_drop.rs
+  s_b7d7dd5280bd00::t_551d551604d217 229
+src/mito2/src/worker/handle_flush.rs
+  s_b7d7dd5280bd00::t_109b184378c0c3 590-591
+src/mito2/src/worker/handle_manifest.rs
+  s_b7d7dd5280bd00::t_a5b9b025d7402e 34-35,48,50,55,90,133-136,170-174,177-181,316-348,357-364,395,399,513,607-608,617-714,717,724-726,732-744,748,752,756,759-760,1170-1209
+src/mito2/src/worker/handle_reload.rs
+  s_b7d7dd5280bd00::t_6e512f799be5d5 118
+src/operator/src/expr_helper.rs
+  s_b7d7dd5280bd00::t_363388595930c1 839-846,1141-1147,1171-1177,1478-1510
+src/operator/src/statement.rs
+  s_b7d7dd5280bd00::t_efa2bcff369ff6 525,527-529,534-566,634-635,637
+src/query/src/dist_plan/dyn_filter_bridge.rs
+  s_b7d7dd5280bd00::t_6217848c9e0757 21,28,38,85,131-149,154-160,167,345-353,371-388,502-503,508,608-634,732-737,758,769,771-802,965-1046
+src/query/src/dist_plan/remote_dyn_filter_receiver.rs
+  s_b7d7dd5280bd00::t_a17b9d12fb0757 241-246,251-255,331-444
+src/query/src/dist_plan/remote_dyn_filter_registry.rs
+  s_b7d7dd5280bd00::t_77368ea0929427 21-24,28,387-400,425-427,442-535,920-923,1104-1139,1468-1606,1860-1928
+src/servers/src/mysql/handler.rs
+  s_b7d7dd5280bd00::t_e18ac2cf74f53d 154-271,553-565,569-582,584-586,695-700,782-790,800-818,823-825,1101,1146-1153,1167-1257
+src/servers/src/mysql/writer.rs
+  s_b7d7dd5280bd00::t_27176b67c4392c 154-170,174-178
+src/servers/src/postgres/auth_handler.rs
+  s_b7d7dd5280bd00::t_4599bd13b206de 27,92,139-145,243-245,304-315,336-338,403-405,456,458-459,461-463,465-466,468-476,478-481,483-486
+src/servers/tests/mod.rs
+  s_b7d7dd5280bd00::t_9950fdd2e8bc3f 236,241-242
+src/servers/tests/mysql/mysql_server_test.rs
+  s_b7d7dd5280bd00::t_6121d35c3afe79 281-287,300-308,480,598-614
+src/servers/tests/postgres/mod.rs
+  s_b7d7dd5280bd00::t_89c126ac8b1ae3 349-474
+src/session/src/lib.rs
+  s_b7d7dd5280bd00::t_f63a740e071383 41-60
+src/sql/src/statements/set_variables.rs
+  s_b7d7dd5280bd00::t_8ca02fb28d3d9c 29-30,34,38-42,44-58,111-117,119-124,135-138
+src/table/src/predicate.rs
+  s_b7d7dd5280bd00::t_4b312ce6948a77 124-135,142-144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "169263eccfcc334544d10702560eaee758c8415a",
+  "prompts": {},
+  "sessions": {
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
