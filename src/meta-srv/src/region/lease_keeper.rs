@@ -876,7 +876,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_renew_region_leases_candidate_lease_carries_candidate_lease_id() {
+    async fn test_renew_region_lease_from_registration_carries_candidate_lease_id() {
         let keeper = new_test_keeper();
         let region_id = RegionId::new(2048, 1);
         let guard = register_candidate_with_route(&keeper, region_id, 1, 2).await;

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use api::v1::meta::GrantedRegion;
+use api::v1::meta::GrantedRegion as PbGrantedRegion;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -26,7 +26,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_telemetry::{debug, error, info, trace, warn};
 use snafu::OptionExt;
-use store_api::region_engine::{RegionRole, SettableRegionRoleState};
+use store_api::region_engine::{GrantedRegion, RegionRole, SettableRegionRoleState};
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 #[cfg(test)]
@@ -137,22 +137,22 @@ impl RegionAliveKeeper {
     /// Renews the lease of regions to `deadline`, granted for a heartbeat sent at `sent_at`.
     async fn renew_region_leases(
         &self,
-        regions: &[GrantedRegion],
+        regions: &[PbGrantedRegion],
         sent_at: Instant,
         deadline: Instant,
     ) {
         for region in regions {
-            let region = store_api::region_engine::GrantedRegion::from(region.clone());
+            let region = GrantedRegion::from(region.clone());
             let region_id = region.region_id;
             if let Some(handle) = self.find_handle(region_id).await {
                 handle
-                    .reset_deadline(
-                        region.region_role,
+                    .reset_deadline(ResetLease {
+                        role: region.region_role,
                         sent_at,
                         deadline,
-                        region.candidate_lease_id,
-                        region.extensions,
-                    )
+                        candidate_lease_id: region.candidate_lease_id,
+                        extensions: region.extensions,
+                    })
                     .await;
             } else {
                 warn!(
@@ -308,7 +308,7 @@ enum CountdownCommand {
     /// 4 * `heartbeat_interval_millis`
     Start(u64),
     /// Reset countdown deadline to the given instance.
-    Reset(GrantedLease),
+    Reset(ResetLease),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
@@ -316,7 +316,7 @@ enum CountdownCommand {
 
 /// A region lease received in a heartbeat response.
 #[derive(Debug)]
-struct GrantedLease {
+struct ResetLease {
     role: RegionRole,
     /// When the heartbeat was sent.
     sent_at: Instant,
@@ -397,25 +397,8 @@ impl CountdownTaskHandle {
         None
     }
 
-    async fn reset_deadline(
-        &self,
-        role: RegionRole,
-        sent_at: Instant,
-        deadline: Instant,
-        candidate_lease_id: Option<u64>,
-        extension_info: HashMap<String, Vec<u8>>,
-    ) {
-        if let Err(e) = self
-            .tx
-            .send(CountdownCommand::Reset(GrantedLease {
-                role,
-                sent_at,
-                deadline,
-                candidate_lease_id,
-                extensions: extension_info,
-            }))
-            .await
-        {
+    async fn reset_deadline(&self, lease: ResetLease) {
+        if let Err(e) = self.tx.send(CountdownCommand::Reset(lease)).await {
             warn!(
                 "Failed to reset region alive keeper deadline: {e}. \
                 Maybe the task is stopped due to region been closed."
@@ -467,7 +450,7 @@ impl CountdownTask {
                                 started = true;
                             }
                         },
-                        Some(CountdownCommand::Reset(GrantedLease { role, sent_at, deadline, candidate_lease_id, extensions: extension_info })) => {
+                        Some(CountdownCommand::Reset(ResetLease { role, sent_at, deadline, candidate_lease_id, extensions })) => {
                             let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
                             let applied = match self.region_server.set_region_role_with_lease(self.region_id, role, sent_at.into_std(), deadline.into_std(), candidate_lease_id) {
                                 Ok(applied) => applied,
@@ -500,7 +483,7 @@ impl CountdownTask {
                                     self.region_id,
                                     role,
                                     deadline,
-                                    extension_info,
+                                    extensions,
                                 ).await;
                             }
                             trace!(
@@ -558,7 +541,10 @@ mod test {
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     /// Handles a heartbeat response that grants `regions` for a heartbeat sent now.
-    async fn handle_lease_response(alive_keeper: &RegionAliveKeeper, regions: Vec<GrantedRegion>) {
+    async fn handle_lease_response(
+        alive_keeper: &RegionAliveKeeper,
+        regions: Vec<PbGrantedRegion>,
+    ) {
         let sent_at = alive_keeper.epoch().elapsed();
         handle_lease_response_sent_at(alive_keeper, sent_at, regions).await;
     }
@@ -568,7 +554,7 @@ mod test {
     async fn handle_lease_response_sent_at(
         alive_keeper: &RegionAliveKeeper,
         sent_at: Duration,
-        regions: Vec<GrantedRegion>,
+        regions: Vec<PbGrantedRegion>,
     ) {
         let (tx, _rx) = mpsc::channel(1);
         let response = HeartbeatResponse {
@@ -607,7 +593,7 @@ mod test {
         let alive_keeper =
             RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
         alive_keeper.register_region(region_id).await;
-        let grant = GrantedRegion {
+        let grant = PbGrantedRegion {
             region_id: region_id.as_u64(),
             role: api::v1::meta::RegionRole::Leader.into(),
             candidate_lease_id: 0,
@@ -629,7 +615,7 @@ mod test {
         let alive_keeper =
             RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
         alive_keeper.register_region(region_id).await;
-        let grant = GrantedRegion {
+        let grant = PbGrantedRegion {
             region_id: region_id.as_u64(),
             role: api::v1::meta::RegionRole::Follower.into(),
             candidate_lease_id: 7,
@@ -685,7 +671,7 @@ mod test {
 
         // A Leader grant renews the lease of the region.
         alive_keeper.register_region(region_id).await;
-        let grant = GrantedRegion {
+        let grant = PbGrantedRegion {
             region_id: region_id.as_u64(),
             role: api::v1::meta::RegionRole::Leader.into(),
             candidate_lease_id: 0,
@@ -760,7 +746,7 @@ mod test {
         // Renew lease then sleep.
         alive_keeper
             .renew_region_leases(
-                &[GrantedRegion {
+                &[PbGrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::Leader.into(),
                     candidate_lease_id: 0,
@@ -818,13 +804,13 @@ mod test {
 
         // Reset deadline.
         countdown_handle
-            .reset_deadline(
-                RegionRole::Leader,
-                Instant::now(),
-                Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
-                None,
-                HashMap::new(),
-            )
+            .reset_deadline(ResetLease {
+                role: RegionRole::Leader,
+                sent_at: Instant::now(),
+                deadline: Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
+                candidate_lease_id: None,
+                extensions: HashMap::new(),
+            })
             .await;
         assert!(
             countdown_handle.deadline().await.unwrap()
@@ -867,7 +853,7 @@ mod test {
         alive_keeper.register_region(region_id).await;
         alive_keeper
             .renew_region_leases(
-                &[GrantedRegion {
+                &[PbGrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
                     candidate_lease_id: 0,
@@ -917,7 +903,7 @@ mod test {
         alive_keeper.register_region(region_id).await;
         alive_keeper
             .renew_region_leases(
-                &[GrantedRegion {
+                &[PbGrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::Leader.into(),
                     candidate_lease_id: 0,
@@ -961,7 +947,7 @@ mod test {
         alive_keeper.register_region(region_id).await;
         alive_keeper
             .renew_region_leases(
-                &[GrantedRegion {
+                &[PbGrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
                     candidate_lease_id: 0,

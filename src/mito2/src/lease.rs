@@ -93,11 +93,11 @@ impl NodeLease {
     }
 }
 
-/// A region lease the metasrv granted for a heartbeat sent at `issued_at`.
+/// A region lease the metasrv granted for a heartbeat sent at `sent_at`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GrantedLease {
     pub(crate) candidate_lease_id: Option<u64>,
-    pub(crate) issued_at: Instant,
+    pub(crate) sent_at: Instant,
 }
 
 /// The lease of the latest heartbeat each region received, whether or not the region applied it.
@@ -113,12 +113,12 @@ impl GrantedLeases {
         &self,
         region_id: RegionId,
         candidate_lease_id: Option<u64>,
-        issued_at: Instant,
+        sent_at: Instant,
         region_is_open: impl FnOnce() -> bool,
     ) {
         let lease = GrantedLease {
             candidate_lease_id,
-            issued_at,
+            sent_at,
         };
         let mut leases = self.0.lock().unwrap();
         if !region_is_open() {
@@ -127,7 +127,7 @@ impl GrantedLeases {
         leases
             .entry(region_id)
             .and_modify(|latest| {
-                if issued_at > latest.issued_at {
+                if sent_at > latest.sent_at {
                     *latest = lease;
                 }
             })

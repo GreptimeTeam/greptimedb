@@ -8711,6 +8711,7 @@ dependencies = [
  "object-store",
  "partition",
  "prometheus 0.14.0",
+ "rstest",
  "serde",
  "serde_json",
  "smallvec",

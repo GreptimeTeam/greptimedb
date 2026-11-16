@@ -179,8 +179,8 @@ impl SetRegionRoleStateResponse {
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
-    /// Only set on a lease granted because a region migration registered this region as its
-    /// target, not from the region route. Each registration uses a new non-zero value.
+    /// An opaque non-zero id the lease carries, or `None`. Engines pass it to
+    /// [`RegionEngine::set_region_role_with_lease`] and may record it, but must not interpret it.
     pub candidate_lease_id: Option<u64>,
     pub extensions: HashMap<String, Vec<u8>>,
 }

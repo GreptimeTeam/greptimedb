@@ -716,6 +716,8 @@ mod test {
         RegionTruncateRequest,
     };
 
+    use rstest::rstest;
+
     use super::*;
     use crate::maybe_skip_kafka_log_store_integration_test;
     use crate::test_util::{
@@ -970,22 +972,38 @@ mod test {
         assert!(!object_store.exists(&data_region_dir).await.unwrap());
     }
 
+    /// The region that ignores a Leader grant is the one downgraded after the heartbeat is sent;
+    /// the other one is downgraded before it.
+    #[rstest]
+    #[case::metadata_region_ignores(
+        utils::to_data_region_id,
+        utils::to_metadata_region_id,
+        RegionRole::Follower
+    )]
+    #[case::data_region_ignores(
+        utils::to_metadata_region_id,
+        utils::to_data_region_id,
+        RegionRole::Leader
+    )]
     #[tokio::test]
-    async fn test_leader_grant_ignored_by_metadata_region_leaves_data_region() {
+    async fn test_leader_grant_ignored_by_one_region(
+        #[case] downgraded_before_sent: fn(RegionId) -> RegionId,
+        #[case] downgraded_after_sent: fn(RegionId) -> RegionId,
+        #[case] metadata_role: RegionRole,
+    ) {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let (engine, mito) = (env.metric(), env.mito());
         let physical_region_id = env.default_physical_region_id();
         let lease = std::time::Duration::from_secs(10);
-        // The data region is downgraded before the heartbeat is sent, the metadata region after it.
         let downgrade = |region_id| {
             mito.set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
         };
-        downgrade(utils::to_data_region_id(physical_region_id))
+        downgrade(downgraded_before_sent(physical_region_id))
             .await
             .unwrap();
         let sent_at = Instant::now();
-        downgrade(utils::to_metadata_region_id(physical_region_id))
+        downgrade(downgraded_after_sent(physical_region_id))
             .await
             .unwrap();
 
@@ -1002,56 +1020,20 @@ mod test {
         };
         assert!(!grant(sent_at));
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Follower));
-        // The data region still records the grant it did not take.
-        assert_eq!(
-            mito.granted_candidate_lease_id(utils::to_data_region_id(physical_region_id)),
-            Some(7)
-        );
-
-        assert!(grant(Instant::now()));
-        assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
-    }
-
-    #[tokio::test]
-    async fn test_leader_grant_ignored_by_data_region() {
-        let env = TestEnv::new().await;
-        env.init_metric_region().await;
-        let (engine, mito) = (env.metric(), env.mito());
-        let physical_region_id = env.default_physical_region_id();
-        // The metadata region is downgraded before the heartbeat is sent, the data region after it.
-        let downgrade = |region_id| {
-            mito.set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
-        };
-        downgrade(utils::to_metadata_region_id(physical_region_id))
-            .await
-            .unwrap();
-        let sent_at = Instant::now();
-        downgrade(utils::to_data_region_id(physical_region_id))
-            .await
-            .unwrap();
-
-        assert!(
-            !engine
-                .set_region_role_with_lease(
-                    physical_region_id,
-                    RegionRole::Leader,
-                    sent_at,
-                    sent_at + std::time::Duration::from_secs(10),
-                    Some(7),
-                )
-                .unwrap()
-        );
-        assert_eq!(engine.role(physical_region_id), Some(RegionRole::Follower));
         assert_eq!(
             mito.role(utils::to_metadata_region_id(physical_region_id)),
-            Some(RegionRole::Leader)
+            Some(metadata_role)
         );
+        // Both regions record the grant, including the one that is not handed it.
         for region_id in [
             utils::to_metadata_region_id(physical_region_id),
             utils::to_data_region_id(physical_region_id),
         ] {
             assert_eq!(mito.granted_candidate_lease_id(region_id), Some(7));
         }
+
+        assert!(grant(Instant::now()));
+        assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
     }
 
     #[tokio::test]

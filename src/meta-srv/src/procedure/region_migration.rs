@@ -814,9 +814,9 @@ pub struct RegionMigrationData<'a> {
 
 pub(crate) struct RegionMigrationProcedure {
     state: Box<dyn State>,
-    // Declared before `_guards`: a procedure that ends without a rollback (e.g. it fails to
-    // record the rollback, or the manager stops) drops the candidate registration in `context`
-    // before the region leaves the tracker, so another migration cannot start meanwhile.
+    /// Declared before `_guards`: a procedure that ends without a rollback (e.g. it fails to
+    /// record the rollback, or the manager stops) drops the candidate registration in `context`
+    /// before the region leaves the tracker, so another migration cannot start meanwhile.
     context: Context,
     _guards: Vec<RegionMigrationProcedureGuard>,
 }

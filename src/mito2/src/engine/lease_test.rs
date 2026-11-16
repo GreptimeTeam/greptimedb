@@ -77,14 +77,6 @@ fn grant(engine: &MitoEngine, role: RegionRole, deadline: Instant) {
         .unwrap();
 }
 
-/// Grants Leader for a heartbeat sent at `sent_at`, and returns whether the role was applied.
-fn grant_leader_at(engine: &MitoEngine, sent_at: Instant) -> bool {
-    let deadline = Instant::now() + LEASE;
-    engine
-        .set_region_role_with_lease(REGION_ID, RegionRole::Leader, sent_at, deadline, None)
-        .unwrap()
-}
-
 /// Returns a request that writes rows `start..start + 3`.
 fn put_request(schema: &[ColumnSchema], start: usize) -> RegionRequest {
     let rows = Rows {
@@ -320,11 +312,26 @@ async fn test_stale_leader_grant_after_downgrade(#[case] downgraded_to: Settable
         .unwrap();
 
     // Grants for heartbeats sent before either downgrade arrive late.
-    assert!(!grant_leader_at(&engine, sent_before));
-    assert!(!grant_leader_at(&engine, sent_between));
+    assert!(!grant_candidate_at(
+        &engine,
+        RegionRole::Leader,
+        sent_before,
+        None
+    ));
+    assert!(!grant_candidate_at(
+        &engine,
+        RegionRole::Leader,
+        sent_between,
+        None
+    ));
     assert_eq!(downgraded, engine.get_region(REGION_ID).unwrap().state());
 
-    assert!(grant_leader_at(&engine, Instant::now()));
+    assert!(grant_candidate_at(
+        &engine,
+        RegionRole::Leader,
+        Instant::now(),
+        None
+    ));
     assert!(engine.get_region(REGION_ID).unwrap().is_writable());
 }
 
@@ -357,7 +364,12 @@ async fn test_reopened_region_ignores_earlier_grants(#[case] close: bool) {
         &engine.get_region(REGION_ID).unwrap()
     ));
 
-    assert!(!grant_leader_at(&engine, sent_before));
+    assert!(!grant_candidate_at(
+        &engine,
+        RegionRole::Leader,
+        sent_before,
+        None
+    ));
     assert!(!engine.get_region(REGION_ID).unwrap().is_writable());
 
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
@@ -431,7 +443,7 @@ async fn test_granted_lease_keeps_latest_heartbeat_across_catchup_reopen() {
     ));
     let latest = GrantedLease {
         candidate_lease_id: Some(9),
-        issued_at: sent_before,
+        sent_at: sent_before,
     };
     assert_eq!(granted_lease(&engine), Some(latest));
     // A lease of an earlier heartbeat that arrives late does not replace it.
@@ -454,7 +466,7 @@ async fn test_granted_lease_keeps_latest_heartbeat_across_catchup_reopen() {
         granted_lease(&engine),
         Some(GrantedLease {
             candidate_lease_id: None,
-            issued_at: later,
+            sent_at: later,
         })
     );
 }
