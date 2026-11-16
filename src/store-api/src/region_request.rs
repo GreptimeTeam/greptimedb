@@ -502,6 +502,12 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
             region_id,
             RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
         )]),
+        Some(truncate_request::Kind::PendingTails(pending_tails)) => Ok(vec![(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::PendingTails {
+                node_id: pending_tails.node_id,
+            }),
+        )]),
     }
 }
 
@@ -1999,6 +2005,15 @@ pub enum RegionTruncateRequest {
         /// so no guarantee that all data in the time range will be truncated.
         time_ranges: Vec<(Timestamp, Timestamp)>,
     },
+    /// Discards the WAL entries that node `node_id` wrote and the region still has to
+    /// recover, without replaying them. Returns the number of discarded ranges.
+    ///
+    /// Only a writable leader that is not staging accepts it. A region with no such
+    /// entries returns 0 and changes nothing, so a retry after a success returns 0.
+    PendingTails {
+        /// The datanode that wrote the entries.
+        node_id: u64,
+    },
 }
 
 /// Catchup region request.
@@ -2272,6 +2287,39 @@ mod tests {
             requests[0].1,
             RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
         ));
+    }
+
+    #[test]
+    fn test_make_region_truncate_pending_tails() {
+        let region_id = RegionId::new(42, 3);
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
+                region_id: region_id.as_u64(),
+                kind: Some(truncate_request::Kind::PendingTails(
+                    api::v1::region::PendingTails { node_id: 7 },
+                )),
+            }))
+            .unwrap();
+
+        assert_eq!(region_id, requests[0].0);
+        assert!(matches!(
+            requests[0].1,
+            RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 7 })
+        ));
+    }
+
+    #[test]
+    fn test_make_region_truncate_rejects_unknown_kind() {
+        use prost::Message;
+        // An empty message in field 99, a kind this version does not know.
+        let truncate = TruncateRequest::decode([0x08, 0x01, 0x9a, 0x06, 0x00].as_slice()).unwrap();
+        let error = RegionRequest::try_from_request_body(region_request::Body::Truncate(truncate))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("missing kind in TruncateRequest")
+        );
     }
 
     #[test]

@@ -18,7 +18,8 @@ use api::helper::to_pb_time_unit;
 use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{
     BuildIndexRequest, CancelCompactionRequest, CompactRequest, CompactionTimeRange, FlushRequest,
-    RegionRequestHeader, TruncateRequest, Unflushed, build_index_request, truncate_request,
+    PendingTails, RegionRequestHeader, TruncateRequest, Unflushed, build_index_request,
+    truncate_request,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
@@ -279,6 +280,78 @@ impl Requester {
         table_name: TableName,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
+        self.truncate_table_regions(
+            table_name,
+            truncate_request::Kind::Unflushed(Unflushed {}),
+            "discard unflushed data",
+            "discarding unflushed data from a Metric Engine logical table",
+            &ctx,
+        )
+        .await
+    }
+
+    /// Discards the pending WAL tails that datanode `node_id` wrote from the region.
+    pub async fn handle_discard_pending_tails(
+        &self,
+        region_id: RegionId,
+        node_id: u64,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        let request = RegionRequestBody::Truncate(TruncateRequest {
+            region_id: region_id.into(),
+            kind: Some(truncate_request::Kind::PendingTails(PendingTails {
+                node_id,
+            })),
+        });
+
+        info!(
+            user = ctx.current_user().username(),
+            "Handle region discard pending tails request: {region_id}, node: {node_id}"
+        );
+        let discarded = self.do_request(vec![request], None, &ctx).await?;
+        if discarded == 0 {
+            info!("No pending tails from node {node_id} in region {region_id}");
+        }
+        Ok(discarded)
+    }
+
+    /// Discards the pending WAL tails that datanode `node_id` wrote from all regions of the
+    /// table.
+    pub async fn handle_discard_pending_tails_by_table(
+        &self,
+        table_name: TableName,
+        node_id: u64,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        info!(
+            user = ctx.current_user().username(),
+            "Handle table discard pending tails request: {table_name}, node: {node_id}"
+        );
+        let discarded = self
+            .truncate_table_regions(
+                table_name.clone(),
+                truncate_request::Kind::PendingTails(PendingTails { node_id }),
+                "discard pending tails",
+                "discarding pending WAL tails from a Metric Engine logical table",
+                &ctx,
+            )
+            .await?;
+        if discarded == 0 {
+            info!("No pending tails from node {node_id} in table {table_name}");
+        }
+        Ok(discarded)
+    }
+
+    /// Sends a truncate request of `kind`, logged as `request`, to every region of the table. A
+    /// Metric Engine logical table is rejected as `feat` before any request is sent.
+    async fn truncate_table_regions(
+        &self,
+        table_name: TableName,
+        kind: truncate_request::Kind,
+        request: &str,
+        feat: &'static str,
+        ctx: &QueryContextRef,
+    ) -> Result<AffectedRows> {
         let table = self
             .catalog_manager
             .table(
@@ -293,9 +366,10 @@ impl Requester {
             table_name: table_name.to_string(),
         })?;
         let table_info = table.table_info();
-        ensure_discard_unflushed_supported(
+        ensure_not_metric_logical_table(
             &table_info.meta.engine,
             table_info.is_physical_table(),
+            feat,
         )?;
 
         let partitions = &self
@@ -311,19 +385,19 @@ impl Requester {
             .map(|partition| {
                 RegionRequestBody::Truncate(TruncateRequest {
                     region_id: partition.id.into(),
-                    kind: Some(truncate_request::Kind::Unflushed(Unflushed {})),
+                    kind: Some(kind.clone()),
                 })
             })
             .collect();
 
-        info!("Handle table discard unflushed data request: {table_name}");
+        info!("Handle table {request} request: {table_name}");
         self.do_request(
             requests,
             Some(build_db_string(
                 &table_name.catalog_name,
                 &table_name.schema_name,
             )),
-            &ctx,
+            ctx,
         )
         .await
     }
@@ -462,12 +536,14 @@ fn ensure_build_series_index_supported(engine: &str, is_physical_table: bool) ->
     Ok(())
 }
 
-fn ensure_discard_unflushed_supported(engine: &str, is_physical_table: bool) -> Result<()> {
+fn ensure_not_metric_logical_table(
+    engine: &str,
+    is_physical_table: bool,
+    feat: &'static str,
+) -> Result<()> {
     ensure!(
         engine != METRIC_ENGINE || is_physical_table,
-        NotSupportedSnafu {
-            feat: "discarding unflushed data from a Metric Engine logical table"
-        }
+        NotSupportedSnafu { feat }
     );
     Ok(())
 }
@@ -575,12 +651,12 @@ mod tests {
     }
 
     #[test]
-    fn test_discard_unflushed_rejects_metric_logical_table() {
-        let error = ensure_discard_unflushed_supported(METRIC_ENGINE, false).unwrap_err();
+    fn test_ensure_not_metric_logical_table() {
+        let error = ensure_not_metric_logical_table(METRIC_ENGINE, false, "feat").unwrap_err();
         assert!(matches!(error, crate::error::Error::NotSupported { .. }));
 
-        ensure_discard_unflushed_supported(METRIC_ENGINE, true).unwrap();
-        ensure_discard_unflushed_supported("mito", false).unwrap();
+        ensure_not_metric_logical_table(METRIC_ENGINE, true, "feat").unwrap();
+        ensure_not_metric_logical_table("mito", false, "feat").unwrap();
     }
 
     #[test]

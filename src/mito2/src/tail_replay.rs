@@ -66,6 +66,29 @@ pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
     region.can_replay_tails() && region.version().has_pending_tails()
 }
 
+/// Releases the WAL of `region` on node `node_id` up to where the region now replays it on
+/// open, keeping the node's remaining tails, after `commit` changed its tails. A failure is
+/// only logged.
+pub(crate) async fn release_wal<S: LogStore>(
+    region: &MitoRegion,
+    wal: &Wal<S>,
+    node_id: Option<u64>,
+    commit: &str,
+) {
+    let manifest = region.manifest_ctx.manifest().await;
+    let entry_id = cap_wal_release(
+        &manifest.pending_tails,
+        node_id,
+        manifest.wal_replay_start(node_id),
+    );
+    if let Err(e) = wal
+        .obsolete(region.region_id, entry_id, &region.provider)
+        .await
+    {
+        error!(e; "Failed to release the WAL of region {} after {commit}", region.region_id);
+    }
+}
+
 /// Replays the pending tails of a region into SSTs and publishes them in one manifest edit.
 ///
 /// Each round reads the tails in order and writes each into its own SSTs: an SST can give all its
@@ -415,7 +438,14 @@ impl<S: LogStore> TailReplayTask<S> {
                     info!(
                         "Published the replayed WAL tails of region {region_id} in manifest version {manifest_version}"
                     );
-                    self.release_wal().await;
+                    release_wal(
+                        &self.region,
+                        &self.wal,
+                        self.node_id,
+                        "publishing its tails",
+                    )
+                    .await;
+                    self.listener.on_tail_commit_end(region_id).await;
                     let region = self.region.clone();
                     let tails = tails.to_vec();
                     let notify = BackgroundNotify::TailReplayCommitted {
@@ -464,25 +494,6 @@ impl<S: LogStore> TailReplayTask<S> {
                 return Ok(false);
             }
             backoff = (backoff * 2).min(MAX_BACKOFF);
-        }
-    }
-
-    /// Releases the WAL up to where the region now replays it on open, keeping this node's
-    /// remaining tails. A failure is only logged.
-    async fn release_wal(&self) {
-        let region = &self.region;
-        let manifest = region.manifest_ctx.manifest().await;
-        let entry_id = cap_wal_release(
-            &manifest.pending_tails,
-            self.node_id,
-            manifest.wal_replay_start(self.node_id),
-        );
-        if let Err(e) = self
-            .wal
-            .obsolete(region.region_id, entry_id, &region.provider)
-            .await
-        {
-            error!(e; "Failed to release the WAL of region {} after publishing its tails", region.region_id);
         }
     }
 

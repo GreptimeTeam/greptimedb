@@ -1177,6 +1177,17 @@ pub(crate) enum BackgroundNotify {
     },
     /// A tail replay ended.
     TailReplayEnded,
+    /// An edit that discards pending tails was published in the manifest.
+    PendingTailsDiscarded {
+        /// The instance the tails were discarded from.
+        region: MitoRegionRef,
+        /// The published edit, whose tails are those of `tails` it keeps.
+        edit: RegionEdit,
+        /// The tails the manifest recorded when the edit was published.
+        tails: Vec<PendingTail>,
+        /// Receives the number of discarded tails.
+        sender: OptionOutputTx,
+    },
 }
 
 impl BackgroundNotify {
@@ -1213,7 +1224,8 @@ impl BackgroundNotify {
             | Self::RegionBecameWritable
             | Self::RegionCannotReplay { .. }
             | Self::TailReplayCommitted { .. }
-            | Self::TailReplayEnded => false,
+            | Self::TailReplayEnded
+            | Self::PendingTailsDiscarded { .. } => false,
         }
     }
 }

@@ -1811,10 +1811,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 edit,
                 tails,
             } => {
-                self.handle_tail_replay_committed(region_id, region, edit, tails)
+                self.apply_tails_edit(region_id, &region, edit, &tails)
                     .await
             }
             BackgroundNotify::TailReplayEnded => self.handle_tail_replay_ended(region_id),
+            BackgroundNotify::PendingTailsDiscarded {
+                region,
+                edit,
+                tails,
+                sender,
+            } => {
+                self.handle_pending_tails_discarded(region_id, region, edit, tails, sender)
+                    .await
+            }
         }
         // Completion handlers may return early after releasing their scheduler. Dispatch
         // here covers those paths as well as their normal completion.
@@ -1974,6 +1983,14 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_tail_commit_begin(_region_id).await;
+        }
+    }
+
+    /// A tail replay committed its result and has not told the worker yet.
+    pub(crate) async fn on_tail_commit_end(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_commit_end(_region_id).await;
         }
     }
 

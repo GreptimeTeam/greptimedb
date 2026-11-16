@@ -22,7 +22,7 @@ use api::v1::{Mutation, OpType, Rows, WalEntry};
 use async_trait::async_trait;
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_wal::config::object_store::STANDALONE_GENERATION;
@@ -90,6 +90,9 @@ struct TailReplayListener {
     commits: AtomicUsize,
     /// Commit attempts numbered from it on wait until it changes; 0 holds none.
     held_from: AtomicUsize,
+    /// Whether a committed replay waits before telling the worker.
+    hold_commit_end: AtomicBool,
+    commit_ends: AtomicUsize,
     failures: Mutex<Vec<(StatusCode, String)>>,
     ended: AtomicUsize,
     lease_checks: AtomicUsize,
@@ -103,6 +106,13 @@ impl EventListener for TailReplayListener {
     async fn on_tail_commit_begin(&self, _region_id: RegionId) {
         let attempt = self.commits.fetch_add(1, Ordering::Relaxed) + 1;
         while (1..=attempt).contains(&self.held_from.load(Ordering::Relaxed)) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn on_tail_commit_end(&self, _region_id: RegionId) {
+        self.commit_ends.fetch_add(1, Ordering::Relaxed);
+        while self.hold_commit_end.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -132,6 +142,14 @@ impl EventListener for TailReplayListener {
 impl TailReplayListener {
     fn hold_from(&self, attempt: usize) {
         self.held_from.store(attempt, Ordering::Relaxed);
+    }
+
+    fn hold_commit_end(&self, hold: bool) {
+        self.hold_commit_end.store(hold, Ordering::Relaxed);
+    }
+
+    fn commit_ends(&self) -> usize {
+        self.commit_ends.load(Ordering::Relaxed)
     }
 
     fn commits(&self) -> usize {
@@ -430,6 +448,12 @@ impl TestRegion {
         let stream = self.engine.scan_to_stream(self.region_id, request).await;
         let batches = RecordBatches::try_collect(stream.unwrap()).await.unwrap();
         batches.pretty_print().unwrap().contains("99.0")
+    }
+
+    async fn discard_pending_tails(&self, node_id: u64) -> Result<usize, BoxedError> {
+        let request = RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id });
+        let response = self.engine.handle_request(self.region_id, request).await?;
+        Ok(response.affected_rows)
     }
 
     fn version(&self) -> VersionRef {
@@ -1943,4 +1967,137 @@ async fn test_failed_replay_reloads_region_after_failed_commit() {
     wait_until(|| is_replaced(&region.engine, &old)).await;
 
     assert!(!region.has_pending_tails());
+}
+
+#[tokio::test]
+async fn test_discard_keeps_other_tails_and_their_wal() {
+    let region = TestRegion::new("tail-discard-remote", false, None).await;
+    let remote_upto = region.write_remote_rows(region.region_id, 6, 9).await;
+    let own = own_tail(0, region.entries[1], UptoKind::Reported);
+    region
+        .reopen_with_tails(vec![
+            own.clone(),
+            remote_tail(0, remote_upto, UptoKind::Reported),
+        ])
+        .await;
+    region.listener.hold_from(1);
+    region.catchup().await;
+    // The replay read both tails and waits to commit them.
+    wait_until(|| region.listener.commits() == 1).await;
+    assert_eq!(
+        region.entries.to_vec(),
+        stored_entry_ids(&region.log_store, region.region_id).await
+    );
+
+    assert_eq!(
+        1,
+        region.discard_pending_tails(REMOTE_NODE_ID).await.unwrap()
+    );
+
+    let version = region.version();
+    assert_eq!(vec![own], version.pending_tails);
+    assert_eq!(remote_upto, version.flushed_entry_id);
+    // The release kept the entries of the own tail, which the raised flushed entry id covers.
+    assert_eq!(
+        region.entries.to_vec(),
+        stored_entry_ids(&region.log_store, region.region_id).await
+    );
+    assert_eq!(
+        0,
+        region.discard_pending_tails(REMOTE_NODE_ID).await.unwrap()
+    );
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+    assert_eq!(6, count_rows(&region.engine, region.region_id).await);
+}
+
+#[tokio::test]
+async fn test_discard_after_unapplied_replay_commit_is_busy() {
+    let region = TestRegion::new("tail-discard-unapplied", false, None).await;
+    let remote_upto = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, remote_upto, UptoKind::Reported)])
+        .await;
+    region.listener.hold_commit_end(true);
+    region.catchup().await;
+    // The replay committed and has not told the worker yet.
+    wait_until(|| region.listener.commit_ends() == 1).await;
+
+    let error = region
+        .discard_pending_tails(REMOTE_NODE_ID)
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, error.status_code());
+
+    region.listener.hold_commit_end(false);
+    region.wait_until_replayed().await;
+    assert_eq!(1, region.stored_ssts().await);
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
+}
+
+#[tokio::test]
+async fn test_discard_on_follower_changes_nothing() {
+    let region = TestRegion::new("tail-discard-follower", false, None).await;
+    let tails = vec![own_tail(0, region.entries[1], UptoKind::Reported)];
+    region.reopen_with_tails(tails.clone()).await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = next_manifest_version(&mito_region).await;
+
+    let error = region.discard_pending_tails(NODE_ID).await.unwrap_err();
+
+    assert_eq!(StatusCode::RegionNotReady, error.status_code());
+    assert_eq!(tails, region.version().pending_tails);
+    assert_eq!(version, next_manifest_version(&mito_region).await);
+}
+
+/// A conditional publication finds the landed edit by its content, and an unconditional one
+/// writes it again, which removes the same tails.
+#[rstest]
+#[case::conditional(true)]
+#[case::unconditional(false)]
+#[tokio::test]
+async fn test_discard_with_unknown_result_is_retried(#[case] leased: bool) {
+    let version = Arc::new(AtomicU64::new(u64::MAX));
+    let region = TestRegion::new(
+        "tail-discard-uncertain",
+        leased,
+        Some(lose_delta_response(version.clone())),
+    )
+    .await;
+    // A reload replays the WAL after the raised flushed entry id, so the region's own rows
+    // must not stay unflushed below a tail's `upto`, as a takeover ensures.
+    flush_region(&region.engine, region.region_id, None).await;
+    let remote_upto = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, remote_upto, UptoKind::Reported)])
+        .await;
+    region.listener.hold_from(1);
+    region.promote_with_lease();
+    wait_until(|| region.listener.commits() == 1).await;
+    let old = region.engine.get_region(region.region_id).unwrap();
+    version.store(next_manifest_version(&old).await, Ordering::Relaxed);
+
+    // The edit lands but its commit reports an error.
+    region
+        .discard_pending_tails(REMOTE_NODE_ID)
+        .await
+        .unwrap_err();
+    assert!(region.has_pending_tails());
+    // A conditional retry with other content conflicts with the landed edit and fences the
+    // region, which reloads from it.
+    let _ = region.discard_pending_tails(REMOTE_NODE_ID).await;
+    wait_until(|| !region.has_pending_tails()).await;
+    // A reloaded instance waits for a later lease to become writable.
+    region.promote_with_lease();
+
+    assert_eq!(
+        0,
+        region.discard_pending_tails(REMOTE_NODE_ID).await.unwrap()
+    );
+    assert_eq!(
+        remote_upto.max(region.entries[1]),
+        region.version().flushed_entry_id
+    );
+    region.listener.hold_from(0);
+    assert_eq!(6, count_rows(&region.engine, region.region_id).await);
 }

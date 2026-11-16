@@ -272,20 +272,23 @@ impl RegionEngine for MetricEngine {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }
             }
-            RegionRequest::Truncate(RegionTruncateRequest::Unflushed) => {
+            RegionRequest::Truncate(
+                request @ (RegionTruncateRequest::Unflushed
+                | RegionTruncateRequest::PendingTails { .. }),
+            ) => {
                 if self.inner.is_physical_region(region_id) {
                     self.inner
                         .mito
                         .handle_request(
                             utils::to_data_region_id(region_id),
-                            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+                            RegionRequest::Truncate(request),
                         )
                         .await
                         .context(error::MitoTruncateOperationSnafu)
                         .map(|response| response.affected_rows)
                 } else {
                     UnsupportedRegionRequestSnafu {
-                        request: RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+                        request: RegionRequest::Truncate(request),
                     }
                     .fail()
                 }
@@ -778,6 +781,31 @@ mod test {
             })
         };
         // Mito returns zero for an absent task; reaching that result proves forwarding.
+        let response = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 0);
+
+        let error = env
+            .metric()
+            .handle_request(env.default_logical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discard_pending_tails_physical_and_logical_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let request =
+            || RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 1 });
+        // The data region has no pending tails; reaching that result proves forwarding.
         let response = env
             .metric()
             .handle_request(env.default_physical_region_id(), request())

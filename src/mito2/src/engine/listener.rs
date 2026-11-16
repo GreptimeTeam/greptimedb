@@ -41,6 +41,9 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener before a tail replay commits its result.
     async fn on_tail_commit_begin(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener after a tail replay committed its result, before the worker is told.
+    async fn on_tail_commit_end(&self, _region_id: RegionId) {}
+
     /// Notifies the listener each time a tail replay checks for a Leader lease while it waits.
     fn on_tail_lease_check(&self, _region_id: RegionId) {}
 

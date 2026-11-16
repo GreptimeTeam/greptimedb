@@ -223,6 +223,24 @@ impl FunctionState {
             ) -> Result<AffectedRows> {
                 Ok(ROWS)
             }
+
+            async fn discard_pending_tails(
+                &self,
+                _region_id: RegionId,
+                _node_id: u64,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
+            async fn discard_pending_tails_by_table(
+                &self,
+                _table_name: TableName,
+                _node_id: u64,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
         }
 
         #[async_trait]
