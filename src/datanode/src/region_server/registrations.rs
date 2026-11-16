@@ -794,13 +794,10 @@ mod tests {
             }
 
             // The first region leaves while the second registration waits for
-            // the query lock: its filter goes away and, if nothing prevents it,
-            // so does the now empty query state.
+            // the query lock: its filter goes away and so does the now empty
+            // query state.
             locked.remove(&filter_id);
-            if let Some(dashmap::Entry::Occupied(entry)) = regs_by_query.queries.try_entry(query_id)
-            {
-                entry.remove();
-            }
+            assert!(regs_by_query.queries.remove(&query_id).is_some());
             drop(locked);
 
             assert_eq!(registering.join().unwrap(), vec![filter_id.clone()]);
