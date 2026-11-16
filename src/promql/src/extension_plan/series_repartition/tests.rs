@@ -1425,12 +1425,21 @@ async fn chained_state_routers_share_parent_charge_for_multi_point_groups() {
                     .unwrap();
                 assert!(!seen[group], "each group is routed exactly once");
                 assert_eq!(owner, final_router.routing.output_labels(row.metric()));
-                let row = row.to_state_series().unwrap();
-                assert_eq!(POINTS, row.time.len());
-                for (point, state) in row.states[0].iter().enumerate() {
-                    let state = state.unwrap();
-                    assert_eq!((group * POINTS + point) as f64, state.value);
-                    assert_eq!(-(point as f64), state.compensation);
+                let fields = row.fields().unwrap();
+                assert_eq!(POINTS, row.time().len());
+                assert_eq!(1, fields.len(), "one series field per state row");
+                let values = fields
+                    .field_values(0, StateComponent::Value)
+                    .unwrap()
+                    .unwrap();
+                let compensation = fields
+                    .field_values(0, StateComponent::Compensation)
+                    .unwrap()
+                    .unwrap();
+                for point in 0..row.time().len() {
+                    assert!(fields.is_present(0, point).unwrap());
+                    assert_eq!((group * POINTS + point) as f64, values.value(point));
+                    assert_eq!(-(point as f64), compensation.value(point));
                 }
                 seen[group] = true;
                 owner_counts[owner] += 1;

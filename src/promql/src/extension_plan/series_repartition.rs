@@ -1668,48 +1668,6 @@ async fn read_raw_chains(
     }
 }
 
-/// Merges exact metric-name and complete-tag identities, preserving first-seen group order.
-///
-/// The Fused series stack calls this helper for evaluated frame finalization; this branch does not
-/// yet contain that caller, so the shared helper is not dead code in the integrated feature.
-#[allow(dead_code)]
-pub(crate) fn merge_exact_series(
-    schema: &Arc<SeriesSchema>,
-    series: Vec<Series>,
-) -> DataFusionResult<Vec<Series>> {
-    let mut indices = BTreeMap::new();
-    let mut groups: Vec<Vec<Series>> = Vec::new();
-    for series in series {
-        let key = (
-            series.metric.name().map(Arc::<str>::from),
-            series
-                .metric
-                .tags()
-                .iter()
-                .map(|tag| (Arc::clone(&tag.name), Arc::clone(&tag.value)))
-                .collect::<Vec<_>>(),
-        );
-        let group = match indices.get(&key) {
-            Some(index) => *index,
-            None => {
-                let index = groups.len();
-                indices.insert(key, index);
-                groups.push(Vec::new());
-                index
-            }
-        };
-        groups[group].push(series);
-    }
-    let mut output = Vec::with_capacity(groups.len());
-    for group in groups {
-        output.extend(
-            merge_same_labelset(schema, group)
-                .map_err(|error| DataFusionError::External(Box::new(error)))?,
-        );
-    }
-    Ok(output)
-}
-
 /// What one output stream holds so that the read belongs to the streams rather than to the plan.
 ///
 /// DataFusion's `execute_stream_partitioned` takes the plan by value and keeps only the streams, so
