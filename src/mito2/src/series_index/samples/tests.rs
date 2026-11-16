@@ -1229,13 +1229,32 @@ async fn real_samples_reconcile_reopen_and_retire(
     }));
     // Nothing is released while the superseded snapshot and its handle are still alive.
     assert!(purges.try_recv().is_err());
+    // A reader outlives the snapshot it was taken from, so hold a handle on every generation the
+    // superseded snapshot published: a rebuild can replace several of them at once, and releasing
+    // the snapshot must release none while those handles are alive.
+    let readers: Vec<_> = current
+        .samples
+        .values()
+        .filter(|handle| handle.entry().file_id != retired.entry().file_id)
+        .cloned()
+        .collect();
     drop(current);
+    // The purge follows the last reader handle, not the snapshot: `retired` and `readers` still
+    // hold the superseded generations, so dropping the published snapshot that owned one of their
+    // handles each must not release them.
+    assert!(purges.try_recv().is_err());
     drop(retired);
     let mut purged = BTreeSet::new();
     while let Ok(request) = purges.try_recv() {
         purged.extend(request.objects.unwrap());
     }
     assert!(retired_paths.is_subset(&purged));
+    // The generations kept alive above are superseded as well, so they are released with their
+    // last reader handle, not with the snapshot.
+    drop(readers);
+    while let Ok(request) = purges.try_recv() {
+        purged.extend(request.objects.unwrap());
+    }
     // Only superseded generations are released; nothing the snapshot still points at is purged.
     assert!(
         region
