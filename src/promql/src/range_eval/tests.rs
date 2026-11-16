@@ -1318,20 +1318,21 @@ fn synthetic_zero_still_extrapolates_to_the_window_end() {
         }
     }
 
-    // Three real samples, where the two spans finally differ: the sampled interval runs from the
-    // synthetic zero (5000 - 1000) while the average interval is measured between the real samples
-    // (5000 - 2000 over two steps). Both are 4000 against 1500 here, so an average taken from the
-    // sampled interval instead divides by three and under-reports the increase. Prometheus answers
-    // 9 * 1.375 = 12.375.
-    for (function, expected) in [
-        (RangeFunction::Increase, 12.375),
-        (RangeFunction::Rate, 2.0625),
-    ] {
+    // Two real samples, where the two spans finally differ: the sampled interval runs from the
+    // synthetic zero (3000 - 1000) while the average interval is measured between the real samples
+    // (3000 - 2000 over one step). That is 2000ms against 1000ms, so both ends fall past
+    // 1.1 * 1000ms and back to half of it, and the counter's zero point then takes the start to 0:
+    // the factor is (2000 + 0 + 500) / 2000 = 1.25. Measuring the average from the synthetic zero
+    // instead makes it 2000ms, leaves both ends inside 1.1 * 2000ms and answers 1.75 -- the swap
+    // this geometry fails on rather than passes by agreeing with itself. The zero adds its own
+    // sample back, so the count is (4 - 2) + 2 = 4, and Prometheus answers 4 * 1.25 = 5 for the
+    // increase and 4 * 1.25 / 4 = 1.25 for the rate.
+    for (function, expected) in [(RangeFunction::Increase, 5.0), (RangeFunction::Rate, 1.25)] {
         let mut evaluator = RangeEvaluator::try_new(
             &schema,
-            grid(6_500, 3_000, 1),
+            grid(4_500, 3_000, 1),
             RangeWindow {
-                range_ms: 6_000,
+                range_ms: 4_000,
                 offset_ms: 0,
                 anchor_ms: None,
                 modifier: None,
@@ -1343,19 +1344,18 @@ fn synthetic_zero_still_extrapolates_to_the_window_end() {
             &mut evaluator,
             &[
                 make_chunk(2_000, 2.0, Some(1_000), false),
-                make_chunk(3_500, 5.0, None, false),
-                make_chunk(5_000, 9.0, None, true),
+                make_chunk(3_000, 4.0, None, true),
             ],
         );
         let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
         match series.fields.as_slice()[0].cursor().at(0).unwrap() {
             SampleRef::Histogram(histogram) => assert!(
                 (histogram.count - expected).abs() < 1e-12,
-                "{function:?} over three samples: {} vs {expected}",
+                "{function:?} over two samples: {} vs {expected}",
                 histogram.count
             ),
             other => panic!(
-                "expected histogram for {function:?} over three samples, got {}",
+                "expected histogram for {function:?} over two samples, got {}",
                 describe_sample(Some(other))
             ),
         }
