@@ -489,7 +489,10 @@ pub(crate) fn build_table_meta_from_column_metadatas(
 
     // Takes the primary key order from the input tags, which the reconcile paths feed in the
     // regions' key order; the column order still comes from `table_meta`.
-    for col in column_metadata.iter().filter(|c| c.semantic_type == SemanticType::Tag) {
+    for col in column_metadata
+        .iter()
+        .filter(|c| c.semantic_type == SemanticType::Tag)
+    {
         let Some(&new_idx) = column_name_to_index.get(col.column_schema.name.as_str()) else {
             continue;
         };
