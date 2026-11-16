@@ -86,7 +86,7 @@ impl<S> RegionWorkerLoop<S> {
             existing_indexes: &file_meta.indexes,
         }));
         let index_build_inputs = Some(IndexBuildInputs {
-            output_rows: Some(file_meta.num_rows),
+            output_rows: (file_meta.num_rows != 0).then_some(file_meta.num_rows),
             plan,
             inputs: vec![file.with_updated_index(file_meta.clone())].into(),
             input_puffin_manager: access_layer.build_puffin_manager(),
@@ -256,10 +256,32 @@ impl<S> RegionWorkerLoop<S> {
             file_meta.cloned()
         };
 
+        // Check required providers for eligible inputs before currency selection:
+        // an unavailable handler has no plan and could otherwise appear current.
+        let candidates = if request.file_metas.is_empty() {
+            all_files
+                .values()
+                .filter_map(|file| {
+                    let file_meta = current_file_meta(file.meta_ref().file_id)?;
+                    Some((file.clone(), file_meta))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            request
+                .file_metas
+                .iter()
+                .filter_map(|meta| {
+                    let file = all_files.get(&meta.file_id)?;
+                    let file_meta = current_file_meta(meta.file_id)?;
+                    Some((file.clone(), file_meta))
+                })
+                .collect::<Vec<_>>()
+        };
+
         let registry = match self.prepare_rebuild_registry(
             &snapshot,
             request.build_type.clone(),
-            manifest.files.values().map(AsRef::as_ref),
+            candidates.iter().map(|(_, metadata)| metadata.as_ref()),
         ) {
             Ok(registry) => registry,
             Err(err) => {
@@ -276,13 +298,12 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         let build_tasks = if request.file_metas.is_empty() {
-            // If no specific files are provided, find files whose index is inconsistent with the region metadata.
             // Check the version rather than the manifest: a publication committed
             // to the manifest but not yet applied is still invisible to queries.
             // Its build still holds the file, so the manual task waits for it.
-            all_files
-                .values()
-                .filter(|file| {
+            candidates
+                .into_iter()
+                .filter(|(file, _)| {
                     index_needs_rebuild(
                         &registry,
                         &snapshot,
@@ -290,21 +311,9 @@ impl<S> RegionWorkerLoop<S> {
                         request.build_type.clone(),
                     )
                 })
-                .filter_map(|file| {
-                    let file_meta = current_file_meta(file.meta_ref().file_id)?;
-                    Some((file.clone(), file_meta))
-                })
                 .collect::<Vec<_>>()
         } else {
-            request
-                .file_metas
-                .iter()
-                .filter_map(|meta| {
-                    let file = all_files.get(&meta.file_id)?;
-                    let file_meta = current_file_meta(meta.file_id)?;
-                    Some((file.clone(), file_meta))
-                })
-                .collect::<Vec<_>>()
+            candidates
         };
 
         if build_tasks.is_empty() {

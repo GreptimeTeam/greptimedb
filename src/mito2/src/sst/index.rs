@@ -1028,18 +1028,40 @@ impl IndexBuildTask {
                 .await,
             ));
         };
-        let registry = &self.indexer_builder.registry;
-        let validation = if self.reason == IndexBuildType::Flush {
-            // Do not require schema extensions for built-in flush indexing, but
-            // still protect any extension indexes published while this task waited.
-            registry.validate_file_kinds([current_file_meta.as_ref()])
+        if self.reason == IndexBuildType::Flush {
+            // Flush plans omit extension handlers, even when their providers are
+            // registered. A replacement would erase these published indexes.
+            let has_extensions = current_file_meta
+                .available_indexes
+                .iter()
+                .chain(
+                    current_file_meta
+                        .indexes
+                        .iter()
+                        .flat_map(|column| &column.created_indexes),
+                )
+                .any(|index_type| {
+                    kind::ExtensionIndexKind::ALL.into_iter().any(|extension| {
+                        kind::IndexKind::Extension(extension).index_type() == *index_type
+                    })
+                });
+            if has_extensions {
+                return Ok(ControlFlow::Break(
+                    self.abort_and_notify(
+                        region_file_id,
+                        "Flush cannot replace published extension indexes",
+                    )
+                    .await,
+                ));
+            }
         } else {
-            registry
+            self.indexer_builder
+                .registry
                 .validate_required_kinds(&self.target_region_metadata, [current_file_meta.as_ref()])
-        };
-        validation.with_context(|_| ExternalSnafu {
-            context: "validating index handlers for rebuild".to_string(),
-        })?;
+                .with_context(|_| ExternalSnafu {
+                    context: "validating index handlers for rebuild".to_string(),
+                })?;
+        }
         let context = handler::PlanContext {
             metadata: &self.target_region_metadata,
             index_options: &self.index_options,
@@ -1068,7 +1090,8 @@ impl IndexBuildTask {
         if let Some(inputs) = &mut builder.index_build_inputs {
             inputs.plan = plan;
             inputs.inputs = vec![current_file.clone()].into();
-            inputs.output_rows = Some(current_file_meta.num_rows);
+            inputs.output_rows =
+                (current_file_meta.num_rows != 0).then_some(current_file_meta.num_rows);
         }
         self.file = current_file;
         self.source.file_meta = current_file_meta.as_ref().clone();
@@ -3521,8 +3544,11 @@ mod tests {
         }
     }
 
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
     #[tokio::test]
-    async fn test_rebuild_metadata_refresh_retains_sst_lifetime() {
+    async fn test_rebuild_metadata_refresh_retains_sst_lifetime(#[case] unknown_rows: bool) {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
@@ -3532,7 +3558,11 @@ mod tests {
             region_id: metadata.region_id,
             file_id: info.file_id,
             file_size: info.file_size,
-            num_rows: info.num_rows as u64,
+            num_rows: if unknown_rows {
+                0
+            } else {
+                info.num_rows as u64
+            },
             num_row_groups: info.num_row_groups,
             ..Default::default()
         };
@@ -3584,6 +3614,14 @@ mod tests {
             ControlFlow::Continue(())
         ));
         assert_eq!(task.file.meta_ref().index_version, 1);
+        assert_eq!(
+            task.indexer_builder
+                .index_build_inputs
+                .as_ref()
+                .unwrap()
+                .output_rows,
+            (!unknown_rows).then_some(info.num_rows as u64),
+        );
         let reader = task
             .indexer_builder
             .index_build_inputs
@@ -3599,6 +3637,81 @@ mod tests {
         assert!(purger.0.lock().unwrap().is_empty());
         drop(reader);
         assert_eq!(*purger.0.lock().unwrap(), vec![refreshed]);
+    }
+
+    #[rstest::rstest]
+    #[case(false, false)]
+    #[case(false, true)]
+    #[case(true, false)]
+    #[case(true, true)]
+    #[tokio::test]
+    async fn test_flush_refresh_preserves_published_extensions(
+        #[case] registered: bool,
+        #[case] column_level: bool,
+    ) {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata());
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let file_purger = Arc::new(NoopFilePurger);
+        let info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
+        let initial = FileMeta {
+            region_id: metadata.region_id,
+            file_id: info.file_id,
+            file_size: info.file_size,
+            num_rows: info.num_rows as u64,
+            num_row_groups: info.num_row_groups,
+            ..Default::default()
+        };
+        let mut published = initial.clone();
+        published.index_version = 1;
+        if column_level {
+            published.indexes.push(ColumnIndexMetadata {
+                column_id: metadata.column_metadatas[0].column_id,
+                created_indexes: smallvec::smallvec![IndexType::HllIndex],
+                ..Default::default()
+            });
+        } else {
+            published.available_indexes.push(IndexType::HllIndex);
+        }
+        seed_manifest_file(&manifest_ctx, &published).await;
+        let version = mock_version_control(
+            metadata.clone(),
+            file_purger.clone(),
+            HashMap::from([(initial.file_id, published.clone())]),
+        )
+        .await;
+        let mut builder = mock_indexer_builder(metadata.clone(), &env).await;
+        if registered {
+            Arc::make_mut(&mut Arc::make_mut(&mut builder).registry)
+                .register(Arc::new(RemoveTestIndex))
+                .unwrap();
+        }
+        let (tx, _rx) = mpsc::channel(4);
+        let mut task = IndexBuildTask {
+            region_id: metadata.region_id,
+            file: FileHandle::new(initial.clone(), file_purger.clone()),
+            target_region_metadata: metadata.clone(),
+            source: IndexBuildSource::new(initial.clone(), metadata.schema_version),
+            reason: IndexBuildType::Flush,
+            access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
+            manifest_ctx: manifest_ctx.clone(),
+            write_cache: None,
+            cache_manager: None,
+            file_purger,
+            indexer_builder: builder,
+            request_sender: tx,
+            index_options: IndexOptions::default(),
+            result_senders: Vec::new(),
+        };
+        assert!(matches!(
+            task.index_build(version).await.unwrap(),
+            IndexBuildReport::Done(IndexBuildOutcome::Aborted(_))
+        ));
+        assert_eq!(
+            manifest_ctx.manifest().await.files[&initial.file_id].as_ref(),
+            &published
+        );
     }
 
     #[tokio::test]
@@ -4020,7 +4133,10 @@ mod tests {
             // A flush retry must not overwrite an already published extension
             // index merely because it skips schema-level provider requirements.
             task.reason = IndexBuildType::Flush;
-            assert!(task.index_build(version_control.clone()).await.is_err());
+            assert!(matches!(
+                task.index_build(version_control.clone()).await.unwrap(),
+                IndexBuildReport::Done(IndexBuildOutcome::Aborted(_))
+            ));
             assert_eq!(
                 manifest_ctx.manifest().await.files[&file_meta.file_id].as_ref(),
                 &file_meta

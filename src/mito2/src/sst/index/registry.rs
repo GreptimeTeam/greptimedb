@@ -72,8 +72,9 @@ impl IndexRegistry {
         Ok(self)
     }
 
-    /// Strictly validates configured options before a region is opened.
+    /// Strictly validates configured options before a new region is created.
     pub fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        self.validate_schema_kinds(context.metadata)?;
         for handler in &self.handlers {
             handler.validate(context)?;
         }

@@ -127,14 +127,74 @@ async fn test_engine_create_validates_extension_options_before_manifest() {
             .is_empty()
     );
     // A failed plugin validation must leave a clean path for a subsequent create.
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas[0]
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Create(CreateRequestBuilder::new().build()),
-        )
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
         .await
         .unwrap();
     assert!(engine.get_region(region_id).is_some());
+
+    // Recovery and an idempotent Create do not require an optional provider.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    reopen_region(
+        &engine,
+        region_id,
+        request.table_dir,
+        true,
+        Default::default(),
+    )
+    .await;
+    assert!(engine.get_region(region_id).is_some());
+}
+
+#[tokio::test]
+async fn test_engine_create_rejects_missing_sketch_provider_before_manifest() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    for (key, value) in [
+        (datatypes::schema::HLL_KEY, r#"{"precision":10}"#),
+        (datatypes::schema::KLL_KEY, r#"{"capacity":64}"#),
+        (datatypes::schema::MG_KEY, r#"{"max-counters":64}"#),
+        (datatypes::schema::HLL_KEY, "invalid"),
+    ] {
+        let mut request = CreateRequestBuilder::new().build();
+        request.column_metadatas[0]
+            .column_schema
+            .mut_metadata()
+            .insert(key.into(), value.into());
+        let dir = manifest_dir(&region_dir_from_table_dir(
+            &request.table_dir,
+            region_id,
+            request.path_type,
+        ));
+        let error = engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert!(error.to_string().contains("no registered handler"));
+        assert!(engine.get_region(region_id).is_none());
+        assert!(
+            env.get_object_store()
+                .unwrap()
+                .list(&dir)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 #[tokio::test]

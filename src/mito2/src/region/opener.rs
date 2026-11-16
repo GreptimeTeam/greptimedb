@@ -396,7 +396,7 @@ impl RegionOpener {
         ensure_json2_uses_flat_format(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
         // Validate explicit new-region configuration before creating its manifest.
-        // Recovery and later compactions tolerate stale optional sketch settings.
+        // Opening an existing manifest above does not require its optional providers.
         if let Some(registry) = &self.index_registry {
             registry
                 .validate(&PlanContext {

@@ -2773,9 +2773,7 @@ async fn test_async_flush_without_sketch_provider_builds_builtin_indexes() {
     plugins.insert::<IndexKindProviderRef>(Arc::new(RebuildSketchProvider::default()));
     let mut setup_config = async_build_mode_config(false);
     setup_config.index.build_mode = IndexBuildMode::Sync;
-    let engine = env
-        .create_engine_with_plugins(setup_config, plugins)
-        .await;
+    let engine = env.create_engine_with_plugins(setup_config, plugins).await;
     let region_id = RegionId::new(1, 1);
     let mut request = CreateRequestBuilder::new().build_with_index();
     request.column_metadatas[0]
@@ -2982,6 +2980,100 @@ async fn test_manual_rebuild_without_required_provider_preserves_sketch_metadata
     assert!(outcome.is_err());
     let current = region.all_manifest_files().await.0;
     assert_eq!(current, vec![file]);
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_targeted_rebuild_ignores_unrelated_sketch_provider() {
+    let mut env = TestEnv::new().await;
+    let mut config = async_build_mode_config(false);
+    config.index.build_mode = IndexBuildMode::Sync;
+    let engine = env.create_engine(config).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build_with_index();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for start in [0, 2] {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(start, start + 2),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let mut files = region.all_manifest_files().await.0;
+    assert_eq!(files.len(), 2);
+    let target = files.pop().unwrap();
+    let mut historical = files.pop().unwrap();
+    historical.available_indexes.push(IndexType::HllIndex);
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![historical.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    for (file, should_succeed) in [(&target, true), (&historical, false)] {
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(1);
+        engine
+            .inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                crate::request::WorkerRequest::Background {
+                    region_id,
+                    notify: crate::request::BackgroundNotify::IndexBuildRetry(
+                        crate::request::BuildIndexRequest {
+                            region_id,
+                            build_type: IndexBuildType::SchemaChange,
+                            file_metas: vec![file.clone()],
+                            result_senders: vec![result_tx],
+                        },
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), result_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if should_succeed {
+            outcome.unwrap();
+        } else {
+            assert!(format!("{:?}", outcome.unwrap_err()).contains("no registered handler"));
+        }
+    }
+    let current = region.all_manifest_files().await.0;
+    assert!(
+        current
+            .iter()
+            .find(|file| file.file_id == target.file_id)
+            .unwrap()
+            .available_indexes
+            .contains(&IndexType::InvertedIndex)
+    );
+    let historical_current = current
+        .iter()
+        .find(|file| file.file_id == historical.file_id)
+        .unwrap();
+    assert_eq!(
+        historical_current.available_indexes,
+        historical.available_indexes
+    );
+    assert_eq!(historical_current.index_version, historical.index_version);
     engine.stop().await.unwrap();
 }
 
