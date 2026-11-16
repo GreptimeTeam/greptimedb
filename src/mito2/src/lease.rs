@@ -97,7 +97,7 @@ impl NodeLease {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GrantedLease {
     pub(crate) candidate_lease_id: Option<u64>,
-    /// When the heartbeat that carried the lease was sent.
+    /// When the heartbeat request for which this lease was granted was sent.
     pub(crate) sent_at: Instant,
 }
 
