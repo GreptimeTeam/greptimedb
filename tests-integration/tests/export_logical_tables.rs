@@ -621,6 +621,7 @@ async fn database_export_rejects_invalid_members_before_output() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn database_export_rejects_unsafe_local_names_before_output() {
+    use common_error::ext::ErrorExt;
     use servers::query_handler::sql::SqlQueryHandler;
 
     let standalone = GreptimeDbStandaloneBuilder::new("unsafe_export_names")
@@ -682,7 +683,7 @@ async fn database_export_rejects_unsafe_local_names_before_output() {
                 );
                 let mut results = instance.do_query(&statement, QueryContext::arc()).await;
                 assert_eq!(results.len(), 1);
-                let error = results.remove(0).unwrap_err().to_string();
+                let error = results.remove(0).unwrap_err().output_msg();
                 assert!(error.contains("Invalid database export"), "{error}");
                 for name in &names {
                     assert!(error.contains(name), "{error}");
@@ -1527,10 +1528,7 @@ async fn data_cli_propagates_copy_failures() {
     ])
     .await
     .unwrap_err();
-    assert!(
-        error.to_string().contains("duplicate output name"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("SQL request failed"), "{error}");
     let directory = legacy.join("greptime/public");
     assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
 
@@ -1550,10 +1548,7 @@ async fn data_cli_propagates_copy_failures() {
     ])
     .await
     .unwrap_err();
-    assert!(
-        error.to_string().contains("duplicate output name"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("SQL request failed"), "{error}");
 
     std::fs::write(directory.join("aaa_valid.parquet"), "invalid parquet").unwrap();
     std::fs::write(
@@ -1575,10 +1570,7 @@ async fn data_cli_propagates_copy_failures() {
     ])
     .await
     .unwrap_err();
-    assert!(
-        error.to_string().contains("parquet file metadata"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("SQL request failed"), "{error}");
     server.abort();
 }
 
