@@ -507,11 +507,15 @@ async fn database_export_rejects_invalid_members_before_output() {
             QueryContext::arc(),
         )
         .await;
-    assert!(matches!(result,
-        Err(frontend::error::Error::TableOperation {
-            source: operator::error::Error::InvalidDatabaseExport { reason }, ..
-        }) if reason == "duplicate output name: foo conflicts with Foo (foo.parquet)"));
-    assert!(!case_path.exists());
+    if cfg!(any(windows, target_os = "macos")) {
+        assert!(matches!(result,
+            Err(frontend::error::Error::TableOperation {
+                source: operator::error::Error::InvalidDatabaseExport { reason }, ..
+            }) if reason == "duplicate output name: foo conflicts with Foo (foo.parquet)"));
+        assert!(!case_path.exists());
+    } else {
+        assert_eq!(result.unwrap().output_files.len(), 2);
+    }
     case_req.location = "s3://export-bucket/data/".into();
     case_req.connection.extend([
         ("region".into(), "us-east-1".into()),
@@ -620,6 +624,7 @@ async fn database_export_rejects_invalid_members_before_output() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg(any(windows, target_os = "macos"))]
 async fn database_export_rejects_unsafe_local_names_before_output() {
     use common_error::ext::ErrorExt;
     use servers::query_handler::sql::SqlQueryHandler;
@@ -630,7 +635,7 @@ async fn database_export_rejects_unsafe_local_names_before_output() {
     let instance = standalone.fe_instance();
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     let overlong_name = "z".repeat(252);
-    let mut cases = vec![vec!["Events", "events"]];
+    let mut cases = vec![vec!["Events", "events"], vec!["Éa", "éa"]];
     if cfg!(windows) {
         cases.extend(
             [
@@ -711,6 +716,9 @@ async fn database_export_preserves_valid_table_names() {
     names.push("z".repeat(247));
     if !cfg!(windows) {
         names.extend(["ordinary:b".to_string(), "metric:b".to_string()]);
+    }
+    if !cfg!(any(windows, target_os = "macos")) {
+        names.extend(["Events", "events", "Éa", "éa"].map(String::from));
     }
     for name in &names {
         let engine = if name.starts_with("metric") {
@@ -1497,9 +1505,40 @@ async fn export_http(instance: Arc<Instance>) -> (String, tokio::task::JoinHandl
     (addr, task)
 }
 
+struct FailCopyExport;
+
+impl servers::interceptor::SqlQueryInterceptor for FailCopyExport {
+    type Error = frontend::error::Error;
+
+    fn pre_execute(
+        &self,
+        statement: Option<&sql::statements::statement::Statement>,
+        _plan: Option<&datafusion_expr::LogicalPlan>,
+        _ctx: session::context::QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        use sql::statements::copy::{Copy, CopyDatabase};
+        use sql::statements::statement::Statement;
+        if matches!(
+            statement,
+            Some(Statement::Copy(Copy::CopyDatabase(CopyDatabase::To(_))))
+        ) {
+            return Err(operator::error::InvalidDatabaseExportSnafu {
+                reason: "injected COPY export failure",
+            }
+            .build()
+            .into());
+        }
+        Ok(())
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn data_cli_propagates_copy_failures() {
+    use servers::interceptor::SqlQueryInterceptorRef;
+    let plugins = common_base::Plugins::new();
+    plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(FailCopyExport));
     let standalone = GreptimeDbStandaloneBuilder::new("cli_copy_failures")
+        .with_plugin(plugins)
         .build()
         .await;
     let instance = standalone.fe_instance();
@@ -1780,6 +1819,10 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
         let overlong_name = "z".repeat(252);
         for (name, engine) in [
             (overlong_name.as_str(), ""),
+            ("Events", ""),
+            ("events", ""),
+            ("Éa", ""),
+            ("éa", ""),
             ("ordinary:record", ""),
             (
                 "metric:record",

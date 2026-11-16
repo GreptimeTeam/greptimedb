@@ -19,7 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_error::ext::BoxedError;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use object_store::ObjectStore;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -431,7 +431,11 @@ impl Export {
             });
         }
 
-        for result in futures::future::join_all(tasks).await {
+        let results = futures::future::join_all(tasks).await;
+        for error in results.iter().filter_map(|result| result.as_ref().err()) {
+            error!(error; "Failed to export database schema");
+        }
+        for result in results {
             result?;
         }
         let elapsed = timer.elapsed();
@@ -548,7 +552,11 @@ impl Export {
             });
         }
 
-        for result in futures::future::join_all(tasks).await {
+        let results = futures::future::join_all(tasks).await;
+        for error in results.iter().filter_map(|result| result.as_ref().err()) {
+            error!(error; "Failed to export database data");
+        }
+        for result in results {
             result?;
         }
         let elapsed = timer.elapsed();

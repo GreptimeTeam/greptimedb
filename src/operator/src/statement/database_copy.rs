@@ -165,8 +165,10 @@ pub(crate) fn prepare_database_export_files(
                 },
             )?;
         }
-        let key = if local {
-            output.path.to_ascii_lowercase()
+        // Use platform defaults for per-table files. This does not model
+        // filesystem-specific Unicode equivalences such as APFS normalization.
+        let key = if local && !packed && cfg!(any(windows, target_os = "macos")) {
+            output.path.to_lowercase()
         } else {
             output.path.clone()
         };
@@ -268,16 +270,23 @@ mod tests {
     #[test]
     fn database_export_file_names_are_distinct() {
         for directory in ["backup/", "file:///copy/backup/"] {
-            let result = prepare_database_export_files(
-                directory,
-                ["Events".into(), "events".into()],
-                ".parquet",
-                false,
-            );
-            assert!(
-                matches!(result, Err(error::Error::InvalidDatabaseExport { reason })
-                if reason.contains("Events") && reason.contains("events") && reason.contains("events.parquet"))
-            );
+            for names in [["Events", "events"], ["Éa", "éa"]] {
+                for packed in [false, true] {
+                    let result = prepare_database_export_files(
+                        directory,
+                        names.map(String::from),
+                        ".parquet",
+                        packed,
+                    );
+                    if !packed && cfg!(any(windows, target_os = "macos")) {
+                        assert!(matches!(result,
+                            Err(error::Error::InvalidDatabaseExport { reason })
+                            if names.iter().all(|name| reason.contains(name))));
+                    } else {
+                        assert_eq!(result.unwrap().len(), 2);
+                    }
+                }
+            }
         }
         let overlong_name = "z".repeat(252);
         for name in [

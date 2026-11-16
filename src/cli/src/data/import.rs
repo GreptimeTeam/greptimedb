@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::ext::BoxedError;
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
@@ -172,7 +172,11 @@ impl Import {
             })
         }
 
-        for result in futures::future::join_all(tasks).await {
+        let results = futures::future::join_all(tasks).await;
+        for error in results.iter().filter_map(|result| result.as_ref().err()) {
+            error!(error; "Failed to import {filename}");
+        }
+        for result in results {
             result?;
         }
         let elapsed = timer.elapsed();
