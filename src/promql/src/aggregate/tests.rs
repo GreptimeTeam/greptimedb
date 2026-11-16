@@ -25,7 +25,9 @@ use datatypes::series::aggregate_state::{
     AggregateStateKind, AggregateStateSchema, StateComponent, StateFieldsBatch, StatePayload,
     StateSeries,
 };
-use datatypes::series::histogram::{BucketSideView, HistogramBatchBuilder, HistogramView};
+use datatypes::series::histogram::{
+    BucketSideView, HistogramBatch, HistogramBatchBuilder, HistogramView,
+};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 
@@ -1791,7 +1793,8 @@ fn state_row_of(op: AggregateOp, group: StateSeries) -> StateRow {
     let mut lists: Vec<Arc<dyn Array>> = Vec::with_capacity(group.states.len());
     for field in &group.states {
         // Only numeric payloads reach this encoder: `state_fields` describes numeric accumulators,
-        // and every state these folds produce is one.
+        // and every state these folds produce is one. A histogram payload is merged through
+        // `HistogramAccumulator`'s own state instead, in `merged_histogram_groups`.
         let numeric = |payload: &Option<StatePayload>| match payload.as_ref() {
             Some(StatePayload::Float(state)) => Some(*state),
             Some(StatePayload::Histogram(_)) => {
@@ -3345,30 +3348,76 @@ fn partial_state(
     aggregator.finish_partial().unwrap()
 }
 
-/// The answer a merge of `partials` reports, in merge order.
-fn merged_answer(
-    op: AggregateOp,
-    schema: &Arc<SeriesSchema>,
-    partials: &[PartialAggregate],
-) -> Vec<Series> {
-    let mut merger = FloatMerger::try_new(schema, op).unwrap();
+/// The per-group states a merge of `partials`' histogram payloads produces, in merge order.
+///
+/// A histogram payload's merge rules -- how the mean path weights each side by its own count, and
+/// which evidence a merge keeps -- are `HistogramAccumulator`'s own `from_payload` and `merge_state`,
+/// so a test that asks for those rules asks that API. Re-encoding the payload into the Arrow row an
+/// executor hands over would restate a layout the state encoder already owns, in the fixture.
+fn merged_histogram_groups(op: AggregateOp, partials: &[PartialAggregate]) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    let mut index: HashMap<LabelKey, usize> = HashMap::new();
     for partial in partials {
-        merge_partial(&mut merger, partial.clone());
+        assert_eq!(partial.op, op, "a merge folds the partitions of one op");
+        for series in &partial.groups {
+            // Groups pair by label set, so two partitions of one group meet at the same position.
+            let at = *index.entry(label_key(&series.metric)).or_insert_with(|| {
+                groups.push(Group {
+                    metric: series.metric.clone(),
+                    blocks: BTreeMap::new(),
+                    histograms: BTreeMap::new(),
+                });
+                groups.len() - 1
+            });
+            let histograms = &mut groups[at].histograms;
+            for (point, position) in series.time.positions() {
+                for (field, states) in series.states.iter().enumerate() {
+                    let Some(payload) = states[position].as_ref().and_then(StatePayload::histogram)
+                    else {
+                        continue;
+                    };
+                    match histograms.get_mut(&(point, field)) {
+                        Some(accumulator) => accumulator.merge_state(op, payload).unwrap(),
+                        None => {
+                            histograms.insert(
+                                (point, field),
+                                HistogramAccumulator::from_payload(op, payload).unwrap(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
-    merger.finish().unwrap()
+    groups
 }
 
-/// The evidence the merge of `partials` recorded, in merge order.
-fn merged_evidence(
+/// The answer a merge of `partials` reports at the first group's first point and field, or `None`
+/// where the merge answers nothing there.
+fn merged_histogram_answer(
     op: AggregateOp,
-    schema: &Arc<SeriesSchema>,
     partials: &[PartialAggregate],
-) -> HistogramEvidence {
-    let mut merger = FloatMerger::try_new(schema, op).unwrap();
-    for partial in partials {
-        merge_partial(&mut merger, partial.clone());
-    }
-    merger.evidence_summary()
+) -> Option<FloatHistogram> {
+    let groups = merged_histogram_groups(op, partials);
+    let accumulator = groups[0]
+        .histograms
+        .get(&(0, 0))
+        .expect("the merged histogram point");
+    finished_histogram(op, accumulator).unwrap()
+}
+
+/// The evidence a merge of `partials` recorded, once a point's bits are read as the summary reports
+/// them.
+fn merged_histogram_evidence(op: AggregateOp, partials: &[PartialAggregate]) -> HistogramEvidence {
+    evidence_summary(&merged_histogram_groups(op, partials))
+}
+
+/// One answer encoded as the row a series holds it in, so a merged answer and a serial fold's answer
+/// compare through the same view.
+fn answered_row(histogram: &FloatHistogram) -> Arc<HistogramBatch> {
+    let mut builder = HistogramBatchBuilder::new();
+    histogram.push_to(&mut builder).unwrap();
+    builder.finish().unwrap()
 }
 
 /// Compares two answers' scalar fields and buckets within a relative tolerance.
@@ -3428,14 +3477,16 @@ fn merging_two_partials_answers_the_sum_the_one_fold_answers() {
     let both: Vec<Series> = first.iter().chain(&second).cloned().collect();
     let left = partial_state(AggregateOp::Sum, &schema, &first);
     let right = partial_state(AggregateOp::Sum, &schema, &second);
-    let merged = merged_answer(AggregateOp::Sum, &schema, &[left, right]);
+    let merged =
+        merged_histogram_answer(AggregateOp::Sum, &[left, right]).expect("a merged answer");
     let complete = aggregate_answer(&schema, &both, AggregateOp::Sum);
+    let row = answered_row(&merged);
     assert_histogram_close(
-        &answered_histogram(&merged[0], 0, 0),
+        &row.view(0).expect("one answer row"),
         &answered_histogram(&complete, 0, 0),
     );
-    assert_eq!(answered_histogram(&merged[0], 0, 0).sum, 10.0);
-    assert_eq!(answered_histogram(&merged[0], 0, 0).count, 4.0);
+    assert_eq!(merged.sum, 10.0);
+    assert_eq!(merged.count, 4.0);
 }
 
 /// One partition that switched to a mean and one that is still summing merge into the answer one
@@ -3475,13 +3526,17 @@ fn merging_a_mean_partial_with_a_sum_partial_answers_the_one_fold() {
         "the second partition did not"
     );
 
-    let merged = merged_answer(AggregateOp::Avg, &schema, &[left, right]);
+    let merged =
+        merged_histogram_answer(AggregateOp::Avg, &[left, right]).expect("a merged answer");
     let complete = aggregate_answer(&schema, &both, AggregateOp::Avg);
-    let merged_value = answered_histogram(&merged[0], 0, 0);
-    assert_histogram_close(&merged_value, &answered_histogram(&complete, 0, 0));
-    assert!(merged_value.sum.is_finite());
+    let row = answered_row(&merged);
+    assert_histogram_close(
+        &row.view(0).expect("one answer row"),
+        &answered_histogram(&complete, 0, 0),
+    );
+    assert!(merged.sum.is_finite());
     assert_eq!(
-        merged_value.sum,
+        merged.sum,
         1e308 / 2.0,
         "two of four samples observed 1e308"
     );
@@ -3503,8 +3558,7 @@ fn merging_two_overflowing_partials_answers_a_finite_mean() {
         &schema,
         &[histogram_series(&schema, "b", vec![(0, large())])],
     );
-    let merged = merged_answer(AggregateOp::Avg, &schema, &[left, right]);
-    let value = answered_histogram(&merged[0], 0, 0);
+    let value = merged_histogram_answer(AggregateOp::Avg, &[left, right]).expect("a merged answer");
     assert!(value.sum.is_finite(), "a mean of finite sums is finite");
     assert_eq!(value.sum, 1e308, "(1e308 + 1e308) / 2");
     assert_eq!(value.count, 1.0);
@@ -3567,8 +3621,7 @@ fn merging_unequal_mean_partials_weights_each_mean_by_its_count() {
     );
     assert_eq!(right_payload.count, 6.0);
     // One side switching is enough to put the merge on its mean path.
-    let merged = merged_answer(AggregateOp::Avg, &schema, &[left, right]);
-    let value = answered_histogram(&merged[0], 0, 0);
+    let value = merged_histogram_answer(AggregateOp::Avg, &[left, right]).expect("a merged answer");
     assert_eq!(
         value.sum,
         7.0 * 2f64.powi(1019),
@@ -3577,7 +3630,7 @@ fn merging_unequal_mean_partials_weights_each_mean_by_its_count() {
     // The observation counts follow the same weights, and both sides average one observation per
     // sample, so the answer's count stays 1 whatever the weights are.
     assert_eq!(value.count, 1.0);
-    assert_eq!(side_buckets(&value.positive), vec![(0, 1.0)]);
+    assert_eq!(value.positive, vec![(0, 1.0)]);
 }
 
 /// A poisoned partition poisons the point whatever the other partition holds, and a poisoned point
@@ -3613,12 +3666,12 @@ fn a_poisoned_partial_poisons_the_merged_point() {
         [poisoned.clone(), legal.clone()],
         [legal.clone(), poisoned.clone()],
     ] {
-        let merged = merged_answer(AggregateOp::Sum, &schema, &order);
+        let merged = merged_histogram_answer(AggregateOp::Sum, &order);
         assert!(
-            merged.is_empty(),
+            merged.is_none(),
             "a poisoned point answers nothing, whichever side poisoned it"
         );
-        let evidence = merged_evidence(AggregateOp::Sum, &schema, &order);
+        let evidence = merged_histogram_evidence(AggregateOp::Sum, &order);
         assert!(evidence.poisoned);
         assert!(evidence.incompatible_layout);
     }
@@ -3669,8 +3722,8 @@ fn the_merged_evidence_does_not_depend_on_the_merge_order() {
             )],
         )],
     );
-    let forward = merged_evidence(AggregateOp::Sum, &schema, &[left.clone(), right.clone()]);
-    let backward = merged_evidence(AggregateOp::Sum, &schema, &[right, left]);
+    let forward = merged_histogram_evidence(AggregateOp::Sum, &[left.clone(), right.clone()]);
+    let backward = merged_histogram_evidence(AggregateOp::Sum, &[right, left]);
     assert!(forward.custom_bounds_reconciled, "{forward:?}");
     assert_eq!(forward, backward, "the evidence is order independent");
 }
@@ -3715,11 +3768,11 @@ fn a_merge_collides_the_reset_hints_of_one_group_but_not_of_two() {
     let right = partial("b", not_reset());
     for one in [&left, &right] {
         assert!(
-            !merged_evidence(AggregateOp::Sum, &schema, std::slice::from_ref(one))
+            !merged_histogram_evidence(AggregateOp::Sum, std::slice::from_ref(one))
                 .counter_reset_collision
         );
     }
-    let apart = merged_evidence(AggregateOp::Sum, &schema, &[left, right]);
+    let apart = merged_histogram_evidence(AggregateOp::Sum, &[left, right]);
     assert!(apart.counter_reset_seen && apart.not_counter_reset_seen);
     assert!(
         !apart.counter_reset_collision,
@@ -3729,7 +3782,7 @@ fn a_merge_collides_the_reset_hints_of_one_group_but_not_of_two() {
     // The same group on both sides: the point holds both hints once they are merged.
     let left = partial("a", reset());
     let right = partial("a", not_reset());
-    let together = merged_evidence(AggregateOp::Sum, &schema, &[left, right]);
+    let together = merged_histogram_evidence(AggregateOp::Sum, &[left, right]);
     assert!(
         together.counter_reset_collision,
         "one point saw both hints: {together:?}"
@@ -3776,13 +3829,13 @@ fn a_merge_of_two_valid_partials_with_different_layouts_removes_the_point() {
             )],
         );
         // Each partial on its own is a valid answer.
-        assert!(!merged_evidence(op, &schema, std::slice::from_ref(&exponential)).poisoned);
-        assert!(!merged_evidence(op, &schema, std::slice::from_ref(&custom)).poisoned);
+        assert!(!merged_histogram_evidence(op, std::slice::from_ref(&exponential)).poisoned);
+        assert!(!merged_histogram_evidence(op, std::slice::from_ref(&custom)).poisoned);
         for order in [
             [exponential.clone(), custom.clone()],
             [custom.clone(), exponential.clone()],
         ] {
-            let evidence = merged_evidence(op, &schema, &order);
+            let evidence = merged_histogram_evidence(op, &order);
             assert!(
                 evidence.poisoned,
                 "{op:?} kept a point whose two partitions disagree on the bucket family: {evidence:?}"
