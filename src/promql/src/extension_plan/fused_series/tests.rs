@@ -36,7 +36,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use api::v1::SemanticType;
+use common_error::ext::BoxedError;
 use common_query::series_frame::{pack_evaluated_series, unpack_evaluated_series};
+use common_recordbatch::{
+    EmptyRecordBatchStream, SendableRecordBatchStream as CommonSendableRecordBatchStream,
+};
 use datafusion::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -57,7 +62,7 @@ use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
 use datafusion::physical_plan::execution_plan::{
     Boundedness, ChildrenPropertiesMode, EmissionType, ReplaceChildrenOptions,
 };
-use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
@@ -65,6 +70,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::SessionContext;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, SchemaRef as DatatypesSchemaRef};
 use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent, StateSeries};
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
@@ -76,9 +82,12 @@ use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, Serie
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
-use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-use store_api::region_engine::{BoundTag, RawLabelSource};
-use store_api::storage::RegionId;
+use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+use store_api::region_engine::{
+    BoundTag, PrepareRequest, QueryScanContext, RawLabelSource, RegionScanner, ScannerProperties,
+};
+use store_api::storage::{RegionId, ScanRequest};
+use table::table::scan::RegionScanExec;
 
 mod frame_output;
 
@@ -87,7 +96,8 @@ use super::{
     series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
-use crate::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+use crate::extension_plan::raw_series_source::tests::{per_series_scan, raw_source};
+use crate::extension_plan::{RawSeriesSourceExec, SeriesRepartitionExec, SeriesRouting};
 use crate::histogram_eval::HistogramFunction;
 use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
@@ -209,6 +219,20 @@ fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
 /// The tree `rate(x[5m])` compiles to over one field.
 fn rate_tree() -> NativeTree {
     rate_tree_of(raw_schema())
+}
+
+/// [`rate_tree`] with its window function replaced by `function`.
+///
+/// Only the kernel changes: the input stays raw samples and the output stays the same evaluated
+/// schema, so a tree built here differs from [`rate_tree`] in the one thing a function decides -
+/// whether the metric name survives its window.
+fn window_tree_of(function: RangeFunction) -> NativeTree {
+    let mut root = rate_tree().root().clone();
+    let NativeExpr::Window { op, .. } = &mut root.expr else {
+        panic!("the rate fixture is a window root");
+    };
+    op.function = function;
+    NativeTree::try_new(root).expect("a window function keeps the raw input and its grid")
 }
 
 /// `left + right` on one grid, both operands reading the one actual source.
@@ -641,7 +665,220 @@ fn timestamp_match_tree() -> NativeTree {
     NativeTree::try_new(root).unwrap()
 }
 
+/// `instant_of(0, grid)` broadcast against the constant 2 with `op`.
+///
+/// A scalar has no labels, so the operation reaches each series of the vector side as it is; which
+/// side the scalar is bound to changes nothing about the identity the node answers.
+fn scalar_broadcast_tree(op: BinaryOp, scalar_left: bool) -> NativeTree {
+    let grid = grid();
+    let vector = instant_of(0, &grid);
+    let output = vector.output.clone();
+    let scalar = NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value: 2.0 }),
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let (left, right) = if scalar_left {
+        (scalar, vector)
+    } else {
+        (vector, scalar)
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output,
+    })
+    .expect("a scalar broadcast over one source is a legal tree")
+}
+
+/// `instant_of(0, grid)` with one `label_replace` writing `destination` into it.
+fn label_rewrite_tree(destination: &str) -> NativeTree {
+    let input = instant_of(0, &grid());
+    let output = input.output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(input),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Label(Arc::new(
+                    LabelRewrite::replace(destination, "fresh", HOST, ".*")
+                        .expect("the rewrite is a legal label_replace"),
+                ))]),
+            },
+        },
+        output,
+    })
+    .expect("a label rewrite over one source is a legal tree")
+}
+
+/// The labels the per-series fixture scan binds: one metric named `cpu` keyed by `host`.
+fn fixture_labels() -> super::StoredSeriesLabels {
+    super::StoredSeriesLabels::of(&fixture_binding(HOST))
+        .expect("the fixture binding states labels")
+}
+
+/// A per-series binding of one metric whose single tag - and so its primary key - is `name`.
+fn fixture_binding(name: &str) -> RawLabelSource {
+    fixture_binding_of(name, false)
+}
+
+/// The same binding over a region that states its tag nullable, as a metric data region does.
+///
+/// A nullable tag distinguishes a `NULL` value from an empty string in storage: they are different
+/// keys, and they decode to an absent label and to an empty one.
+fn fixture_binding_with_nullable_tag(name: &str) -> RawLabelSource {
+    fixture_binding_of(name, true)
+}
+
+/// A per-series binding of one metric whose single tag - and so its primary key - is `name`, in a
+/// region that states the tag `nullable`.
+fn fixture_binding_of(name: &str, nullable: bool) -> RawLabelSource {
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(name, ConcreteDataType::string_datatype(), nullable),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 2,
+        })
+        .primary_key(vec![1]);
+    RawLabelSource::PrimaryKey {
+        metric_name: Arc::from(METRIC),
+        physical_metadata: Arc::new(builder.build().expect("the fixture metadata is valid")),
+        logical_tags: Arc::from([BoundTag {
+            column_id: 1,
+            name: Arc::from(name),
+        }]),
+    }
+}
+
+/// A per-series scan of `partitions` scan partitions over a region whose only tag is nullable.
+///
+/// A metric data region states every user tag nullable, because the logical metrics it holds share
+/// them, so this is the region a `rate` over a metric table reads. The scan never runs here: what a
+/// disjointness claim says is decided from the plan alone.
+fn nullable_tag_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
+    let binding = fixture_binding_with_nullable_tag(HOST);
+    let RawLabelSource::PrimaryKey {
+        physical_metadata, ..
+    } = &binding
+    else {
+        unreachable!("the fixture binding binds a primary key")
+    };
+    let scanner = NullableTagScanner {
+        metadata: Arc::clone(physical_metadata),
+        properties: ScannerProperties::new(vec![vec![]; partitions], false, 0),
+    };
+    let scan = Arc::new(
+        RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None)
+            .expect("the fixture scanner scans"),
+    );
+    scan.try_to_series_scan(binding)
+        .expect("the fixture binding is legal")
+        .expect("the fixture scanner answers raw series")
+}
+
+/// The region scan [`nullable_tag_scan`] builds: it publishes no chunks, only the metadata a
+/// disjointness claim is read from.
+#[derive(Debug)]
+struct NullableTagScanner {
+    metadata: RegionMetadataRef,
+    properties: ScannerProperties,
+}
+
+impl DisplayAs for NullableTagScanner {
+    fn fmt_as(&self, _format: DisplayFormatType, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "NullableTagScanner")
+    }
+}
+
+impl RegionScanner for NullableTagScanner {
+    fn name(&self) -> &str {
+        "NullableTagScanner"
+    }
+
+    fn properties(&self) -> &ScannerProperties {
+        &self.properties
+    }
+
+    fn schema(&self) -> DatatypesSchemaRef {
+        Arc::clone(&self.metadata.schema)
+    }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        Arc::clone(&self.metadata)
+    }
+
+    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.properties.prepare(request);
+        Ok(())
+    }
+
+    fn scan_partition(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics: &ExecutionPlanMetricsSet,
+        _partition: usize,
+    ) -> Result<CommonSendableRecordBatchStream, BoxedError> {
+        Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
+            &self.metadata.schema,
+        ))))
+    }
+
+    fn has_predicate_without_region(&self) -> bool {
+        true
+    }
+
+    fn add_dyn_filter_to_predicate(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Vec<bool> {
+        vec![false; filter_exprs.len()]
+    }
+
+    fn set_logical_region(&mut self, logical_region: bool) {
+        self.properties.set_logical_region(logical_region);
+    }
+
+    fn set_query_load_region_id(&mut self, region_id: RegionId) {
+        self.properties.set_query_load_region_id(region_id);
+    }
+
+    fn raw_series_schema(
+        &self,
+        _label_source: &RawLabelSource,
+    ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
+        Ok(Some(raw_schema()))
+    }
+}
+
 fn partition_disjoint(tree: NativeTree, input: Arc<dyn ExecutionPlan>) -> bool {
+    partition_disjoint_over(tree, input, RawLabelSource::Explicit)
+}
+
+/// Whether the fused node over `input`, whose frames `label_source` binds, claims disjoint
+/// identities.
+fn partition_disjoint_over(
+    tree: NativeTree,
+    input: Arc<dyn ExecutionPlan>,
+    label_source: RawLabelSource,
+) -> bool {
     let node = FusedSeries::try_new(
         Arc::from(PROMQL),
         tree.clone(),
@@ -655,11 +892,7 @@ fn partition_disjoint(tree: NativeTree, input: Arc<dyn ExecutionPlan>) -> bool {
     )
     .unwrap();
     let exec = node
-        .to_execution_plan(vec![(
-            input,
-            RawLabelSource::Explicit,
-            SeriesOrdering::Contiguous,
-        )])
+        .to_execution_plan(vec![(input, label_source, SeriesOrdering::Contiguous)])
         .unwrap();
     exec.downcast_ref::<super::FusedSeriesExec>()
         .unwrap()
@@ -702,7 +935,10 @@ fn partition_disjoint_rejects_non_identity_trees() {
         );
     }
     assert!(
-        !super::preserves_partition_identity(binary_tree(raw_schema(), raw_schema()).root()),
+        !super::preserves_partition_identity(
+            binary_tree(raw_schema(), raw_schema()).root(),
+            Some(&fixture_labels())
+        ),
         "two Input leaves sharing source 0 are still a Binary tree"
     );
 }
@@ -711,10 +947,306 @@ fn partition_disjoint_rejects_non_identity_trees() {
 fn partition_disjoint_requires_proven_input() {
     let sample = NativeTree::try_new(instant_of(0, &grid())).unwrap();
     assert!(!partition_disjoint(sample.clone(), memory_exec(vec![])));
-    assert!(super::preserves_partition_identity(sample.root()));
+    assert!(super::preserves_partition_identity(sample.root(), None));
 
     let scalar = scalar_tree(grid(), 1.0);
-    assert!(!super::preserves_partition_identity(scalar.root()));
+    assert!(!super::preserves_partition_identity(scalar.root(), None));
+}
+
+#[test]
+fn partition_disjoint_accepts_a_raw_source_that_kept_its_per_series_scan() {
+    let tree = NativeTree::try_new(instant_of(0, &grid())).unwrap();
+    let source = raw_source(per_series_scan(2));
+    assert!(
+        source
+            .downcast_ref::<RawSeriesSourceExec>()
+            .expect("the fixture input is the region's raw source")
+            .is_per_series_scan(),
+        "the fixture input keeps the per-series provenance the region planner declared"
+    );
+
+    assert!(
+        partition_disjoint(tree, source),
+        "a raw source over a per-series scan confines each identity to one scan partition, so the \
+         fused node above it keeps that placement"
+    );
+}
+
+#[test]
+fn partition_disjoint_accepts_a_window_that_keeps_the_metric_name() {
+    let source = raw_source(per_series_scan(2));
+    for function in [RangeFunction::LastOverTime, RangeFunction::FirstOverTime] {
+        let tree = window_tree_of(function);
+        assert!(
+            super::preserves_partition_identity(tree.root(), None),
+            "{function:?} answers one series per input series under the labels it read"
+        );
+        assert!(
+            partition_disjoint(tree, Arc::clone(&source)),
+            "a window root that keeps the metric name is one output identity per input series, so \
+             the per-series scan below it still places each identity on one partition"
+        );
+    }
+}
+
+#[test]
+fn partition_disjoint_accepts_a_window_that_drops_the_metric_name_over_one_bound_metric() {
+    let source = raw_source(per_series_scan(2));
+    for function in [
+        RangeFunction::Rate,
+        RangeFunction::Increase,
+        RangeFunction::SumOverTime,
+    ] {
+        let tree = window_tree_of(function);
+        assert!(
+            partition_disjoint(tree, Arc::clone(&source)),
+            "{function:?} drops the metric name, and the binding below it names one metric and \
+             binds its primary key: the dropped name told no two stored series apart, and every tag \
+             that does tell them apart survives the drop, so each output identity is still one \
+             stored series' own"
+        );
+    }
+}
+
+#[test]
+fn partition_disjoint_refuses_a_window_that_drops_the_metric_name_without_a_bound_key() {
+    let tree = window_tree_of(RangeFunction::Rate);
+    assert!(
+        !super::preserves_partition_identity(tree.root(), None),
+        "rate drops the metric name, and without a binding that proves the name was shared the \
+         name is part of what tells two series apart"
+    );
+    assert!(
+        !partition_disjoint(tree, memory_exec(vec![])),
+        "a source that states no bound labels proves neither that the dropped name was shared nor \
+         that the remaining tags distinguish the series it reads"
+    );
+}
+
+#[test]
+fn partition_disjoint_refuses_a_key_bound_by_a_metadata_label() {
+    let tree = window_tree_of(RangeFunction::Rate);
+    let keeping_name = window_tree_of(RangeFunction::LastOverTime);
+    for name in ["__type__", "__unit__"] {
+        let binding = fixture_binding(name);
+        let labels = super::StoredSeriesLabels::of(&binding)
+            .expect("a per-series binding states its labels");
+        assert!(
+            !labels.keys_survive_metadata_drop,
+            "a region that keys a series by {name} is keyed by a label a name-dropping kernel \
+             removes"
+        );
+        assert!(
+            !super::preserves_partition_identity(tree.root(), Some(&labels)),
+            "rate drops {name} with the name, so two stored series that differ only there meet \
+             under one output label set"
+        );
+        assert!(
+            super::preserves_partition_identity(keeping_name.root(), Some(&labels)),
+            "a window that keeps the name keeps {name} too, so the binding's key survives it"
+        );
+    }
+}
+
+#[test]
+fn partition_disjoint_refuses_a_nullable_key_a_name_drop_normalizes() {
+    // One stored series carries `host = NULL` and another `host = ''`: two different storage keys,
+    // which decode to an absent label and to an empty one. A kernel that drops the metric name drops
+    // the empty value with it, so both series leave it under one label set - and a node that claims
+    // disjoint identities never merges that label set again, so the two need not even meet: one
+    // partition closing each is enough for both to survive.
+    let binding = fixture_binding_with_nullable_tag(HOST);
+    let labels =
+        super::StoredSeriesLabels::of(&binding).expect("a per-series binding states its labels");
+    assert!(
+        !labels.keys_survive_metadata_drop,
+        "a nullable key column can hold `NULL` in one series and `''` in another, which a \
+         name-dropping kernel hands over as no label at all in either case"
+    );
+
+    let source = nullable_tag_scan(2);
+    assert_eq!(
+        source.properties().output_partitioning().partition_count(),
+        2,
+        "the regression is about two partitions, each holding one of the two series"
+    );
+    assert!(
+        !super::preserves_partition_identity(
+            window_tree_of(RangeFunction::Rate).root(),
+            Some(&labels)
+        ),
+        "rate drops the empty value with the name, so the two stored series meet under one label set"
+    );
+    for tree in [
+        window_tree_of(RangeFunction::Rate),
+        window_tree_of(RangeFunction::Increase),
+        scalar_broadcast_tree(BinaryOp::Mul, false),
+    ] {
+        assert!(
+            !partition_disjoint_over(tree, Arc::clone(&source), binding.clone()),
+            "a nullable key proves nothing a name-dropping kernel could rely on, so the node keeps \
+             the merging path instead of claiming disjoint identities"
+        );
+    }
+
+    // What the normalization does not touch still proves: a window that keeps the name and an
+    // instant selection keep the labels they read, and with them the absent-versus-empty
+    // distinction the nullable key has in storage.
+    assert!(
+        partition_disjoint_over(
+            window_tree_of(RangeFunction::LastOverTime),
+            Arc::clone(&source),
+            binding.clone()
+        ),
+        "a window that keeps the name keeps every label it read, so the nullable key still tells \
+         two series apart"
+    );
+    assert!(
+        partition_disjoint_over(
+            NativeTree::try_new(instant_of(0, &grid())).unwrap(),
+            source,
+            binding
+        ),
+        "an instant selection of the sample keeps the labels it read, `NULL` and `''` included"
+    );
+}
+
+#[test]
+fn partition_disjoint_refuses_a_binding_whose_tags_the_rows_do_not_carry() {
+    let tree = window_tree_of(RangeFunction::Rate);
+    let binding = fixture_binding("zone");
+    let labels =
+        super::StoredSeriesLabels::of(&binding).expect("a per-series binding states its labels");
+    assert!(
+        !labels.answers_every_tag(&[HOST.to_string(), NAME.to_string()]),
+        "the rows carry `host` and `__name__`, so the `zone` tag that tells stored series apart \
+         would be dropped and two of them would leave as one identity"
+    );
+    assert!(
+        labels.answers_every_tag(&["zone".to_string(), NAME.to_string()]),
+        "the rows that carry the tag keep the distinction"
+    );
+    assert!(
+        partition_disjoint(tree, raw_source(per_series_scan(2))),
+        "the fixture scan binds `host`, which the fixture output rows carry"
+    );
+}
+
+#[test]
+fn partition_disjoint_accepts_an_info_sample_selection() {
+    let mut root = NativeTree::try_new(instant_of(0, &grid()))
+        .unwrap()
+        .root()
+        .clone();
+    let NativeExpr::Instant { op, .. } = &mut root.expr else {
+        panic!("the instant fixture is an instant selection");
+    };
+    op.value = InstantValue::InfoTimestamp;
+    let tree = NativeTree::try_new(root).expect("an info sample selection is a legal tree");
+    assert!(
+        partition_disjoint(tree, raw_source(per_series_scan(2))),
+        "an info sample selection hands each series over under the labels it read, so it keeps \
+         every identity its input had"
+    );
+}
+
+#[test]
+fn partition_disjoint_accepts_a_filtering_scalar_comparison() {
+    let source = raw_source(per_series_scan(2));
+    for scalar_left in [false, true] {
+        assert!(
+            partition_disjoint(
+                scalar_broadcast_tree(BinaryOp::Gt, scalar_left),
+                Arc::clone(&source)
+            ),
+            "a filtering comparison keeps the label set it read, so it keeps every identity"
+        );
+        assert!(
+            partition_disjoint(
+                scalar_broadcast_tree(BinaryOp::Mul, scalar_left),
+                Arc::clone(&source)
+            ),
+            "an arithmetic broadcast drops the name of a scan that names one metric and binds its \
+             key, which merges no two stored series"
+        );
+        assert!(
+            !super::preserves_partition_identity(
+                scalar_broadcast_tree(BinaryOp::Mul, scalar_left).root(),
+                None
+            ),
+            "without the binding, the name arithmetic drops is part of what tells series apart"
+        );
+    }
+}
+
+#[test]
+fn partition_disjoint_admits_a_label_rewrite_only_when_it_writes_a_fresh_label() {
+    let source = raw_source(per_series_scan(2));
+    assert!(
+        partition_disjoint(label_rewrite_tree("zone"), Arc::clone(&source)),
+        "writing a label no series carries cannot make two of them equal"
+    );
+    for destination in [HOST, NAME] {
+        assert!(
+            !partition_disjoint(label_rewrite_tree(destination), Arc::clone(&source)),
+            "{destination} is a label a stored series carries, so rewriting it can fold two \
+             series into one label set"
+        );
+    }
+}
+
+#[test]
+fn partition_disjoint_rejects_a_multi_input_tree() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("the logical node accepts two dense sources");
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                raw_source(per_series_scan(2)),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                raw_source(per_series_scan(2)),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect("both sources are per-series scans");
+    let fused = exec
+        .downcast_ref::<super::FusedSeriesExec>()
+        .expect("the fused node is the root here");
+    assert_eq!(
+        2,
+        fused.inputs.len(),
+        "the fixture really has more than one input"
+    );
+    assert!(
+        !fused.has_partition_disjoint_identities(),
+        "a tree reading several sources matches their series against each other, so no output \
+         identity is one input's"
+    );
+}
+
+#[test]
+fn partition_disjoint_fails_closed_across_a_repartition() {
+    let tree = window_tree_of(RangeFunction::LastOverTime);
+    let repartitioned: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(raw_source(per_series_scan(2)), 2)
+            .expect("a raw frame routes by its primary key"),
+    );
+    assert!(
+        !partition_disjoint(tree, repartitioned),
+        "a redistribution below the producer breaks the one-identity-one-partition contract, so the \
+         per-series provenance below it cannot be inherited through it"
+    );
 }
 
 #[test]
