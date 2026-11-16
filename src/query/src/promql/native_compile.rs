@@ -1375,13 +1375,13 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     if let Some((op, vector)) = vector_op(func.name, &args.args)? {
         return vector_call(context, func.name, op, vector);
     }
+    if let Some(node) = scalar_function_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
     // The name is looked up before the call's arguments are read, so a name this compiler has no
     // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
     // vector to map, and the rejection names the name rather than describing a vector they never
     // wrote.
-    if let Some(node) = scalar_function_call(context, func.name, &args.args)? {
-        return Ok(node);
-    }
     if let Some(node) = parameterized_call(context, func.name, &args.args)? {
         return Ok(node);
     }
