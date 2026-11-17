@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod file_metadata;
 pub(crate) mod manifest_size;
 
 use std::time::{Duration, Instant};
@@ -67,6 +68,12 @@ lazy_static! {
             exponential_buckets(0.01, 10.0, 7).unwrap(),
         )
         .unwrap();
+
+    /// Close-time WAL releases that the log store failed to admit.
+    pub static ref WAL_RELEASE_ADMISSION_FAILURE_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_wal_release_admission_failure_total",
+        "Close-time WAL release admission failures"
+    ).unwrap();
 
     // ------ Flush related metrics
     /// Counter of scheduled flush requests.
@@ -728,6 +735,35 @@ lazy_static! {
     /// Counter of flush files.
     pub static ref FLUSH_FILE_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_flush_file_total", "mito flushed file count").unwrap();
+
+    /// Elapsed time of the SST writes of tail replays, by stage.
+    pub static ref TAIL_REPLAY_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_mito_tail_replay_elapsed",
+        "mito tail replay elapsed",
+        &[TYPE_LABEL],
+        // 1 ~ 3125
+        exponential_buckets(1.0, 5.0, 6).unwrap(),
+    )
+    .unwrap();
+    /// Bytes of SSTs from completed chunk writes of tail replays, including chunks of rounds
+    /// that fail later.
+    pub static ref TAIL_REPLAY_BYTES_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_tail_replay_bytes_total",
+        "mito tail replay bytes total"
+    )
+    .unwrap();
+    /// Count of SSTs written by tail replays, including SSTs of failed rounds that were deleted.
+    pub static ref TAIL_REPLAY_FILE_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_tail_replay_file_total",
+        "mito tail replay file count"
+    )
+    .unwrap();
+    /// Count of failed tail replay rounds.
+    pub static ref TAIL_REPLAY_FAILURE_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_tail_replay_failure_total",
+        "mito tail replay failure total"
+    )
+    .unwrap();
 }
 
 #[cfg(feature = "hdfs-object-store")]

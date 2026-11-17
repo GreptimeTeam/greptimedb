@@ -31,18 +31,19 @@ use encoder::WalEntryEncoder;
 use entry_reader::NoopEntryReader;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use snafu::ResultExt;
+use futures::{StreamExt, TryStreamExt};
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
-use store_api::logstore::{AppendBatchResponse, LogStore};
+use store_api::logstore::{AppendBatchResponse, LogStore, WalReadUpperBound};
 use store_api::storage::RegionId;
 use tokio::sync::watch;
 
 use crate::error::{
-    BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, Result, WaitWalDurableSnafu,
-    WriteWalSnafu,
+    BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, ReadNodeWalSnafu,
+    RemoteWalUnsupportedSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu,
 };
-use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
+use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader, decode_raw_entry};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
 
 /// WAL entry id.
@@ -243,6 +244,33 @@ impl<S: LogStore> Wal<S> {
         }
     }
 
+    /// Streams the region's entries in `(after, upper]` from the WAL of node `node_id`, which may
+    /// be this node, without writing to it.
+    pub(crate) async fn read_node(
+        &self,
+        region_id: RegionId,
+        node_id: u64,
+        after: EntryId,
+        upper: WalReadUpperBound,
+    ) -> Result<WalEntryStream<'static>> {
+        let entries = self
+            .store
+            .read_node(node_id, region_id, after, upper)
+            .await
+            .map_err(BoxedError::new)
+            .context(ReadNodeWalSnafu { region_id, node_id })?
+            .context(RemoteWalUnsupportedSnafu { region_id, node_id })?;
+        Ok(entries
+            .map(move |entries| {
+                entries
+                    .map_err(BoxedError::new)
+                    .context(ReadNodeWalSnafu { region_id, node_id })
+            })
+            .map_ok(|entries| futures::stream::iter(entries.into_iter().map(decode_raw_entry)))
+            .try_flatten()
+            .boxed())
+    }
+
     /// Scan entries of specific region starting from `start_id` (inclusive).
     /// Currently only used in tests.
     pub fn scan<'a>(
@@ -291,6 +319,24 @@ impl<S: LogStore> Wal<S> {
         }
         self.store
             .release_region(provider, region_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
+    }
+
+    /// Queues a persistent release through the region's safe recovery watermark.
+    /// Success acknowledges admission, not persistence; see [LogStore::release_entries].
+    pub async fn release_entries(
+        &self,
+        region_id: RegionId,
+        entry_id: EntryId,
+        provider: &Provider,
+    ) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .release_entries(provider, region_id, entry_id)
             .await
             .map_err(BoxedError::new)
             .context(DeleteWalSnafu { region_id })

@@ -185,6 +185,10 @@ impl SetRegionRoleStateResponse {
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
+    /// An opaque non-zero id the metadata plane attaches to some leases, `None` for a lease
+    /// without one. It reaches the engine through [`RegionEngine::set_region_role_with_lease`];
+    /// engines may keep it with the lease and must not interpret it.
+    pub candidate_lease_id: Option<u64>,
     pub extensions: HashMap<String, Vec<u8>>,
 }
 
@@ -193,6 +197,7 @@ impl GrantedRegion {
         Self {
             region_id,
             region_role,
+            candidate_lease_id: None,
             extensions: HashMap::new(),
         }
     }
@@ -203,6 +208,7 @@ impl From<GrantedRegion> for PbGrantedRegion {
         PbGrantedRegion {
             region_id: value.region_id.as_u64(),
             role: PbRegionRole::from(value.region_role).into(),
+            candidate_lease_id: value.candidate_lease_id.unwrap_or_default(),
             extensions: value.extensions,
         }
     }
@@ -213,6 +219,8 @@ impl From<PbGrantedRegion> for GrantedRegion {
         GrantedRegion {
             region_id: RegionId::from_u64(value.region_id),
             region_role: value.role().into(),
+            // 0 means the lease carries no candidate lease id.
+            candidate_lease_id: (value.candidate_lease_id != 0).then_some(value.candidate_lease_id),
             extensions: value.extensions,
         }
     }
@@ -1097,6 +1105,49 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_granted_region_wire() {
+        use prost::Message;
+
+        let legacy_bytes: &[u8] = include_bytes!(
+            "../../../tests/compatibility/wire/candidate_lease_id/legacy_granted_region.pb"
+        );
+        let granted = GrantedRegion::from(PbGrantedRegion::decode(legacy_bytes).unwrap());
+        assert_eq!(
+            granted,
+            GrantedRegion {
+                candidate_lease_id: None,
+                extensions: HashMap::from([("plugin".to_string(), b"payload".to_vec())]),
+                ..GrantedRegion::new(RegionId::new(1024, 1), RegionRole::Follower)
+            }
+        );
+
+        assert_eq!(PbGrantedRegion::from(granted).encode_to_vec(), legacy_bytes);
+    }
+
+    #[test]
+    fn test_granted_region_candidate_lease_id_wire() {
+        use prost::Message;
+
+        let granted = GrantedRegion {
+            candidate_lease_id: Some(7),
+            ..GrantedRegion::new(RegionId::new(1024, 1), RegionRole::Follower)
+        };
+        // Region id (field 1), role Follower (field 2), then candidate_lease_id as a uint64
+        // varint in field 3.
+        let bytes: &[u8] = &[
+            0x08, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, 0x10, 0x01, 0x18, 0x07,
+        ];
+        assert_eq!(
+            PbGrantedRegion::from(granted.clone()).encode_to_vec(),
+            bytes
+        );
+        assert_eq!(
+            GrantedRegion::from(PbGrantedRegion::decode(bytes).unwrap()),
+            granted
+        );
+    }
+
+    #[test]
     fn region_statistic_flush_bytes_compatibility() {
         let legacy_bytes = br#"{
             "num_rows": 1,
@@ -1479,12 +1530,15 @@ pub trait RegionEngine: Send + Sync {
     /// The region must not acknowledge a write whose WAL append completes at or after the
     /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
     /// that deadline.
+    ///
+    /// `candidate_lease_id` is the lease's [GrantedRegion::candidate_lease_id].
     fn set_region_role_with_lease(
         &self,
         region_id: RegionId,
         role: RegionRole,
         sent_at: Instant,
         deadline: Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError>;
 
     /// Syncs the region manifest to the given manifest version.

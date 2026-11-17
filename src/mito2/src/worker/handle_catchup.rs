@@ -32,7 +32,7 @@ use crate::request::OptionOutputTx;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{RegionWorkerLoop, drain_ended_staging, handle_tail_replay};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_catchup_request(
@@ -79,6 +79,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         #[cfg(feature = "hdfs-object-store")]
         let sweep_limiter = self.sweep_limiter.clone();
         let node_lease = self.node_lease.clone();
+        let worker_sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -93,8 +94,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         node_lease.seed(&region.manifest_ctx.leader_deadline);
                         if region.manifest_ctx.promote_after_catchup(region_id) {
                             // Finalize leadership: persist backfilled metadata.
+                            let drain = drain_ended_staging(&worker_sender, region_id);
                             match region
-                                .set_role_state_gracefully(SettableRegionRoleState::Leader)
+                                .set_role_state_gracefully(SettableRegionRoleState::Leader, drain)
                                 .await
                             {
                                 Ok(()) => {
@@ -110,6 +112,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                                     error!(err; "Failed to set region {region_id} to leader");
                                 }
                             }
+                            handle_tail_replay::notify_writable(&worker_sender, &region);
                         }
                     }
                     catchup_regions.remove_region(region_id);

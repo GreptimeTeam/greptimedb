@@ -50,7 +50,7 @@ function deploy_etcd_cluster() {
     -n "$namespace"
 
   # Wait for etcd cluster to be ready.
-  kubectl rollout status statefulset/etcd -n "$namespace"
+  kubectl rollout status statefulset/etcd -n "$namespace" --timeout=5m
 }
 
 # Deploy greptimedb-operator.
@@ -81,16 +81,8 @@ function deploy_greptimedb_cluster() {
     -n "$install_namespace"
 
   # Wait for greptimedb cluster to be ready.
-  while true; do
-    PHASE=$(kubectl -n "$install_namespace" get gtc "$cluster_name" -o jsonpath='{.status.clusterPhase}')
-    if [ "$PHASE" == "Running" ]; then
-      echo "Cluster is ready"
-      break
-    else
-      echo "Cluster is not ready yet: Current phase: $PHASE"
-      sleep 5 # wait for 5 seconds before check again.
-    fi
-  done
+  kubectl -n "$install_namespace" wait "gtc/$cluster_name" \
+    --for=jsonpath='{.status.clusterPhase}'=Running --timeout=5m
 
   # Expose greptimedb cluster to local access and check if port-forward is available.
   kubectl -n "$install_namespace" port-forward svc/"$cluster_name"-frontend \
@@ -141,16 +133,8 @@ function deploy_greptimedb_cluster_with_s3_storage() {
     --set objectStorage.credentials.secretAccessKey="$AWS_SECRET_ACCESS_KEY"
 
   # Wait for greptimedb cluster to be ready.
-  while true; do
-    PHASE=$(kubectl -n "$install_namespace" get gtc "$cluster_name" -o jsonpath='{.status.clusterPhase}')
-    if [ "$PHASE" == "Running" ]; then
-      echo "Cluster is ready"
-      break
-    else
-      echo "Cluster is not ready yet: Current phase: $PHASE"
-      sleep 5 # wait for 5 seconds before check again.
-    fi
-  done
+  kubectl -n "$install_namespace" wait "gtc/$cluster_name" \
+    --for=jsonpath='{.status.clusterPhase}'=Running --timeout=5m
 
   # Expose greptimedb cluster to local access.
   kubectl -n "$install_namespace" port-forward svc/"$cluster_name"-frontend \
@@ -168,8 +152,8 @@ function deploy_standalone_greptimedb() {
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
     -n "$DEFAULT_INSTALL_NAMESPACE"
 
-  # Wait for etcd cluster to be ready.
-  kubectl rollout status statefulset/greptimedb-standalone -n "$DEFAULT_INSTALL_NAMESPACE"
+  # Wait for standalone GreptimeDB to be ready.
+  kubectl rollout status statefulset/greptimedb-standalone -n "$DEFAULT_INSTALL_NAMESPACE" --timeout=5m
 
   # Expose greptimedb to local access.
   kubectl -n "$DEFAULT_INSTALL_NAMESPACE" port-forward svc/greptimedb-standalone \

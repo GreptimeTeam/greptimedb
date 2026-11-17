@@ -420,7 +420,7 @@ async fn test_ingested_parquet_bytes() {
             .edit_region(
                 region_id,
                 crate::manifest::action::RegionEdit {
-                    files_to_add: vec![file],
+                    files_to_add: vec![file.as_ref().clone()],
                     files_to_remove: vec![],
                     timestamp_ms: None,
                     compaction_time_window: None,

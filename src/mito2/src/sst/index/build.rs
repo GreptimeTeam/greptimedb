@@ -21,13 +21,13 @@ use crate::sst::index::puffin_manager::SstPuffinManager;
 use crate::sst::index::registry::IndexBuildPlan;
 
 /// An immutable plan with operation-scoped input files and output constraints.
-/// Currently compaction and explicit rebuild supply these inputs; flush does not
-/// inject extension handlers and builds only the existing built-in indexes.
+/// Compaction and SST index rebuilds supply these inputs, including asynchronous
+/// post-flush indexing. Synchronous memtable flushes have no persisted input files.
 #[derive(Clone)]
 pub struct IndexBuildInputs {
     /// Typed plans shared by output files of this operation.
     pub plan: Arc<IndexBuildPlan>,
-    /// Pinned physical input files; flushes have no inputs.
+    /// Pinned physical input files. Post-flush indexing reads the newly written SST.
     pub inputs: Arc<[FileHandle]>,
     /// Reads persisted inputs even when output uses a local write cache.
     /// Input availability is determined by `inputs.is_empty()`, not this manager.

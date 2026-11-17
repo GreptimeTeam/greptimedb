@@ -39,6 +39,12 @@ Double-check with the user.
 
 ## 3. Pick the range and generate
 
+For every release type, use the release tag's commit as `<tip>` when the tag exists.
+Resolve the exact tag from the remote (use the peeled `^{}` commit for annotated tags)
+and exclude commits added to the release branch afterward. Before tagging, pin the
+intended release commit and record its SHA. Pass that SHA as `--target` when creating
+the release, then verify the resulting tag before publishing the docs copy.
+
 Key topology fact: **patch tags** (`v1.0.1`, `v1.0.2`) live on `release/vX.Y` and are **NOT**
 ancestors of `main` (they are cherry-picks with different SHAs). Up to v1.1 the `.0` tag was
 the point where `release/vX.Y` left `main`; from v1.2 the branch is cut before the `.0`, and
@@ -51,8 +57,8 @@ left `main`, minus what any published `vX.(Y-1).*` release (pre-releases, `.0`, 
 already shipped. The line's own pre-releases (`vX.Y.0-beta.*`) are not subtracted; the `.0`
 note covers the whole minor.
 
-Base = the **previous minor tag** (e.g. `v1.1.0`); tip = the tagged `vX.Y.0` commit, resolved as
-in "Pre-release" below. Split the range at the point where `release/vX.Y` left `main`:
+Base = the **previous minor tag** (e.g. `v1.1.0`); tip = the release commit resolved above.
+Split the range at the point where `release/vX.Y` left `main`:
 ```
 bp=$(git merge-base <remote>/release/vX.Y <remote>/main)
 ```
@@ -80,14 +86,14 @@ small Python script is the reliable way — match `pull/<n>)` on lines starting 
 The previous patch tag is an ancestor of the release branch, so a plain range works **when the
 cherry-picks land as individual commits**:
 ```
-GITHUB_TOKEN=$(gh auth token) git cliff <prev-patch-tag>..<release-branch-tip> --tag vX.Y.Z -o ...
+GITHUB_TOKEN=$(gh auth token) git cliff <prev-patch-tag>..<tip> --tag vX.Y.Z -o ...
 ```
 No extra subtraction (the branch only contains the new cherry-picks).
 
 **Common case — squashed pick commit.** Patch branches are often a single squashed commit like
 `chore: pick fixes and bump version to vX.Y.Z (#NNNN)`, so the plain range above yields just
 that one bullet. First **find the picked PRs**: read the squash commit message
-(`git log -1 --format=%B <release-branch-tip>`) — each `* fix: ... (#NN)` line is a picked PR.
+(`git log -1 --format=%B <tip>`) — each `* fix: ... (#NN)` line is a picked PR.
 Then pick one of two ways to build the changelog (a patch is usually only a few PRs — **ask the
 user which they prefer**):
 
@@ -131,16 +137,6 @@ Either source alone misses PRs: a release body can omit a backport that its tag 
 backport commit can name only the backport PR.
 
 ### Pre-release (`X.Y.Z-{alpha,beta,rc}.N` after an earlier pre-release)
-**The tip is the tagged commit, not the release branch tip.** Resolve it from the remote and
-write this SHA in the docs PR body (§8) as what the note was checked against:
-```
-git ls-remote --tags <remote> 'vX.Y.Z-beta.N*'
-```
-Use the `refs/tags/vX.Y.Z-beta.N` line (its `^{}` line if the tag is annotated), not the
-build-suffixed tags it also lists. PRs that land on `release/vX.Y` after the tag
-(`git log --oneline <tag>..<remote>/release/vX.Y`) belong to the next release, even if they are
-already merged when you write the note.
-
 The range `<prev-pre-release>..<tag>` usually mixes two kinds of commits: individual backports
 (`... [Backport release/vX.Y] (#NNNN)`) and squashed pick commits (`chore: backport selected
 changes for ... (#NNNN)`). In both, the original PRs are the `(#NN)` at the end of body lines;
@@ -156,8 +152,8 @@ done | tr -dc '0-9\n' | sort -un
 List the bullets under the **original** PRs (title and author of the PR merged to `main`), not
 the backport PRs. Build them with patch (a) or (b) above; for (b), fetch
 `gh api repos/GreptimeTeam/greptimedb/pulls/<n> --jq '{number,title,author:.user.login,merged_at}'`,
-group by the `cliff.toml` parsers (first match wins), order by `merged_at`, and put `!` titles
-under Breaking changes (§6).
+group by the `cliff.toml` parsers (first match wins), order by `merged_at`, and review `!` titles
+for user-visible compatibility impact (§6) before assigning a category.
 
 A squashed pick PR can also contain release-only commits that have no PR. List them:
 ```
@@ -179,6 +175,10 @@ them and add the user-facing ones by hand:
 ```
 git log --format=%s <range> | grep -E '\(#[0-9]+\)$' | grep -vE '^[a-z]+(\([^)]*\))?!?: '
 ```
+Review generated breaking-change bullets using the same user-impact criteria as §6. Move
+internal-only entries to ordinary groups, preserving genuine incompatibilities, PR links,
+and authors.
+
 Use only the groups in `cliff.toml`. `git cliff` prints a `### Build` section for `build:` commits
 because no parser matches them; move a user-facing `build(deps)` fix to Bug Fixes and the rest to
 Miscellaneous Tasks. Keep each bullet list free of blank lines; a blank line turns it into a
@@ -217,45 +217,18 @@ line (ask the user; some prefer to keep it).
 
 ## 6. Human-curated sections (insert after the `Release date:` line)
 
-**Style.** Follow the Google developer documentation style guide: sentence-case headings, active voice, present
-tense for behavior, American spelling, serial comma, code font for identifiers, bold only for UI
-names. Keep it short:
-- Intro: two sentences at most, what the release covers and its main theme.
-- Highlight: one paragraph of up to four sentences, plus an example if it earns one (see below).
-- Upgrade note or breaking change: one bullet, one or two sentences: what changes, who is
-  affected, what to do.
-- Every sentence states a fact the reader acts on or checks. Delete sentences that restate the
-  heading or the previous sentence, transitions, and summaries.
-- No marketing words (`significantly`, `powerful`, `seamless`, `robust`, `enhanced`), no vague
-  verbs (`supports`, `handles`, `improves`; say what happens), no `several`/`many` when the number
-  is known. Keep the source's hedges; don't add new ones.
+Write concise, factual English. Rank changes by their impact and explain what changed,
+why it matters, and any required action. Verify claims against the release's PRs, code,
+and documentation; preserve their conditions and limitations.
 
-Example:
-> Bad: This release significantly enhances write reliability by introducing a robust retry
-> mechanism that seamlessly handles transient failures.
->
-> Good: In distributed clusters, the frontend retries a failed write up to three times with
-> exponential backoff. Set `max_retries = 0` to disable retries.
-
-Mirror past release bodies (`gh release view v1.0.0 --repo GreptimeTeam/greptimedb`):
-- **Short intro** (see Style).
-- **`### 👍 Highlights`** — *few, deep* highlights, ranked by user impact. Fixes for silently
-  wrong query results, lost or invisible data, and security issues rank with new features and
-  can be highlights.
-  - Write a fix as its symptom and the affected deployments or usage, not the PR title. Example:
-    "with no traffic, `errors / requests > 0.05` was true, so the alert fired".
-  - State whether a feature is on by default. If an example config uses the default values, say
-    so.
-  - Give an example (SQL / TOML config) only where it helps readers act. Don't pick highlights,
-    or the example, by what is easy to demonstrate.
-  - One highlight covers one change or one user-visible problem. Don't merge unrelated PRs into
-    one entry because they touch the same component.
-  - Sources: the PR body's sections on impact, compatibility, and behavior changes, plus the
-    code and config it touches, not the title alone. Verify examples against the related docs
-    PR/page in the docs repo (`GreptimeTeam/docs`, often checked out locally),
-    `docs/reference/sql/*.md`, `config/*.example.toml`, `config/config.md`.
-  Do **not** mention implementation details, tiny features, or unfinished/experimental-but-not-ready
-  features. Always have the user review and edit the highlights; iterate.
+- **Short intro** — summarize the release in one or two sentences.
+- **`### 👍 Highlights`** — select the most consequential changes, including new features,
+  correctness, security, performance, and substantial architectural improvements. Internal changes can
+  be highlights when their technical significance or benefit is supported by evidence;
+  change size alone is not a reason to feature them. Explain enough of the mechanism to
+  make the benefit clear, without turning the note into an implementation walkthrough.
+  Keep related changes together and distinguish shipped benefits from future possibilities.
+  Include usage examples only when needed, and verify them against the released version.
 - **Dashboard** subsection — don't just bump the version. Read the dashboard PRs in the bundled
   release (`gh release view <ver> --repo GreptimeTeam/dashboard`; then the linked PRs) and
   describe the user-facing change. Use the names the UI shows, not the PR titles; check them in
@@ -266,22 +239,18 @@ Mirror past release bodies (`gh release view v1.0.0 --repo GreptimeTeam/greptime
   ```
   Screenshots need absolute `https://` URLs: the body is copied to the GitHub release, where
   relative and site-root (`/img/...`) paths don't resolve.
-- **`### Upgrade notes`** and **`### Breaking changes`** — check every PR in the release for:
-  `!` titles; `Compatibility`, `Behavior change`, `Breaking` paragraphs in the body (often a
-  plain `Compatibility:` line, not a heading); unchecked "API changes are backward compatible" /
-  "Schema or data changes are backward compatible" boxes; new config options and their defaults;
-  changed defaults; persisted format changes; rolling-upgrade order; new hard limits. These
-  signals set reading order, not a filter: a limit can sit in plain prose with every box
-  checked, so read the body of every user-facing `feat`/`fix` PR. Examples of what is easy to
-  miss: a 512 MiB cap on decompressed request bodies (#9264); a default step for stepless
-  subqueries (#9481).
-  - **Upgrade notes**: steps operators take — upgrade order, index rebuilds, settings to review.
-  - **Breaking changes**: behavior that used to work and now errors or returns different
-    results. Put the `!` PR bullets here too, after these entries (see `v1.3.0-beta.1`).
+- **`### Upgrade and compatibility notes`** — distinguish internal changes from changes
+  visible to database users and operators. Include only user-visible compatibility changes
+  and required upgrade actions; state who is affected, what changes, and what to do.
+  Read PR bodies to establish impact: `!` titles and compatibility checkboxes alone do not
+  determine whether a change belongs here. Internal changes without upgrade impact belong in
+  highlights or the ordinary changelog, according to significance. Preserve PR links and
+  contributor attribution. Omit empty sections and avoid repeating information across
+  curated sections.
 - **Benchmark results** (optional) — state the baseline version (often the previous formal
-  release, not the previous beta), data size, cache state, and hardware. Don't attribute results
-  to single PRs. Leave out results the benchmark marks as not for publication, and smoke-level
-  runs.
+  release, not the previous beta), workload, data size, cache state, and hardware. Attribute results
+  to individual changes only when the measurements isolate their effect. Leave out results the
+  benchmark marks as not for publication, and smoke-level runs.
 
 ## 7. Output
 
@@ -323,7 +292,7 @@ The release note is also published as a blog post in **`GreptimeTeam/docs`**.
   (`.github/pull_request_template.md`) from the checkout used for the release.
   Fill in every required section; do not rely on hard-coded section names from an older
   template. The checklist items are the author's to confirm: check the ones you did, and for one
-  that doesn't apply, check it and say why. For pre-releases, state the tagged SHA (§3) under
+  that doesn't apply, check it and say why. State the release SHA (§3) under
   Verification.
 - **Build the site before opening the PR.** A new worktree has no `node_modules`. Install with
   the pnpm version pinned in `package.json` (`packageManager`), as CI does:

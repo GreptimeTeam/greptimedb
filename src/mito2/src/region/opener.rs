@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
+use api::v1::WalEntry;
 use arrow_schema::extension::ExtensionType;
 use common_telemetry::{debug, error, info, warn};
 use common_wal::options::WalOptions;
@@ -77,8 +78,11 @@ use crate::sst::FormatType;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::index::IndexBuildType;
+use crate::sst::index::handler::PlanContext;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::IndexRegistryRef;
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
@@ -148,6 +152,7 @@ pub type PartitionExprFetcherRef = Arc<dyn PartitionExprFetcher + Send + Sync>;
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
+    index_registry: Option<IndexRegistryRef>,
     region_id: RegionId,
     metadata_builder: Option<RegionMetadataBuilder>,
     memtable_builder_provider: MemtableBuilderProvider,
@@ -191,6 +196,7 @@ impl RegionOpener {
         partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> RegionOpener {
         RegionOpener {
+            index_registry: None,
             region_id,
             metadata_builder: None,
             memtable_builder_provider,
@@ -214,6 +220,12 @@ impl RegionOpener {
             series_index_store: None,
             series_index_purger: None,
         }
+    }
+
+    /// Sets the registry used to validate new-region index options.
+    pub(crate) fn with_index_registry(mut self, registry: IndexRegistryRef) -> Self {
+        self.index_registry = Some(registry);
+        self
     }
 
     /// Sets the store for companion range indexes.
@@ -383,17 +395,39 @@ impl RegionOpener {
         };
         ensure_json2_uses_flat_format(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
+        // Validate explicit new-region configuration before creating its manifest.
+        // Opening an existing manifest above does not require its optional providers.
+        if let Some(registry) = &self.index_registry {
+            registry
+                .validate(&PlanContext {
+                    metadata: &metadata,
+                    index_options: &options.index_options,
+                    // Validate initial options without building indexes; extensions skip flush work.
+                    build_type: IndexBuildType::Flush,
+                    existing_indexes: &[],
+                })
+                .map_err(|err| {
+                    InvalidRegionOptionsSnafu {
+                        reason: err.to_string(),
+                    }
+                    .build()
+                })?;
+        }
         // The region's WAL history starts in this log store, so reopening
         // the region on it passes the history check without any entry. It is
         // recorded before the manifest exists: a log store that gave up its
         // history meanwhile fails the create before it leaves a manifest.
         wal.start_region_history(region_id, &provider)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let mut region_manifest_options =
-            RegionManifestOptions::new(config, &region_dir, &object_store)
-                .with_conditional_publication(
-                    options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
-                );
+        let mut region_manifest_options = RegionManifestOptions::new(
+            config,
+            &region_dir,
+            &object_store,
+            self.file_ref_manager.file_metadata_interner.clone(),
+        )
+        .with_conditional_publication(
+            options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+        );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -525,12 +559,15 @@ impl RegionOpener {
         let now = Instant::now();
         let mut region_options = self.options.as_ref().unwrap().clone();
         let object_storage = get_object_store(&region_options.storage, &self.object_store_manager)?;
-        let mut region_manifest_options =
-            RegionManifestOptions::new(config, &self.region_dir(), &object_storage)
-                .with_conditional_publication(
-                    region_options
-                        .requires_conditional_manifest_publication(self.node_lease.is_enabled()),
-                );
+        let mut region_manifest_options = RegionManifestOptions::new(
+            config,
+            &self.region_dir(),
+            &object_storage,
+            self.file_ref_manager.file_metadata_interner.clone(),
+        )
+        .with_conditional_publication(
+            region_options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+        );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -1001,7 +1038,6 @@ where
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
     let replay_from_entry_id = flushed_entry_id + 1;
-    let region_metadata = version_control.current().version.metadata.clone();
 
     let mut wal_stream = wal_entry_reader.read(provider, replay_from_entry_id)?;
     while let Some(res) = wal_stream.next().await {
@@ -1021,63 +1057,8 @@ where
             );
         }
         last_entry_id = last_entry_id.max(entry_id);
-
-        let mut region_write_ctx = RegionWriteCtx::new(
-            region_id,
-            version_control,
-            provider.clone(),
-            // For WAL replay, we don't need to track the write bytes rate.
-            None,
-            WriteSource::WalReplay,
-        );
-        for mutation in entry.mutations {
-            rows_replayed += mutation
-                .rows
-                .as_ref()
-                .map(|rows| rows.rows.len())
-                .unwrap_or(0);
-            region_write_ctx.push_mutation(
-                mutation.op_type,
-                mutation.rows,
-                mutation.write_hint,
-                OptionOutputTx::none(),
-                // We should respect the sequence in WAL during replay.
-                Some(mutation.sequence),
-                false,
-            );
-        }
-
-        for bulk_entry in entry.bulk_entries {
-            let mut part = BulkPart::try_from(bulk_entry)?;
-            // The entry may miss columns added by a concurrent alter if it was
-            // written by a writer with a stale schema (older versions kept the
-            // stale raw data when filling missing columns). Fills missing
-            // columns like the write path, otherwise the memtable rejects the
-            // batch. Skips sparse batches as they don't carry tag columns by
-            // design.
-            part.fill_missing_columns(&region_metadata)?;
-            rows_replayed += part.num_rows();
-            // During replay, we should adopt the sequence from WAL.
-            let bulk_sequence_from_wal = part.sequence;
-            ensure!(
-                region_write_ctx.push_bulk(
-                    OptionOutputTx::none(),
-                    part,
-                    Some(bulk_sequence_from_wal),
-                    false
-                ),
-                RegionCorruptedSnafu {
-                    region_id,
-                    reason: "unable to replay memtable with bulk entries",
-                }
-            );
-        }
-
-        // set next_entry_id and write to memtable.
-        region_write_ctx.set_next_entry_id(last_entry_id + 1);
-        // Publish the replayed sequences only after all rows (including bulk
-        // parts) are installed, matching the write path ordering.
-        region_write_ctx.write_memtables().await;
+        rows_replayed +=
+            replay_entry(provider, region_id, version_control, entry, last_entry_id).await?;
     }
 
     // TODO(weny): We need to update `flushed_entry_id` in the region manifest
@@ -1096,6 +1077,77 @@ where
         now.elapsed()
     );
     Ok(last_entry_id)
+}
+
+/// Writes one WAL entry into the mutable memtable of `version_control`, keeping the
+/// sequences the WAL recorded, and returns the number of rows. `last_entry_id` is the
+/// largest entry id replayed so far, this one included.
+pub(crate) async fn replay_entry(
+    provider: &Provider,
+    region_id: RegionId,
+    version_control: &VersionControlRef,
+    entry: WalEntry,
+    last_entry_id: EntryId,
+) -> Result<usize> {
+    let mut rows_replayed = 0;
+    let mut region_write_ctx = RegionWriteCtx::new(
+        region_id,
+        version_control,
+        provider.clone(),
+        // For WAL replay, we don't need to track the write bytes rate.
+        None,
+        WriteSource::WalReplay,
+    );
+    for mutation in entry.mutations {
+        rows_replayed += mutation
+            .rows
+            .as_ref()
+            .map(|rows| rows.rows.len())
+            .unwrap_or(0);
+        region_write_ctx.push_mutation(
+            mutation.op_type,
+            mutation.rows,
+            mutation.write_hint,
+            OptionOutputTx::none(),
+            // We should respect the sequence in WAL during replay.
+            Some(mutation.sequence),
+            false,
+        );
+    }
+
+    let region_metadata = region_write_ctx.version().metadata.clone();
+    for bulk_entry in entry.bulk_entries {
+        let mut part = BulkPart::try_from(bulk_entry)?;
+        // The entry may miss columns added by a concurrent alter if it was
+        // written by a writer with a stale schema (older versions kept the
+        // stale raw data when filling missing columns). Fills missing
+        // columns like the write path, otherwise the memtable rejects the
+        // batch. Skips sparse batches as they don't carry tag columns by
+        // design.
+        part.fill_missing_columns(&region_metadata)?;
+        rows_replayed += part.num_rows();
+        // During replay, we should adopt the sequence from WAL.
+        let bulk_sequence_from_wal = part.sequence;
+        ensure!(
+            region_write_ctx.push_bulk(
+                OptionOutputTx::none(),
+                part,
+                Some(bulk_sequence_from_wal),
+                false
+            ),
+            RegionCorruptedSnafu {
+                region_id,
+                reason: "unable to replay memtable with bulk entries",
+            }
+        );
+    }
+
+    // set next_entry_id and write to memtable.
+    region_write_ctx.set_next_entry_id(last_entry_id + 1);
+    // Publish the replayed sequences only after all rows (including bulk
+    // parts) are installed, matching the write path ordering.
+    region_write_ctx.write_memtables().await;
+    Ok(rows_replayed)
 }
 
 /// A task to load and fill the region file cache.
@@ -1476,6 +1528,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
     match state {
         RegionRoleState::Leader(RegionLeaderState::Writable)
         | RegionRoleState::Leader(RegionLeaderState::Staging)
+        | RegionRoleState::Leader(RegionLeaderState::EndingStaging)
         | RegionRoleState::Leader(RegionLeaderState::Altering)
         | RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
         | RegionRoleState::Leader(RegionLeaderState::Editing)

@@ -12,19 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
-use object_store::{Lister, ObjectStore, util};
+use object_store::{ObjectStore, util};
 use snafu::ResultExt;
-use store_api::ManifestVersion;
 
 use crate::error::{OpenDalSnafu, Result};
-use crate::manifest::storage::delta::DeltaStorage;
-use crate::manifest::storage::size_tracker::NoopTracker;
-use crate::manifest::storage::utils::{sort_manifests, write_and_put_cache};
-use crate::manifest::storage::{file_version, is_delta_file};
+use crate::manifest::storage::utils::write_and_put_cache;
 
 /// A simple blob storage for arbitrary binary data in the staging directory.
 ///
@@ -97,18 +90,16 @@ impl StagingBlobStorage {
     }
 }
 
-/// Storage for staging manifest files and blobs used during repartition operations.
-///
-/// Fields:
-/// - `delta_storage`: Manages incremental manifest delta files specific to the staging region.
-/// - `blob_storage`: Manages arbitrary blobs, such as generated manifests for regions.
+/// Storage for the staging directory used during repartition operations.
 ///
 /// Directory structure:
-/// - `{region_dir}/staging/manifest/` — for incremental manifest delta files for the staging region.
+/// - `{region_dir}/staging/manifest/` — manifest deltas that older versions staged. It is only
+///   cleared.
 /// - `{region_dir}/staging/blob/` — for arbitrary blobs (e.g., generated region manifests).
 #[derive(Debug, Clone)]
 pub(crate) struct StagingStorage {
-    delta_storage: DeltaStorage<NoopTracker>,
+    object_store: ObjectStore,
+    manifest_path: String,
     blob_storage: StagingBlobStorage,
 }
 
@@ -125,23 +116,12 @@ pub fn staging_manifest_path(manifest_path: &str) -> String {
 }
 
 impl StagingStorage {
-    pub fn new(path: String, object_store: ObjectStore, compress_type: CompressionType) -> Self {
-        let staging_blob_path = staging_blob_path(&path);
-        let blob_storage = StagingBlobStorage::new(staging_blob_path, object_store.clone());
-        let staging_manifest_path = staging_manifest_path(&path);
-        let delta_storage = DeltaStorage::new(
-            staging_manifest_path.clone(),
-            object_store.clone(),
-            compress_type,
-            // StagingStorage does not use a manifest cache; set to None.
-            None,
-            // StagingStorage does not track file sizes, since all staging files are
-            // deleted after exiting staging mode.
-            Arc::new(NoopTracker),
-        );
+    pub fn new(path: String, object_store: ObjectStore) -> Self {
+        let blob_storage = StagingBlobStorage::new(staging_blob_path(&path), object_store.clone());
 
         Self {
-            delta_storage,
+            object_store,
+            manifest_path: staging_manifest_path(&path),
             blob_storage,
         }
     }
@@ -151,44 +131,10 @@ impl StagingStorage {
         &self.blob_storage
     }
 
-    /// Returns an iterator of manifests from staging directory.
-    pub(crate) async fn manifest_lister(&self) -> Result<Option<Lister>> {
-        self.delta_storage.manifest_lister(None).await
-    }
-
-    /// Fetch all staging manifest files and return them as (version, action_list) pairs.
-    pub(crate) async fn fetch_manifests(&self) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
-        let manifest_entries = self
-            .delta_storage
-            .get_paths(None, |entry| {
-                let file_name = entry.name();
-                if is_delta_file(file_name) {
-                    let version = file_version(file_name);
-                    Some((version, entry))
-                } else {
-                    None
-                }
-            })
-            .await?;
-
-        let mut sorted_entries = manifest_entries;
-        sort_manifests(&mut sorted_entries);
-
-        self.delta_storage
-            .fetch_manifests_from_entries(sorted_entries)
-            .await
-    }
-
-    /// Save the delta manifest file.
-    pub(crate) async fn save(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
-        self.delta_storage.save(version, bytes).await
-    }
-
     /// Clean all staging manifest files.
     pub(crate) async fn clear(&self) -> Result<()> {
-        self.delta_storage
-            .object_store()
-            .delete_with(self.delta_storage.path())
+        self.object_store
+            .delete_with(&self.manifest_path)
             .recursive(true)
             .await
             .context(OpenDalSnafu)?;
@@ -202,7 +148,7 @@ impl StagingStorage {
 
         debug!(
             "Cleared all staging manifest files from {}, blob directory: {}",
-            self.delta_storage.path(),
+            self.manifest_path,
             self.blob_storage.path()
         );
 
@@ -211,17 +157,9 @@ impl StagingStorage {
 }
 
 #[cfg(test)]
-impl StagingStorage {
-    pub fn set_compress_type(&mut self, compress_type: CompressionType) {
-        self.delta_storage.set_compress_type(compress_type);
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use common_datasource::compression::CompressionType;
     use common_test_util::temp_dir::create_temp_dir;
     use futures::TryStreamExt;
     use object_store::layers::mock::{MockLayerBuilder, ObservedWriter, WriterObservations, oio};
@@ -319,15 +257,18 @@ mod tests {
         let builder = Fs::default().root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap();
         let manifest_path = "/data/table/region_0001/manifest/";
-        let mut storage = StagingStorage::new(
-            manifest_path.to_string(),
-            object_store.clone(),
-            CompressionType::Uncompressed,
-        );
+        let storage = StagingStorage::new(manifest_path.to_string(), object_store.clone());
         let manifest_dir = staging_manifest_path(manifest_path);
         let blob_dir = staging_blob_path(manifest_path);
 
-        storage.save(0, b"manifest").await.unwrap();
+        // A delta staged by an older version.
+        object_store
+            .write(
+                &format!("{manifest_dir}00000000000000000000.json"),
+                b"manifest".to_vec(),
+            )
+            .await
+            .unwrap();
         storage
             .blob_storage()
             .put("region_0002_manifest", b"blob".to_vec())
