@@ -571,12 +571,15 @@ fn check_pipeline_name_exists(pipeline_name: Option<String>) -> Result<String> {
     })
 }
 
-/// Check if the data length less than 10
+/// The maximum number of rows the pipeline dryrun API accepts.
+const MAX_DRYRUN_ROWS: usize = 10;
+
+/// Check that the dryrun data has at most [`MAX_DRYRUN_ROWS`] rows.
 fn check_data_valid(data_len: usize) -> Result<()> {
     ensure!(
-        data_len <= 10,
+        data_len <= MAX_DRYRUN_ROWS,
         InvalidParameterSnafu {
-            reason: "data is required",
+            reason: format!("dryrun data must not exceed {MAX_DRYRUN_ROWS} rows, got {data_len}"),
         }
     );
     Ok(())
