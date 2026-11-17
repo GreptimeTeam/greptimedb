@@ -389,7 +389,7 @@ impl Requester {
             table_name: table_name.to_string(),
         })?;
         let table_info = table.table_info();
-        ensure_not_metric_logical_table(
+        ensure_discard_supported(
             &table_info.meta.engine,
             table_info.is_physical_table(),
             feat,
@@ -559,7 +559,7 @@ fn ensure_build_series_index_supported(engine: &str, is_physical_table: bool) ->
     Ok(())
 }
 
-fn ensure_not_metric_logical_table(
+fn ensure_discard_supported(
     engine: &str,
     is_physical_table: bool,
     feat: &'static str,
@@ -651,6 +651,83 @@ mod tests {
         assert!(requests.try_recv().is_err());
     }
 
+    #[tokio::test]
+    async fn test_discard_pending_tails_targets_regions_and_node() {
+        use catalog::RegisterTableRequest;
+        use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+        use table::dist_table::DummyDataSource;
+
+        let backend = test_util::prepare_mocked_backend().await;
+        let partition_manager = test_util::create_partition_rule_manager(backend).await;
+        let (sender, mut requests) = tokio::sync::mpsc::channel(8);
+        // Region 3 fails; the others discard one tail each.
+        let watcher = DatanodeWatcher::new(sender).with_handler(|peer, _| {
+            if peer.id == 3 {
+                return common_meta::error::UnexpectedSnafu {
+                    err_msg: "mock error",
+                }
+                .fail();
+            }
+            Ok(RegionResponse::new(1))
+        });
+        let catalog = catalog::memory::MemoryCatalogManager::with_default_setup();
+        let table = Arc::new(table::Table::new(
+            Arc::new(test_util::new_test_table_info(1, "table_1", [].into_iter())),
+            table::metadata::FilterPushDownType::Unsupported,
+            Arc::new(DummyDataSource),
+        ));
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "table_1".to_string(),
+                table_id: 1,
+                table,
+            })
+            .unwrap();
+        let requester = Requester::new(
+            catalog,
+            partition_manager,
+            Arc::new(MockDatanodeManager::new(watcher)),
+        );
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+        let expected = |region_number| {
+            Some(RegionRequestBody::Truncate(TruncateRequest {
+                region_id: RegionId::new(1, region_number).as_u64(),
+                kind: Some(truncate_request::Kind::PendingTails(PendingTails {
+                    node_id: 7,
+                })),
+            }))
+        };
+
+        let discarded = requester
+            .handle_discard_pending_tails(RegionId::new(1, 1), 7, ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(1, discarded);
+        let (peer, request) = requests.try_recv().unwrap();
+        assert_eq!(1, peer.id);
+        assert_eq!(expected(1), request.body);
+        assert!(requests.try_recv().is_err());
+
+        let table_name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "table_1");
+        let error = requester
+            .handle_discard_pending_tails_by_table(table_name, 7, ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, crate::error::Error::RequestRegion { .. }));
+        let mut sent = Vec::new();
+        while let Ok((peer, request)) = requests.try_recv() {
+            assert_eq!(expected(peer.id as u32), request.body);
+            sent.push(peer.id);
+        }
+        sent.sort();
+        assert_eq!(vec![1, 2, 3], sent);
+    }
+
     #[test]
     fn test_build_series_index_requires_physical_metric_table() {
         ensure_build_series_index_supported(METRIC_ENGINE, true).unwrap();
@@ -674,12 +751,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_not_metric_logical_table() {
-        let error = ensure_not_metric_logical_table(METRIC_ENGINE, false, "feat").unwrap_err();
+    fn test_ensure_discard_supported() {
+        let error = ensure_discard_supported(METRIC_ENGINE, false, "feat").unwrap_err();
         assert!(matches!(error, crate::error::Error::NotSupported { .. }));
 
-        ensure_not_metric_logical_table(METRIC_ENGINE, true, "feat").unwrap();
-        ensure_not_metric_logical_table("mito", false, "feat").unwrap();
+        ensure_discard_supported(METRIC_ENGINE, true, "feat").unwrap();
+        ensure_discard_supported("mito", false, "feat").unwrap();
     }
 
     #[test]

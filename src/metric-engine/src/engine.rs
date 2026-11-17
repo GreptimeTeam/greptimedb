@@ -833,6 +833,19 @@ mod test {
         assert_eq!(response.affected_rows, 0);
         let data_stat = env.mito().region_statistic(data_region_id).unwrap();
         assert!(data_stat.memtable_size > 0);
+        // The request reaches the data region, which refuses it as a follower.
+        env.mito()
+            .set_region_role(data_region_id, RegionRole::Follower)
+            .unwrap();
+        let error = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::RegionNotReady,
+            error.status_code()
+        );
 
         let error = env
             .metric()
