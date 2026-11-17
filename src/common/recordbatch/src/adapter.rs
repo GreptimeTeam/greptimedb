@@ -17,8 +17,8 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_base::readable_size::ReadableSize;
@@ -33,7 +33,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_expr::create_physical_expr;
-use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
+use datafusion::physical_plan::metrics::{BaselineMetrics, CustomMetricValue, MetricValue};
 use datafusion::physical_plan::{
     DisplayFormatType, ExecutionPlan, ExecutionPlanVisitor, PhysicalExpr,
     RecordBatchStream as DfRecordBatchStream, accept,
@@ -470,6 +470,7 @@ fn collect_lightweight_query_load_metrics_inner(
             plan_name: df_plan.name().to_string(),
             level,
             metrics: vec![("output_bytes".to_string(), output_bytes)],
+            native: None,
         });
     }
 
@@ -588,6 +589,7 @@ impl ExecutionPlanVisitor for MetricCollector {
                 plan_name: plan.name().to_string(),
                 level: self.current_level,
                 metrics: vec![],
+                native: None,
             });
             self.current_level += 1;
             return Ok(true);
@@ -603,8 +605,20 @@ impl ExecutionPlanVisitor for MetricCollector {
             plan_name: plan.name().to_string(),
             level: self.current_level,
             metrics: Vec::with_capacity(metric.iter().size_hint().0),
+            native: None,
         };
         for m in metric.iter() {
+            // An operator that runs nodes inside itself registers the tree as one of its metric
+            // values. It travels here, where a plain value cannot: the tree is structure, not a
+            // figure, so it is reported apart from the flat list instead of being flattened into it.
+            if let MetricValue::Custom { name, value } = m.value()
+                && name.as_ref() == NATIVE_TREE_METRIC
+            {
+                if let Some(tree) = value.as_any().downcast_ref::<NativeTreeMetric>() {
+                    plan_metric.native = Some(tree.report());
+                }
+                continue;
+            }
             plan_metric
                 .metrics
                 .push((m.value().name().to_string(), m.value().as_usize()));
@@ -694,45 +708,59 @@ pub struct RegionWatermarkEntry {
 }
 
 /// Determines if a metric name represents a time measurement that should be formatted.
-fn is_time_metric(metric_name: &str) -> bool {
+pub fn is_time_metric(metric_name: &str) -> bool {
     metric_name.contains("elapsed") || metric_name.contains("time") || metric_name.contains("cost")
 }
 
 /// Determines if a metric name represents a bytes measurement that should be formatted.
-fn is_bytes_metric(metric_name: &str) -> bool {
+pub fn is_bytes_metric(metric_name: &str) -> bool {
     metric_name.contains("bytes") || metric_name.contains("mem")
 }
 
-fn format_bytes_human_readable(bytes: usize) -> String {
+/// Renders `bytes` the way a plan line reports a memory figure.
+pub fn format_bytes_human_readable(bytes: usize) -> String {
     format!("{}", ReadableSize(bytes as u64))
 }
 
+/// Renders one metric as `label: value`, the way every `ANALYZE` line reports it.
+///
+/// A time is a readable duration, a byte count a readable size, and anything else a plain integer.
+/// This is the one formatter for a plan line, so a node rendered by its own operator and a node
+/// rendered by the collector read alike.
+pub fn format_metric(label: &str, value: usize) -> String {
+    if is_time_metric(label) {
+        format!("{}: {}", label, format_nanoseconds_human_readable(value))
+    } else if is_bytes_metric(label) {
+        format!("{}: {}", label, format_bytes_human_readable(value))
+    } else {
+        format!("{}: {}", label, value)
+    }
+}
+
 /// Only display `plan_metrics` with indent `  ` (2 spaces).
+///
+/// An operator's own figures go at the end of its own line, which is the line that names it. An
+/// operator whose line continues - one that renders the nodes it runs below itself - therefore
+/// keeps those figures rather than receiving every figure of the subtree it drew, and the lines it
+/// drew keep the figures and the indentation they were rendered with, shifted to sit under it.
 impl Display for RecordBatchMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for metric in &self.plan_metrics {
+            let indent = metric.level * 2;
+            let mut lines = metric.plan.trim_end().lines();
             write!(
                 f,
                 "{:indent$}{} metrics=[",
                 " ",
-                metric.plan.trim_end(),
-                indent = metric.level * 2,
+                lines.next().unwrap_or_default(),
             )?;
             for (label, value) in &metric.metrics {
-                if is_time_metric(label) {
-                    write!(
-                        f,
-                        "{}: {}, ",
-                        label,
-                        format_nanoseconds_human_readable(*value),
-                    )?;
-                } else if is_bytes_metric(label) {
-                    write!(f, "{}: {}, ", label, format_bytes_human_readable(*value),)?;
-                } else {
-                    write!(f, "{}: {}, ", label, value)?;
-                }
+                write!(f, "{}, ", format_metric(label, *value))?;
             }
             writeln!(f, "]")?;
+            for line in lines {
+                writeln!(f, "{:indent$}{line}", " ")?;
+            }
         }
 
         Ok(())
@@ -751,6 +779,131 @@ pub struct PlanMetrics {
     /// An ordered key-value list of metrics.
     /// Key is metric label and value is metric value.
     pub metrics: Vec<(String, usize)>,
+    /// The tree of nodes an operator runs inside itself, when it runs one.
+    ///
+    /// Such an operator reports its own figures through `metrics` and each node it runs through
+    /// this: they are not the same operator, so they are not the same entry. Absent for every other
+    /// operator, and for a record written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeTreeMetrics>,
+}
+
+/// One node of a tree an operator runs inside itself, with the figures that node recorded.
+///
+/// The shape is the plan line's own: the node's line without figures, the figures, and the nodes
+/// that consume its output, in the order the operator feeds them.
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct NativeTreeMetrics {
+    /// The node's line without figures, as `<kind>: <what it computes>`.
+    pub line: String,
+    /// An ordered key-value list of the figures this node recorded.
+    #[serde(default)]
+    pub metrics: Vec<(String, usize)>,
+    /// The nodes that consume this one's output.
+    #[serde(default)]
+    pub children: Vec<NativeTreeMetrics>,
+}
+
+/// Builds the tree a reader sees, when it asks for it.
+type NativeTreeReader = Arc<dyn Fn() -> NativeTreeMetrics + Send + Sync>;
+
+/// The tree an operator runs, registered as one of that operator's metrics.
+///
+/// It is a metric value so it travels with the operator's own figures through the same collection
+/// and the same record: a plan's figures are only final once it ran, which is when `ANALYZE` reads
+/// them, so what is registered is how to read the tree rather than a copy of it.
+pub struct NativeTreeMetric {
+    /// Reads the tree as it is now. `None` for a value created to accumulate a combination.
+    reader: Option<NativeTreeReader>,
+    /// A report this value took over while combining with another, which wins over `reader`.
+    adopted: Mutex<Option<NativeTreeMetrics>>,
+}
+
+/// The name an operator registers its tree under.
+///
+/// It carries the same `native.` prefix as the per-node figures so a reader that lists an
+/// operator's own figures leaves it out.
+pub const NATIVE_TREE_METRIC: &str = "native.tree";
+
+impl NativeTreeMetric {
+    /// Registers `reader` as the way to read the tree when it is asked for.
+    pub fn new(reader: impl Fn() -> NativeTreeMetrics + Send + Sync + 'static) -> Self {
+        Self {
+            reader: Some(Arc::new(reader)),
+            adopted: Mutex::new(None),
+        }
+    }
+
+    /// The tree with the figures it has now.
+    pub fn report(&self) -> NativeTreeMetrics {
+        if let Some(adopted) = self
+            .adopted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return adopted;
+        }
+        self.reader
+            .as_ref()
+            .map_or_else(NativeTreeMetrics::default, |reader| reader())
+    }
+}
+
+impl std::fmt::Display for NativeTreeMetric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a tree of {} nodes", self.report().node_count())
+    }
+}
+
+impl std::fmt::Debug for NativeTreeMetric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeTreeMetric").finish_non_exhaustive()
+    }
+}
+
+impl NativeTreeMetrics {
+    /// How many nodes this node and everything below it cover.
+    pub fn node_count(&self) -> usize {
+        1 + self
+            .children
+            .iter()
+            .map(NativeTreeMetrics::node_count)
+            .sum::<usize>()
+    }
+}
+
+impl CustomMetricValue for NativeTreeMetric {
+    /// A value to accumulate a combination into: it holds nothing until it combines with one.
+    fn new_empty(&self) -> Arc<dyn CustomMetricValue> {
+        Arc::new(Self {
+            reader: None,
+            adopted: Mutex::new(None),
+        })
+    }
+
+    /// Combining takes the report of `other`, because one operator registers one tree: what a
+    /// combination of two registrations would mean is not defined, and cannot happen today.
+    fn aggregate(&self, other: Arc<dyn CustomMetricValue + 'static>) {
+        let Some(other) = other.as_any().downcast_ref::<Self>() else {
+            return;
+        };
+        *self
+            .adopted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(other.report());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn is_eq(&self, other: &Arc<dyn CustomMetricValue>) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other.report() == self.report())
+    }
 }
 
 enum AsyncRecordBatchStreamAdapterState {
@@ -1235,6 +1388,7 @@ mod test {
                 plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 2)],
+                native: None,
             }],
             ..Default::default()
         };
@@ -1604,6 +1758,7 @@ mod test {
                 plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 42)],
+                native: None,
             }],
             ..Default::default()
         };
@@ -1638,6 +1793,7 @@ mod test {
                 plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 42)],
+                native: None,
             }],
             ..Default::default()
         };
@@ -1715,6 +1871,108 @@ mod test {
 
         let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.region_watermarks, metrics.region_watermarks);
+    }
+
+    fn plan_metrics(level: usize, plan: &str, metrics: &[(&str, usize)]) -> PlanMetrics {
+        PlanMetrics {
+            plan: plan.to_string(),
+            plan_name: "Test".to_string(),
+            level,
+            metrics: metrics
+                .iter()
+                .map(|(label, value)| (label.to_string(), *value))
+                .collect(),
+            native: None,
+        }
+    }
+
+    /// A one-line operator keeps its figures on its line, rendered as before: this is the shape
+    /// every operator other than one that draws a subtree has always had.
+    #[test]
+    fn a_single_line_plan_keeps_its_figures_on_its_line() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![
+                plan_metrics(0, "CooperativeExec", &[("elapsed_compute", 1_000_000)]),
+                plan_metrics(1, "RegionScanExec", &[("output_bytes", 2048)]),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            metrics.to_string(),
+            " CooperativeExec metrics=[elapsed_compute: 1.0ms, ]\n  RegionScanExec metrics=[output_bytes: 2.0KiB, ]\n"
+        );
+    }
+
+    /// An operator that draws nodes below itself keeps its own figures on its own - first - line.
+    /// Its subtree keeps the figures and the indentation it was rendered with, shifted to sit under
+    /// the operator it hangs from.
+    #[test]
+    fn a_multi_line_plan_receives_its_figures_before_the_subtree_it_drew() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![
+                plan_metrics(
+                    1,
+                    "FusedSeriesExec: rate(x[5m])\n  Window: rate, metrics=[output_values: 3]\n    Input: source=0",
+                    &[("elapsed_compute", 2_000_000)],
+                ),
+                plan_metrics(2, "RegionScanExec", &[("output_bytes", 4096)]),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            metrics.to_string(),
+            concat!(
+                "  FusedSeriesExec: rate(x[5m]) metrics=[elapsed_compute: 2.0ms, ]\n",
+                "    Window: rate, metrics=[output_values: 3]\n",
+                "      Input: source=0\n",
+                "    RegionScanExec metrics=[output_bytes: 4.0KiB, ]\n",
+            )
+        );
+    }
+
+    /// A record written before the native tree was carried here still reads, and a record without
+    /// one does not grow a field: the payload is optional on the wire in both directions.
+    #[test]
+    fn a_plan_record_without_a_native_tree_reads_and_writes_no_field() {
+        let older: PlanMetrics = serde_json::from_str(
+            r#"{"plan":"CooperativeExec","plan_name":"CooperativeExec","level":0,"metrics":[]}"#,
+        )
+        .expect("a record written before the field existed reads");
+
+        assert_eq!(older.native, None);
+        let written = serde_json::to_value(&older).unwrap();
+        assert!(written.get("native").is_none());
+    }
+
+    /// A tree crosses the record as structure: each node's line, its own figures, and its children.
+    #[test]
+    fn a_native_tree_round_trips_through_the_record() {
+        let tree = NativeTreeMetrics {
+            line: "Map: abs".to_string(),
+            metrics: vec![("output_values".to_string(), 4)],
+            children: vec![NativeTreeMetrics {
+                line: "Input: raw samples source=0".to_string(),
+                metrics: vec![],
+                children: vec![],
+            }],
+        };
+        let record = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "FusedSeriesExec: abs(rate(x[5m]))".to_string(),
+                plan_name: "FusedSeriesExec".to_string(),
+                level: 0,
+                metrics: vec![],
+                native: Some(tree.clone()),
+            }],
+            ..Default::default()
+        };
+
+        let written = serde_json::to_string(&record).unwrap();
+        let read: RecordBatchMetrics = serde_json::from_str(&written).unwrap();
+
+        assert_eq!(read.plan_metrics[0].native, Some(tree));
     }
 
     #[test]

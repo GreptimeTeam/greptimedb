@@ -1684,10 +1684,14 @@ fn executes_fused_series(plan: &Arc<dyn ExecutionPlan>) -> bool {
 /// One row of a PromQL result: its tag columns in schema order, its timestamp and its value.
 type PromqlRow = (Vec<(String, String)>, i64, f64);
 
-/// Checks that a native result reads no scan for a constant, and one real scan over
-/// `scan_partitions` non-empty partitions for a vector, and returns the fused node it ran.
+/// Checks that a native result plans one fused node, that a constant plans no scan and a vector one
+/// scan exposing `scan_partitions` partitions, and returns the plan's view of the fused node.
+///
+/// `exec` is the fused node that really ran. For a vector it is the region-side node, which the JSON
+/// view reports as a separate stage, so it is passed in rather than found in `plan`.
 fn assert_native_plan(
     plan: &Arc<dyn ExecutionPlan>,
+    exec: &Arc<dyn ExecutionPlan>,
     scan_partitions: Option<usize>,
     context: &str,
 ) -> Value {
@@ -1700,8 +1704,16 @@ fn assert_native_plan(
         );
         nodes.remove(0)
     };
-    // The tree the node will run, rendered the way `EXPLAIN` renders it: one line per node.
-    let tree = fused["param"].as_str().unwrap_or_default();
+    // The tree the node ran, as its own line renders it: `native_tree=[...]`. The JSON view reports
+    // each node of that tree as its own child, next to the plans the operator reads, so this is the
+    // one place the tree is still a single text.
+    let display = datafusion::physical_plan::displayable(exec.as_ref())
+        .indent(false)
+        .to_string();
+    let tree = display
+        .split_once("native_tree=[")
+        .map(|(_, tree)| tree.to_string())
+        .unwrap_or_else(|| panic!("{context}: the fused node renders no tree: {display}"));
     let scans = plan_nodes_named(plan, "SeriesScanExec");
     let Some(partitions) = scan_partitions else {
         // A constant reads no frame: its one value per grid point comes from the tree alone, so the
@@ -1710,10 +1722,9 @@ fn assert_native_plan(
             scans.is_empty(),
             "{context}: a constant planned a scan: {scans:?}"
         );
-        assert_eq!(
-            fused["children"].as_array().map(Vec::len),
-            Some(0),
-            "{context}: a constant's fused node has children: {fused}"
+        assert!(
+            exec.children().is_empty(),
+            "{context}: a constant's fused node reads a child: {fused}"
         );
         assert!(
             !tree.contains("Input"),
@@ -1721,11 +1732,6 @@ fn assert_native_plan(
         );
         return fused;
     };
-    assert_eq!(
-        fused["children"].as_array().map(Vec::len),
-        Some(1),
-        "{context}: a vector must read exactly one child: {fused}"
-    );
     assert_eq!(
         scans.len(),
         1,
@@ -1754,49 +1760,40 @@ fn assert_native_plan(
         !tree.contains("source=1"),
         "{context}: the tree reads a second source: {tree}"
     );
-    // Every partition the scan exposes did its own work: a gather of the raw input would leave the
-    // partitions without the input figure, and a partition that never ran would leave both at zero.
-    // These are input figures: the JSON drops `metric.partition()`, so it cannot say which partition
-    // produced which values.
-    let metrics = fused["metrics"]
-        .as_object()
-        .unwrap_or_else(|| panic!("{context}: the fused node reports no metrics: {fused}"));
-    // A partition-local tree evaluates on the partitions its input owns, which need not be every
-    // declared partition: the router puts each series on one owner, so a small fixture can leave
-    // some of them empty. What must hold is that the partitions that did work are reported.
-    let reported = (0..partitions)
-        .filter(|partition| {
-            let root_peak = format!("native.p{partition}.root.peak_reserved_bytes");
-            metrics
-                .get(&root_peak)
-                .and_then(Value::as_u64)
-                .unwrap_or_default()
-                > 0
-        })
-        .count();
+    // What the node did is in its own set: the registrations name the partition they ran on, and the
+    // samples and values are the counts the tree recorded. Which partition did that work is the
+    // canonical router's hash over the series it was delivered, so these are "some partition"
+    // claims; the figure the statement fixes - how many values the partitions published between them
+    // - is asserted against the result by [`assert_native_partition_output`].
+    let metrics = node_metric_set(exec);
+    let published = metrics
+        .iter()
+        .filter(|metric| metric.value().name() == "native.root.output_values")
+        .map(|metric| metric.value().as_usize())
+        .sum::<usize>();
     assert!(
-        reported > 0,
-        "no partition of `{context}` reported native work: {fused}"
+        published > 0,
+        "no partition of `{context}` published a value: {display}"
     );
-    let read_input = (0..partitions).any(|partition| {
-        let prefix = format!("native.p{partition}.root.");
-        metrics.iter().any(|(name, value)| {
-            name.starts_with(&prefix)
-                && name.ends_with(".input.peak_reserved_bytes")
-                && value.as_u64().unwrap_or_default() > 0
-        })
-    });
+    let read = metrics
+        .iter()
+        .filter(|metric| metric.value().name() == "native.root.input_samples")
+        .map(|metric| metric.value().as_usize())
+        .sum::<usize>();
     assert!(
-        read_input,
-        "no partition of `{context}` read any input: {fused}"
+        read > 0,
+        "no partition of `{context}` read any input sample: {display}"
     );
     fused
 }
 
-/// Checks that the fused node that actually ran answered the whole result, one partition at a time.
+/// Checks that the fused node that actually ran answered the whole result, and that the values its
+/// partitions published add up to the rows the result holds.
 ///
-/// The JSON drops `metric.partition()`, so which partition produced which values is only on the
-/// captured node.
+/// The JSON drops `metric.partition()`, so the per-partition figures are only on the captured node.
+/// Which partition produced which value is the canonical router's hash over the series it was
+/// delivered, so the total is the assertion; the split is reported in the failure messages, never
+/// asserted.
 fn assert_native_partition_output(
     fused: &Arc<dyn ExecutionPlan>,
     scan_partitions: Option<usize>,
@@ -1825,9 +1822,7 @@ fn assert_native_partition_output(
              {partitions}"
         );
     }
-    let metrics = fused
-        .metrics()
-        .unwrap_or_else(|| panic!("{context}: the executed fused node reports no metrics"));
+    let metrics = node_metric_set(fused);
     let mut values_by_partition = vec![0_usize; partitions];
     for metric in metrics.iter() {
         if metric.value().name() != "native.root.output_values" {
@@ -1844,9 +1839,11 @@ fn assert_native_partition_output(
         });
         *values += count.value();
     }
-    // A partition-local tree publishes on the partitions that own the series it evaluates: a small
-    // fixture can leave some of them empty, which is not evidence of lost work. The total below is
-    // the assertion that every value was produced.
+    // A partition-local tree publishes on the owners the canonical router hashed each series onto,
+    // so which partition folds what - and how many partitions fold anything at all - is the router's
+    // hash of the series it was delivered, not a property of the statement: a small fixture can leave
+    // some owners empty, which is not evidence of lost work. The total below is the assertion that
+    // every value was produced.
     assert!(
         values_by_partition.iter().any(|values| *values > 0),
         "{context}: no native execution partition reported values: {values_by_partition:?}"
@@ -1856,6 +1853,18 @@ fn assert_native_partition_output(
         expected_rows,
         "{context}: the partitions reported a different number of values than the result holds"
     );
+}
+
+/// The registrations the fused node's tree made, exactly as they were recorded.
+///
+/// [`datafusion::physical_plan::ExecutionPlan::metrics`] leaves them out: a flat set cannot say
+/// which tree node recorded what, so the node keeps its own set for readers that key by name.
+fn node_metric_set(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> datafusion::physical_plan::metrics::MetricsSet {
+    plan.downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+        .unwrap_or_else(|| panic!("the plan is a FusedSeriesExec, not {}", plan.name()))
+        .node_metric_set()
 }
 
 /// The columns of a result as (name, type, nullable).
@@ -2031,46 +2040,18 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
 
     observer.clear();
     let (_, row_schema, _) = promql_output(frontend, "native_demo", true, "0", "2").await;
-    let origin = observer
-        .take_all("native_demo")
-        .into_iter()
-        .next()
-        .expect("the statement ran a fused node");
-    // A fused node may read its region through a router and a merge scan rather than directly, so
-    // the prepared series scan is found in the region's own plan.
-    let scan = observer
-        .1
-        .lock()
-        .unwrap()
-        .last()
-        .cloned()
-        .or_else(|| {
-            let mut candidates = vec![Arc::clone(&origin)];
-            let mut stack = candidates.clone();
-            while let Some(node) = stack.pop() {
-                for child in node.children() {
-                    candidates.push(Arc::clone(child));
-                    stack.push(Arc::clone(child));
-                }
-            }
-            candidates.into_iter().find(|plan| {
-                plan.downcast_ref::<table::table::scan::SeriesScanExec>()
-                    .is_some()
-            })
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "the fused input is a real SeriesScanExec: {}",
-                datafusion::physical_plan::displayable(origin.as_ref()).indent(false)
-            )
-        });
-    let scan_plan = Arc::clone(&scan).reset_state().unwrap();
-    let scan_ref = scan
+    let origin = observer.take("native_demo");
+    let children = origin.children();
+    assert_eq!(children.len(), 1, "the fused origin has exactly one child");
+    // The fused node's child is the router over the statement's dispatched raw read, so the raw
+    // scan is the one the region planned: it is observed on its own rather than nested here.
+    let scan_plan = observer.take_scan("native_demo");
+    let scan = scan_plan
         .downcast_ref::<table::table::scan::SeriesScanExec>()
-        .expect("the fused input is a real SeriesScanExec");
-    let raw_schema = Arc::clone(scan_ref.series_schema());
-    let label_source = scan_ref.label_source().clone();
-    let ordering = scan_ref.raw_series_ordering();
+        .expect("the observed raw input is a real SeriesScanExec");
+    let raw_schema = Arc::clone(scan.series_schema());
+    let label_source = scan.label_source().clone();
+    let ordering = scan.raw_series_ordering();
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 3).unwrap()).unwrap());
     let output_schema = Arc::new(SeriesSchema {
         fields: Arc::clone(&raw_schema.fields),
@@ -2546,10 +2527,13 @@ pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
     instance.guard.remove_all().await;
 }
 
-/// Keeps the native fused node the request executed, for the figures only the node records.
+/// Keeps the native fused node and the raw scan the request executed, for the figures only they
+/// record.
 ///
-/// Uses the existing [`PhysicalPlanWrapper`] hook; `clear` before a query and `take` after its body
-/// is drained keep each query reading only the node it ran.
+/// The two are observed from different plans: the fused node is the frontend's, while the raw scan
+/// is the one the region planned for the statement's raw read. Uses the existing
+/// [`PhysicalPlanWrapper`] hook, which runs per plan; `clear` before a query and `take`/`take_scan`
+/// after its body is drained keep each query reading only the nodes it ran.
 #[derive(Default)]
 struct NativeFusedObserver(
     Mutex<Vec<Arc<dyn ExecutionPlan>>>,
@@ -2557,9 +2541,10 @@ struct NativeFusedObserver(
 );
 
 impl NativeFusedObserver {
-    /// Drops what an earlier request captured.
+    /// Drops both what an earlier request captured: its fused node and its raw scan.
     fn clear(&self) {
         self.0.lock().unwrap().clear();
+        self.1.lock().unwrap().clear();
     }
 
     /// The one fused node the request just executed.
@@ -2569,6 +2554,23 @@ impl NativeFusedObserver {
             captured.len(),
             1,
             "`{context}`: the request executed {} fused nodes: {captured:?}",
+            captured.len()
+        );
+        captured.remove(0)
+    }
+
+    /// The one raw scan the request just executed.
+    ///
+    /// The fused node reads its region through a router over a merge scan, whose region half is
+    /// dispatched rather than nested: the plan below the fused node is the router and the merge
+    /// scan, so the raw scan the statement read is taken from the plan the region planned for it
+    /// instead of by walking down from the fused node.
+    fn take_scan(&self, context: &str) -> Arc<dyn ExecutionPlan> {
+        let mut captured = std::mem::take(&mut *self.1.lock().unwrap());
+        assert_eq!(
+            captured.len(),
+            1,
+            "`{context}`: the request executed {} series scans: {captured:?}",
             captured.len()
         );
         captured.remove(0)
@@ -2747,19 +2749,12 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         let (plan, schema, rows) = promql_output(frontend, query, true, start, end).await;
         assert_rows_eq(&rows, &expected, query);
         assert_native_result_schema(&schema, tags, query, query);
-        let fused = assert_native_plan(&plan, scan_partitions, query);
-        assert_eq!(
-            fused["metrics"]["native.root.output_values"].as_u64(),
-            Some(expected.len() as u64),
-            "`{query}`: the tree reported a different number of values than the result holds"
-        );
-        // The body is drained, so every partition has finished.
-        assert_native_partition_output(
-            &observer.take(query),
-            scan_partitions,
-            expected.len(),
-            query,
-        );
+        // The body is drained, so every partition has finished and the node this statement ran is
+        // complete; its own registrations - not the flat set the JSON view reads - carry the
+        // per-partition figures.
+        let exec = observer.take(query);
+        assert_native_plan(&plan, &exec, scan_partitions, query);
+        assert_native_partition_output(&exec, scan_partitions, expected.len(), query);
 
         // Without the per-query hint the same statement runs the legacy pipeline, which must answer
         // with the same rows.
@@ -2821,19 +2816,28 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         1,
         "`{query}`: expected one fused node: {fused_nodes:?}"
     );
-    let fused = &fused_nodes[0];
-    let tree = fused["param"].as_str().unwrap_or_default();
-    assert_eq!(
-        fused["children"].as_array().map(Vec::len),
-        Some(1),
-        "`{query}`: an empty vector must read exactly one child: {fused}"
-    );
     let scans = plan_nodes_named(&plan, "SeriesScanExec");
     assert_eq!(
         scans.len(),
         1,
         "`{query}`: an empty vector must read exactly one scan: {scans:?}"
     );
+    // The body is drained, so the one fused node the request ran has finished. Its own child list is
+    // what says how many plans it reads, and its own line is where the tree it ran is still one text:
+    // the JSON view lists that tree's nodes as children of the operator, next to the plans it reads.
+    let exec = observer.take(query);
+    assert_eq!(
+        exec.children().len(),
+        1,
+        "`{query}`: an empty vector must read exactly one child"
+    );
+    let display = datafusion::physical_plan::displayable(exec.as_ref())
+        .indent(false)
+        .to_string();
+    let tree = display
+        .split_once("native_tree=[")
+        .map(|(_, tree)| tree.to_string())
+        .unwrap_or_else(|| panic!("`{query}`: the fused node renders no tree: {display}"));
     // The tree binds the one source instead of answering as a constant, whose tree binds no input.
     assert!(
         tree.contains("Input"),
@@ -2848,8 +2852,6 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         !tree.contains("source=1"),
         "`{query}`: the tree reads a second source: {tree}"
     );
-    // The body is drained, so the one fused node the request ran has finished.
-    observer.take(query);
 
     // Without the per-query hint the same statement runs the legacy pipeline, which must answer
     // with the same empty typed result.
@@ -5689,36 +5691,53 @@ pub async fn test_remote_write_v2_histogram_native_partitions(store_type: Storag
     assert!(written.is_empty(), "missing series: {written:?}");
     let fused = observer.take("histogram partitions");
     assert_eq!(fused.name(), "FusedSeriesExec");
-    let metrics = fused.metrics().expect("fused metrics");
+    let metrics = node_metric_set(&fused);
     let mut partitions = BTreeMap::new();
+    let mut samples = BTreeMap::new();
     for metric in metrics.iter() {
-        if metric.value().name() == "native.root.output_values"
-            && let MetricValue::Count { count, .. } = metric.value()
-        {
-            *partitions
-                .entry(metric.partition().expect("partition label"))
-                .or_insert(0usize) += count.value();
-        }
+        let Some(partition) = metric.partition() else {
+            continue;
+        };
+        let MetricValue::Count { count, .. } = metric.value() else {
+            continue;
+        };
+        let by_partition = match metric.value().name() {
+            "native.root.output_values" => &mut partitions,
+            "native.root.input_samples" => &mut samples,
+            _ => continue,
+        };
+        *by_partition.entry(partition).or_insert(0usize) += count.value();
     }
+    // A partition-local tree publishes on the owners the canonical router hashed the series onto,
+    // so which partition reports a given histogram - and how many partitions report at all - is the
+    // router's hash of the series it was delivered, not a property of the statement. The total is:
+    // every series answers once at the single instant this query evaluates at, so the partitions
+    // together report exactly as many values as the result holds.
     assert_eq!(
-        partitions.len(),
-        4,
-        "expected all four scan partitions to report output: {partitions:?}"
+        results.len(),
+        partitions.values().sum::<usize>(),
+        "the native partitions reported a different number of values than the result holds: \
+         {partitions:?}"
     );
-    // Routing hashes each series' label set, so eight series over four partitions can legitimately
-    // leave one of them empty. What the topology has to guarantee is that the series are spread
-    // over more than one partition - otherwise the merge this test exists for is never exercised -
-    // and that the routing loses none of them.
+    // Routing hashes each series' label set, so eight series over four owners can legitimately leave
+    // one of them empty. What the topology has to guarantee is that the series are spread over more
+    // than one owner - otherwise the merge this test exists for is never exercised - and that the
+    // routing loses none of them.
     let non_empty = partitions.values().filter(|count| **count > 0).count();
     assert!(
         non_empty >= 2,
         "the fused producer must run on more than one partition: {partitions:?}"
     );
-    assert_eq!(
-        8,
-        partitions.values().sum::<usize>(),
-        "every series must produce exactly one value: {partitions:?}"
-    );
+    // An owner that published values is one that read the samples they were computed from; an owner
+    // that was handed nothing reports neither.
+    for (partition, values) in &partitions {
+        assert_eq!(
+            *values > 0,
+            samples.get(partition).is_some_and(|samples| *samples > 0),
+            "partition {partition} must read samples exactly when it publishes values; values: \
+             {partitions:?}, samples: {samples:?}"
+        );
+    }
 }
 
 pub async fn test_remote_write_v2_histogram_native_range_function(store_type: StorageType) {

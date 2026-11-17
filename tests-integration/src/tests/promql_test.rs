@@ -2375,7 +2375,7 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
             .to_string();
         if split {
             assert!(
-                display.contains("Aggregate sum by [] final"),
+                display.contains("Aggregate: sum by [] final"),
                 "{query}: {display}"
             );
             let producer = observer.fused().expect("native partial producer");
@@ -2389,11 +2389,11 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
         } else {
             assert!(display.contains("FusedSeriesExec"), "{query}: {display}");
             assert!(
-                display.contains("Vector topk 1 by []"),
+                display.contains("Vector: topk 1 by []"),
                 "{query}: {display}"
             );
             assert!(
-                display.contains("Aggregate sum by [] complete"),
+                display.contains("Aggregate: sum by [] complete"),
                 "{query}: {display}"
             );
         }
@@ -2766,6 +2766,28 @@ fn assert_two_source_native_plan(
     assert_eq!(display.matches("source=1").count(), 1, "{display}");
 }
 
+/// The registrations the fused node's tree made, exactly as they were recorded.
+///
+/// [`datafusion::physical_plan::ExecutionPlan::metrics`] leaves them out: a flat set cannot say
+/// which tree node recorded what, so the node keeps its own set for readers that key by name.
+fn fused_metric_set(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> datafusion::physical_plan::metrics::MetricsSet {
+    plan.downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+        .unwrap_or_else(|| panic!("the plan is a FusedSeriesExec, not {}", plan.name()))
+        .node_metric_set()
+}
+
+/// The node's `native.root.output_values` counts, indexed by the partition the node ran on.
+///
+/// `None` when the node registered no such metric. A `Some` vector is as wide as the node, and an
+/// entry is zero when that partition published nothing - which is a partition the router handed no
+/// series.
+///
+/// Those zeros are not a property of the statement: each series is placed on the owner the canonical
+/// router hashes its stored key onto, over however many series each scan partition delivers, so a
+/// caller may sum this vector or ask that some partition published, but it must not assert which
+/// entry is non-zero, how many owners were used, or that every one of them was.
 fn output_values_per_partition(
     plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
 ) -> Option<Vec<u64>> {
@@ -2775,7 +2797,7 @@ fn output_values_per_partition(
         return None;
     }
     let partition_count = plan.output_partitioning().partition_count();
-    let metrics = plan.metrics()?;
+    let metrics = fused_metric_set(plan);
     let mut values_by_partition = vec![0_u64; partition_count];
     let mut found_metric = false;
     for metric in metrics.iter() {
@@ -2944,31 +2966,34 @@ fn fused_vectors_report(nodes: &[FusedNodeVector]) -> String {
         .join(" ")
 }
 
-/// Asserts the native work of the last statement reached every one of the
-/// [`DECLARED_PARTITIONS`] partitions it runs at, and reports the vectors it checked.
+/// Asserts the native work of the last statement ran at the width of the
+/// [`DECLARED_PARTITIONS`] partitions it declares and published values, and reports the vectors it
+/// checked.
 ///
-/// `native.root.output_values` counts what a fused node published on the partition it ran, so a
-/// zero in a node's vector is a partition where it published nothing. Both placements are read,
-/// and each is asserted node by node rather than by looking for one node that happens to span
-/// partitions:
+/// `native.root.output_values` counts what a fused node published on the partition it ran, and the
+/// canonical router places each series on one owner by hashing its stored key over whatever the scan
+/// partitions delivered, so an owner can be left with nothing to publish even when every scan
+/// partition read rows. Which partition published what - and how many partitions published at all -
+/// is therefore not a property of the statement, and no vector below is asserted entry by entry.
+/// What is asserted is per node: it registers the metric, it runs at the width the statement
+/// declares, and it published the values it evaluated. Both placements are read:
 ///
 /// - A statement that runs native work inside a region has one fused node per region-side tree.
-///   Every one of those must report the metric, be as wide as the statement, and have all counts
-///   positive, so a region prefix that collapsed onto one partition fails here even when another
-///   region's prefix is wide. The frontend's own node is the finalize over the region streams; its
-///   vector is reported but not asserted, because a final combine is not required to publish on
-///   every partition (it may even be a single partition, and the answer is assembled from the
-///   per-region streams above it).
+///   Every one of those must report the metric, be as wide as the statement, and have published
+///   something. The frontend's own node is the finalize over the region streams; its vector is
+///   reported but not asserted, because a final combine is not required to publish on every
+///   partition (it may even be a single partition, and the answer is assembled from the per-region
+///   streams above it).
 /// - A statement that only runs native work in the frontend (the frontend-raw routes, which run no
 ///   native node inside a region) is read from [`NativePlanObserver::root_plan`] instead: its
 ///   fused nodes must be found there, and every one of them that is as wide as the statement must
-///   report the metric with all counts positive. A narrower final merge is ignored, because it is
-///   the last combine rather than a partition-wide execution; a tree whose fused nodes are all
-///   narrow is refused, because nothing in it shows a partition-wide execution.
+///   report the metric and publish something. A narrower final merge is ignored, because it is the
+///   last combine rather than a partition-wide execution; a tree whose fused nodes are all narrow is
+///   refused, because nothing in it shows a partition-wide execution.
 ///
-/// A width-4 node without the metric, or with an empty partition, is a failure wherever the metric
-/// is required, never an exemption. The failure messages name the label, the node's site and the
-/// vectors, so a regression that collapses one region or one width-4 node is reported as itself.
+/// A width-4 node without the metric, or one that published nothing, is a failure wherever the
+/// metric is required, never an exemption. The failure messages name the label, the node's site and
+/// the vectors, so a regression that loses the metric or a node's values is reported as itself.
 fn assert_cross_partition_native_values(label: &str, observer: &NativePlanObserver) -> String {
     let mut region_nodes = Vec::new();
     for (index, plan) in observer.region_plans().iter().enumerate() {
@@ -2996,11 +3021,14 @@ fn assert_cross_partition_native_values(label: &str, observer: &NativePlanObserv
                  {counts:?}; region vectors: {region_report}",
                 node.site, node.partitions
             );
-            let empty_partitions = counts.iter().filter(|count| **count == 0).count();
-            assert_eq!(
-                0, empty_partitions,
-                "{label}: the region-side fused node {} published nothing on {empty_partitions} \
-                 of {DECLARED_PARTITIONS} partitions: {counts:?}; region vectors: {region_report}",
+            // Which of the partitions were handed series is the canonical router's hash, so a zero
+            // is not a lost value; that the node published the values it evaluated is.
+            let published: u64 = counts.iter().sum();
+            assert!(
+                published > 0,
+                "{label}: the region-side fused node {} published no value on any of the \
+                 {DECLARED_PARTITIONS} partitions it runs: {counts:?}; region vectors: \
+                 {region_report}",
                 node.site
             );
         }
@@ -3040,15 +3068,14 @@ fn assert_cross_partition_native_values(label: &str, observer: &NativePlanObserv
                 display_plan_tree(&observer.root_plan())
             ),
         };
-        let empty_partitions = counts.iter().filter(|count| **count == 0).count();
         // An ordinary partition can be empty: the raw frames are routed by their stored key, so a
         // small fixture need not put work on every one of them. The producer's width is still
-        // required, but a partition that reports nothing is not evidence of lost work.
+        // required, and so is that it published the values it evaluated.
+        let published: u64 = counts.iter().sum();
         assert!(
-            empty_partitions < DECLARED_PARTITIONS,
-            "{label}: the {}-partition frontend fused node {} published nothing on \
-             {empty_partitions} of {DECLARED_PARTITIONS} partitions: {counts:?}; root vectors: \
-             {root_report}",
+            published > 0,
+            "{label}: the {}-partition frontend fused node {} published nothing on any of its \
+             partitions: {counts:?}; root vectors: {root_report}",
             node.partitions,
             node.site
         );
@@ -3070,9 +3097,7 @@ fn nonempty_partitions(
     use datafusion::physical_plan::metrics::MetricValue;
 
     let partition_count = plan.output_partitioning().partition_count();
-    let metrics = plan
-        .metrics()
-        .unwrap_or_else(|| panic!("the plan reports metrics: {}", display_plan_tree(plan)));
+    let metrics = fused_metric_set(plan);
     let mut recorded = vec![0_u64; partition_count];
     let mut found = false;
     for entry in metrics.iter() {
@@ -3142,7 +3167,18 @@ fn canonical_router(
         })
 }
 
-fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
+/// Asserts the fused producer keeps the four partitions of the scan it reads, and that the
+/// partitions published `expected_values` values between them.
+///
+/// The width is the statement's: the producer folds over the scan-width router, so it must not
+/// collapse onto one partition. Which of those partitions were handed a series is not: the canonical
+/// router hashes each series' stored key onto one owner, so an owner can be left with nothing even
+/// when every scan partition read rows. The distribution-independent figure is the total, which is
+/// one published value per value the statement answers with.
+fn assert_four_native_partitions(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    expected_values: usize,
+) {
     assert_eq!(plan.name(), "FusedSeriesExec");
     assert_eq!(plan.output_partitioning().partition_count(), 4);
     assert_eq!(
@@ -3152,13 +3188,15 @@ fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::Execu
     );
     let values_by_partition = output_values_per_partition(plan).unwrap_or_else(|| {
         panic!(
-            "the fused producer must report `native.root.output_values` for every partition, \
-             otherwise nothing here shows that the partitions executed"
+            "the fused producer must register `native.root.output_values` for the partitions it \
+             runs, otherwise nothing here shows that it executed"
         )
     });
-    assert!(
-        values_by_partition.iter().all(|value| *value > 0),
-        "every native execution partition must produce values: {values_by_partition:?}"
+    assert_eq!(
+        expected_values,
+        values_by_partition.iter().sum::<u64>() as usize,
+        "the native partitions together must publish one value per value the statement answers \
+         with: {values_by_partition:?}"
     );
 }
 
@@ -5234,7 +5272,17 @@ async fn distributed_native_promql_zero_match_or_real() {
             "{}",
             datafusion::physical_plan::displayable(fused.as_ref()).one_line()
         );
-        assert!(display.contains("root Set or"), "{expression}: {display}");
+        // The node draws the tree it runs, one line per node: no query string, no path prefix and
+        // no `segment` wording, and the set names its own operator and matching labels.
+        assert!(
+            display.contains("native_tree=[\nSet: or ignoring []"),
+            "{expression}: {display}"
+        );
+        assert!(
+            display.contains("\n  Input: evaluated samples source=0, contiguous")
+                && display.contains("\n  Input: evaluated samples source=1, contiguous"),
+            "{expression}: {display}"
+        );
         let children = fused.children();
         assert_eq!(children.len(), 2, "{expression}: {display}");
         assert!(
@@ -5792,7 +5840,7 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
     .unwrap();
     let fresh_rows = native_result_rows(fresh).await;
     let fused = observer.take();
-    assert_four_native_partitions(&fused);
+    assert_four_native_partitions(&fused, fresh_rows.len());
     assert_eq!(
         fresh_rows,
         (0..16)
@@ -5882,9 +5930,7 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
     let split_rows = native_result_rows(split_parts).await;
     assert_eq!(split_rows.len(), 2, "{split_rows:?}");
     let split_plan = observer.take();
-    let nonempty = split_plan
-        .metrics()
-        .expect("fused plan metrics")
+    let nonempty = fused_metric_set(&split_plan)
         .iter()
         .filter(|metric| metric.value().name() == "native.root.output_values")
         .filter_map(|metric| match metric.value() {
@@ -5945,13 +5991,13 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
     let histogram_producer = histogram_router.children()[0].clone();
     // The boundary's own tree is the merge over the rewrite: `histogram_count` is not in it, so the
     // router that validates the collected label set runs below the map rather than above it. The
-    // node's explain line names the whole statement, so the tree is read from its own header on.
+    // physical node renders its own tree directly below its operator line.
     let producer_display = datafusion::physical_plan::displayable(histogram_producer.as_ref())
-        .indent(false)
+        .one_line()
         .to_string();
     let producer_tree = producer_display
-        .split_once("NativeTree")
-        .map(|(_, tree)| format!("NativeTree{tree}"))
+        .split_once('\n')
+        .map(|(_, tree)| tree)
         .unwrap_or_else(|| panic!("the producer renders its tree: {producer_display}"));
     assert!(
         producer_tree.contains("Merge"),
@@ -6479,7 +6525,7 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
         .unwrap();
     let native_rows = native_result_rows(native).await;
     let plan = observer.take();
-    assert_four_native_partitions(&plan);
+    assert_four_native_partitions(&plan, native_rows.len());
     let expected = (b'a'..=b'p')
         .zip((1..=16).map(|index| index as f64 * 2.0))
         .map(|(host, value)| (0, (host as char).to_string(), value))
@@ -7351,9 +7397,7 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
         let native_rows = native_result_rows(native).await;
         let plan = observer.take();
         assert_eq!(plan.name(), "FusedSeriesExec", "{expr}");
-        let output_count = plan
-            .metrics()
-            .unwrap()
+        let output_count = fused_metric_set(&plan)
             .iter()
             .filter_map(|metric| match metric.value() {
                 datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -7606,9 +7650,7 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
     let plan = observer.take();
     assert_eq!(plan.name(), "FusedSeriesExec");
     assert_two_source_native_plan(&observer, &plan, true);
-    let input_samples = plan
-        .metrics()
-        .expect("fused metrics")
+    let input_samples = fused_metric_set(&plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -7628,9 +7670,7 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
         ("native.root.left.input_samples", HOSTS * 4),
         ("native.root.right.input_samples", HOSTS * 2),
     ] {
-        let source_samples = plan
-            .metrics()
-            .expect("fused metrics")
+        let source_samples = fused_metric_set(&plan)
             .iter()
             .filter_map(|metric| match metric.value() {
                 datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -10029,9 +10069,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         scan_frame_rows, 1,
         "the anchored range returns one packed raw-series frame"
     );
-    let root_values = bounded_plan
-        .metrics()
-        .expect("fused metrics")
+    let root_values = fused_metric_set(&bounded_plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -10043,9 +10081,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         })
         .sum::<usize>();
     assert_eq!(root_values, 1, "the bounded native result was executed");
-    let root_input_samples = bounded_plan
-        .metrics()
-        .expect("fused metrics")
+    let root_input_samples = fused_metric_set(&bounded_plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -10433,7 +10469,7 @@ async fn native_promql_rate_and_abs_rate_match_legacy_across_storage_encodings()
                 "fused execution must retain partitioning for {table}"
             );
             if sparse {
-                assert_four_native_partitions(&plan);
+                assert_four_native_partitions(&plan, native_rows.len());
             }
             let child = plan.children()[0];
             let child = child
@@ -10478,9 +10514,7 @@ async fn native_promql_explain_and_analyze_execute_fused_plan() {
             assert!(text.contains("FusedSeriesExec"));
             assert!(text.contains("output_values"));
             let plan = observer.take();
-            let output_values = plan
-                .metrics()
-                .expect("fused plan metrics")
+            let output_values = fused_metric_set(&plan)
                 .iter()
                 .filter_map(|metric| match metric.value() {
                     datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -10493,10 +10527,11 @@ async fn native_promql_explain_and_analyze_execute_fused_plan() {
                 .sum::<usize>();
             assert_eq!(output_values, 1, "ANALYZE executes the fused series");
         } else if statement.contains("EXPLAIN") && enabled {
-            assert!(text.contains("FusedSeries: native_explain"));
+            assert!(text.contains("Input: raw samples source=0"), "{text}");
             assert!(text.contains("MergeScanExec"));
+            assert!(!text.contains("metrics="), "{text}");
         } else if !enabled {
-            assert!(!text.contains("FusedSeries:"));
+            assert!(!text.contains("FusedSeries"));
         }
     }
 }
@@ -10673,7 +10708,7 @@ fn holds_split_merge(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -
     let mut stack = vec![plan.clone()];
     while let Some(node) = stack.pop() {
         let display = datafusion::physical_plan::displayable(node.as_ref())
-            .indent(false)
+            .one_line()
             .to_string();
         if node.name() == "FusedSeriesExec" && display.contains(" final") {
             let mut descendants = node.children().into_iter().cloned().collect::<Vec<_>>();
@@ -11271,20 +11306,36 @@ async fn cte_native_statement_runs_the_fused_plan() {
         "a fused plan joins nothing, but these nodes ran: {joins:?}\n{}",
         cte_native_observed_plan_trees(&observer)
     );
-    // Every selector reads through its own raw source, so the two occurrences of the repeated
-    // selector name two of them, and each source wraps the region scan it reads.
+    // One logical table keeps both occurrences on their own region boundary: the node reads one
+    // merged region stream per occurrence, and the raw source behind each of them is the region's
+    // own, not a frontend scan per input.
+    let trees = cte_native_observed_plan_trees(&observer);
     let scans = observed_series_scans(&observer);
     assert_eq!(
         scans.len(),
         2,
-        "one independent scan per occurrence of the repeated selector:\n{}",
-        cte_native_observed_plan_trees(&observer)
+        "one independent scan per occurrence of the repeated selector:\n{trees}"
     );
+    let occurrences = fused[0].children();
     assert_eq!(
         2,
+        occurrences.len(),
+        "one region boundary per occurrence of the repeated selector:\n{trees}"
+    );
+    for (index, occurrence) in occurrences.iter().enumerate() {
+        assert!(
+            find_plan_node(occurrence, "MergeScanExec").is_some(),
+            "occurrence {index} must read its own region merge:\n{trees}"
+        );
+        assert!(
+            find_plan_node(occurrence, "SeriesScanExec").is_none(),
+            "occurrence {index} must leave the series scan to its region:\n{trees}"
+        );
+    }
+    assert_eq!(
         observer.take_raw_sources().len(),
-        "each occurrence of the repeated selector reads its own raw source:\n{}",
-        cte_native_observed_plan_trees(&observer)
+        occurrences.len(),
+        "the region reads one raw source per occurrence of the repeated selector:\n{trees}"
     );
     assert_eq!(
         native_schema,
@@ -12728,9 +12779,7 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
             .all(|entry| entry["artifact"]["format"] == "columnar-series")
     );
     // One value per series: the node ran, rather than being merely planned.
-    let output_values = plan
-        .metrics()
-        .expect("fused plan metrics")
+    let output_values = fused_metric_set(&plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -12831,9 +12880,7 @@ async fn native_promql_columnar_unindexed_float64_matches_legacy(
     // fused node to have run.
     let plan = observer.take();
     assert_eq!(native_rows, expected, "{stage}: fused route must answer");
-    let output_values = plan
-        .metrics()
-        .expect("fused plan metrics")
+    let output_values = fused_metric_set(&plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -12920,9 +12967,7 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
     // fused node to have run.
     let plan = observer.take();
     assert_eq!(native_rows, expected, "{stage}: fused route must answer");
-    let output_values = plan
-        .metrics()
-        .expect("fused plan metrics")
+    let output_values = fused_metric_set(&plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -13403,21 +13448,22 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
             "a global topk answers one partition"
         );
         let parent_display = datafusion::physical_plan::displayable(parent.as_ref())
-            .indent(true)
+            .one_line()
             .to_string();
         let parent_tree = parent_display
-            .split_once("NativeTree")
-            .map_or(parent_display.as_str(), |(_, tree)| tree);
+            .split_once('\n')
+            .expect("the parent renders its own tree")
+            .1;
         assert!(
-            parent_tree.contains("Aggregate sum by [] complete"),
+            parent_tree.contains("Aggregate: sum by [] complete"),
             "the parent owns the complete sum: {parent_tree}"
         );
         assert!(
-            parent_tree.contains("Vector topk 1 by []"),
+            parent_tree.contains("Vector: topk 1 by []"),
             "the parent owns the global topk: {parent_tree}"
         );
         assert!(
-            parent_tree.contains("Input evaluated samples source=0"),
+            parent_tree.contains("Input: evaluated samples source=0"),
             "the parent reads its child's evaluated frame, not a scan: {parent_tree}"
         );
         assert!(
@@ -13440,13 +13486,13 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
             "the prefix keeps the scan's partitions, which is the point of cutting below the topk"
         );
         let child_display = datafusion::physical_plan::displayable(child.as_ref())
-            .indent(true)
+            .one_line()
             .to_string();
-        // The first line names the statement the node was built for, which is the same for both
-        // segments; what a segment computes is the tree below it.
+        // Each segment renders its own compiled tree below the operator line.
         let child_tree = child_display
-            .split_once("NativeTree")
-            .map_or(child_display.as_str(), |(_, tree)| tree);
+            .split_once('\n')
+            .expect("the child renders its own tree")
+            .1;
         assert!(
             child_tree.contains("Instant"),
             "the child owns the per-series prefix: {child_tree}"
@@ -14046,20 +14092,20 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
         }
         if query == "sum(topk(1, seg_a)) + vector(1)" {
             let parent = datafusion::physical_plan::displayable(frontend[0].as_ref())
-                .indent(true)
+                .one_line()
                 .to_string();
-            let parent_tree = parent.split_once("NativeTree").unwrap().1;
+            let parent_tree = parent.split_once('\n').unwrap().1;
             assert!(parent_tree.contains("VectorOf"), "{parent_tree}");
             assert!(
-                parent_tree.contains("Input evaluated samples source=0"),
+                parent_tree.contains("Input: evaluated samples source=0"),
                 "the parent must read the data segment: {parent_tree}"
             );
             assert!(!parent_tree.contains("Instant"), "{parent_tree}");
             assert_eq!(regions.len(), 1, "{query}: the data prefix must be cut");
             let prefix = datafusion::physical_plan::displayable(regions[0].as_ref())
-                .indent(true)
+                .one_line()
                 .to_string();
-            let prefix_tree = prefix.split_once("NativeTree").unwrap().1;
+            let prefix_tree = prefix.split_once('\n').unwrap().1;
             assert!(prefix_tree.contains("Instant"), "{prefix_tree}");
             assert!(!prefix_tree.contains("VectorOf"), "{prefix_tree}");
             let mut rows = eval_values(native_tql_output(&instance, &sql, true).await);
@@ -16035,7 +16081,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         .indent(true)
         .to_string();
     assert!(
-        pair_sum_display.contains("Aggregate sum by [] complete"),
+        pair_sum_display.contains("Aggregate: sum by [] complete"),
         "the fold is a complete aggregate over the assembled series: {pair_sum_display}"
     );
     assert!(
@@ -16110,7 +16156,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         // state standing in for the collection.
         if shape == "a fold" {
             assert!(
-                display.contains("Aggregate sum by [] complete"),
+                display.contains("Aggregate: sum by [] complete"),
                 "{shape}: the fold is a complete aggregate over the assembled frames: {display}"
             );
             assert!(
@@ -16205,7 +16251,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         .indent(true)
         .to_string();
     assert!(
-        sum_display.contains("Aggregate sum by [] complete"),
+        sum_display.contains("Aggregate: sum by [] complete"),
         "the fold runs natively as a complete aggregate over the boundary: {sum_display}"
     );
     assert!(

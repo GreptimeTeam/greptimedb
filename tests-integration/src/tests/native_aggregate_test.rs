@@ -18,31 +18,37 @@
 //! The table is ordinary - one region, no `PARTITION` clause - and its five series sit in four SST
 //! files and one memtable range. The region's scan still splits them into the four partitions the
 //! request asks for, but that split stays in the region: above the boundary the raw frames are
-//! routed by stored key over the four owners the execution asks for, so the metric assertion below
-//! checks that every owner runs the fold and the fixture's totals check what they fold together.
+//! routed by stored key over the four owners the execution asks for. Which owner folds a series, and
+//! how many owners fold anything at all, is therefore that router's hash of each series' stored key
+//! and not a property of this fixture, so the metric assertions below pin totals only - the values
+//! the partitions published between them and the sample positions they consumed between them - and
+//! never which owner reported what.
+//!
 //! Every query runs twice: once with the native route asked for per request, once on the plan the
 //! existing planner builds. Both are compared with expectations worked out from the fixture, so
 //! neither run is the other's oracle.
 //!
-//! The native run plans a split aggregate above the region boundary, and that tree is checked in the
-//! plan the engine really executed. Both halves of the split live there: the Partial
-//! `FusedSeriesExec` reads the regions' raw frames through a `SeriesRepartitionExec` that routes
-//! whole series by their stored key out to the four partitions the execution was asked for, and the
-//! Final `FusedSeriesExec` above it reads that state through a second `SeriesRepartitionExec` that
-//! gathers each group's contributions where they are folded. `native.root.output_values` is reported
-//! by the Partial producer for every one of the four owners; the metric is read after the result
-//! stream was drained, the only point at which it is complete. A per-series segment the analyzer
-//! accepts instead runs beside the region's scan, where its input is that scan itself. Each chain is
-//! checked through [`PhysicalPlanWrapper`], which both query engines install, so what is checked is
-//! the plan that ran rather than a re-plan made for an `EXPLAIN`.
+//! The native run plans two trees, and both are checked in the plans the engines really executed.
+//! Both halves of the split live in the frontend one: the Partial `FusedSeriesExec` reads the
+//! regions' raw frames through a `SeriesRepartitionExec` that routes whole series by their stored key
+//! out to the four partitions the execution was asked for - or, for a per-series segment the
+//! analyzer accepts instead, the region's `SeriesScanExec` itself, which is already that wide - and
+//! the Final `FusedSeriesExec` above it reads that state through a second `SeriesRepartitionExec`
+//! that gathers each group's contributions where they are folded. The raw `SeriesScanExec` behind the
+//! producer's merge is in the separately captured region physical plan. The fused node publishes the
+//! values it folded from them; the metric is read after the result stream was drained, the only point
+//! at which it is complete. Both trees are checked independently through [`PhysicalPlanWrapper`],
+//! which both query engines install, so what is checked is the plan that ran rather than a re-plan
+//! made for an `EXPLAIN`.
 //!
 //! Two tables carry the queries. [`COUNTER_TABLE`] holds the same five series in the same four
 //! persisted files and one memtable range as [`GAUGE_TABLE`], but its samples are a counter's, so
 //! `rate` over it is a nonzero number that is derived by hand in [`COUNTER_SERIES`]: the gauge's
 //! constant value has a rate of exactly zero and cannot tell a computed rate from a dropped one. The
-//! counter queries are the acceptance ones for the state bridge - every owner folds a partial state
-//! and only a merge over *all* of them turns them into `sum`, `avg`, `count` and `stddev` - while
-//! the gauge queries keep covering the shapes with round answers.
+//! counter queries are the acceptance ones for the state bridge - the owners the router hashes the
+//! five series onto fold partial states that only a merge over *all* of them finishes as `sum`,
+//! `avg`, `count` and `stddev` - while the gauge queries keep covering the shapes with round
+//! answers.
 //!
 //! The counter table carries one tag the gauge table does not, `region`: the four flushed series -
 //! the four files - are in one region and the series left in the memtable range is in another, so
@@ -412,16 +418,18 @@ impl QueryResult {
 }
 
 /// One query, and what it must answer.
+///
+/// Nothing here says which of the scan-width owners folds what: the canonical router hashes each
+/// series' stored key onto one owner over however many series each scan partition delivers, so an
+/// owner can be left with nothing even though every scan partition read rows. What a case pins is
+/// distribution-independent - the rows and their values, the values the partitions published between
+/// them, and the input samples they consumed between them.
 struct AggregateCase {
     promql: String,
     expected: Vec<ResultRow>,
-    /// Whether the fold must be spread over more than one of the four owners the raw-frame router
-    /// assigns. Which owner a series lands on is that router's decision, so this is not a claim that
-    /// every owner folds something - the fixture's five series need not fill four of them.
-    per_partition: bool,
-    /// The number of values the owners' producers must report together, when the answer fixes that
-    /// figure: one value per series that folded, which is what the counter fixture's queries make
-    /// checkable. With `per_partition` the fold must also not collapse onto one owner. `None` leaves
+    /// The number of input sample positions the producers must consume together, when the answer
+    /// fixes that figure: one per series that folded, which is what the counter fixture's queries make
+    /// checkable. The owners' shares are the router's hash, so only the total is pinned; `None` leaves
     /// only "some value" to the assertion.
     root_values: Option<usize>,
     /// The stage marker the producer must show (`sum by [hostname] partial`), when the fixture
@@ -434,7 +442,7 @@ struct AggregateCase {
 }
 
 /// Builds one case from a PromQL expression and its `(labels, value)` rows.
-fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool) -> AggregateCase {
+fn case(promql: String, expected: &[(&[(&str, &str)], f64)]) -> AggregateCase {
     AggregateCase {
         promql,
         expected: expected
@@ -448,20 +456,20 @@ fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool
                 value: Some(*value),
             })
             .collect(),
-        per_partition,
         root_values: None,
         partial_state: None,
         single_owner: false,
     }
 }
 
-/// A case over [`COUNTER_TABLE`], which additionally pins the total the producers fold and the
-/// state the producer exports.
+/// A case over [`COUNTER_TABLE`], which additionally pins the values the producer folds and the state
+/// it exports.
 ///
 /// Every counter series is one series the scan keeps whole, and each of them decides exactly one
-/// `rate` at the single grid point [`tql_eval`] evaluates, so the owners' producers together report
-/// exactly as many values as there are counter series. Which owner folds which series is the
-/// raw-frame router's decision, so only the total is pinned.
+/// `rate` at the single grid point [`tql_eval`] evaluates, so the producers together consume exactly
+/// one sample position per counter series and the total below is the fixture's series count. Which
+/// owner folds which series - and how many owners fold anything - is the canonical router's hash of
+/// each series' stored key, so no per-owner share and no count of used owners is pinned.
 ///
 /// `partial_state` is the aggregate the split cut out, as the producer's plan line names it: the
 /// innermost aggregate of the tree, whose state the partitions export.
@@ -473,7 +481,7 @@ fn counter_case(
     AggregateCase {
         root_values: Some(COUNTER_SERIES.len()),
         partial_state: Some(partial_state),
-        ..case(promql, expected, true)
+        ..case(promql, expected)
     }
 }
 
@@ -681,34 +689,40 @@ async fn native_hybrid_binary_05_06_08() {
         left.iter().chain(&right).all(Option::is_some),
         "{unpartitioned}: operand metrics must be registered for every partition: left={left:?}, right={right:?}"
     );
-    // The fixture has one LHS api series, one RHS api series, and two RHS other series.
-    // The on(job) routers co-locate each group, so the only way to get these exact counts is
-    // api on the LHS partition and both other samples on a different matching partition.
-    let left_partition = left
-        .iter()
-        .position(|count| *count == Some(1))
-        .unwrap_or_else(|| panic!("{unpartitioned}: missing single left value: {left:?}"));
-    let other_partition = right
-        .iter()
-        .position(|count| *count == Some(2))
-        .unwrap_or_else(|| panic!("{unpartitioned}: missing duplicated right group: {right:?}"));
-    assert_ne!(
-        left_partition, other_partition,
-        "{unpartitioned}: left={left:?}, right={right:?}"
-    );
-    let mut expected_left = vec![Some(0); SCAN_PARTITIONS];
-    expected_left[left_partition] = Some(1);
-    let mut expected_right = vec![Some(0); SCAN_PARTITIONS];
-    expected_right[left_partition] = Some(1);
-    expected_right[other_partition] = Some(2);
-    // Exact vectors also fix totals at 1 and 3 and require every other partition to be empty.
+    // The fixture has one LHS api series, one RHS api series, and two RHS other series. Which owner
+    // the `on(job)` routers place each group on is their hash of the group key, so the vectors are
+    // read for their totals and for the co-location the routers promise, never for which partition
+    // got what:
+    //
+    // * the LHS is one series, so its operand publishes one value, on one owner;
+    // * the RHS is one api series and the two `other` series of one duplicated group, so its operand
+    //   publishes three values, and the group's pair ends up together - either on an owner of its own
+    //   (the counts are 1 and 2) or on the api owner's (the counts are one 3);
+    // * api is api on both sides, so the RHS value sits on the owner the LHS value does.
     assert_eq!(
-        expected_left, left,
-        "{unpartitioned}: LHS values per partition"
+        vec![1],
+        nonzero_counts(&left),
+        "{unpartitioned}: the one LHS series is evaluated once, on one owner: {left:?}"
     );
     assert_eq!(
-        expected_right, right,
-        "{unpartitioned}: RHS values per partition"
+        3,
+        right.iter().flatten().sum::<usize>(),
+        "{unpartitioned}: the RHS publishes api and the duplicated other group: {right:?}"
+    );
+    let right_counts = nonzero_counts(&right);
+    assert!(
+        right_counts == vec![1, 2] || right_counts == vec![3],
+        "{unpartitioned}: the duplicated `other` group must stay on one owner, so the RHS counts \
+         are either api and the pair apart or all three together: {right:?}"
+    );
+    let left_owner = left
+        .iter()
+        .position(|count| count.is_some_and(|count| count > 0))
+        .unwrap_or_else(|| panic!("{unpartitioned}: no owner evaluated the LHS: {left:?}"));
+    assert!(
+        right[left_owner].is_some_and(|count| count > 0),
+        "{unpartitioned}: the matching router must put the RHS api value on the LHS api's owner \
+         {left_owner}, but left={left:?} and right={right:?}"
     );
     common_telemetry::info!(
         "`{unpartitioned}` operand values per matching partition: left={left:?}, right={right:?}"
@@ -734,14 +748,21 @@ async fn native_hybrid_binary_05_06_08() {
         fused_node_count_per_partition(binary[0], "native.root.left.output_values", &empty_left);
     let control_right =
         fused_node_count_per_partition(binary[0], "native.root.right.output_values", &empty_left);
-    assert_eq!(
-        vec![Some(0); SCAN_PARTITIONS],
-        control_left,
-        "{empty_left}: left must be globally empty"
+    assert!(
+        control_left.iter().all(|count| *count == Some(0)),
+        "{empty_left}: left must be globally empty: {control_left:?}"
     );
+    // The same duplicated RHS reaches the binary, in the same shape as above: its totals and the
+    // co-location of the pair are the fixture's, its placement is the router's hash.
     assert_eq!(
-        expected_right, control_right,
-        "{empty_left}: the same duplicated RHS must reach the binary"
+        3,
+        control_right.iter().flatten().sum::<usize>(),
+        "{empty_left}: the same duplicated RHS must reach the binary: {control_right:?}"
+    );
+    let control_counts = nonzero_counts(&control_right);
+    assert!(
+        control_counts == vec![1, 2] || control_counts == vec![3],
+        "{empty_left}: the duplicated `other` group must stay on one owner: {control_right:?}"
     );
     common_telemetry::info!(
         "`{empty_left}` operand values per matching partition: left={control_left:?}, right={control_right:?}"
@@ -1324,9 +1345,14 @@ fn fused_node_count_per_partition(
 ) -> Vec<Option<usize>> {
     let mut per_partition = vec![None; SCAN_PARTITIONS];
     let plan = displayable(fused.as_ref()).indent(false).to_string();
+    // The tree's registrations live in the node's own set: `ExecutionPlan::metrics` leaves them
+    // out, since a flat set cannot say which node recorded what.
     let metrics = fused
-        .metrics()
-        .unwrap_or_else(|| panic!("{context}: the fused producer reports no metrics:\n{plan}"));
+        .downcast_ref::<FusedSeriesExec>()
+        .unwrap_or_else(|| {
+            panic!("{context}: the fused producer is not a FusedSeriesExec:\n{plan}")
+        })
+        .node_metric_set();
     for metric in metrics.iter() {
         let MetricValue::Count { count, .. } = metric.value() else {
             continue;
@@ -1345,6 +1371,22 @@ fn fused_node_count_per_partition(
         per_partition[partition] = Some(per_partition[partition].unwrap_or(0) + count.value());
     }
     per_partition
+}
+
+/// The nonzero entries of `values`, in ascending order.
+///
+/// A vector of per-partition counts is read this way when what matters is how the values were
+/// grouped rather than which partition reported them: an owner the router handed nothing is a zero,
+/// and its position says nothing about the statement.
+fn nonzero_counts(values: &[Option<usize>]) -> Vec<usize> {
+    let mut counts = values
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|count| *count > 0)
+        .collect::<Vec<_>>();
+    counts.sort_unstable();
+    counts
 }
 
 /// The named root metric of all fused producers in `capture`, per partition.
@@ -1373,8 +1415,9 @@ fn final_input_samples_per_partition(capture: &NativeCapture, context: &str) -> 
     for finalize in &capture.finalize {
         let plan = displayable(finalize.as_ref()).indent(false).to_string();
         let metrics = finalize
-            .metrics()
-            .unwrap_or_else(|| panic!("{context}: Final reports no metrics:\n{plan}"));
+            .downcast_ref::<FusedSeriesExec>()
+            .unwrap_or_else(|| panic!("{context}: Final is not a FusedSeriesExec:\n{plan}"))
+            .node_metric_set();
         for metric in metrics.iter() {
             let MetricValue::Count { count, .. } = metric.value() else {
                 continue;
@@ -1389,6 +1432,43 @@ fn final_input_samples_per_partition(capture: &NativeCapture, context: &str) -> 
             assert!(
                 partition < SCAN_PARTITIONS,
                 "{context}: Final `{name}` partition {partition} exceeds {SCAN_PARTITIONS}:\n{plan}"
+            );
+            per_partition[partition] += count.value();
+        }
+    }
+    per_partition
+}
+
+/// The Final merges' root `native.root.output_values` counts, summed per partition.
+///
+/// The root of a Final tree is the node that publishes the finished answer, so these counts are the
+/// statement's own values summed over the partitions that published them; which partition published
+/// which value is the router's hash over the partial frames, so the total is what is read.
+fn final_output_values_per_partition(capture: &NativeCapture, context: &str) -> Vec<usize> {
+    let mut per_partition = vec![0; SCAN_PARTITIONS];
+    for finalize in &capture.finalize {
+        let plan = displayable(finalize.as_ref()).indent(false).to_string();
+        let metrics = finalize
+            .downcast_ref::<FusedSeriesExec>()
+            .unwrap_or_else(|| panic!("{context}: Final is not a FusedSeriesExec:\n{plan}"))
+            .node_metric_set();
+        for metric in metrics.iter() {
+            if metric.value().name() != ROOT_OUTPUT_VALUES_METRIC {
+                continue;
+            }
+            let MetricValue::Count { count, .. } = metric.value() else {
+                continue;
+            };
+            let partition = metric.partition().unwrap_or_else(|| {
+                panic!(
+                    "{context}: Final `{ROOT_OUTPUT_VALUES_METRIC}` is not labelled with its \
+                     partition"
+                )
+            });
+            assert!(
+                partition < SCAN_PARTITIONS,
+                "{context}: Final `{ROOT_OUTPUT_VALUES_METRIC}` partition {partition} exceeds \
+                 {SCAN_PARTITIONS}:\n{plan}"
             );
             per_partition[partition] += count.value();
         }
@@ -1411,11 +1491,11 @@ fn final_input_samples_per_partition(capture: &NativeCapture, context: &str) -> 
 ///   One stored key routes to exactly one owner, so each owner's fold still sees whole series, and
 ///   the router re-declares the frames the merge scan publishes instead of reshaping them.
 ///
-/// Both chains are pinned rather than allowed: the exchange in the frontend chain is exactly one
-/// `SeriesRepartitionExec` with raw-key routing over the merge scan, the merge scan is its single
-/// leaf input, and the region chain has no exchange above the scan. A `CoalesceExec`, a second
-/// exchange, a narrower scan, or a producer over anything else is a different topology and fails
-/// here.
+/// Both chains are pinned rather than allowed: the exchange is exactly one `SeriesRepartitionExec`
+/// with raw-key routing over the merge scan - or over the scan itself, where that scan stayed local -
+/// the merge scan is its single leaf input, and the region chain has no exchange above the scan. A
+/// `CoalesceExec`, a second exchange, a narrower scan, or a producer over anything else is a
+/// different topology and fails here.
 fn assert_fused_reads_raw_source(fused: &Arc<dyn ExecutionPlan>, context: &str) {
     let plan = displayable(fused.as_ref()).indent(false).to_string();
     assert_eq!(
@@ -1472,13 +1552,27 @@ fn assert_fused_reads_raw_source(fused: &Arc<dyn ExecutionPlan>, context: &str) 
         routed[0].schema(),
         "{context}: the raw-frame router must re-declare the frames the region stream publishes:\n{plan}"
     );
+    // The router either closes the region boundary over the merge scan, or reads the scan itself
+    // where that scan stayed local; nothing else may sit below it.
     let boundary = through_cooperative(routed[0]);
     assert!(
-        boundary.is::<MergeScanExec>(),
-        "{context}: the raw-frame router must read the region `MergeScanExec` itself, with no other \
-         exchange between them, but it reads `{}`:\n{plan}",
+        boundary.is::<MergeScanExec>() || boundary.is::<SeriesScanExec>(),
+        "{context}: the raw-frame router must read the region `MergeScanExec` or the raw series \
+         scan itself, with no other exchange between them, but it reads `{}`:\n{plan}",
         boundary.name()
     );
+    if boundary.is::<SeriesScanExec>() {
+        assert_eq!(
+            SCAN_PARTITIONS,
+            boundary
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            "{context}: `SeriesScanExec` must expose the {SCAN_PARTITIONS} scan partitions the \
+             fused producer reads:\n{plan}"
+        );
+        return;
+    }
     assert!(
         boundary.children().is_empty(),
         "{context}: `MergeScanExec` must be a leaf:\n{plan}"
@@ -1548,10 +1642,10 @@ fn through_cooperative(node: &Arc<dyn ExecutionPlan>) -> &Arc<dyn ExecutionPlan>
 /// every group's contributions where they meet, so the Final's physical planning routes its state
 /// input: to a single owner when it folds one group or one histogram's bounds
 /// (`histogram_quantile` over a `le`-only grouping), and out to the session's width otherwise. Both
-/// halves of the split are planned in the frontend above the region boundary, so the router reads the
-/// captured Partial producer itself - not a region merge scan - and the producer keeps the width its
-/// raw-frame router gave it. The router re-declares the Partial state frame and routes canonical
-/// labels, never raw keys.
+/// halves of the split are planned in the frontend, and the region boundary is planned under the
+/// producer, so the Final's router reads the captured Partial producer itself - not a region merge
+/// scan - and the producer keeps the width its raw-frame router gave it. The router re-declares the
+/// Partial state frame and routes canonical labels, never raw keys.
 fn assert_finalize_routes_partial_state(
     finalize: &Arc<dyn ExecutionPlan>,
     producer: &Arc<dyn ExecutionPlan>,
@@ -1637,14 +1731,18 @@ fn assert_finalize_routes_partial_state(
 
     let producer_schema = producer.schema();
     let producer_plan = NodeDisplay(producer.as_ref()).to_string();
+    // The node's own line, then `native_tree=[`, then the tree: the first line inside the brackets
+    // is the root of the tree it runs, unindented and without a path prefix.
     let root_line = producer_plan
         .lines()
         .map(str::trim)
-        .find(|line| line.starts_with("root ") || line.starts_with("root:"))
+        .find(|line| {
+            !line.starts_with("FusedSeriesExec") && !matches!(*line, "native_tree=[" | "]")
+        })
         .unwrap_or_default();
     assert!(
-        root_line.contains("Aggregate") && root_line.contains("partial"),
-        "{context}: the captured Partial producer must have a Partial root, got `{root_line}`:\n{producer_plan}"
+        root_line.starts_with("Aggregate:") && root_line.contains(" partial"),
+        "{context}: captured region producer must have a Partial root, got `{root_line}`:\n{producer_plan}"
     );
     let declaration =
         SeriesFrameDeclaration::parse(producer_schema.as_ref()).unwrap_or_else(|error| {
@@ -1855,28 +1953,22 @@ async fn check_two_source_segregation(
         let plan = displayable(segments[index].as_ref())
             .indent(false)
             .to_string();
-        assert!(
-            values.iter().all(Option::is_some),
-            "`{query}`: segment {index} must run on every owner it is planned with, but one of them \
-             reported no `{ROOT_OUTPUT_VALUES_METRIC}`; both segment vectors: {vectors:?}; parent \
-             plan:\n{parent_display}; segment plan:\n{plan}"
-        );
+        if values.iter().all(Option::is_none) {
+            panic!(
+                "`{query}`: segment {index} does not publish `{ROOT_OUTPUT_VALUES_METRIC}`; \
+                 both segment vectors: {vectors:?}; parent plan:\n{parent_display}; segment plan:\n{plan}"
+            );
+        }
         // What each owner folds is the placement's decision: a region-local segment keeps the
         // region scan's partitions, while a frontend one is spread by the raw-key router over the
-        // target width, so the same series can leave an owner empty. The totals are what the
-        // fixture fixes - both fixture tables hold the same five series, and a segment answers one
-        // value per series of its source - so those are asserted instead of the spread.
+        // target width, so the same series can leave an owner empty. The total is what the fixture
+        // fixes - both fixture tables hold the same five series, and a segment answers one value per
+        // series of its source - so that is asserted instead of the spread.
         assert_eq!(
             COUNTER_SERIES.len(),
             values.iter().flatten().sum::<usize>(),
             "`{query}`: segment {index} must answer one value per series of its source; both \
              segment vectors: {vectors:?}; parent plan:\n{parent_display}; segment plan:\n{plan}"
-        );
-        assert!(
-            values.iter().flatten().filter(|count| **count > 0).count() > 1,
-            "`{query}`: segment {index} must produce values on more than one owner, otherwise the \
-             segment is not parallel at all; both segment vectors: {vectors:?}; parent plan:\n\
-             {parent_display}; segment plan:\n{plan}"
         );
     }
 }
@@ -2040,7 +2132,9 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
 
     if !case.single_owner {
         // These counters belong to the Final runtime tree, not the Partial producer. The Final
-        // aggregate consumes routed AggregateState chunks at `native.root.input_samples`.
+        // aggregate consumes routed AggregateState chunks at `native.root.input_samples`. Which of
+        // its owners were handed state is the router's hash over the partial frames, so only the
+        // total is asserted: a Final that consumed nothing would answer nothing.
         let final_samples =
             final_input_samples_per_partition(&capture, &format!("native `{query}`"));
         common_telemetry::info!(
@@ -2049,10 +2143,6 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         assert!(
             final_samples.iter().sum::<usize>() > 0,
             "`{query}`: Final must consume aggregate state, got {final_samples:?}"
-        );
-        assert!(
-            final_samples.iter().filter(|&&samples| samples > 0).count() >= 2,
-            "`{query}`: aggregate state must reach at least two of the {SCAN_PARTITIONS} Final partitions, got {final_samples:?}"
         );
     }
 
@@ -2064,39 +2154,36 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     common_telemetry::info!(
         "`{query}` native per-partition `{ROOT_OUTPUT_VALUES_METRIC}` counts: {per_partition:?}"
     );
-    // The producer's owners are the raw-frame router's buckets, not the region scan's partitions:
-    // every one of the four runs the producer, but which of them a series lands on is the router's
-    // decision, and five series spread over four owners need not fill each one. What the fixture
-    // fixes is the fold's *total*, which the `native.root.input_samples` check below pins, so this
-    // block asserts that every owner is live and, for a whole-vector fold, that the work was spread
-    // rather than collapsed onto one owner.
-    for (partition, values) in per_partition.iter().enumerate() {
-        assert!(
-            values.is_some(),
-            "`{query}`: the fused producer must run on all {SCAN_PARTITIONS} owners the raw-frame \
-             router gives it, but owner {partition} reported no `{ROOT_OUTPUT_VALUES_METRIC}`; all \
-             owners: {per_partition:?}"
-        );
-    }
-    let folded_owners = per_partition
-        .iter()
-        .flatten()
-        .filter(|values| **values > 0)
-        .count();
+    // Which owner folds which series is the canonical router's hash of the series' stored key, over
+    // however many series each scan partition delivered - not the scan partition the series was read
+    // on. An owner can therefore be handed nothing, and which partition read a series says nothing
+    // about where it is folded: neither how many owners folded nor what each one folded is asserted.
+    // A producer that folded nothing at all is still a failure.
     assert!(
-        folded_owners > 0,
-        "`{query}`: the fused producer must report folded values, got {per_partition:?}"
+        per_partition.iter().flatten().sum::<usize>() > 0,
+        "`{query}`: the fused producer must report the values it folded, got {per_partition:?}"
     );
-    if case.per_partition {
-        assert!(
-            folded_owners > 1,
-            "`{query}`: the fold must be spread over more than one of the {SCAN_PARTITIONS} owners, \
-             otherwise no partition of the split did any work; got {per_partition:?}"
-        );
-    }
+    // The finished answer is the statement's, though: the frontend merge publishes one value per row
+    // the result holds, wherever the partial states were folded.
+    let answered = final_output_values_per_partition(&capture, &format!("native `{query}`"));
+    common_telemetry::info!(
+        "`{query}` native Final per-partition `{ROOT_OUTPUT_VALUES_METRIC}` counts: {answered:?}"
+    );
+    assert_eq!(
+        case.expected
+            .iter()
+            .filter(|row| row.value.is_some())
+            .count(),
+        answered.iter().sum::<usize>(),
+        "`{query}`: the Final merge must publish one value per row the result holds, \
+         {per_partition:?} were folded below it; its own partitions reported {answered:?}"
+    );
     if let Some(root_values) = case.root_values {
-        // One value per series that folded, so the owners' counts add up to the number of series the
-        // scan selected - every counter series, or only the ones a matcher kept.
+        // One input sample position per series that folded - the single instant this statement
+        // evaluates at - so the owners' counts add up to the number of series the scan selected:
+        // every counter series, or only the ones a matcher kept. Which owner each series lands on is
+        // the canonical router's hash of its stored key, so only that total is pinned, together with
+        // each owner reporting samples exactly when it reports folded values.
         let input_samples = fused_root_metric_per_partition(
             &capture,
             ROOT_INPUT_SAMPLES_METRIC,
@@ -2105,24 +2192,23 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         common_telemetry::info!(
             "`{query}` native per-partition `{ROOT_INPUT_SAMPLES_METRIC}` counts: {input_samples:?}"
         );
-        assert!(
-            input_samples.iter().all(Option::is_some),
-            "`{query}`: every owner must report root input samples, got {input_samples:?}"
-        );
         assert_eq!(
             root_values,
             input_samples.iter().flatten().sum::<usize>(),
             "`{query}`: root input sample total must match the selected fixture series"
         );
-        if case.per_partition {
-            assert!(
-                input_samples.iter().flatten().copied().max().unwrap_or(0) < root_values,
-                "`{query}`: the split must not fold every series on one owner, got {input_samples:?}"
+        for (partition, values) in per_partition.iter().enumerate() {
+            assert_eq!(
+                values.is_some_and(|values| values > 0),
+                input_samples[partition].is_some_and(|samples| samples > 0),
+                "`{query}`: owner {partition} must consume samples exactly when it folds values; \
+                 folded: {per_partition:?}, samples: {input_samples:?}"
             );
         }
-        // Root output counts are grid points grouped into output series, not input-series
-        // contributions. Keep the owner activity check above; contribution totals belong to the
-        // exact native root input_samples metric checked here.
+        // The output counts are one value per group an owner published, not per-series
+        // contributions, so they do not add up to these input figures: the contribution total is the
+        // root `input_samples` total pinned here, and the answer's value count is the Final's own
+        // total above. Neither is read per owner.
     }
 }
 
@@ -2237,19 +2323,26 @@ async fn native_aggregate_topk_over_global_partitions() {
     expected.sort_by(|a, b| (a.ts_millis, &a.labels).cmp(&(b.ts_millis, &b.labels)));
     assert_native_schema(&native, &expression_name(&promql), &expected, &sql);
     assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
-    // `topk` above a global aggregate is not split, so the scan side folds per series and the
-    // ranking runs above it. A plan may hold several fused nodes (the frontend root and the region
-    // producers), so select them by what they do instead of counting nodes.
+    // `topk` above a global aggregate is not split, so the scan side answers the rate it reads and
+    // the ranking runs above the merged groups. A plan may hold several fused nodes (the frontend
+    // root and the region producers), so select them by what they do instead of counting nodes: a
+    // producer's tree reads raw samples, and only the node above them ranks.
     let plan_text =
         |node: &Arc<dyn ExecutionPlan>| displayable(node.as_ref()).indent(false).to_string();
     let producers: Vec<_> = capture
         .fused
         .iter()
-        .filter(|node| plan_text(node).contains("segment"))
+        .filter(|node| plan_text(node).contains("Input: raw samples"))
         .collect();
     assert!(
         !producers.is_empty(),
-        "a segmented producer answers the fold"
+        "a segmented producer answers the scan it was given; fused nodes:\n{}",
+        capture
+            .fused
+            .iter()
+            .map(plan_text)
+            .collect::<Vec<_>>()
+            .join("\n=====\n")
     );
     for producer in &producers {
         assert!(
@@ -2265,6 +2358,13 @@ async fn native_aggregate_topk_over_global_partitions() {
         .filter(|node| plan_text(node).to_ascii_lowercase().contains("topk"))
         .collect();
     assert_eq!(1, ranked.len(), "topk runs once, above the merged groups");
+    let ranked_text = plan_text(ranked[0]);
+    assert!(
+        ranked_text.contains("Vector: topk 10 by []")
+            && ranked_text.contains("Aggregate: sum by [hostname] complete")
+            && ranked_text.contains("Input: evaluated samples source=0, contiguous"),
+        "the fold answers the merged sources whole, with the ranking above it:\n{ranked_text}"
+    );
     // The cross-producer requirement lives in the deterministic fixtures instead, which pin which
     // suffixes the split accepts above the cut and which it declines
     // (`native_fused_split_declines_a_whole_vector_suffix`).
@@ -2388,76 +2488,62 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     // Both tables have exactly one value field (`v`), so a bare table selector reads it. A
     // `__field__` matcher would narrow the field set, and the native route declines such a query.
     let cases = [
-        case(
-            format!("sum by (job) ({GAUGE_TABLE})"),
-            &by_job(18.0, 12.0),
-            true,
-        ),
+        case(format!("sum by (job) ({GAUGE_TABLE})"), &by_job(18.0, 12.0)),
         // The gauge's groups average to 6 and 6, and the producer's plan line has to name the
         // `avg by (job)` the split cut out: what a partition exports is that aggregate's state, not
         // the group's mean. The counter table's cases below are the ones whose answers can tell a
         // merged state from a finished one.
         AggregateCase {
             partial_state: Some("avg by [job] partial"),
-            ..case(
-                format!("avg by (job) ({GAUGE_TABLE})"),
-                &by_job(6.0, 6.0),
-                true,
-            )
+            ..case(format!("avg by (job) ({GAUGE_TABLE})"), &by_job(6.0, 6.0))
         },
-        case(
-            format!("count by (job) ({GAUGE_TABLE})"),
-            &by_job(3.0, 2.0),
-            true,
-        ),
+        case(format!("count by (job) ({GAUGE_TABLE})"), &by_job(3.0, 2.0)),
         // `a` deviates by sqrt(32/3) and `b` by 2.
         case(
             format!("stddev by (job) ({GAUGE_TABLE})"),
             &by_job((32.0f64 / 3.0).sqrt(), 2.0),
-            true,
         ),
         case(
             format!("sum without (instance) ({GAUGE_TABLE})"),
             &by_job(18.0, 12.0),
-            true,
         ),
         case(
             format!("abs(sum by (job) ({GAUGE_TABLE}))"),
             &by_job(18.0, 12.0),
-            true,
         ),
         // A literal scalar above the fold: `sum` over the gauge's 2, 6, 10, 4 and 8 is 30, and the
-        // merge's suffix doubles the merged value. The global aggregate has one owner.
+        // merge's suffix doubles the merged value. The global aggregate finishes on the one owner
+        // that row is routed to.
         AggregateCase {
             single_owner: true,
-            ..case(format!("sum({GAUGE_TABLE}) * 2"), &[(&[], 60.0)], true)
+            ..case(format!("sum({GAUGE_TABLE}) * 2"), &[(&[], 60.0)])
         },
         // A gauge over a constant value has a rate of exactly zero, so these two only cover the
-        // zero-rate case: every series has both samples inside the 5m window, hence every partition
-        // must fold a value. They cannot tell a computed rate from a dropped one, which is what the
-        // counter table's cases below are for. The global aggregate has one owner.
+        // zero-rate case: every series has both samples inside the 5m window, hence the fold reports
+        // values on the owners the router hands series to. They cannot tell a computed rate from a
+        // dropped one, which is what the counter table's cases below are for. The global aggregate
+        // finishes on the one owner that row is routed to.
         AggregateCase {
             single_owner: true,
-            ..case(format!("sum(rate({GAUGE_TABLE}[5m]))"), &[(&[], 0.0)], true)
+            ..case(format!("sum(rate({GAUGE_TABLE}[5m]))"), &[(&[], 0.0)])
         },
         case(
             format!("sum by (job) (rate({GAUGE_TABLE}[5m]))"),
             &by_job(0.0, 0.0),
-            true,
         ),
         // The counter table: the same five series in the same four files, twice each, with the
         // increases of `COUNTER_SERIES`, so every value below is a nonzero rate that
         // `increase / 150` derives by hand - 1, 3 and 5 for `job = a`, 2 and 4 for `job = b`.
         //
-        // These are the acceptance cases for the partial/final state bridge. Each of the four
-        // partitions folds the states of the series its own scan returned and the merge above it
-        // folds them together, so the answers are only reachable when every partition's state
-        // arrives: `count` reports 3 and 2, and `avg`/`stddev` fold states that do not decompose
-        // into per-partition values. `job = a`'s three series cannot all be in one of the four
-        // partitions - the per-partition counts asserted for the counter cases that read every
-        // series rule that out - so its mean and its standard deviation are merged across at least
-        // two partitions. A standard deviation finished per partition and then averaged would
-        // report 0.5 or 1.0 for the 2+1 splits the counts leave possible, never sqrt(8/3).
+        // These are the acceptance cases for the partial/final state bridge. Each owner folds the
+        // states of the series the router handed it and the merge above it folds them together, so the
+        // answers are only reachable when every owner's state arrives: `count` reports 3 and 2, and
+        // `avg`/`stddev` fold states that do not decompose into per-owner values. The five series are
+        // hashed onto however many of the four owners the router picks - the test pins the totals the
+        // owners report between them, never their shares - and a series' state may reach a different
+        // owner than the one it was read on, so the mean and the standard deviation are merged across
+        // owners. A standard deviation finished per owner and then averaged would report 0.5 or 1.0
+        // for a 2+1 split, never sqrt(8/3).
         AggregateCase {
             single_owner: true,
             ..counter_case(
@@ -2469,7 +2555,8 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         // The same sum with a literal scalar above the fold: the merge's suffix doubles the merged
         // 15 to 30, where a suffix run over one partition's share - at most 10 of the 15 - would
         // answer at most 20, and a suffix that divided instead would answer 7.5. The cut is still
-        // the ungrouped `sum`, which the producer's plan line names. The global aggregate has one owner.
+        // the ungrouped `sum`, which the producer's plan line names. The global aggregate finishes on
+        // the one owner that row is routed to.
         AggregateCase {
             single_owner: true,
             ..counter_case(
@@ -2484,26 +2571,25 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
             "sum by [job] partial",
         ),
         // The matcher selects only `job = a`'s three series. Their rates are 1, 3 and 5, so the
-        // native partial producer must still run and the merged result must be 9. Three selected
-        // series cannot populate all four scan partitions, so this case checks that some producer
-        // output exists without applying the unfiltered fixture's four-nonempty-partition assertion.
+        // native partial producer must still run and the merged result must be 9. Which owners the
+        // router hands those three series to is its own hash, so this case pins the answer and the
+        // producer's activity without asserting anything per owner.
         AggregateCase {
             single_owner: true,
             partial_state: Some("sum by [] partial"),
             ..case(
                 format!("sum(rate({COUNTER_TABLE}{{job=\"a\"}}[5m]))"),
                 &[(&[], 9.0)],
-                false,
             )
         },
         // A matcher on the tag only the counter table carries. The four flushed series are the four
         // `region = us-west-2` files and the series left in the memtable range is `us-east-1`, so
         // this selects four of the five scan ranges: `job = a` keeps its 1, 3 and 5 - nine - while
-        // `job = b` keeps only `h4`'s 2, where the case above answers 6. The pruned range still
-        // runs and may leave its partition with nothing to fold, so `per_partition` is left off and
-        // only the total is pinned: one value for each of the four selected series. The answer's
-        // labels and values say which series survived, and every case here still requires the
-        // producer to read the four-partition scan.
+        // `job = b` keeps only `h4`'s 2, where the case above answers 6. The pruned range still runs
+        // and the four survivors are hashed onto some owners, so only the total is pinned: one sample
+        // position for each of the four selected series. The answer's labels and values say which
+        // series survived, and every case here still requires the producer to read the
+        // four-partition scan.
         AggregateCase {
             root_values: Some(COUNTER_SERIES.len() - 1),
             partial_state: Some("sum by [job] partial"),
@@ -2512,7 +2598,6 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
                     "sum by (job) (rate({COUNTER_TABLE}{{region=\"{COUNTER_WEST_REGION}\"}}[5m]))"
                 ),
                 &by_job(9.0, 2.0),
-                false,
             )
         },
         counter_case(
@@ -2592,15 +2677,14 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
                 "sum by [] partial",
             )
         },
-        // The range table holds one series in one partition, so this is a correctness smoke test of
-        // one populated partition rather than a parallel acceptance. Its one series folds one
-        // `count_over_time` value at the single grid point.
+        // The range table holds one series, so this is a correctness smoke test of one populated
+        // owner rather than a parallel acceptance. Its one series folds one `count_over_time` value
+        // at the single grid point.
         AggregateCase {
             single_owner: true,
             ..case(
                 format!("sum(count_over_time({RANGE_TABLE}[10m]))"),
                 &[(&[], 2.0)],
-                false,
             )
         },
     ];
@@ -2612,11 +2696,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     let nested_cases = [
         AggregateCase {
             single_owner: true,
-            ..case(
-                format!("sum(avg({GAUGE_TABLE}) by (job))"),
-                &[(&[], 12.0)],
-                true,
-            )
+            ..case(format!("sum(avg({GAUGE_TABLE}) by (job))"), &[(&[], 12.0)])
         },
         counter_case(
             format!("sum(abs(avg(rate({COUNTER_TABLE}[5m])) by (job)))"),
@@ -2633,7 +2713,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         check_nested_aggregate_case(&instance, &observer, case).await;
     }
 
-    let time = case("time()".to_string(), &[(&[], EVAL_SECS as f64)], false);
+    let time = case("time()".to_string(), &[(&[], EVAL_SECS as f64)]);
     let (native, capture) = run_query(&instance, &time.promql, true, &observer).await;
     assert_rows(&native.rows, &time.expected, "native `time()`");
     assert_eq!(1, capture.fused.len(), "`time()` runs one fused node");
@@ -2644,7 +2724,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         &instance,
         &observer,
         &two_source_promql,
-        &case(two_source_promql.clone(), &[(&[], 15.0 / 30.0)], false).expected,
+        &case(two_source_promql.clone(), &[(&[], 15.0 / 30.0)]).expected,
     )
     .await;
 
@@ -2654,11 +2734,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     // partition at a time would report the value of whichever partition held a single series, so
     // the NaN also says the whole vector was read at once. The native run must therefore hold a
     // fused producer and no frontend merge, and answer the same rows the existing plan answers.
-    let scalar_case = case(
-        format!("scalar({COUNTER_TABLE})"),
-        &[(&[], f64::NAN)],
-        false,
-    );
+    let scalar_case = case(format!("scalar({COUNTER_TABLE})"), &[(&[], f64::NAN)]);
     let scalar_query = tql_eval(&scalar_case.promql);
     let (legacy, legacy_capture) =
         run_query(&instance, &scalar_case.promql, false, &observer).await;
@@ -2702,7 +2778,6 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     let split_cases = [case(
         format!("max_over_time((sum(rate({COUNTER_TABLE}[5m])))[2s:1s])"),
         &[(&[], 15.0)],
-        false,
     )];
     for case in &split_cases {
         check_split_case(&instance, &observer, case).await;
