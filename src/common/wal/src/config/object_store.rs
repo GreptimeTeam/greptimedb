@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 /// both the heartbeat node epoch and the store epoch carried in object headers.
 pub const FIXED_DIRECTORY_GENERATION: u64 = 0;
 
-/// Plugin marker allowing a metasrv-controlled datanode to use object-store WAL.
+/// Plugin marker allowing metasrv and its datanodes to use object-store WAL.
 ///
 /// OSS does not register this marker. Cluster integration registers it only after
 /// the distributed WAL prerequisites are available; it does not itself configure
-/// metasrv or enable region failover.
+/// storage or implement region failover.
 #[derive(Debug, Clone, Copy)]
 pub struct EnableObjectStoreWal;
 
@@ -115,9 +115,9 @@ impl ObjectStoreWalConfig {
     /// Returns the prefix the store of `node_id` runs under in `generation`:
     /// `<prefix>/datanodes/<node_id>/epochs/<generation>`.
     ///
-    /// Every place that names the store's prefix, whether to open the store or
-    /// to allocate the WAL options of a region, must derive it here so the
-    /// prefix a region persists matches the one its store runs under.
+    /// Writers and remote readers derive concrete node directories here.
+    /// Distributed region metadata retains the public root instead; standalone
+    /// WAL options retain this concrete prefix for compatibility.
     pub fn node_prefix(&self, node_id: u64, generation: u64) -> String {
         format!("{}/datanodes/{node_id}/epochs/{generation}", self.prefix)
     }

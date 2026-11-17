@@ -286,7 +286,10 @@ impl WalProvider {
 
     /// Returns true if it's the remote WAL.
     pub fn is_remote_wal(&self) -> bool {
-        matches!(&self, WalProvider::Kafka(_))
+        matches!(
+            &self,
+            WalProvider::Kafka(_) | WalProvider::ObjectStore { .. }
+        )
     }
 }
 
@@ -312,6 +315,10 @@ pub async fn build_wal_provider(
 ) -> Result<WalProvider> {
     match config {
         MetasrvWalConfig::RaftEngine => Ok(WalProvider::RaftEngine),
+        #[cfg(feature = "enterprise")]
+        MetasrvWalConfig::ObjectStore(config) => Ok(WalProvider::ObjectStore {
+            prefix: config.prefix.clone(),
+        }),
         MetasrvWalConfig::Kafka(kafka_config) => {
             let prefix = &kafka_config.kafka_topic.topic_name_prefix;
             ensure!(
@@ -541,6 +548,35 @@ mod tests {
             serde_json::to_string(&none).unwrap(),
             r#"{"region_wal_options":null}"#
         );
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_build_object_store_provider() {
+        let config =
+            MetasrvWalConfig::ObjectStore(common_wal::config::object_store::ObjectStoreWalConfig {
+                prefix: "cluster/wal".to_string(),
+                ..Default::default()
+            });
+        let provider = build_wal_provider(&config, Arc::new(MemoryKvBackend::new()))
+            .await
+            .unwrap();
+        assert!(provider.is_remote_wal());
+        let options = provider.allocate(&[1, 2], false).await.unwrap();
+        assert_eq!(
+            options,
+            HashMap::from([
+                (
+                    1,
+                    WalOptions::ObjectStore(ObjectStoreWalOptions::new("cluster/wal".into()))
+                ),
+                (
+                    2,
+                    WalOptions::ObjectStore(ObjectStoreWalOptions::new("cluster/wal".into()))
+                ),
+            ])
+        );
+        assert!(remote_wal_topics(&options).is_empty());
     }
 
     #[tokio::test]

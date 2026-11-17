@@ -46,11 +46,12 @@ use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_meta::stats::topic::TopicStatsRegistry;
-use common_meta::wal_provider::{build_kafka_client, build_wal_provider};
+use common_meta::wal_provider::{WalProvider, build_kafka_client, build_wal_provider};
 use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_stat::ResourceStatImpl;
 use common_telemetry::{info, warn};
+use common_wal::config::object_store::EnableObjectStoreWal;
 use snafu::{ResultExt, ensure};
 use store_api::storage::MAX_REGION_SEQ;
 
@@ -306,6 +307,18 @@ impl MetasrvBuilder {
         let wal_provider = build_wal_provider(&options.wal, kv_backend.clone())
             .await
             .context(BuildWalProviderSnafu)?;
+        if matches!(wal_provider, WalProvider::ObjectStore { .. }) {
+            ensure!(
+                plugins
+                    .as_ref()
+                    .and_then(|plugins| plugins.get::<EnableObjectStoreWal>())
+                    .is_some(),
+                error::InvalidArgumentsSnafu {
+                    err_msg: "Distributed object store WAL requires the enterprise enablement plugin",
+                }
+            );
+        }
+
         let wal_provider = Arc::new(wal_provider);
         let is_remote_wal = wal_provider.is_remote_wal();
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
@@ -528,8 +541,8 @@ impl MetasrvBuilder {
 
         let ddl_manager = Arc::new(ddl_manager);
 
-        let region_flush_ticker = if is_remote_wal {
-            let remote_wal_options = options.wal.remote_wal_options().unwrap();
+        let region_flush_ticker = if let Some(remote_wal_options) = options.wal.remote_wal_options()
+        {
             let (region_flush_trigger, region_flush_ticker) = RegionFlushTrigger::new(
                 table_metadata_manager.clone(),
                 leader_region_registry.clone(),
@@ -548,11 +561,11 @@ impl MetasrvBuilder {
             None
         };
 
-        // remote WAL prune ticker and manager
-        let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
+        // Kafka pruning is independent of whether another provider supports failover.
+        let wal_prune_ticker = if let Some(remote_wal_options) = options.wal.remote_wal_options()
+            && options.wal.enable_active_wal_pruning()
+        {
             let (tx, rx) = WalPruneManager::channel();
-            // Safety: Must be remote WAL.
-            let remote_wal_options = options.wal.remote_wal_options().unwrap();
             let kafka_client = build_kafka_client(&remote_wal_options.connection)
                 .await
                 .context(error::BuildKafkaClientSnafu)?;
@@ -782,6 +795,32 @@ pub struct DdlManagerConfigureContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_object_store_wal_requires_enablement() {
+        use common_wal::config::MetasrvWalConfig;
+
+        let options = MetasrvOptions {
+            wal: MetasrvWalConfig::ObjectStore(Default::default()),
+            enable_region_failover: true,
+            enable_telemetry: false,
+            ..Default::default()
+        };
+        let result = MetasrvBuilder::new().options(options.clone()).build().await;
+        assert!(matches!(result, Err(error::Error::InvalidArguments { .. })));
+        let plugins = Plugins::new();
+        plugins.insert(EnableObjectStoreWal);
+        let metasrv = MetasrvBuilder::new()
+            .options(options)
+            .plugins(plugins)
+            .build()
+            .await
+            .unwrap();
+        assert!(metasrv.wal_provider.is_remote_wal());
+        assert!(metasrv.region_flush_ticker.is_none());
+        assert!(metasrv.wal_prune_ticker.is_none());
+    }
 
     #[cfg(feature = "enterprise")]
     #[test]

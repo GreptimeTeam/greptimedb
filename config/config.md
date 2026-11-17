@@ -512,6 +512,7 @@
 | `datanode.client.max_send_message_size` | String | `512MB` | The maximum send message size for the gRPC client. |
 | `wal` | -- | -- | -- |
 | `wal.provider` | String | `raft_engine` | -- |
+| `wal.prefix` | String | `wal` | Public root prefix for `experimental_object_store` WAL (enterprise builds only).<br/>The distributed WAL enablement plugin is also required. Metasrv only reads<br/>this prefix; it can use the same WAL configuration as the datanodes.<br/>All datanodes must configure the same prefix and shared object storage. |
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster.<br/><br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
