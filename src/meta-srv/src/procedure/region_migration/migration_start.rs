@@ -210,7 +210,7 @@ mod tests {
 
     use common_meta::key::test_utils::{new_test_table_info, new_test_table_info_with_name};
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
 
     use super::*;
@@ -388,28 +388,10 @@ mod tests {
         let mut state = Box::new(RegionMigrationStart);
         // from_peer: 1
         // to_peer: 2
-        let mut persistent_context = new_persistent_context();
-        let moved = RegionId::new(1024, 1);
-        let downgraded = RegionId::new(1024, 2);
-        persistent_context.region_ids = vec![moved, downgraded];
         let env = TestingEnv::new();
+        let mut persistent_context = new_persistent_context();
+        persistent_context.region_ids = env.create_batch_with_moved_leader(1).await;
         let mut ctx = env.context_factory().new_context(persistent_context);
-
-        let region_routes = vec![
-            RegionRoute {
-                region: Region::new_test(moved),
-                leader_peer: Some(Peer::empty(1024)),
-                ..Default::default()
-            },
-            RegionRoute {
-                region: Region::new_test(downgraded),
-                leader_peer: Some(Peer::empty(1)),
-                leader_state: Some(LeaderState::Downgrading),
-                ..Default::default()
-            },
-        ];
-        env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
-            .await;
         let procedure_ctx = new_procedure_context();
         let (next, status) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 

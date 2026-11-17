@@ -157,6 +157,33 @@ impl TestingEnv {
         &mut self.mailbox_ctx
     }
 
+    /// Creates the table of a batch of two regions and returns their ids. The leader of the
+    /// first region is neither peer 1 nor peer 2; the second region is led by
+    /// `downgraded_leader` in the downgrading state.
+    pub(crate) async fn create_batch_with_moved_leader(
+        &self,
+        downgraded_leader: DatanodeId,
+    ) -> Vec<RegionId> {
+        let moved = RegionId::new(1024, 1);
+        let downgraded = RegionId::new(1024, 2);
+        let region_routes = vec![
+            RegionRoute {
+                region: Region::new_test(moved),
+                leader_peer: Some(Peer::empty(3)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region::new_test(downgraded),
+                leader_peer: Some(Peer::empty(downgraded_leader)),
+                leader_state: Some(LeaderState::Downgrading),
+                ..Default::default()
+            },
+        ];
+        self.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+            .await;
+        vec![moved, downgraded]
+    }
+
     /// Returns the receiver of the messages broadcast to a frontend.
     pub(crate) async fn frontend_receiver(&mut self) -> MockHeartbeatReceiver {
         let (tx, rx) = tokio::sync::mpsc::channel(1);

@@ -1382,24 +1382,7 @@ mod tests {
         for downgraded_leader in [1, 2] {
             let env = TestingEnv::new();
             let mut persistent_ctx = new_persistent_context();
-            let moved = RegionId::new(1024, 1);
-            let downgraded = RegionId::new(1024, 2);
-            persistent_ctx.region_ids = vec![moved, downgraded];
-            let region_routes = vec![
-                RegionRoute {
-                    region: Region::new_test(moved),
-                    leader_peer: Some(Peer::empty(3)),
-                    ..Default::default()
-                },
-                RegionRoute {
-                    region: Region::new_test(downgraded),
-                    leader_peer: Some(Peer::empty(downgraded_leader)),
-                    leader_state: Some(LeaderState::Downgrading),
-                    ..Default::default()
-                },
-            ];
-            env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
-                .await;
+            persistent_ctx.region_ids = env.create_batch_with_moved_leader(downgraded_leader).await;
 
             let mut procedure = recover_procedure(&env, persistent_ctx);
             let ctx = TestingEnv::procedure_context();

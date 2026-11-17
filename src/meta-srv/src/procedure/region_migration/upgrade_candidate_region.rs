@@ -378,6 +378,7 @@ mod tests {
     use std::assert_matches;
     use std::collections::HashMap;
 
+    use common_meta::instruction::InstructionError;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::key::topic_name::TopicNameKey;
@@ -975,6 +976,15 @@ mod tests {
             let replies = [
                 |id| Err(error::MailboxTimeoutSnafu { id }.build()),
                 |id| Ok(new_close_region_reply(id)),
+                |id| {
+                    let reply = UpgradeRegionReply {
+                        error: Some(InstructionError::legacy_internal_retryable(
+                            "mock upgrade failed".to_string(),
+                        )),
+                        ..new_region_reply(RegionId::new(1024, 2), true, true)
+                    };
+                    Ok(new_upgrade_regions_reply(id, vec![reply]))
+                },
                 replaying_reply,
                 replaying_reply,
             ];
@@ -997,6 +1007,11 @@ mod tests {
         assert_eq!(ctx.volatile_ctx.upgraded_regions, HashSet::from([upgraded]));
         let err = state.upgrade_region(&mut ctx).await.unwrap_err();
         assert_matches!(err, Error::UnexpectedInstructionReply { .. });
+        assert_eq!(ctx.volatile_ctx.upgraded_regions, HashSet::from([upgraded]));
+
+        // A reply with an error is not accepted, even if it is ready.
+        let err = state.upgrade_region(&mut ctx).await.unwrap_err();
+        assert_matches!(err, Error::RetryLater { .. });
         assert_eq!(ctx.volatile_ctx.upgraded_regions, HashSet::from([upgraded]));
 
         // A reply that is not ready is accepted only when the region need not be ready.
