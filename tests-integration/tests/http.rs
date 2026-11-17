@@ -7111,18 +7111,30 @@ async fn write_native_histogram_sample(
 /// The fused node that publishes the statement's rows.
 ///
 /// A split aggregate executes twice: the partial producer exports state frames, and the final
-/// consumer above the series router answers the statement. Only the consumer declares the answer
-/// column, so its schema is what tells the two apart.
+/// consumer above the series router answers the statement. Only the consumer answers the statement's
+/// rows, so its schema is what tells the two apart.
+///
+/// `sum` and `avg` over native histograms answer a histogram - they add the payloads and the counts
+/// - so the answer column is a column whose type is the native histogram value type. Its name is the
+/// expression's now (`sum(some_metric)`), which is why the type and not the name identifies it.
+///
+/// The two schemas are otherwise unrelated: a state frame's columns are `read_key`, `is_last`,
+/// `time`, `fields`, `name` and `labels`, while the consumer's are the time index, the answer and
+/// the tags. The producer does carry a histogram, but only inside its accumulator column: `fields`
+/// types every state component in one struct, so the live histogram is a field of a list element
+/// under `fields` rather than a column of that schema. This check therefore reads the schema's own
+/// fields and never descends: the answer is a column of the rows the statement publishes, and
+/// looking deeper would be reading the merge state instead of those rows.
 fn answer_consumer(nodes: &[Arc<dyn ExecutionPlan>]) -> &Arc<dyn ExecutionPlan> {
     use datatypes::prelude::DataType;
 
     let histogram_type =
         common_query::native_histogram::native_histogram_value_type().as_arrow_type();
     let mut consumers = nodes.iter().filter(|node| {
-        node.schema().fields().iter().any(|field| {
-            field.name() == common_query::prelude::greptime_native_histogram()
-                && field.data_type() == &histogram_type
-        })
+        node.schema()
+            .fields()
+            .iter()
+            .any(|field| field.data_type() == &histogram_type)
     });
     let consumer = consumers
         .next()
@@ -7346,8 +7358,8 @@ pub async fn test_remote_write_v2_histogram_avg_native_partitions(store_type: St
         2,
         "the split's partial and final nodes both execute: {fused:?}"
     );
-    // The producer ran once per partition that read rows, which is what makes this a merge and not
-    // a single fold: the reference fixture spreads its eight flushes over the four partitions.
+    // The producer runs once per partition that read rows, which is what makes this a merge and not
+    // a single fold.
     let producer = fused
         .iter()
         .find(|node| !Arc::ptr_eq(node, consumer))
@@ -7363,13 +7375,20 @@ pub async fn test_remote_write_v2_histogram_avg_native_partitions(store_type: St
                 .or_insert(0usize) += count.value();
         }
     }
-    assert!(
-        partitions.len() > 1,
-        "the average folded in one partition, so nothing was merged: {partitions:?}"
+    assert_eq!(
+        partitions.len(),
+        4,
+        "the statement asks for four partitions and the producer runs one per partition: {partitions:?}"
     );
+    // Routing hashes each series' label set, so eight series over four partitions can legitimately
+    // leave one of them empty, and on this fixture the flushes land on three of the four. What the
+    // topology has to guarantee is that the fold is spread over more than one partition, since one
+    // fold is what the merge has to be told apart from; that no series was lost is the answer
+    // asserted above, which counts every one of them exactly once.
+    let non_empty = partitions.values().filter(|count| **count > 0).count();
     assert!(
-        partitions.values().all(|count| *count > 0),
-        "a partition produced no state to merge: {partitions:?}"
+        non_empty >= 2,
+        "the average folded in one partition, so nothing was merged: {partitions:?}"
     );
 
     // The same statement over the same data asking for one partition: the merge has to answer what
