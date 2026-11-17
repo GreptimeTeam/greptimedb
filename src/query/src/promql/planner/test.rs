@@ -7248,7 +7248,9 @@ async fn native_fused_quantile_is_never_folded_per_partition() {
             native_engine_provider(partition_key_indices.clone()).await,
         )
         .await;
-        let display = plan.display_indent().to_string();
+        // `display_indent_schema` still renders the statement, which is what the last assertion
+        // below reads; `display_indent` now shows only the plan lines #10202 introduced.
+        let display = plan.display_indent_schema().to_string();
         assert!(
             find_fused_series(&plan).is_some(),
             "partition on {partition_key_indices:?}: {display}"
