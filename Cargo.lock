@@ -13777,6 +13777,7 @@ dependencies = [
  "local-ip-address",
  "log-query",
  "loki-proto",
+ "lz4_flex 0.14.0",
  "meter-core",
  "meter-macros",
  "metric-engine",
