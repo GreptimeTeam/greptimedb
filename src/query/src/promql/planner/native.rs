@@ -87,25 +87,54 @@ use crate::promql::native_compile::{
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
 
-/// The query-context key that turns the native fused-series route on for one query.
+/// The query option that turns the native fused-series route on for one query.
 ///
-/// Named after the engine-wide option it mirrors ([`QueryOptions::experimental_native_promql`]) and read
-/// the way the other per-query override in this crate is read: a query-context extension, which a client
-/// can set per request. The engine-wide option is applied while building query-engine state; this planner
-/// reads the per-query extension at the call site; see [`native_promql_requested`].
+/// Named after the engine-wide option it mirrors ([`QueryOptions::experimental_native_promql`]), it
+/// is a query option like the others in this crate: a client states it per request (the HTTP hints
+/// header, a gRPC context key) or per session (`SET query.experimental_native_promql = ...`), and
+/// the engine-wide option is the default. The three resolve in that order where the query options
+/// snapshot is applied, and the planner reads the resulting
+/// [`NativePromqlExtension`](crate::options::NativePromqlExtension) rather than this key.
 ///
 /// [`QueryOptions::experimental_native_promql`]: crate::options::QueryOptions::experimental_native_promql
 pub const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
 
-/// Whether `query_ctx` asks for the native fused-series route.
+/// Whether the query options of one query ask for the native fused-series route.
 ///
-/// The route is off unless the query asks for it, so a query that says nothing keeps the plan the existing
-/// planner builds. The value is compared literally (`true` in any case), so a typo costs a slow query and
-/// never a wrong one.
+/// Read from the query options snapshot the query is planned with, so a per-request value and a
+/// session `SET` arrive here alike, already normalized: this compares literally (`true` in any
+/// case) rather than parsing again, because a value that is not a boolean never reaches the
+/// snapshot.
 pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
     query_ctx
         .extension(NATIVE_PROMQL_EXTENSION_KEY)
         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// Whether one query asks for the native fused-series route, resolved the way planning resolves
+/// it: a stated value wins (`request over session `SET``), otherwise the engine default answers.
+///
+/// This exists for the callers that have to act *before* a plan is built - the frontend bounds
+/// metric discovery by the caller's grants only when this route will read it - and it resolves
+/// from the same two sources planning reads: [`QueryContext::query_option_snapshot`] for what the
+/// query states, and the engine-wide option for what it inherits. Nothing here re-derives the
+/// option from a third place, so the two readers cannot disagree.
+pub fn native_promql_resolved(
+    query_ctx: &QueryContextRef,
+    engine_default: bool,
+) -> crate::error::Result<bool> {
+    let snapshot = query_ctx.query_option_snapshot().map_err(|error| {
+        crate::error::InvalidQueryContextExtensionSnafu {
+            reason: error.to_string(),
+        }
+        .build()
+    })?;
+    Ok(
+        match snapshot.extensions().get(NATIVE_PROMQL_EXTENSION_KEY) {
+            Some(value) => value.eq_ignore_ascii_case("true"),
+            None => engine_default,
+        },
+    )
 }
 
 /// Whether this executable plan is the native raw PromQL topology, the one plan shape whose
@@ -2425,8 +2454,44 @@ mod tests {
         ArrowDataType, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY, NativeType,
         PromPlanner, aggregate_reads_histogram, collect_selectors_with_set_operations,
         fused_output_schema, independent_scan_pair, native_promql_requested,
-        native_raw_plan_bounds_region_reads, scan_time_filter,
+        native_promql_resolved, native_raw_plan_bounds_region_reads, scan_time_filter,
     };
+
+    /// The switch resolves from the two sources planning reads: what the query states (a request
+    /// value over the session `SET` it inherits), and the engine default when it states nothing.
+    /// The frontend reads the same resolver before a plan exists, so a query that never asks for
+    /// the route is not bounded for discovery and one that does is.
+    #[test]
+    fn the_route_switch_resolves_over_the_engine_default() {
+        const KEY: &str = "query.experimental_native_promql";
+        for (engine_default, session, request, resolved) in [
+            // Nothing is stated, so the engine default answers.
+            (false, None, None, false),
+            (true, None, None, true),
+            // A session `SET` states it, and a request value outranks it in both directions.
+            (false, Some("true"), None, true),
+            (true, Some("false"), None, false),
+            (false, Some("false"), Some("true"), true),
+            (true, Some("true"), Some("false"), false),
+            // The value is compared literally, as planning compares it.
+            (false, None, Some("TRUE"), true),
+        ] {
+            let mut ctx = QueryContextBuilder::default().build();
+            if let Some(value) = session {
+                ctx.configuration_parameter()
+                    .set_query_option(KEY, value)
+                    .unwrap();
+            }
+            if let Some(value) = request {
+                ctx.set_extension(KEY.to_string(), value.to_string());
+            }
+            assert_eq!(
+                resolved,
+                native_promql_resolved(&Arc::new(ctx), engine_default).unwrap(),
+                "engine={engine_default}, session={session:?}, request={request:?}"
+            );
+        }
+    }
 
     #[test]
     fn native_raw_region_read_budget_needs_the_native_topology() {
@@ -3344,8 +3409,8 @@ mod tests {
     }
 
     #[test]
-    fn native_promql_requested_rejects_false_and_unrecognized_values() {
-        for value in ["false", "FALSE", "yes", "1", " true ", ""] {
+    fn native_promql_requested_rejects_false_values() {
+        for value in ["false", "FALSE", "False"] {
             let query_ctx = Arc::new(
                 QueryContextBuilder::default()
                     .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), value.to_string())

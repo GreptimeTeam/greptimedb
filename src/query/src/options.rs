@@ -111,9 +111,12 @@ pub struct QueryOptions {
     ///   evenly among spillable reservations and may trigger earlier spills.
     pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
     /// Enables the experimental native PromQL execution path for compatible queries. This
-    /// path currently applies only to standalone queries using in-process region transport,
-    /// and also requires the per-request `query.experimental_native_promql=true` extension.
-    /// Default: `false`.
+    /// path currently applies only to standalone queries using in-process region transport.
+    ///
+    /// This is the engine-wide default. A session `SET query.experimental_native_promql = true`
+    /// or a per-request `query.experimental_native_promql` option overrides it, in that order, so
+    /// a `true` default routes every query natively and a `false` one still lets one query or one
+    /// session ask for it. Default: `false`.
     pub experimental_native_promql: bool,
 }
 
@@ -450,6 +453,57 @@ impl ExtensionOptions for ScheduledTimeExtension {
 
     fn entries(&self) -> Vec<ConfigEntry> {
         vec![]
+    }
+}
+
+/// Carries the native PromQL route switch a query asked for through
+/// [`ConfigOptions::extensions`].
+///
+/// The value is resolved once per query, where the query options snapshot is applied to the
+/// planning state: the request extension
+/// [`NATIVE_PROMQL_EXTENSION_KEY`](crate::promql::planner::NATIVE_PROMQL_EXTENSION_KEY) over a
+/// session `SET` of the same option over the engine-wide
+/// [`QueryOptions::experimental_native_promql`] default. Planning and `SHOW` both read it back from
+/// there, so a query that states nothing routes as the engine default says.
+///
+/// What it records is the *request*, not the plan the query got: planning still applies the
+/// conditions that decide whether the route can be taken at all (a statement that allows query
+/// fallback or one planned inside a CTE keeps the existing plan whatever this says), so `SHOW
+/// query.experimental_native_promql` answers what the query asked for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NativePromqlExtension {
+    pub(crate) requested: bool,
+}
+
+impl ConfigExtension for NativePromqlExtension {
+    const PREFIX: &'static str = "native_promql";
+}
+
+impl ExtensionOptions for NativePromqlExtension {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(*self)
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "NativePromqlExtension does not support set key: {key} with value: {value}"
+        )))
+    }
+
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![ConfigEntry {
+            key: "requested".to_string(),
+            value: Some(self.requested.to_string()),
+            description: "Whether the query requests the native fused-series PromQL route",
+        }]
     }
 }
 

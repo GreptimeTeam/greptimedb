@@ -59,7 +59,7 @@ use crate::error::{
 };
 use crate::log_query::planner::LogQueryPlanner;
 use crate::optimizer::expr_depth;
-use crate::options::ScheduledTimeExtension;
+use crate::options::{NativePromqlExtension, ScheduledTimeExtension};
 use crate::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
@@ -702,14 +702,13 @@ impl DfLogicalPlanner {
     }
 
     /// Plans a PromQL statement, offering it to the native fused-series route when the statement
-    /// may take it and the state it is planned with asks for it.
+    /// may take it and the query options it is planned with ask for it.
     ///
     /// `native_route_allowed` states whether the statement may take the route at all: a PromQL
     /// statement embedded in a CTE may not (see [`Self::tql_to_logical_plan`]), every other one
-    /// may. The remaining switches are read from the state the statement is planned with, after
-    /// `apply_query_options` has resolved the per-query options into it: the fallback option,
-    /// which decides whether a fallback rewriter may wrap the plan, and the engine-wide native
-    /// option together with the per-request native extension.
+    /// may. Everything else the route depends on is read from the query options snapshot the
+    /// statement is planned with, where every option is already resolved as request > session
+    /// `SET` > engine default.
     #[tracing::instrument(skip_all)]
     async fn plan_pql(
         &self,
@@ -724,22 +723,23 @@ impl DfLogicalPlanner {
         // rewriter can wrap a native region scan in an unusable MergeScan, so the native route is
         // only offered to a query that cannot fall back.
         //
-        // TODO(narthex-merge): this used to disjoin three sources - the engine option, the session
-        // `allow_query_fallback` variable and the `query_fallback` hint - on the assumption that
-        // each of them only ever turns the fallback on. `apply_query_options` above now resolves
-        // all of them from the query option snapshot into this `DistPlannerOptions` extension,
-        // which is why the read happens here instead. One semantics is kept from main rather than
-        // narthex: a stated `false` overrides the engine default instead of leaving it on.
+        // `apply_query_options` above resolved the three sources this used to disjoin - the engine
+        // option, the session `allow_query_fallback` variable and the `query_fallback` hint - into
+        // this extension, so the read happens here instead. One mainline semantic is kept: a stated
+        // `false` overrides the engine default rather than leaving it on.
         let allow_query_fallback = scheduled_state
             .config_options()
             .extensions
             .get::<DistPlannerOptions>()
             .is_some_and(|options| options.allow_query_fallback);
         // Whether the statement is offered to the native fused-series compiler. This is the second,
-        // independent switch: the engine-wide option and the per-request extension it is requested
-        // with, and no source of it is derived from the fallback option.
-        let native_promql = self.engine_state.experimental_native_promql()
-            && crate::promql::planner::native::native_promql_requested(&query_ctx);
+        // independent switch: it states what the query asks for, and no source of it is derived
+        // from the fallback option.
+        let native_promql = scheduled_state
+            .config_options()
+            .extensions
+            .get::<NativePromqlExtension>()
+            .is_some_and(|options| options.requested);
         let promql_annotations = query_ctx.remote_query_id().map(promql_annotation_collector);
         if let Some(collector) = &promql_annotations {
             scheduled_state
@@ -1465,10 +1465,7 @@ mod tests {
             // The route a deployed frontend plans: a distributed planner over its regions.
             true,
         );
-        let mut builder = QueryContextBuilder::default()
-            // The native route request reaches the planner as a query context extension, the way
-            // a client sends it.
-            .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), "true".to_string());
+        let mut builder = QueryContextBuilder::default();
         if let Some((key, value)) = request {
             builder = builder.set_extension(key.to_string(), value.to_string());
         }
@@ -1499,6 +1496,45 @@ mod tests {
             .plan(&stmt, query_ctx)
             .await
             .map(|plan| plan.display_indent().to_string())
+    }
+
+    /// The native route follows the query options the snapshot resolves: the request, then the
+    /// session `SET`, then the engine-wide default. Only that one value decides, so a session that
+    /// says `true` routes natively with no request hint and the engine default off, and a request
+    /// that says `false` leaves the route however the other two are set.
+    #[tokio::test]
+    async fn test_plan_pql_native_route_follows_query_options() {
+        // (engine default, session `SET`, request hint, native route admitted)
+        for (engine_default, session, request, native) in [
+            // Nothing states the option: the engine default decides.
+            (false, None, None, false),
+            (true, None, None, true),
+            // A session `SET` alone enables the route while the engine default stays off.
+            (false, Some("true"), None, true),
+            // A request over the session value, in both directions.
+            (false, Some("true"), Some("false"), false),
+            (false, Some("false"), Some("true"), true),
+            // Over the engine default too, in both directions.
+            (true, Some("false"), None, false),
+            (true, Some("true"), Some("false"), false),
+            (false, None, Some("true"), true),
+        ] {
+            let plan = plan_native_promql_with_query_options(
+                crate::options::QueryOptions {
+                    experimental_native_promql: engine_default,
+                    ..Default::default()
+                },
+                session.map(|value| (NATIVE_PROMQL_EXTENSION_KEY, value)),
+                request.map(|value| (NATIVE_PROMQL_EXTENSION_KEY, value)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                plan.contains("FusedSeries"),
+                native,
+                "engine default={engine_default}, session={session:?}, request={request:?}: {plan}"
+            );
+        }
     }
 
     /// Plans `rate(some_metric[5m])` with the fallback option the caller states, while the native
@@ -1557,28 +1593,50 @@ mod tests {
         }
     }
 
-    /// The engine-wide option is the outer gate: a request that asks for the native route is
-    /// still planned through the legacy path while `experimental_native_promql` keeps its
-    /// default. `plan_native_promql_with_query_options` always sets the request extension, so
-    /// passing `QueryOptions::default()` here is exactly that case.
+    /// The engine-wide option is the default a request or a session overrides: it is not a gate
+    /// the request also has to pass. A default deployment stays on the legacy route when nothing
+    /// is stated, and a client that asks for the native route gets it - which is the case that
+    /// matters when this branch is merged back, because a client can always state the option.
     #[tokio::test]
-    async fn test_default_engine_option_keeps_a_native_request_on_the_legacy_route() {
-        let plan = plan_native_promql_with_query_options(
-            crate::options::QueryOptions::default(),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+    async fn test_engine_option_is_the_default_a_request_or_session_overrides() {
+        const KEY: &str = "query.experimental_native_promql";
+        // (engine option, session `SET`, request hint, native route planned)
+        for (engine, session, request, native) in [
+            // Nothing states the option, so the engine default answers.
+            (false, None, None, false),
+            (true, None, None, true),
+            // A request that asks for the route gets it on a default deployment.
+            (false, None, Some((KEY, "true")), true),
+            // ... and a request that states `false` keeps the legacy route on an enabled one.
+            (true, None, Some((KEY, "false")), false),
+            // A session `SET` states it too, and the request outranks it in both directions.
+            (false, Some((KEY, "true")), None, true),
+            (true, Some((KEY, "false")), None, false),
+            (false, Some((KEY, "false")), Some((KEY, "true")), true),
+            (true, Some((KEY, "true")), Some((KEY, "false")), false),
+        ] {
+            let plan = plan_native_promql_with_query_options(
+                crate::options::QueryOptions {
+                    experimental_native_promql: engine,
+                    ..Default::default()
+                },
+                session,
+                request,
+            )
+            .await
+            .unwrap();
 
-        assert!(
-            !plan.contains("FusedSeries"),
-            "a default deployment planned natively: {plan}"
-        );
-        assert!(
-            !plan.contains("RawSeriesSource"),
-            "a default deployment planned a raw-series source: {plan}"
-        );
+            assert_eq!(
+                plan.contains("FusedSeries"),
+                native,
+                "engine={engine}, session={session:?}, request={request:?}: {plan}"
+            );
+            assert_eq!(
+                plan.contains("RawSeriesSource"),
+                native,
+                "engine={engine}, session={session:?}, request={request:?}: {plan}"
+            );
+        }
     }
 
     /// The fallback hint names a query option, so a value that is not a boolean is rejected instead

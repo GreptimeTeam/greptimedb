@@ -1444,12 +1444,22 @@ impl Instance {
         expr: &promql_parser::parser::Expr,
         query_ctx: &mut QueryContextRef,
     ) -> server_error::Result<()> {
-        // Discovery scope is consumed by the native PromQL route only. The extension
-        // is deliberately opt-in, matching `native_promql_requested` in query's planner.
-        if !query_ctx
-            .extension(query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY)
-            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-        {
+        // Discovery scope is read by the native PromQL route only, so a query that does not ask
+        // for it pays nothing here beyond resolving the switch: the value is read through the
+        // query engine's own resolver, which takes what the query states (a request hint, or the
+        // session `SET` it inherits) over the engine default - the same two sources planning
+        // reads, so the two cannot disagree. A route that is off leaves discovery unrestricted,
+        // which is what it was before the switch existed; a route that is on is bounded below
+        // whether or not the fallback option later keeps the plan on the existing route.
+        let native_requested = query::promql::planner::native_promql_resolved(
+            query_ctx,
+            self.query_engine
+                .engine_state()
+                .experimental_native_promql(),
+        )
+        .map_err(BoxedError::new)
+        .context(ExecuteQuerySnafu)?;
+        if !native_requested {
             Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
             return Ok(());
         }
@@ -2427,6 +2437,44 @@ mod tests {
         }
 
         fn is_admin(&self) -> bool {
+            true
+        }
+    }
+
+    /// A checker that authorizes per table and counts the grants it was asked for, so a test can
+    /// state that a path did (or did not) ask.
+    #[derive(Default)]
+    struct CountingPermissionChecker {
+        table_target_checks: atomic::AtomicUsize,
+    }
+
+    impl CountingPermissionChecker {
+        fn table_target_checks(&self) -> usize {
+            self.table_target_checks.load(atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl PermissionChecker for CountingPermissionChecker {
+        fn check_permission(
+            &self,
+            _user_info: UserInfoRef,
+            _req: PermissionReq,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(PermissionResp::Allow)
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            _user_info: UserInfoRef,
+            _req: PermissionReq,
+            _targets: PermissionTableTargets,
+        ) -> auth::error::Result<PermissionResp> {
+            self.table_target_checks
+                .fetch_add(1, atomic::Ordering::Relaxed);
+            Ok(PermissionResp::Allow)
+        }
+
+        fn uses_table_targets(&self) -> bool {
             true
         }
     }
@@ -5744,6 +5792,181 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_some());
+
+        Ok(())
+    }
+    const NATIVE_PROMQL_OPTION: &str = "query.experimental_native_promql";
+
+    /// A frontend whose `public` schema holds two metric-engine logical tables, `cpu_usage` and
+    /// `target`, with `checker` as its permission checker.
+    async fn test_metric_discovery_instance(checker: PermissionCheckerRef) -> TestResult<Instance> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker);
+        test_instance_with_plugins_and_metric_names(
+            test_logical_table(1024, "cpu_usage")?,
+            test_logical_table(1025, "target")?,
+            plugins,
+            None,
+        )
+        .await
+    }
+
+    /// An expression that has to be answered by discovering the schema's metric tables: it names
+    /// no exact metric, only a name matcher.
+    fn discovery_metric_expr() -> promql_parser::parser::Expr {
+        promql_parser::parser::parse(r#"{__name__=~"cpu.*"}"#).unwrap()
+    }
+
+    /// The tables a bounded scope allows, sorted so a test can state them.
+    fn allowed_tables(scope: &MetricDiscoveryScope) -> Vec<String> {
+        let MetricDiscoveryScope::Allowed(allowed) = scope else {
+            panic!("expected a table-bounded discovery scope, got {scope:?}");
+        };
+        let mut tables = allowed
+            .iter()
+            .map(|target| target.table.clone())
+            .collect::<Vec<_>>();
+        tables.sort_unstable();
+        tables
+    }
+
+    /// A session `SET` turns the native route on without any request hint, so the scope has to be
+    /// bounded by the caller's grants in exactly that case too.
+    #[tokio::test]
+    async fn test_discovery_scope_bounds_a_session_enabled_native_route() -> TestResult<()> {
+        let instance =
+            test_metric_discovery_instance(Arc::new(RejectUnresolvedPermissionChecker)).await?;
+        let mut ctx = test_query_ctx(1);
+        ctx.configuration_parameter()
+            .set_query_option(NATIVE_PROMQL_OPTION, "true")
+            .unwrap();
+        assert!(
+            ctx.extension(NATIVE_PROMQL_OPTION).is_none(),
+            "a session SET is not a request hint"
+        );
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vec!["cpu_usage".to_string(), "target".to_string()],
+            allowed_tables(ctx.metric_discovery_scope())
+        );
+
+        Ok(())
+    }
+
+    /// With the switch off and nothing stated, the route never reads discovery, so the scope stays
+    /// unrestricted and no per-table grant is asked for: a query that does not use the route pays
+    /// nothing here.
+    #[tokio::test]
+    async fn test_discovery_scope_is_not_computed_when_the_route_is_off() -> TestResult<()> {
+        let counter = Arc::new(CountingPermissionChecker::default());
+        let instance = test_metric_discovery_instance(counter.clone()).await?;
+        let mut ctx = test_query_ctx(1);
+        assert!(ctx.extension(NATIVE_PROMQL_OPTION).is_none());
+        assert_eq!(
+            None,
+            ctx.effective_query_options()
+                .unwrap()
+                .get(NATIVE_PROMQL_OPTION),
+            "nothing states the option here"
+        );
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                ctx.metric_discovery_scope(),
+                MetricDiscoveryScope::Unrestricted
+            ),
+            "a route that is off reads no scope: {:?}",
+            ctx.metric_discovery_scope()
+        );
+        assert_eq!(
+            0,
+            counter.table_target_checks(),
+            "an off route asked for per-table grants"
+        );
+        assert!(
+            ctx.extension(NATIVE_PROMQL_OPTION).is_none(),
+            "resolving the switch must not state the option"
+        );
+
+        Ok(())
+    }
+
+    /// A checker that decides without table targets needs no bound: there is nothing to narrow.
+    #[tokio::test]
+    async fn test_discovery_scope_stays_unrestricted_without_table_targets() -> TestResult<()> {
+        let instance =
+            test_metric_discovery_instance(Arc::new(TargetIndependentPermissionChecker::default()))
+                .await?;
+        let mut ctx = test_query_ctx(1);
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                ctx.metric_discovery_scope(),
+                MetricDiscoveryScope::Unrestricted
+            ),
+            "got {:?}",
+            ctx.metric_discovery_scope()
+        );
+
+        Ok(())
+    }
+
+    /// Resolving the switch must not state it: the option a query inherits stays inherited, so
+    /// nothing this function does can change what planning later resolves. With nothing stated and
+    /// the engine default off the route is off, which leaves discovery unrestricted - the scope is
+    /// the only thing this function changes, and the route reads the option, not the scope.
+    ///
+    /// The routing itself is asserted where the plan is built
+    /// (`query::planner`'s `test_engine_option_is_the_default_a_request_or_session_overrides`
+    /// covers the "nothing stated, engine default" case): a catalog of plain in-memory tables
+    /// cannot plan a discovery expression natively, so a frontend-level plan assertion would only
+    /// restate the legacy planner's own rejections.
+    #[tokio::test]
+    async fn test_discovery_scope_does_not_state_the_native_option() -> TestResult<()> {
+        let instance =
+            test_metric_discovery_instance(Arc::new(RejectUnresolvedPermissionChecker)).await?;
+        let mut ctx = test_query_ctx(1);
+        assert!(ctx.extension(NATIVE_PROMQL_OPTION).is_none());
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                ctx.metric_discovery_scope(),
+                MetricDiscoveryScope::Unrestricted
+            ),
+            "an off route reads no scope: {:?}",
+            ctx.metric_discovery_scope()
+        );
+        assert!(
+            ctx.extension(NATIVE_PROMQL_OPTION).is_none(),
+            "computing the scope must not state the option"
+        );
+        assert_eq!(
+            None,
+            ctx.effective_query_options()
+                .unwrap()
+                .get(NATIVE_PROMQL_OPTION),
+            "the route stays on the engine default"
+        );
 
         Ok(())
     }
