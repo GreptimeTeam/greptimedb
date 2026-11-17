@@ -41,7 +41,7 @@ use tokio::sync::watch;
 
 use crate::error::{
     BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, ReadNodeWalSnafu,
-    RemoteWalUnsupportedSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu,
+    RemoteWalUnsupportedSnafu, ResolveWalProviderSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu,
 };
 use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader, decode_raw_entry};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
@@ -125,7 +125,7 @@ impl<S: LogStore> Wal<S> {
         self.store
             .resolve_provider(provider)
             .map_err(BoxedError::new)
-            .context(crate::error::ResolveWalProviderSnafu { region_id })
+            .context(ResolveWalProviderSnafu { region_id })
     }
 
     /// Subscribes to shared WAL pressure snapshots. Notifications only advise

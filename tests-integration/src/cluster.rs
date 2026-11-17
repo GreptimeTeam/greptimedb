@@ -1189,7 +1189,9 @@ mod tests {
     async fn test_object_store_cluster_entry_and_restart() {
         use crate::test_util::{execute_sql, execute_sql_and_expect, get_test_store_config};
         use client::OutputData;
-        use common_wal::config::object_store::{EnableObjectStoreWal, ObjectStoreWalConfig};
+        use common_wal::config::object_store::{
+            EnableObjectStoreWal, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig,
+        };
 
         let home = Arc::new(create_temp_dir("object-store-cluster-entry"));
         let (storage, _guard) = get_test_store_config(&StorageType::File);
@@ -1261,7 +1263,10 @@ mod tests {
             assert!(metadata.region_info.region_wal_options.values().all(|options| {
                 matches!(options, common_wal::options::WalOptions::ObjectStore(options) if options.prefix == config.prefix)
             }));
-            let prefix = format!("{}/objects/", config.node_prefix(node_id, 0));
+            let prefix = format!(
+                "{}/objects/",
+                config.node_prefix(node_id, FIXED_DIRECTORY_GENERATION)
+            );
             assert!(
                 !stores
                     .default_object_store()
