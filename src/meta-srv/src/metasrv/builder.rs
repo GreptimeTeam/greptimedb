@@ -818,6 +818,7 @@ mod tests {
             .await
             .unwrap();
         assert!(metasrv.wal_provider.is_remote_wal());
+        assert!(metasrv.region_supervisor_ticker.is_some());
         assert!(metasrv.region_flush_ticker.is_none());
         assert!(metasrv.wal_prune_ticker.is_none());
     }
