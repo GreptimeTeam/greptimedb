@@ -277,7 +277,7 @@ impl Fixture {
                 cache: Arc::new(CacheManager::default()),
                 config: self.config.clone(),
                 protection: protection.clone(),
-                cancellation: Arc::new(CancellationHandle::default()),
+                cancellation: CancellationToken::new(),
             },
             protection,
         )
@@ -2002,7 +2002,7 @@ async fn test_interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibli
     }
 }
 
-struct CancelBeforeCreate(Arc<CancellationHandle>);
+struct CancelBeforeCreate(CancellationToken);
 
 #[async_trait::async_trait]
 impl SstWriteGuard for CancelBeforeCreate {

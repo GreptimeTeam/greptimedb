@@ -6160,7 +6160,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=5870f5adc4d601173e742888e7db2032a690b583#5870f5adc4d601173e742888e7db2032a690b583"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c46f7ee9c82ff90f5762ae192fcf8bb2b0d6046f#c46f7ee9c82ff90f5762ae192fcf8bb2b0d6046f"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -8711,6 +8711,7 @@ dependencies = [
  "object-store",
  "partition",
  "prometheus 0.14.0",
+ "rstest",
  "serde",
  "serde_json",
  "smallvec",

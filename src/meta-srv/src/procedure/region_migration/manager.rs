@@ -672,7 +672,7 @@ mod test {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::procedure::region_migration::test_util::{TestingEnv, new_persistent_context};
 
     #[derive(Default)]
     struct SubmissionGate {
@@ -1323,5 +1323,48 @@ mod test {
         assert_eq!(result.submitted, vec![RegionId::new(1024, 2)]);
         assert!(result.procedure_id.is_some());
         env.procedure_manager().stop().await.unwrap();
+    }
+
+    #[test]
+    fn test_dropped_procedure_releases_candidate_registration_before_tracker() {
+        let env = TestingEnv::new();
+        let keeper = env.opening_region_keeper().clone();
+        let tracker = RegionMigrationProcedureTracker::default();
+        let region_id = RegionId::new(1024, 1);
+        let task = RegionMigrationProcedureTask::new(
+            region_id,
+            Peer::empty(1),
+            Peer::empty(2),
+            Duration::from_secs(1),
+            RegionMigrationTriggerReason::Manual,
+        );
+        let tracker_guard = tracker.insert_running_procedure(&task).unwrap();
+        let mut procedure = RegionMigrationProcedure::new(
+            new_persistent_context(1, 2, region_id),
+            env.context_factory(),
+            vec![tracker_guard],
+        );
+        procedure
+            .context
+            .volatile_ctx
+            .opening_region_guards
+            .push(keeper.register_candidate_region(2, region_id).unwrap());
+
+        // While this read lock is held, the tracker entry cannot be removed, so the registration
+        // has to go first.
+        let running_procedures = tracker.running_procedures.read().unwrap();
+        let dropper = std::thread::spawn(move || drop(procedure));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !keeper.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the candidate registration outlives the tracker entry"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(running_procedures.contains_key(&region_id));
+        drop(running_procedures);
+        dropper.join().unwrap();
+        assert!(tracker.running_procedures.read().unwrap().is_empty());
     }
 }

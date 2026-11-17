@@ -19,16 +19,15 @@ use std::time::Instant;
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info, warn};
-use futures::TryStreamExt;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::{MAX_VERSION, MIN_VERSION, ManifestVersion};
 
 use crate::cache::manifest_cache::ManifestCache;
 use crate::config::MitoConfig;
 use crate::error::{
-    self, EndStagingPendingSnafu, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu,
+    EndStagingPendingSnafu, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu,
     RegionStoppedSnafu, Result,
 };
 use crate::manifest::action::{
@@ -36,10 +35,7 @@ use crate::manifest::action::{
     RegionMetaAction, RegionMetaActionList, RemovedFile,
 };
 use crate::manifest::checkpointer::Checkpointer;
-use crate::manifest::storage::{
-    ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file, list_start_after,
-    manifest_compress_type, manifest_dir,
-};
+use crate::manifest::storage::{ManifestObjectStore, manifest_compress_type, manifest_dir};
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::ManifestStats;
 use crate::sst::file_metadata::FileMetadataInternerRef;
@@ -442,7 +438,12 @@ impl RegionManifestManager {
         Ok(Some(manager))
     }
 
-    /// Stops the manager.
+    /// Stops the manager. A stopped manager takes no update and starts no checkpoint, but a
+    /// checkpoint already running keeps writing the manifest directory until it ends.
+    ///
+    /// A caller that hands the storage to another instance waits for that checkpoint with
+    /// `pending_checkpoint_completion` after the stop, as engine stop and reload do. Close and
+    /// drop, which run in the region worker loop, deliberately do not.
     pub async fn stop(&mut self) {
         self.stopped = true;
     }
@@ -849,6 +850,13 @@ impl RegionManifestManager {
         self.checkpointer.wait_for_pending_checkpoint().await;
     }
 
+    /// Returns a future that resolves once the in-flight checkpoint has finished, including its
+    /// cleanup. Unlike [Self::wait_for_pending_checkpoint], which borrows the manager mutably and
+    /// reaps the task handle, this does neither.
+    pub(crate) fn pending_checkpoint_completion(&self) -> impl Future<Output = ()> + Send + use<> {
+        self.checkpointer.pending_checkpoint_completion()
+    }
+
     /// Clear deleted files from manifest's `removed_files` field without update version. Notice if datanode exit before checkpoint then new manifest by open region may still contain these deleted files, which is acceptable for gc process.
     pub fn clear_deleted_files(&mut self, deleted_files: Vec<RemovedFile>) {
         let mut manifest = (*self.manifest()).clone();
@@ -879,37 +887,11 @@ impl RegionManifestManager {
     ///
     /// It is typically used in read-only regions to catch up with manifest.
     /// It doesn't lock the manifest directory in the object store so the result
-    /// may be inaccurate if there are concurrent writes.
+    /// may be inaccurate if there are concurrent writes. A caller holds the region's manifest
+    /// `RwLock` read guard across the listing (e.g. `ManifestContext::has_update`), which
+    /// `ManifestContext::installed_version_if_updated` does not hold while it lists.
     pub async fn has_update(&self) -> Result<bool> {
-        let last_version = self.last_version();
-
-        // Skip older files at the object-store layer. Files for `v == last_version`
-        // may still appear (`{path}{v:020}` sorts before `{path}{v:020}.json`) but
-        // they are filtered out below by the `version > last_version` check.
-        let start_after = list_start_after(self.store.manifest_dir(), last_version);
-        let streamer = self
-            .store
-            .manifest_lister(Some(&start_after))
-            .await?
-            .context(error::EmptyManifestDirSnafu {
-                manifest_dir: self.store.manifest_dir(),
-            })?;
-
-        let need_update = streamer
-            .try_any(|entry| async move {
-                let file_name = entry.name();
-                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
-                    let version = file_version(file_name);
-                    if version > last_version {
-                        return true;
-                    }
-                }
-                false
-            })
-            .await
-            .context(error::OpenDalSnafu)?;
-
-        Ok(need_update)
+        self.store.has_version_after(self.last_version()).await
     }
 
     /// Increases last version and returns the increased version.
