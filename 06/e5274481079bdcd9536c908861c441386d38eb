@@ -1,0 +1,55 @@
+config/standalone.example.toml
+  s_47fa60ccec3356::t_26caa7fe858793 1102-1103
+config/config.md
+  s_47fa60ccec3356::t_26caa7fe858793 262,423,542,749,810
+config/datanode.example.toml
+  s_47fa60ccec3356::t_26caa7fe858793 909-910
+config/flownode.example.toml
+  s_47fa60ccec3356::t_26caa7fe858793 129-130
+config/frontend.example.toml
+  s_47fa60ccec3356::t_26caa7fe858793 456-457
+config/metasrv.example.toml
+  s_47fa60ccec3356::t_26caa7fe858793 395-396
+src/common/telemetry/src/logging.rs
+  s_47fa60ccec3356::t_26caa7fe858793 467-476,848-850,852,896
+  s_47fa60ccec3356::t_545e016cdb397a 18,28-30,40,53-73
+  s_47fa60ccec3356::t_97e08f4bcd255d 861-866
+  s_47fa60ccec3356::t_e9248acb0bcf4d 74-77,494-495,499,524,536,548-562,564,661-662,664,750,755,767,772,805-847,851,853-860,867-895,897-898,1012-1013
+src/common/telemetry/src/logging/file_retention.rs
+  s_47fa60ccec3356::t_545e016cdb397a 27,30,425,440
+  s_47fa60ccec3356::t_f69168e04f8cca 441-447,451-455,457,527,548-549,577-578,601-602,625-626
+Cargo.lock
+  s_47fa60ccec3356::t_5de9b0cffc1351 2932,2947
+src/cmd/src/cli.rs
+  s_47fa60ccec3356::t_240ee855835e1b 80-81
+src/cmd/src/datanode/builder.rs
+  s_47fa60ccec3356::t_41a336044607b8 70-71
+src/cmd/src/error.rs
+  s_47fa60ccec3356::t_a145283d3fd8a1 26-32,347
+src/cmd/src/flownode.rs
+  s_47fa60ccec3356::t_b82ec251625b44 254-255
+src/cmd/src/frontend.rs
+  s_47fa60ccec3356::t_108470e40e0d21 387-388
+src/cmd/src/metasrv.rs
+  s_47fa60ccec3356::t_7f506daa6d30ca 327-328
+src/cmd/src/standalone.rs
+  s_47fa60ccec3356::t_d6835c3bb0596a 501-502
+src/common/telemetry/Cargo.toml
+  s_47fa60ccec3356::t_a531ff6dd11458 18,35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "06e5274481079bdcd9536c908861c441386d38eb",
+  "prompts": {},
+  "sessions": {
+    "s_47fa60ccec3356": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e87a-6c28-78a3-9820-3369c303e83c",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
