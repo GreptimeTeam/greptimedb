@@ -30,7 +30,6 @@ use common_query::native_histogram::native_histogram_value_type;
 use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datatypes::data_type::DataType as _;
 use datatypes::series::SeriesOrdering;
@@ -42,7 +41,7 @@ use crate::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
     input_locality, tree_source_fields,
 };
-use crate::native::execute::NativeExecutionState;
+use crate::native::plan::native_tree_supported;
 use crate::native::plan::{
     BoundAggregate, BoundInput, BoundVectorOp, Grouping, METRIC_NAME, NativeExpr, NativeNode,
     NativeTree, NativeType, reads_across_series,
@@ -850,8 +849,7 @@ fn build_evaluated_segment(
         return Some((plan, tags));
     }
     let output_tags = output_tags_of(tree.root(), &local_tags)?;
-    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
-    {
+    if !native_tree_supported(&tree) {
         return None;
     }
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
@@ -942,8 +940,7 @@ fn build_inner_segment(
         let time_index = per_source.get(*sources.first()?)?.1.clone();
         (children, None, time_index, output_tags.clone())
     };
-    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
-    {
+    if !native_tree_supported(&tree) {
         return None;
     }
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
@@ -1192,9 +1189,7 @@ pub fn segment_tree(
     // Nothing below can fall back once physical planning starts, so every tree this route commits
     // to has to be one the runtime executes. A shape the runtime refuses - a grouping by a value
     // field, an operation with no kernel - therefore keeps the plan it had.
-    if NativeExecutionState::try_new(&parent, Arc::new(UnboundedMemoryPool::default()), None)
-        .is_err()
-    {
+    if !native_tree_supported(&parent) {
         return None;
     }
     let output_schema = match format {

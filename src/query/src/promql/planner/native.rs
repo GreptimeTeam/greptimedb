@@ -41,7 +41,6 @@ use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
-use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::logical_expr::UserDefinedLogicalNode;
 use datafusion::logical_expr::{EmptyRelation, Extension, LogicalPlan, TableScanBuilder, Union};
 use datafusion::physical_plan::ExecutionPlan;
@@ -55,10 +54,9 @@ use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
     RawSeriesSource, input_locality, matching_operands_drop_key,
 };
-use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
     AggregateKind, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree, NativeType,
-    binary_output_field_kind, fused_output_tags, uniform_field_kind,
+    binary_output_field_kind, fused_output_tags, native_tree_supported, uniform_field_kind,
 };
 use promql::native::segment::{
     self, NATIVE_ORDERING, canonical_boundary_stages, canonical_local_prefix,
@@ -523,9 +521,7 @@ impl PromPlanner {
         ) else {
             return Ok(None);
         };
-        if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
-            .is_err()
-        {
+        if !native_tree_supported(&tree) {
             return Ok(None);
         }
         // The expression names the value columns, and it is the label the node reports.
@@ -1468,13 +1464,12 @@ impl PromPlanner {
         if multi_input && groups_by_metric_name(root) {
             return Ok(None);
         }
-        // Catch construction-time refusals before choosing native execution: errors raised during
-        // physical planning cannot fall back. This does not cover data-dependent errors raised while
-        // executing the tree.
-        if (multi_input || per_source_inputs)
-            && NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
-                .is_err()
-        {
+        // Catch the shape refusals before choosing native execution: errors raised during physical
+        // planning cannot fall back. This includes unsupported aggregates and `topk`, `limitk` or
+        // CountValues groupings; it does not cover data-dependent errors raised while executing the
+        // tree. A plan split over regions commits to the fused node without the split or a segment
+        // above it, so it checks itself the same way before that choice.
+        if (multi_input || per_source_inputs) && !native_tree_supported(&tree) {
             return Ok(None);
         }
         // A tree that ends in a canonical merge answers one series per label set, and the pieces of one

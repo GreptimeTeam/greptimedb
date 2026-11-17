@@ -3407,6 +3407,83 @@ async fn native_fused_partitioned_table_label_rewrite_falls_back() {
     );
 }
 
+/// A `predict_linear` horizon whose instants do not fit keeps the existing plan.
+///
+/// A window folds its `@` anchor into an offset from the grid's first point, and `predict_linear`
+/// is the one range function that adds that offset to a point of the grid as well. `@` is the epoch
+/// and the statement starts 5e18 ms later, so the fold offset is that same 5e18 ms and the sum the
+/// horizon reads is 1e19 ms - not an instant an `i64` holds. The runtime refuses the window while
+/// it builds it.
+///
+/// The window is wrapped in `topk`, a whole-vector consumer: it makes the route cut the window as a
+/// segment and decide the statement's plan from that segment while planning, which is the moment
+/// the refusal cannot be left to the executor - a native plan that fails while its physical plan is
+/// built has none to fall back to. Deciding this during planning is what the route did while it
+/// decided admission by building the runtime and dropping it, and it is what the admission
+/// predicate decides now: every site that commits to a tree asks `native_tree_supported` and builds
+/// no runtime, so `window_instants_fit` is the only thing that keeps this query off the native
+/// route, and dropping it from the predicate makes this test fail. (The `@` half of the same
+/// arithmetic is pinned one level down, in `native::plan::tests`, because a statement whose anchor
+/// and start are that far apart is refused by the planner's own at-modifier rewrite first.)
+#[tokio::test]
+async fn native_fused_windows_whose_instants_overflow_fall_back() {
+    // The far end of the `i64` millisecond range, one step apart.
+    let plan_for = |query: &str, native_fused| {
+        let query = query.to_string();
+        async move {
+            let mut eval_stmt = build_eval_stmt(&query);
+            eval_stmt.start = UNIX_EPOCH
+                .checked_add(Duration::from_millis(5_000_000_000_000_000_000))
+                .unwrap();
+            eval_stmt.end = eval_stmt
+                .start
+                .checked_add(Duration::from_millis(10_000))
+                .unwrap();
+            let provider = build_test_table_provider_with_options(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                1,
+                1,
+                vec![],
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+                ConcreteDataType::float64_datatype(),
+                NATIVE_ENGINE,
+            )
+            .await;
+            PromPlanner::stmt_to_plan_with_annotations(
+                provider,
+                &eval_stmt,
+                &build_query_engine_state(),
+                None,
+                native_fused,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    // `@ 0` folds to the grid's own start, which the horizon then adds to a point of the grid.
+    let query = "topk(1, predict_linear(some_metric[1m] @ 0, 60))";
+    let native = plan_for(query, true).await;
+    let fallback = plan_for(query, false).await;
+    assert!(
+        find_fused_series(&native).is_none(),
+        "{query} reads an instant the runtime cannot compute and must keep the existing plan: {}",
+        native.display_indent()
+    );
+    assert_eq!(
+        native.display_indent().to_string(),
+        fallback.display_indent().to_string(),
+        "{query}: the native setting must plan exactly what the existing planner plans"
+    );
+    // The same shape over a statement near the epoch fits, so the route is not narrowed.
+    let near = plan_for("topk(1, rate(some_metric[5m]))", true).await;
+    assert!(
+        find_fused_series(&near).is_some(),
+        "a window that fits must keep the native route: {}",
+        near.display_indent()
+    );
+}
+
 /// A collapsing rewrite on an unsplit table lowers the same canonical tree to its producer.
 #[tokio::test]
 async fn native_fused_label_rewrite_lowers_canonical_boundary() {
