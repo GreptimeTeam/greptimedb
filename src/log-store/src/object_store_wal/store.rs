@@ -915,6 +915,31 @@ impl ObjectStoreLogStore {
 impl LogStore for ObjectStoreLogStore {
     type Error = Error;
 
+    fn resolve_provider(&self, provider: Provider) -> Result<Provider> {
+        // Noop is a per-region opt-out, including on object store WAL nodes.
+        if matches!(provider, Provider::Noop) {
+            return Ok(provider);
+        }
+        let options =
+            provider
+                .as_object_store_provider()
+                .with_context(|| InvalidProviderSnafu {
+                    expected: ObjectStoreProvider::type_name(),
+                    actual: provider.type_name(),
+                })?;
+        ensure!(
+            options.prefix == self.config.prefix || options.prefix == self.prefix,
+            MismatchedWalPrefixSnafu {
+                expected: format!("{} or {}", self.config.prefix, self.prefix),
+                actual: options.prefix.clone(),
+            }
+        );
+        Ok(Provider::object_store_provider(
+            options.region_id,
+            self.prefix.clone(),
+        ))
+    }
+
     fn flush_candidates(&self) -> Vec<RegionId> {
         // A soft threshold: closed regions and recovery retention can still
         // pin objects. The engine decides which candidates it can flush.
@@ -4343,6 +4368,42 @@ mod tests {
                 matches!(error, Error::InvalidWalObjectStore { .. }),
                 "unexpected error for {config:?}: {error:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_object_store_provider() {
+        let _guard = SERIALIZED.lock().await;
+        let storage = memory_store();
+        let config = eager();
+        let region_id = RegionId::new(1, 1);
+        for node_id in [1, 2] {
+            let store = ObjectStoreLogStore::try_new(storage.clone(), &config, node_id, 0)
+                .await
+                .unwrap();
+            let expected =
+                Provider::object_store_provider(region_id, config.node_prefix(node_id, 0));
+            let metadata_provider =
+                Provider::object_store_provider(region_id, config.prefix.clone());
+            assert!(matches!(
+                store.latest_entry_id(&metadata_provider),
+                Err(Error::MismatchedWalPrefix { .. })
+            ));
+            let resolved = store.resolve_provider(metadata_provider).unwrap();
+            assert_eq!(resolved, expected);
+            assert_eq!(store.latest_entry_id(&resolved).unwrap(), 0);
+            assert_eq!(store.resolve_provider(expected.clone()).unwrap(), expected);
+            for prefix in ["other/wal".to_string(), config.node_prefix(3, 0)] {
+                assert!(matches!(
+                    store.resolve_provider(Provider::object_store_provider(region_id, prefix)),
+                    Err(Error::MismatchedWalPrefix { .. })
+                ));
+            }
+            assert_eq!(
+                store.resolve_provider(Provider::noop_provider()).unwrap(),
+                Provider::noop_provider()
+            );
+            store.stop().await.unwrap();
         }
     }
 
