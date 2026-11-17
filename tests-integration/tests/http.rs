@@ -6773,7 +6773,14 @@ pub async fn test_remote_write_v2_histogram_float_prefix_native_route(store_type
             .await;
         assert_eq!(native.status(), StatusCode::OK, "{query} failed natively");
         let native: Value = native.json().await;
-        let legacy = client.get(&url).send().await;
+        // The fixture turns the native route on by default, so ask for the existing one
+        // explicitly: without the hint this request would run the native plan a second time
+        // and `take_all` would collect both runs.
+        let legacy = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=false")
+            .send()
+            .await;
         assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
         let legacy: Value = legacy.json().await;
         if drops_name {
@@ -6900,7 +6907,14 @@ pub async fn test_remote_write_v2_histogram_count_and_group_native_route(store_t
             .await;
         assert_eq!(native.status(), StatusCode::OK, "{query} failed natively");
         let native: Value = native.json().await;
-        let legacy = client.get(&url).send().await;
+        // The fixture turns the native route on by default, so ask for the existing one
+        // explicitly: without the hint this request would run the native plan a second time
+        // and `take_all` would collect both runs.
+        let legacy = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=false")
+            .send()
+            .await;
         assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
         let legacy: Value = legacy.json().await;
         assert_eq!(
@@ -7252,7 +7266,14 @@ pub async fn test_remote_write_v2_histogram_sum_and_avg_native_route(store_type:
         // The existing path answers the same histogram. It is compared with a tolerance rather than
         // exactly: it scales by the reciprocal where v3.15 divides, and on this fixture that is the
         // one-ulp difference `12 * (1/3) = 3.9999999999999996` against `12 / 3 = 4`.
-        let legacy = client.get(&url).send().await;
+        // The fixture turns the native route on by default, so ask for the existing one
+        // explicitly: without the hint this request would run the native plan a second time
+        // and `take_all` would collect both runs.
+        let legacy = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=false")
+            .send()
+            .await;
         assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
         let legacy: Value = legacy.json().await;
         assert_histogram_fields_close(
