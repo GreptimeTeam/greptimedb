@@ -222,9 +222,10 @@ impl State for RepartitionStart {
 
 impl RepartitionStart {
     /// Fails before any region is allocated or rerouted if a source region of `plans` still
-    /// had WAL ranges to recover when it last reported, since entering staging would then
+    /// had pending WAL tails when it last reported, since entering staging would then
     /// fail after the route change. Targets are the sources or new regions, so only sources
-    /// are checked. A source that has not reported to this metasrv yet is retried later.
+    /// are checked. A source that has not reported as leader to this metasrv yet is retried
+    /// later.
     fn ensure_no_pending_tails(ctx: &Context, plans: &[AllocationPlanEntry]) -> Result<()> {
         let region_ids = plans
             .iter()
@@ -241,7 +242,7 @@ impl RepartitionStart {
             unreported.is_empty(),
             error::RetryLaterSnafu {
                 reason: format!(
-                    "Regions {unreported:?} have not reported their statistics to this metasrv yet"
+                    "Regions {unreported:?} have not reported as leaders to this metasrv since it became leader; check that their datanodes are alive"
                 ),
             }
         );

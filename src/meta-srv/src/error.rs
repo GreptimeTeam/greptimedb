@@ -1083,7 +1083,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Repartition cannot start while regions {:?} have WAL ranges to recover; wait for their replay to finish, or discard their pending tails",
+        "Repartition cannot start while regions {:?} have pending WAL tails; wait for their replay to finish",
         region_ids
     ))]
     RepartitionPendingTails {

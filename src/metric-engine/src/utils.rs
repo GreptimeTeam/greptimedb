@@ -90,6 +90,8 @@ fn merge_region_statistic(
         // pin every metric region's minimum to the epoch.
         min_timestamp: data_stat.min_timestamp,
         max_timestamp: data_stat.max_timestamp,
+        // A repartition flushes the metadata region too, and that flush refuses pending
+        // tails, so the metadata region's tails count as well.
         has_pending_tails: metadata_stat.has_pending_tails || data_stat.has_pending_tails,
     }
 }

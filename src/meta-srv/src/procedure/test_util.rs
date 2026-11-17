@@ -407,22 +407,26 @@ pub async fn new_wal_prune_metadata(
     min_prunable_entry_id
 }
 
+/// Returns a mito leader region as datanode 1 reports it.
+pub fn new_leader_region(flushed_entry_id: u64, has_pending_tails: bool) -> LeaderRegion {
+    LeaderRegion {
+        datanode_id: 1,
+        manifest: LeaderRegionManifestInfo::Mito {
+            manifest_version: 0,
+            flushed_entry_id,
+            topic_latest_entry_id: 0,
+        },
+        has_pending_tails,
+    }
+}
+
 pub async fn update_in_memory_region_flushed_entry_id(
     leader_region_registry: &LeaderRegionRegistryRef,
     region_entry_ids: HashMap<RegionId, u64>,
 ) -> Result<()> {
     let mut key_values = Vec::with_capacity(region_entry_ids.len());
     for (region_id, flushed_entry_id) in region_entry_ids {
-        let value = LeaderRegion {
-            datanode_id: 1,
-            manifest: LeaderRegionManifestInfo::Mito {
-                manifest_version: 0,
-                flushed_entry_id,
-                topic_latest_entry_id: 0,
-            },
-            has_pending_tails: false,
-        };
-        key_values.push((region_id, value));
+        key_values.push((region_id, new_leader_region(flushed_entry_id, false)));
     }
     leader_region_registry.batch_put(key_values);
 

@@ -24,7 +24,6 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
-use common_meta::region_registry::{LeaderRegion, LeaderRegionManifestInfo};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::test_util::new_ddl_context_with_kv_backend;
@@ -45,7 +44,7 @@ use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDe
 use crate::procedure::repartition::{
     Context as ParentContext, PersistentContext as ParentPersistentContext, RepartitionProcedure,
 };
-use crate::procedure::test_util::MailboxContext;
+use crate::procedure::test_util::{MailboxContext, new_leader_region};
 
 /// `TestingEnv` provides components during the tests.
 pub struct TestingEnv {
@@ -242,18 +241,7 @@ pub fn report_leader_regions(
 ) {
     let leaders = region_ids
         .iter()
-        .map(|region_id| {
-            let leader = LeaderRegion {
-                datanode_id: 1,
-                manifest: LeaderRegionManifestInfo::Mito {
-                    manifest_version: 0,
-                    flushed_entry_id: 0,
-                    topic_latest_entry_id: 0,
-                },
-                has_pending_tails,
-            };
-            (*region_id, leader)
-        })
+        .map(|region_id| (*region_id, new_leader_region(0, has_pending_tails)))
         .collect();
     ctx.leader_region_registry.batch_put(leaders);
 }

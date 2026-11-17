@@ -805,11 +805,21 @@ mod tests {
         assert!(!stat.has_pending_tails);
         assert_eq!(serde_json::to_vec(&stat).unwrap(), legacy_stat);
 
-        // A true flag travels from the heartbeat extension to the stored statistic.
+        // A true flag is written under this key, which older or newer peers must read too.
         let statistic = RegionStatistic {
             has_pending_tails: true,
             ..statistic
         };
+        let encoded = serde_json::to_value(&statistic).unwrap();
+        assert_eq!(encoded["has_pending_tails"], serde_json::Value::Bool(true));
+        let encoded = serde_json::to_value(RegionStat {
+            has_pending_tails: true,
+            ..stat
+        })
+        .unwrap();
+        assert_eq!(encoded["has_pending_tails"], serde_json::Value::Bool(true));
+
+        // A true flag travels from the heartbeat extension to the stored statistic.
         let mut region = api::v1::meta::RegionStat::default();
         region.extensions.insert(
             REGION_STATISTIC_KEY.to_string(),
