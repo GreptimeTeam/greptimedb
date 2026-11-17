@@ -101,6 +101,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid partition input, reason: {}", reason))]
+    InvalidPartitionInput {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
     InvalidDeleteRequest {
         reason: String,
@@ -266,6 +273,7 @@ impl ErrorExt for Error {
 
             Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }
+            | Error::InvalidPartitionInput { .. }
             | Error::InvalidDeleteRequest { .. } => StatusCode::InvalidArguments,
 
             Error::ConvertScalarValue { .. }

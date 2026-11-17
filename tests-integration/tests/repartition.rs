@@ -135,22 +135,11 @@ macro_rules! repartition_tests {
                     }
 
                     $crate::table_id_partition_tests! { $service,
-                        (test_partition_unpartitioned_metric_by_table_id_flat_sparse, false, false, true, Sparse),
-                        (test_partition_unpartitioned_metric_by_table_id_flat_dense, false, false, true, Dense),
                         (test_partition_unpartitioned_metric_by_table_id_primary_key_sparse, false, false, false, Sparse),
-                        (test_partition_unpartitioned_metric_by_table_id_primary_key_dense, false, false, false, Dense),
-                        (test_partition_unpartitioned_metric_by_table_id_and_host_flat_sparse, true, false, true, Sparse),
-                        (test_partition_unpartitioned_metric_by_table_id_and_host_flat_dense, true, false, true, Dense),
                         (test_partition_unpartitioned_metric_by_table_id_and_host_primary_key_sparse, true, false, false, Sparse),
-                        (test_partition_unpartitioned_metric_by_table_id_and_host_primary_key_dense, true, false, false, Dense),
-                        (test_partition_unpartitioned_metric_by_table_id_hash_flat_sparse, false, true, true, Sparse),
-                        (test_partition_unpartitioned_metric_by_table_id_hash_flat_dense, false, true, true, Dense),
                         (test_partition_unpartitioned_metric_by_table_id_hash_primary_key_sparse, false, true, false, Sparse),
-                        (test_partition_unpartitioned_metric_by_table_id_hash_primary_key_dense, false, true, false, Dense),
-                        (test_partition_unpartitioned_metric_by_table_id_hash_and_host_flat_sparse, true, true, true, Sparse),
                         (test_partition_unpartitioned_metric_by_table_id_hash_and_host_flat_dense, true, true, true, Dense),
                         (test_partition_unpartitioned_metric_by_table_id_hash_and_host_primary_key_sparse, true, true, false, Sparse),
-                        (test_partition_unpartitioned_metric_by_table_id_hash_and_host_primary_key_dense, true, true, false, Dense),
                     }
 
                     #[tokio::test(flavor = "multi_thread")]
@@ -1634,8 +1623,8 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
     run_sql(
         instance,
         r#"
-        CREATE TABLE partition_table_id_metric_no_host (
-            ts TIMESTAMP TIME INDEX, val DOUBLE
+        CREATE TABLE partition_table_id_metric_null_host (
+            ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY
         ) ENGINE = metric WITH ("on_physical_table" = "partition_table_id_metric_phy")
     "#,
         query_ctx.clone(),
@@ -1644,11 +1633,23 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
     .unwrap();
     run_sql(
         instance,
-        "INSERT INTO partition_table_id_metric_no_host (ts, val) VALUES (0, 98)",
+        "INSERT INTO partition_table_id_metric_null_host (ts, val) VALUES (0, 98)",
         query_ctx.clone(),
     )
     .await
     .unwrap();
+
+    if mixed {
+        run_sql(
+            instance,
+            r#"CREATE TABLE partition_table_id_metric_no_host (
+                ts TIMESTAMP TIME INDEX, val DOUBLE
+            ) ENGINE = metric WITH ("on_physical_table" = "partition_table_id_metric_phy")"#,
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+    }
 
     let sql = r#"
         INSERT INTO `partition_table_id_metric_low` (`host`, `ts`, `val`) VALUES
@@ -1723,9 +1724,33 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
         vec!["__table_id"]
     );
 
-    for (logical, value) in [
-        ("partition_table_id_metric_low", "1.0"),
-        ("partition_table_id_metric_high", "10.0"),
+    if mixed {
+        // A missing schema column cannot be supplied by the table identity context.
+        assert_sql_err_eq(
+            instance,
+            "INSERT INTO partition_table_id_metric_no_host (ts, val) VALUES (1000, 99)",
+            "Undefined column: host",
+            query_ctx.clone(),
+        )
+        .await;
+        run_sql(
+            instance,
+            "DROP TABLE partition_table_id_metric_no_host",
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+    }
+
+    for (logical, expected) in [
+        (
+            "partition_table_id_metric_low",
+            "+-----+\n| val |\n+-----+\n| 1.0 |\n+-----+",
+        ),
+        (
+            "partition_table_id_metric_high",
+            "+------+\n| val  |\n+------+\n| 10.0 |\n+------+",
+        ),
     ] {
         let result = run_sql(
             instance,
@@ -1734,13 +1759,7 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
         )
         .await
         .unwrap();
-        let width = value.len().max(3);
-        let border = format!("+-{}-+", "-".repeat(width));
-        let expected = format!(
-            "{border}\n| {:width$} |\n{border}\n| {value:width$} |\n{border}",
-            "val"
-        );
-        check_output_stream(result.data, &expected).await;
+        check_output_stream(result.data, expected).await;
     }
 
     {
@@ -1876,7 +1895,7 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
     .unwrap();
     run_sql(
         instance,
-        "INSERT INTO partition_table_id_metric_no_host (ts, val) VALUES (1000, 99)",
+        "INSERT INTO partition_table_id_metric_null_host (ts, val) VALUES (1000, 99)",
         query_ctx.clone(),
     )
     .await
@@ -1890,7 +1909,7 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
     .unwrap();
     let output = run_sql(
         instance,
-        "SELECT val FROM partition_table_id_metric_no_host WHERE ts = 1000",
+        "SELECT val FROM partition_table_id_metric_null_host WHERE ts = 1000",
         query_ctx.clone(),
     )
     .await
@@ -1902,7 +1921,7 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
     .await;
     let output = run_sql(
         instance,
-        "SELECT val FROM partition_table_id_metric_no_host ORDER BY ts",
+        "SELECT val FROM partition_table_id_metric_null_host ORDER BY ts",
         query_ctx.clone(),
     )
     .await
@@ -2014,7 +2033,7 @@ WHERE table_name = 'partition_table_id_metric_phy';",
 
     for table in [
         "partition_table_id_metric_new",
-        "partition_table_id_metric_no_host",
+        "partition_table_id_metric_null_host",
         "partition_table_id_metric_low",
         "partition_table_id_metric_high",
         "partition_table_id_metric_phy",

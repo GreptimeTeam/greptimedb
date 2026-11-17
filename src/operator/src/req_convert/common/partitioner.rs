@@ -29,7 +29,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::row_converter::sparse::{SparseOffsetsCache, SparsePrimaryKeyView};
 use partition::PartitionRuleRef;
 use partition::manager::PartitionRuleManager;
-use partition::partition::RegionMask;
+use partition::partition::{PartitionEvalContext, RegionMask};
 use partition::splitter::RowSplitter;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::consts;
@@ -647,10 +647,8 @@ impl TablePartitioner {
     ) -> bool {
         // Logical writes must be evaluated again with their table identity after a
         // route refresh, even if the old physical region still has the same version.
-        matches!(
-            self.rule.eval_context(),
-            partition::partition::PartitionEvalContext::Normal
-        ) && region_id.table_id() == self.table_id
+        self.rule.eval_context() == PartitionEvalContext::Normal
+            && region_id.table_id() == self.table_id
             && self.versions.get(&region_id.region_number()) == Some(&version)
     }
 
@@ -1220,6 +1218,81 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_logical_context_missing_payload_partition_column() {
+        for with_table_id in [false, true] {
+            let regions = [
+                expr::col("a").lt(DataValue::Int32(10)),
+                expr::col("a").gt_eq(DataValue::Int32(10)),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(region, expr)| {
+                let expr = if with_table_id {
+                    expr.and(
+                        expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                            .eq(DataValue::UInt32(1029)),
+                    )
+                } else {
+                    expr
+                };
+                (region as RegionNumber, Some(expr))
+            })
+            .collect();
+            let manager = create_context_fixture(regions, &[1029]).await;
+            // The logical schema declares a; only the payload omits it.
+            let table_info = logical_metric_table_info(1029);
+            let partitioner = TablePartitioner::try_new(&manager, &table_info)
+                .await
+                .unwrap();
+            let rows = Rows {
+                schema: vec![api::v1::helper::tag_column_schema(
+                    "b",
+                    ColumnDataType::Int32,
+                )],
+                rows: vec![Row {
+                    values: vec![ValueData::I32Value(7).into()],
+                }],
+            };
+            let inserts = partitioner
+                .partition_insert_requests(rows.clone(), true)
+                .unwrap();
+            assert_eq!(inserts.len(), 1);
+            assert_eq!(inserts[0].region_id, RegionId::new(1029, 0).as_u64());
+            assert_eq!(inserts[0].rows.as_ref(), Some(&rows));
+
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("b", DataType::Int32, false)])),
+                vec![Arc::new(Int32Array::from(vec![7]))],
+            )
+            .unwrap();
+            let (schema, data_header, payload) =
+                flight::record_batch_to_ipc(batch.clone()).unwrap();
+            let original = ArrowIpc {
+                schema,
+                data_header,
+                payload,
+            };
+            let requests = partitioner
+                .partition_bulk_insert_requests(batch, Some(original.clone()), true)
+                .unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].region_id, inserts[0].region_id);
+            assert_eq!(
+                requests[0].body,
+                Some(bulk_insert_request::Body::ArrowIpc(original))
+            );
+
+            let mut stale = requests[0].clone();
+            stale.region_id = RegionId::new(1029, 1).as_u64();
+            let rebuilt = partitioner
+                .rebuild_write_requests(build_request(Body::BulkInsert(stale)), &table_info)
+                .unwrap();
+            assert_eq!(rebuilt.len(), 1);
+            assert_eq!(rebuilt[0].body, Some(Body::BulkInsert(requests[0].clone())));
         }
     }
 

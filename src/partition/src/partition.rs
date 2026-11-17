@@ -49,6 +49,8 @@ pub trait PartitionRule: Sync + Send {
     /// Finds the target region by the partition values.
     ///
     /// Note that the `values` should have the same length as the `partition_columns`.
+    /// With [`PartitionEvalContext::LogicalTable`], the context supplies `__table_id`;
+    /// the value in its payload slot is ignored.
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber>;
 
     /// Split the record batch into multiple regions by the partition values.

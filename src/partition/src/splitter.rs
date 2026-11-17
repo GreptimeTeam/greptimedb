@@ -17,8 +17,7 @@ use std::sync::Arc;
 
 use api::helper;
 use api::v1::{ColumnSchema, Row, Rows};
-use datatypes::arrow::array::NullArray;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+use datatypes::arrow::datatypes::{Field, Schema};
 use datatypes::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::value::Value;
@@ -144,7 +143,7 @@ impl<'a> SplitReadRowHelper<'a> {
         Ok(regions_row_indexes)
     }
 
-    // Convert only payload partition columns; the evaluator supplies internal columns from ctx.
+    /// Converts present payload partition columns; the evaluator supplies missing inputs.
     fn routing_batch(&self) -> Result<RecordBatch> {
         let mut fields = Vec::new();
         let mut arrays = Vec::new();
@@ -158,9 +157,6 @@ impl<'a> SplitReadRowHelper<'a> {
                 continue;
             }
             let Some(index) = *index else {
-                // Missing payload values retain the row splitter's NULL semantics.
-                fields.push(Field::new(name, ArrowDataType::Null, true));
-                arrays.push(Arc::new(NullArray::new(self.rows.len())) as _);
                 continue;
             };
             let column = &self.schema[index];
@@ -169,7 +165,7 @@ impl<'a> SplitReadRowHelper<'a> {
                 column.datatype_extension.clone(),
             )
             .map_err(|err| {
-                error::InvalidInsertRequestSnafu {
+                error::InvalidPartitionInputSnafu {
                     reason: err.to_string(),
                 }
                 .build()
@@ -180,7 +176,7 @@ impl<'a> SplitReadRowHelper<'a> {
                 let value =
                     row.values
                         .get(index)
-                        .with_context(|| error::InvalidInsertRequestSnafu {
+                        .with_context(|| error::InvalidPartitionInputSnafu {
                             reason: format!("Missing value for partition column {name}"),
                         })?;
                 builder
@@ -369,6 +365,37 @@ mod tests {
             unimplemented!()
         }
     }
+    #[test]
+    fn test_invalid_logical_partition_input() {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
+
+        let rule = crate::multi_dim::MultiDimPartitionRule::try_new(
+            vec!["a".to_string()],
+            vec![0],
+            vec![crate::expr::col("a").gt_eq(Value::Int32(0))],
+            false,
+        )
+        .unwrap()
+        .with_eval_context(PartitionEvalContext::LogicalTable { table_id: 1025 });
+        let splitter = RowSplitter::new(Arc::new(rule));
+        for (datatype, values) in [
+            (-1, vec![ValueData::I32Value(1).into()]),
+            (ColumnDataType::Int32 as i32, vec![]),
+        ] {
+            let mut column = tag_column_schema("a", ColumnDataType::Int32);
+            column.datatype = datatype;
+            let error = splitter
+                .split(Rows {
+                    schema: vec![column],
+                    rows: vec![api::v1::Row { values }],
+                })
+                .unwrap_err();
+            assert!(matches!(error, error::Error::InvalidPartitionInput { .. }));
+            assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        }
+    }
+
     #[test]
     fn test_writer_splitter() {
         let rows = mock_rows();

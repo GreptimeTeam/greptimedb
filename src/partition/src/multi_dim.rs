@@ -23,7 +23,7 @@ use datafusion_expr::{ColumnarValue, Expr};
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    Array, BooleanArray, BooleanBufferBuilder, RecordBatch, UInt32Array,
+    Array, BooleanArray, BooleanBufferBuilder, NullArray, RecordBatch, UInt32Array,
 };
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::compute::prep_null_mask_filter;
@@ -80,6 +80,7 @@ pub struct MultiDimPartitionRule {
     /// Cache of physical expressions.
     #[serde(skip)]
     physical_expr_cache: RwLock<PhysicalExprCache>,
+    /// Write-local routing context; not persisted and defaults to Normal on deserialization.
     #[serde(skip)]
     eval_context: PartitionEvalContext,
 }
@@ -119,7 +120,7 @@ impl MultiDimPartitionRule {
     }
 
     /// Attaches write-local table identity without changing persisted partition expressions.
-    pub fn with_eval_context(mut self, context: PartitionEvalContext) -> Self {
+    pub(crate) fn with_eval_context(mut self, context: PartitionEvalContext) -> Self {
         self.eval_context = context;
         self
     }
@@ -308,11 +309,10 @@ impl MultiDimPartitionRule {
         let routing_batch;
         let record_batch = if let PartitionEvalContext::LogicalTable { table_id } =
             self.eval_context
-            && self
-                .partition_columns
-                .iter()
-                .any(|name| name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
-        {
+            && self.partition_columns.iter().any(|name| {
+                name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+                    || record_batch.column_by_name(name).is_none()
+            }) {
             // Materialize only the routing input. The original write payload stays logical.
             let mut fields = Vec::with_capacity(record_batch.num_columns() + 1);
             let mut columns = Vec::with_capacity(record_batch.num_columns() + 1);
@@ -327,15 +327,20 @@ impl MultiDimPartitionRule {
                     columns.push(column.clone());
                 }
             }
-            fields.push(Arc::new(Field::new(
-                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-                ArrowDataType::UInt32,
-                false,
-            )));
-            columns.push(Arc::new(UInt32Array::from(vec![
-                table_id;
-                record_batch.num_rows()
-            ])));
+            for name in &self.partition_columns {
+                if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                    fields.push(Arc::new(Field::new(name, ArrowDataType::UInt32, false)));
+                    columns.push(Arc::new(UInt32Array::from(vec![
+                        table_id;
+                        record_batch.num_rows()
+                    ])));
+                } else if record_batch.column_by_name(name).is_none() {
+                    // The manager validates these columns against the logical schema.
+                    // Omitted payload columns retain row routing's NULL semantics.
+                    fields.push(Arc::new(Field::new(name, ArrowDataType::Null, true)));
+                    columns.push(Arc::new(NullArray::new(record_batch.num_rows())));
+                }
+            }
             routing_batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
                 .context(error::ComputeArrowKernelSnafu)?;
             &routing_batch

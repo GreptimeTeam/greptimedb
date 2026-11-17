@@ -22,7 +22,9 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
 use snafu::{OptionExt, ResultExt};
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
@@ -234,14 +236,26 @@ impl PartitionRuleManager {
                 .extra_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            // Catalog maps physical partition columns into the logical schema, omitting
-            // internal columns such as __table_id. Routing still needs the complete inputs.
+            // Catalog maps only physical partition columns present in the logical schema.
+            // The routing context can additionally supply __table_id.
             let mut columns = HashSet::new();
             for expr in &exprs {
                 expr.collect_column_names(&mut columns);
             }
             partition_columns = columns.into_iter().collect();
+            // Keep rule snapshots deterministic despite collecting names in a HashSet.
             partition_columns.sort_unstable();
+            for column in &partition_columns {
+                if column != DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+                    && table_info
+                        .meta
+                        .schema
+                        .column_schema_by_name(column)
+                        .is_none()
+                {
+                    return error::UndefinedColumnSnafu { column }.fail();
+                }
+            }
             PartitionEvalContext::LogicalTable {
                 table_id: table_info.table_id(),
             }
