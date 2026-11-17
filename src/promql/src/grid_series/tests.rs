@@ -301,6 +301,130 @@ fn merge_keeps_histograms_and_rejects_any_doubled_field() {
     }
 }
 
+/// The histogram payloads of one label set merge by position, whatever table each shard filed its
+/// own payload in.
+///
+/// A label set reaches a merge as one fragment per producer, and every fragment was built by its own
+/// builder: each holds its own histogram table and its own indices into it, so the merged field has
+/// to be rebuilt over the union of the positions with each row still naming the payload it was
+/// pushed with. The fragments here are complementary, the position neither of two fragments holds
+/// stays a hole, and a fragment that pushes nothing adds no row.
+#[test]
+fn merge_keeps_each_shards_histogram_payload() {
+    // One histogram per shard, each with its own count, sum and bucket payload: `count/sum` are the
+    // two fields a reader of the merged series checks a payload by.
+    let payloads = [
+        OwnedHistogram::parse(
+            "0/0/0/3ff0000000000000/3ff0000000000000/1/0_2/4000000000000000,4008000000000000///",
+        ),
+        OwnedHistogram::parse("0/0/0/4008000000000000/4014000000000000/1/1_1/4010000000000000///"),
+        OwnedHistogram::parse("0/0/0/4014000000000000/4018000000000000/1/0_1/4014000000000000///"),
+    ];
+    // The `(sum, count)` each payload was written with, in payload order.
+    let scalars = [(1.0, 1.0), (5.0, 3.0), (6.0, 5.0)];
+    let schema = grid_schema(1, 8);
+    let shard = |rows: &[(usize, usize)]| {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        for &(point, payload) in rows {
+            let histogram = FloatHistogram::try_from_view(&payloads[payload].view()).unwrap();
+            builder
+                .push_samples(point, &[Some(GridSample::Histogram(Box::new(histogram)))])
+                .unwrap();
+        }
+        builder
+            .finish(metric(0))
+            .unwrap()
+            .expect("the shard holds the rows it pushed")
+    };
+    // A shard of the same label set holding nothing finishes with no series at all, so it adds
+    // neither a row nor a gap to what the others pushed.
+    assert!(
+        GridSeriesBuilder::try_new(schema.clone())
+            .unwrap()
+            .finish(metric(0))
+            .unwrap()
+            .is_none(),
+        "an empty shard handed out a series"
+    );
+    let merged = merge_same_labelset(
+        &schema,
+        vec![shard(&[(0, 0), (3, 1)]), shard(&[(1, 1)]), shard(&[(4, 2)])],
+    )
+    .unwrap();
+    assert_eq!(merged.len(), 1, "one label set, so one merged series");
+    let field = merged[0].fields.get(0).expect("one field");
+    let merged_rows = merged[0]
+        .time
+        .positions()
+        .map(|(point, row)| {
+            let SampleRef::Histogram(view) = field.sample(row) else {
+                panic!("position {point} of the merged series is not a histogram");
+            };
+            let histogram = FloatHistogram::try_from_view(&view).unwrap();
+            (point, histogram.sum, histogram.count)
+        })
+        .collect::<Vec<_>>();
+    // One row per valued position, in order: position 2 is a hole in every shard and stays a hole,
+    // and each row carries the payload its own shard pushed.
+    assert_eq!(
+        vec![
+            (0, scalars[0].0, scalars[0].1),
+            (1, scalars[1].0, scalars[1].1),
+            (3, scalars[1].0, scalars[1].1),
+            (4, scalars[2].0, scalars[2].1),
+        ],
+        merged_rows
+    );
+    // The merged field is one freshly built table over those rows: the rows the shards held are
+    // addressed by the merged series' own indices, so a row cannot name a shard's table.
+    let SampleRef::Histogram(first) = field.sample(0) else {
+        panic!("the merged field holds no histogram");
+    };
+    assert_eq!(&[2.0, 3.0], first.positive.buckets);
+    let SampleRef::Histogram(second) = field.sample(1) else {
+        panic!("the merged field holds no histogram");
+    };
+    assert_eq!(&[4.0], second.positive.buckets);
+    assert_eq!(1, second.positive.span_lengths.len());
+    assert_eq!(1, second.positive.span_offsets[0]);
+}
+
+/// Two shards of one label set holding a histogram at one position are refused.
+///
+/// The merge collects the pieces of one label set into one series, so a position two pieces fill
+/// would carry two values of one field: that is the collision Prometheus reports rather than a
+/// choice for this node to make. The refusal names the shared label set, as it does for floats.
+#[test]
+fn merge_rejects_a_histogram_position_two_shards_hold() {
+    let payloads = [
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/1/0_1/4000000000000000///"),
+        OwnedHistogram::parse("0/0/0/4000000000000000/4000000000000000/1/0_1/4000000000000000///"),
+    ];
+    let schema = grid_schema(1, 8);
+    let shard = |point: usize, payload: usize| {
+        let histogram = FloatHistogram::try_from_view(&payloads[payload].view()).unwrap();
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder
+            .push_samples(point, &[Some(GridSample::Histogram(Box::new(histogram)))])
+            .unwrap();
+        builder.finish(metric(0)).unwrap().unwrap()
+    };
+    // Complementary positions merge whatever payloads they hold, so the only reason the second pair
+    // is refused is the position both of them fill.
+    let merged = merge_same_labelset(&schema, vec![shard(0, 0), shard(1, 1)]).unwrap();
+    assert_eq!(1, merged.len());
+    assert_eq!(
+        2,
+        merged[0].time.len(),
+        "two shards holding different positions merge"
+    );
+    let error = merge_same_labelset(&schema, vec![shard(1, 0), shard(1, 1)]).unwrap_err();
+    assert!(
+        error.to_string().contains("same labelset"),
+        "the refusal does not name the shared label set: {error}"
+    );
+}
+
 /// Two values a million positions apart are one series with two rows, addressed by two runs: the
 /// positions between them cost neither a row nor a value buffer sized by the span.
 #[test]

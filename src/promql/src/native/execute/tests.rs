@@ -51,7 +51,7 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::FieldKind;
-use crate::grid_series::{label_set, merge_same_labelset, series_bytes};
+use crate::grid_series::{merge_same_labelset, series_bytes};
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::info::InfoSelector;
 use crate::instant_eval::{instant_candidate_span, select_instants};
@@ -4332,100 +4332,99 @@ fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
     );
 }
 
-/// A window that drops empty-valued labels hands two stored series over under one label set, and the
-/// duplicate-label-set check no longer collects them.
+/// A window that drops empty-valued labels is collected when the scan's key columns can spell the
+/// pair, and the merge above it rejects the two series as one label set.
 ///
 /// `{host="web-1", zone=""}` and `{host="web-1"}` are two series to the scan: an empty tag value is
 /// a present label, an absent one is not. `rate` drops the metric name and the empty-valued labels,
 /// so both become `{host="web-1"}` and each covers the same grid.
 ///
-/// The one fact that could have told the pass to collect the two is the scan's primary key - whether
-/// one of its columns can hold `NULL` where another holds `''` - and the proof does not read it any
-/// more: it is a fact about the physical table, and paying for it on every query to see this pair is
-/// the trade the guard was dropped for. So the window streams, both series leave it, and whatever
-/// operator sits above them applies its ordinary semantics to the two pieces of one label set. The
-/// planner counts the statements that rely on this (`duplicate_labelset_check_skipped`).
+/// The one fact that tells the pass to collect the two is the scan's primary key - whether one of
+/// its columns can hold `NULL` where another holds `''` - and this fixture states that it cannot
+/// prove the pair apart, which is what a nullable tag column says. The window's output is therefore
+/// collected, and the merge is where the second value of one label set at one position is refused:
+/// Prometheus's answer, rather than two pieces of one series leaving unchecked.
 ///
 /// The merge is the canonical pass's decision, not this fixture's: the tree is built as the window
-/// alone and handed to `merge_label_rewrites` with the facts a planner states - the scan reads one
-/// metric and binds `host`, `zone` and `__name__` - so what is exercised is the pass's answer.
+/// alone and handed to `merge_label_rewrites` with the facts a planner states - it reads one metric
+/// and binds `host`, `zone` and `__name__`, and its key columns can hold that pair - so what is
+/// exercised is the pass's answer.
 #[test]
-fn two_series_onto_one_label_set_after_a_window_are_handed_over_unchecked() {
+fn two_series_onto_one_label_set_after_a_window_are_rejected() {
     let out_grid = grid(0, 60_000, 5);
-    let tree = merge_label_rewrites(
-        &NativeTree::try_new(window_with(
-            input(),
-            RangeFunction::Rate,
-            300_000,
-            None,
-            Arc::clone(&out_grid),
-        ))
-        .unwrap(),
-        &[vec![
-            "host".to_string(),
-            "zone".to_string(),
-            "__name__".to_string(),
-        ]],
-        &[Some(Arc::<str>::from("requests"))],
-    )
-    .unwrap();
+    // One tree per execution: a stopped execution keeps its state.
+    let tree = || {
+        merge_label_rewrites(
+            &NativeTree::try_new(window_with(
+                input(),
+                RangeFunction::Rate,
+                300_000,
+                None,
+                Arc::clone(&out_grid),
+            ))
+            .unwrap(),
+            &[vec![
+                "host".to_string(),
+                "zone".to_string(),
+                "__name__".to_string(),
+            ]],
+            &[Some(Arc::<str>::from("requests"))],
+            // The scan keys its series by a column that can hold `NULL` in one series and `''` in
+            // another, so its labels alone cannot prove the drop.
+            false,
+        )
+        .unwrap()
+    };
+    let tree = tree();
     assert!(
-        !matches!(tree.root().expr, NativeExpr::Merge { .. }),
-        "the labels prove the drop, so the pass collects nothing: {tree}"
+        matches!(tree.root().expr, NativeExpr::Merge { .. }),
+        "the key columns cannot tell the pair apart, so the pass collects it: {tree}"
     );
     let schema = raw_schema();
     let counter = [0, 60_000, 120_000, 180_000, 240_000];
 
-    let mut execution = executor(&tree, pool());
-    execution
-        .push_raw(
-            InputId::new(0),
-            raw_chunk_of(
-                &schema,
-                b"series-a",
-                host_metric(Some("")),
-                &counter,
-                &[1.0, 2.0, 3.0, 4.0, 5.0],
-                true,
-            ),
-        )
-        .unwrap();
-    // Nothing collects what the window answers, so its first piece settles as soon as it is pushed.
-    let first = execution
-        .next_chunk()
-        .unwrap()
-        .expect("the window hands its first series over");
-
     // The second series is a different one to the scan and the same one to `rate`.
-    execution
-        .push_raw(
-            InputId::new(0),
-            raw_chunk_of(
-                &schema,
-                b"series-b",
-                host_metric(None),
-                &counter,
-                &[6.0, 7.0, 8.0, 9.0, 10.0],
-                true,
-            ),
-        )
-        .unwrap();
-    // `run` ends the input and drains what the tree answers.
-    let mut out = vec![first];
-    out.extend(run(&mut execution));
-    // The pair differs only in a label whose value is empty, which the comparison Prometheus uses
-    // treats as no label at all: the two pieces are one label set, and they leave unchecked. The
-    // planner's counter is the answer to that, not a collection.
-    assert_eq!(
-        2,
-        out.len(),
-        "`rate` handed both series over: {:?}",
-        decided(&out)
-    );
-    assert_eq!(
-        label_set(&out[0].series.metric),
-        label_set(&out[1].series.metric),
-        "the two pieces are one label set, which is the unchecked answer"
+    let mut execution = executor(&tree, pool());
+    for (key, metric, values) in [
+        (
+            b"series-a".as_slice(),
+            host_metric(Some("")),
+            [1.0, 2.0, 3.0, 4.0, 5.0],
+        ),
+        (
+            b"series-b".as_slice(),
+            host_metric(None),
+            [6.0, 7.0, 8.0, 9.0, 10.0],
+        ),
+    ] {
+        execution
+            .push_raw(
+                InputId::new(0),
+                raw_chunk_of(&schema, key, metric, &counter, &values, true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let mut rejected = None;
+    loop {
+        match execution.next_chunk() {
+            Ok(None) => break,
+            // The first piece may settle before the second collides with it; what must not happen is
+            // both leaving, and neither is the answer the merge owes this pair.
+            Ok(Some(_)) => {}
+            Err(error) => {
+                rejected = Some(error);
+                break;
+            }
+        }
+    }
+    let error = rejected.unwrap_or_else(|| {
+        panic!("the merge handed two pieces of one label set over instead of refusing the pair")
+    });
+    let message = error.to_string();
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "the rejection does not name the shared label set: {message}"
     );
 
     // Two series carrying different hosts stay distinct, which is what a rate over a label that
@@ -4468,21 +4467,25 @@ fn two_series_onto_one_label_set_after_a_window_are_handed_over_unchecked() {
     assert_eq!(out.len(), 2, "two series over two hosts are two series");
 }
 
-/// A name-dropping node over one metric is left alone, and the pair only the key columns can fold
-/// leaves as two pieces of one label set.
+/// A name-dropping node over one metric is proved by the labels alone only when the scan's key
+/// columns always decode a value; a scan whose keys can spell `NULL` and `''` is collected, and the
+/// merge above the drop is what rejects the pair.
 ///
 /// `requests{host="web-1", zone=""}` and `requests{host="web-1"}` are two series to a scan and one
 /// label set to everything that drops empty values: `timestamp(x)`, `rate(x[5m])` and
-/// `timestamp(rate(x[5m]))` all drop the metric name and the empty `zone` with it. The proof that
-/// used to catch this pair read the scan's key columns, and it is gone: the labels prove the drop of
-/// one metric's name, so nothing is collected and the two pieces reach the consumer above unchecked.
-/// What the consumer then does with two values of one label set at one position is the consumer's
-/// own semantics, not a rejection this pass can promise.
+/// `timestamp(rate(x[5m]))` all drop the metric name and the empty `zone` with it. The name an
+/// individual series carries is the one the whole scan carries, so the labels alone prove the drop
+/// of that name - but not of the empty value: a primary-key column that holds `NULL` in one series
+/// and `''` in another is exactly this pair, and the pass collects it when the scan states that its
+/// keys cannot tell them apart.
 ///
-/// The statements that rely on the omission are counted, not collected: see
+/// Without that fact the drop is proved and nothing is collected, which is what the last block pins:
+/// the two hosts below are two series to the scan and two to every kernel above it.
+///
+/// The statements collected for the key columns alone are counted, not silently paid for: see
 /// `duplicate_labelset_check_skipped` in the query planner.
 #[test]
-fn a_name_dropping_node_over_one_metric_is_handed_over_unchecked() {
+fn a_name_dropping_node_over_a_nullable_key_is_collected() {
     let out_grid = grid(0, 60_000, 5);
     let schema = raw_schema();
     let counter = [0, 60_000, 120_000, 180_000, 240_000];
@@ -4502,6 +4505,17 @@ fn a_name_dropping_node_over_one_metric_is_handed_over_unchecked() {
             }],
         )
         .unwrap()
+    }
+    // What the merge refuses, or `None` when every piece left it.
+    fn rejected(execution: &mut NativeExecutor) -> Option<String> {
+        loop {
+            match execution.next_chunk() {
+                Ok(None) => return None,
+                // A piece may settle before a later one collides with it.
+                Ok(Some(_)) => {}
+                Err(error) => return Some(error.to_string()),
+            }
+        }
     }
 
     let stamps = || {
@@ -4531,9 +4545,10 @@ fn a_name_dropping_node_over_one_metric_is_handed_over_unchecked() {
             output,
         }
     };
-    let passed = |root: NativeNode| {
+    let passed = |root: NativeNode, keys_survive: bool| {
         let tree = NativeTree::try_new(root).unwrap();
-        merge_label_rewrites(&tree, &tags, &metrics).expect("the pass produces a legal tree")
+        merge_label_rewrites(&tree, &tags, &metrics, keys_survive)
+            .expect("the pass produces a legal tree")
     };
     let push = |execution: &mut NativeExecutor, second: SeriesLabels| {
         execution
@@ -4564,37 +4579,34 @@ fn a_name_dropping_node_over_one_metric_is_handed_over_unchecked() {
             .unwrap();
     };
 
-    // Nothing collects a name-dropping node over one metric: the pair the key columns could fold
-    // leaves as two pieces of one label set, and no merge reports it.
-    let unchecked = |name: &str, root: NativeNode| {
-        let tree = passed(root);
+    // A key column that can hold `NULL` in one series and `''` in another: the drop is collected,
+    // and the merge is where the two pieces of one label set are refused.
+    let refused = |name: &str, root: NativeNode| {
+        let tree = passed(root, false);
         assert!(
-            !matches!(tree.root().expr, NativeExpr::Merge { .. }),
-            "`{name}` over one metric keeps every partition: {tree}"
+            matches!(tree.root().expr, NativeExpr::Merge { .. }),
+            "`{name}` over a nullable key is collected: {tree}"
         );
         let mut execution = executor(&tree, pool());
         push(&mut execution, host_metric(None));
-        let out = run(&mut execution);
-        assert_eq!(
-            2,
-            out.len(),
-            "`{name}` hands both pieces over: {:?}",
-            decided(&out)
-        );
-        assert_eq!(
-            label_set(&out[0].series.metric),
-            label_set(&out[1].series.metric),
-            "`{name}`: the two stored series are one label set, which is the unchecked answer"
+        execution.end_of_input().unwrap();
+        let message = rejected(&mut execution)
+            .unwrap_or_else(|| panic!("`{name}` handed two pieces of one label set over"));
+        assert!(
+            message.contains("vector cannot contain metrics with the same labelset"),
+            "`{name}`: the rejection does not name the shared label set: {message}"
         );
     };
-    unchecked("timestamp", stamps());
-    unchecked("rate", rate());
-    unchecked("timestamp(rate)", evaluated_stamps());
+    refused("timestamp", stamps());
+    refused("rate", rate());
+    refused("timestamp(rate)", evaluated_stamps());
 
-    // Two series a non-empty label tells apart stay two, and they stay two without a collection:
-    // that is what an ordinary `abs`/`rate`/`timestamp` over a normal metric table costs.
+    // Two series a non-empty label tells apart stay two. Over keys that cannot spell the pair the
+    // drop is proved and nothing is collected - an ordinary `abs`/`rate`/`timestamp` over a normal
+    // metric table - and over a nullable key it is collected, which costs the merge but answers the
+    // same two series.
     let kept = |name: &str, root: NativeNode| {
-        let tree = passed(root);
+        let tree = passed(root, true);
         assert!(
             !matches!(tree.root().expr, NativeExpr::Merge { .. }),
             "`{name}` keeps every partition: {tree}"
@@ -4611,6 +4623,28 @@ fn a_name_dropping_node_over_one_metric_is_handed_over_unchecked() {
     kept("timestamp", stamps());
     kept("rate", rate());
     kept("timestamp(rate)", evaluated_stamps());
+    let kept_over_a_nullable_key = |name: &str, root: NativeNode| {
+        let tree = passed(root, false);
+        assert!(
+            matches!(tree.root().expr, NativeExpr::Merge { .. }),
+            "`{name}` over a nullable key is collected: {tree}"
+        );
+        let mut execution = executor(&tree, pool());
+        push(&mut execution, requests("web-2"));
+        let out = run(&mut execution);
+        assert_eq!(
+            2,
+            out.len(),
+            "`{name}`: two series over two hosts are two, collected or not"
+        );
+        assert_ne!(
+            out[0].series.metric, out[1].series.metric,
+            "`{name}`: the two hosts were not two label sets"
+        );
+    };
+    kept_over_a_nullable_key("timestamp", stamps());
+    kept_over_a_nullable_key("rate", rate());
+    kept_over_a_nullable_key("timestamp(rate)", evaluated_stamps());
 }
 
 /// Two series a `timestamp` hands out under one label set are refused by the merge above it.
@@ -4856,6 +4890,203 @@ fn merge_canonicalizes_complementary_series_and_flushes_only_at_eof() {
         .collect::<Vec<_>>();
     assert_eq!(values, vec![Some(1.0), Some(2.0)]);
     assert!(execution.next_chunk().unwrap().is_none());
+}
+
+/// A table of `wide`- and `wider`-bucket histograms, so two samples of one field differ in payload.
+///
+/// The payload is what a merge can lose and still answer the right positions, so every test below
+/// names the histogram it expects rather than only counting rows.
+fn two_sized_histograms() -> (Arc<HistogramBatch>, u32, u32) {
+    let mut builder = HistogramBatchBuilder::new();
+    let wide = push_histogram(&mut builder, 2);
+    let wider = push_histogram(&mut builder, 5);
+    (builder.finish().unwrap(), wide, wider)
+}
+
+/// The histograms field 0 of `chunk` holds, in grid order: `(position, count, buckets)`.
+fn histogram_rows(chunk: &EvaluatedChunk) -> Vec<(usize, f64, usize)> {
+    let field = chunk
+        .series
+        .fields
+        .get(0)
+        .expect("the chunk carries one field");
+    chunk
+        .series
+        .time
+        .positions()
+        .map(|(position, row)| match field.sample(row) {
+            SampleRef::Histogram(view) => (
+                position,
+                view.count,
+                view.positive.buckets.len() + view.negative.buckets.len(),
+            ),
+            SampleRef::Missing => panic!("position {position} of the answer holds no sample"),
+            SampleRef::Float(value) => {
+                panic!("position {position} of the answer is the float {value}")
+            }
+        })
+        .collect()
+}
+
+/// Native histogram frames merge by position across the canonical merge, payload and all.
+///
+/// This is the merge a metadata drop over a nullable key pays for: one label set arrives as two
+/// pieces from the same partition, each holding some of its positions, and what comes out is one
+/// series with one histogram per position, each still carrying the payload it was pushed with. A
+/// position neither piece holds stays a hole, and the merge owes nothing until its input ends - the
+/// closing chunk it answers with is the merged series.
+#[test]
+fn merge_canonicalizes_complementary_histogram_pieces_and_flushes_only_at_eof() {
+    let grid = grid(0, 1, 4);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let label = named_metric("same", "x");
+    let (table, wide, wider) = two_sized_histograms();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histogram_chunk_of(
+                &schema,
+                label.clone(),
+                0,
+                vec![Some(wide), None, None],
+                &table,
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histogram_chunk_of(&schema, label, 1, vec![None, Some(wider)], &table, true),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "merge exposed output before EOF"
+    );
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert!(output.is_last);
+    // Position 0 is the first piece's histogram, position 2 the second piece's, and position 1 - a
+    // hole in both - stays a hole rather than becoming a row.
+    assert_eq!(
+        vec![(0, 2.0, 2), (2, 5.0, 5)],
+        histogram_rows(&output),
+        "the merged histograms are not the ones the pieces held"
+    );
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
+/// Two pieces of one label set holding a histogram at one position are refused.
+///
+/// The merge collects the pieces of one label set into one series, so a position two pieces fill
+/// would carry two values of one field. That is the collision Prometheus reports, and the histogram
+/// payload changes nothing about it: the check reads whether a sample is there, not what it holds.
+#[test]
+fn a_histogram_merge_rejects_a_position_two_pieces_hold() {
+    let grid = grid(0, 1, 4);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let label = named_metric("same", "x");
+    let (table, wide, wider) = two_sized_histograms();
+    let mut execution = executor(&tree, pool());
+    for (start, index) in [(0, wide), (0, wider)] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_histogram_chunk_of(
+                    &schema,
+                    label.clone(),
+                    start,
+                    vec![None, Some(index)],
+                    &table,
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let error = match execution.next_chunk() {
+        Ok(None) => panic!("the merge settled nothing at all"),
+        Ok(Some(chunk)) => panic!(
+            "a histogram position two pieces held was handed on: {:?}",
+            histogram_rows(&chunk)
+        ),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "the rejection does not name the shared label set: {message}"
+    );
+}
+
+/// A float-producing histogram function above the canonical merge reduces what the merge collected.
+///
+/// `histogram_count(rate(h[5m]))` is this shape: the window below it answers histograms, the drop it
+/// makes over a nullable key is collected into a merge carrying those frames, and the map above the
+/// merge answers one float per histogram it reads. The merge is what proves the frames crossed the
+/// boundary intact - a count of a lost payload would not be the count the piece was pushed with - and
+/// the map above it drops the positions holding nothing.
+#[test]
+fn a_float_producing_histogram_map_reduces_the_histograms_a_merge_collected() {
+    let grid = grid(0, 1, 4);
+    let tree = NativeTree::try_new(map_ops(
+        merge(evaluated_input(Arc::clone(&grid))),
+        vec![MapOp::Histogram(NativeHistogramFunction::Count)],
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let label = named_metric("same", "x");
+    let (table, wide, wider) = two_sized_histograms();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histogram_chunk_of(
+                &schema,
+                label.clone(),
+                0,
+                vec![Some(wide), None, None],
+                &table,
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histogram_chunk_of(
+                &schema,
+                label,
+                1,
+                vec![None, Some(wider), None],
+                &table,
+                true,
+            ),
+        )
+        .unwrap();
+    // Both pieces close themselves, so the map's answer comes out of `run` without an explicit end
+    // of input; the merge still owes nothing until the second piece arrives.
+    let chunks = run(&mut execution);
+    let [chunk] = chunks.as_slice() else {
+        panic!("expected one chunk, got {}", chunks.len());
+    };
+    // The map answers one float per merged histogram, at the positions the merge kept, and the name
+    // the map drops is the one the pieces shared.
+    assert_eq!(chunk.series.metric.name(), None);
+    assert_eq!(
+        chunk
+            .series
+            .time
+            .positions()
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>(),
+        vec![0, 2]
+    );
+    assert_eq!(sample_values(chunk), vec![Some(2.0), Some(5.0)]);
 }
 
 /// A parent reads a merge's answer only once the merge has flushed.

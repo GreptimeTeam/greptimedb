@@ -4288,6 +4288,83 @@ async fn owner_rejects_conflicting_values_at_same_identity_and_position() {
     );
 }
 
+/// The owner merges the histogram pieces of one label set that its inputs hold.
+///
+/// A canonical boundary hands one label set to a single owner, and that owner is where the pieces the
+/// producer's partitions collected meet: here two inputs hold complementary positions of one label
+/// set and each piece carries its own histogram payload, so the merge rebuilds one field over the
+/// union of the positions with every row still naming the payload it came from. The pieces are closed
+/// as they arrive, so the merged series is also what proves the closing chunk of a chain survives the
+/// merge.
+#[tokio::test]
+async fn owner_merges_histogram_pieces_of_one_label_set_across_inputs() {
+    let metric = labels("histogram-pieces");
+    let (first, closing) = histogram_rows_chunk_with_sum(metric.clone(), 0, 1, 10.0);
+    let (second, _) = histogram_rows_chunk_with_sum(metric.clone(), 8, 1, 20.0);
+    let child = Scripted::plan(vec![
+        vec![Step::Chunk(first, closing)],
+        vec![Step::chunk((second, true))],
+    ]);
+    let plan: Arc<dyn ExecutionPlan> = node(child, 2);
+    let outputs = drain(&plan, &SessionContext::default().task_ctx()).await;
+    let owner = Routing::new(2).output(&metric);
+    let chunks = outputs[owner].as_ref().expect("the owner output decodes");
+    assert_output_contract(chunks, &[(metric.clone(), vec![0, 8])]);
+    assert_eq!(1, chunks.iter().filter(|(_, closed)| *closed).count());
+    // One row per valued position, in order, each holding the payload of the piece that pushed it: a
+    // merge that rebuilt the field without reindexing the payloads would answer one payload twice.
+    let merged = chunks
+        .iter()
+        .flat_map(|(series, _)| {
+            let field = series.fields.get(0).expect("one field");
+            series.time.positions().map(move |(position, row)| {
+                let datatypes::series::samples::SampleRef::Histogram(view) = field.sample(row)
+                else {
+                    panic!("position {position} of the merged series is not a histogram");
+                };
+                (position, view.sum, view.count)
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![(0, 10.0, 4.0), (8, 20.0, 4.0)],
+        merged,
+        "the merged histograms are not the ones the pieces carried"
+    );
+}
+
+/// Two histogram pieces of one label set at one position fail the merge.
+///
+/// The pieces were routed to one owner because they are one label set, so a position both of them
+/// fill would carry two values of one field. The kernel reports that the way it does for floats, and
+/// the histogram payload makes no difference to it.
+#[tokio::test]
+async fn owner_rejects_two_histogram_pieces_at_one_position() {
+    let metric = labels("histogram-conflict");
+    let (first, _) = histogram_rows_chunk_with_sum(metric.clone(), 4, 1, 10.0);
+    let (second, _) = histogram_rows_chunk_with_sum(metric.clone(), 4, 1, 20.0);
+    let child = Scripted::plan(vec![
+        vec![Step::chunk((first, true))],
+        vec![Step::chunk((second, true))],
+    ]);
+    let plan: Arc<dyn ExecutionPlan> = node(child, 1);
+    let outputs = drain(&plan, &SessionContext::default().task_ctx()).await;
+    let error = outputs[0]
+        .as_ref()
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "two histogram pieces of one label set at one position were merged: {:?}",
+                outputs[0].as_ref().map(|chunks| summaries(chunks))
+            )
+        })
+        .to_string();
+    assert!(
+        error.contains("cannot contain metrics with the same labelset"),
+        "the failure does not name the shared label set: {error}"
+    );
+}
+
 /// Same-identity input chunks are collected and emitted as one closed series.
 #[tokio::test]
 async fn same_canonical_key_chains_merge_into_one_series() {

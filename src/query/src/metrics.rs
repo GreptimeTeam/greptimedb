@@ -139,18 +139,20 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Statements whose duplicate label-set check the native PromQL planner skipped, by reason.
+    /// Statements whose metadata drop the native PromQL planner collected for the scan's key
+    /// columns alone, by reason.
     ///
     /// The canonical pass collects the pieces of one label set before a consumer that reads whole
-    /// series, and it decides that from the labels a tree reports. One pair of stored series escapes
-    /// that decision and is deliberately left unchecked rather than paid for per query: a primary-key
-    /// column that holds `NULL` in one series and `''` in another decodes to an absent and to an
-    /// empty label, and a name-dropping kernel drops the empty one with the metadata labels. This
-    /// counter is what makes the statements that rely on the omission observable.
+    /// series, and it decides that from the labels a tree reports and from the key columns the scan
+    /// below them keys its series by. The second half is what one pair of stored series needs: a
+    /// primary-key column that holds `NULL` in one series and `''` in another decodes to an absent
+    /// and to an empty label, and a name-dropping kernel drops the empty one with the metadata
+    /// labels, leaving both under one label set. A drop the labels alone prove is collected for that
+    /// pair, and this counter is what makes the statements that pay for it observable.
     pub static ref DUPLICATE_LABELSET_CHECK_SKIPPED_TOTAL: IntCounterVec =
         register_int_counter_vec!(
             "greptime_query_duplicate_labelset_check_skipped_total",
-            "native PromQL statements whose duplicate label-set check was skipped, by reason",
+            "native PromQL statements whose metadata drop was collected for their key columns              alone, by reason",
             &["reason"]
         )
         .unwrap();

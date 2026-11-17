@@ -352,9 +352,15 @@ fn timestamp_refuses_two_series_that_collapse_to_one_label_set() {
         "__name__".to_string(),
     ]];
     let source_metrics = vec![Some(Arc::<str>::from("a"))];
-    let tree =
-        promql::native::canonicalize::merge_label_rewrites(&tree, &source_tags, &source_metrics)
-            .expect("the canonical pass accepts the tree");
+    // The scan's key columns always decode a value here, so the labels alone decide: `__type__` in
+    // the tags is what keeps this drop collected.
+    let tree = promql::native::canonicalize::merge_label_rewrites(
+        &tree,
+        &source_tags,
+        &source_metrics,
+        true,
+    )
+    .expect("the canonical pass accepts the tree");
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 24));
     let state = NativeExecutionState::try_new(&tree, pool, None).unwrap();
     let mut executor = NativeExecutor::new(state);

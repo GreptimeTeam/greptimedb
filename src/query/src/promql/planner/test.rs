@@ -1377,6 +1377,66 @@ async fn native_engine_temporality_marker_provider() -> DfTableSourceProvider {
     )
 }
 
+/// One Mito table of one float field whose only tag is a nullable primary-key column.
+///
+/// A metric-engine table is built with nullable tags, so one series of such a table can hold `NULL`
+/// in the tag where another holds `''` - the pair a metadata drop normalizes into one label set, and
+/// what the canonical pass collects a drop for. The statements that pay for it are counted, which
+/// `a_nullable_key_statement_records_the_collection_it_pays_for` and
+/// `a_rate_chain_over_a_nullable_key_pays_one_merge` read.
+async fn build_test_table_provider_with_nullable_tag(table_name: &str) -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "tag_0".to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            "timestamp".to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "field_0".to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+    ]));
+    let table_meta = TableMetaBuilder::empty()
+        .schema(schema)
+        .engine(NATIVE_ENGINE.to_string())
+        .primary_key_indices(vec![0])
+        .value_indices(vec![2])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let table_info = TableInfoBuilder::default()
+        .name(table_name.to_string())
+        .meta(table_meta)
+        .build()
+        .unwrap();
+    assert!(
+        catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: table_name.to_string(),
+                table_id: 1024,
+                table: EmptyTable::from_table_info(&table_info),
+            })
+            .is_ok()
+    );
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_test_table_provider_with_options(
     table_name_tuples: &[(String, String)],
@@ -1463,21 +1523,35 @@ async fn build_test_native_histogram_table_provider(table_name: &str) -> DfTable
     build_test_native_histogram_table_provider_with_marker(table_name, false).await
 }
 
+/// The same table with tag columns that always decode a value.
+///
+/// A metric-engine table is built with nullable tags, so a metadata drop over it is collected for the
+/// `NULL`/`''` pair a drop normalizes into one label set
+/// ([`a_nullable_key_column_answers_a_histogram_statement_over_a_canonical_boundary`]). This fixture
+/// states the other table: one whose keys always decode a value, so the labels alone prove the drop
+/// and nothing has to be collected.
+async fn build_test_native_histogram_table_provider_with_stable_keys(
+    table_name: &str,
+) -> DfTableSourceProvider {
+    build_test_native_histogram_tables_with_marker(&[table_name], false, true).await
+}
+
 /// Several Mito tables of native histograms, for the multi-input gates.
 async fn build_test_native_histogram_tables(table_names: &[&str]) -> DfTableSourceProvider {
-    build_test_native_histogram_tables_with_marker(table_names, false).await
+    build_test_native_histogram_tables_with_marker(table_names, false, false).await
 }
 
 async fn build_test_native_histogram_table_provider_with_marker(
     table_name: &str,
     temporality_marker: bool,
 ) -> DfTableSourceProvider {
-    build_test_native_histogram_tables_with_marker(&[table_name], temporality_marker).await
+    build_test_native_histogram_tables_with_marker(&[table_name], temporality_marker, false).await
 }
 
 async fn build_test_native_histogram_tables_with_marker(
     table_names: &[&str],
     temporality_marker: bool,
+    stable_keys: bool,
 ) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     let mut columns = vec![
@@ -1486,10 +1560,12 @@ async fn build_test_native_histogram_tables_with_marker(
             ConcreteDataType::string_datatype(),
             false,
         ),
+        // `le` is a nullable tag on a metric-engine table, which is what a drop over it has to be
+        // proved against; `stable_keys` states the table whose key columns always decode a value.
         ColumnSchema::new(
             LE_COLUMN_NAME.to_string(),
             ConcreteDataType::string_datatype(),
-            true,
+            !stable_keys,
         ),
     ];
     if temporality_marker {
@@ -2701,6 +2777,33 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
     );
 }
 
+/// Whether any canonical merge in `plan` asks to hand histogram frames across a boundary.
+///
+/// A merge hands on the samples it was given, so its answer kind is its child's - which is the fact
+/// the admission gate this route used to carry read, and the reason it kept such a statement on the
+/// existing plan. This reads the same fact off the plan the route now builds, so a test says
+/// "histogram frames cross this boundary" about the node that carries them rather than about the
+/// statement's answer kind.
+fn fused_merges_answer_histograms(plan: &LogicalPlan) -> bool {
+    fn visit(plan: &LogicalPlan, found: &mut bool) {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        {
+            *found |= fused.tree().root().any(&|node| {
+                matches!(node.expr, NativeExpr::Merge { .. })
+                    && node.output_field_kind(Some(FieldKind::Histogram))
+                        == Some(FieldKind::Histogram)
+            });
+        }
+        for input in plan.inputs() {
+            visit(input, found);
+        }
+    }
+    let mut found = false;
+    visit(plan, &mut found);
+    found
+}
+
 /// Every native tree the plan carries, outermost first: one per stage the plan splits into.
 fn fused_trees(plan: &LogicalPlan) -> Vec<String> {
     fn visit(plan: &LogicalPlan, trees: &mut Vec<String>) {
@@ -3297,34 +3400,39 @@ async fn native_fused_multi_metric_rate_keeps_its_canonical_merge() {
     );
 }
 
-/// A statement whose scan keys its series by a nullable column is answered with the duplicate
-/// label-set check left off, and the counter says so once per statement.
+/// A statement whose scan keys its series by a nullable column is collected for that column, and the
+/// counter says so once per statement.
 ///
-/// The check is the labels alone: `rate(some_metric[5m])` over one metric collects nothing, because
-/// the name it drops is the one every series of the scan shares. The one pair the labels cannot see
-/// is a key column holding `NULL` in one series and `''` in another - this fixture's `le` is exactly
-/// that - and reading it per query is the cost the check was dropped for. What is left is the count,
-/// which is what makes the omission observable.
+/// The labels half of the drop's proof holds here: `rate(some_metric[5m])` over one metric proves
+/// the name it drops is the one every series of the scan shares. The other half is the scan's key
+/// columns, and this fixture's tag is a nullable primary key: one series can hold `NULL` there and
+/// another `''`, which decode to no label once the drop removes the empty value with the name. The
+/// pass therefore collects the drop - and reads the table to say so - which is what the count makes
+/// observable.
 ///
 /// A window that keeps the name drops nothing, so it relies on nothing and counts nothing.
 #[tokio::test]
-async fn a_nullable_key_statement_records_the_skipped_label_set_check() {
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+async fn a_nullable_key_statement_records_the_collection_it_pays_for() {
+    let table_provider = build_test_table_provider_with_nullable_tag("some_metric").await;
     let plan =
         build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
+    let trees = fused_trees(&plan);
     assert!(
-        find_fused_series(&plan).is_some(),
-        "`rate(some_metric[5m])` left the native route: {}",
-        plan.display_indent_schema()
+        !trees.is_empty(),
+        "`rate(some_metric[5m])` left the native route"
+    );
+    assert!(
+        trees.iter().any(|tree| tree.contains("Merge")),
+        "the nullable key collected the window's drop: {trees:?}"
     );
     assert_eq!(
         Some("nullable_key"),
         take_reported_skipped_labelset_check(),
-        "the statement's label-set check was skipped and not counted: {}",
+        "the drop was collected for the key columns and not counted: {}",
         plan.display_indent_schema()
     );
 
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let table_provider = build_test_table_provider_with_nullable_tag("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
         "last_over_time(some_metric[5m])",
         true,
@@ -3339,9 +3447,36 @@ async fn a_nullable_key_statement_records_the_skipped_label_set_check() {
     assert_eq!(
         None,
         take_reported_skipped_labelset_check(),
-        "a window that keeps the name skips no check: {}",
+        "a window that keeps the name collects nothing for the keys: {}",
         plan.display_indent_schema()
     );
+}
+
+/// A nullable key column costs a chain of metadata drops one merge, not one per drop.
+///
+/// The merge sits above the window - the bottom-most drop - and everything above it reads one series
+/// per canonical label set, so the drops above it need no collection of their own. A merge per drop
+/// would buffer the whole input once per kernel for a pair only the bottom one can still fold.
+#[tokio::test]
+async fn a_rate_chain_over_a_nullable_key_pays_one_merge() {
+    for query in [
+        "rate(some_metric[5m]) * 2",
+        "abs(abs(rate(some_metric[5m])))",
+    ] {
+        let table_provider = build_test_table_provider_with_nullable_tag("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let trees = fused_trees(&plan);
+        assert!(
+            !trees.is_empty(),
+            "`{query}` is not native: {}",
+            plan.display_indent_schema()
+        );
+        let merges: usize = trees.iter().map(|tree| tree.matches("Merge").count()).sum();
+        assert_eq!(
+            1, merges,
+            "`{query}` pays for one merge over the nullable key: {trees:?}"
+        );
+    }
 }
 
 /// A scan that carries `__type__` or `__unit__` as a tag can hold two series that agree on
@@ -10863,7 +10998,8 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
         "sum(some_metric or some_metric)",
         "sum(some_metric and some_metric)",
     ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         assert!(
@@ -10891,10 +11027,11 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     }
     // A float-producing window still answers on the route: its count, not the input histogram,
     // reaches the fold. The name `count_over_time` drops is the one every series of a single-metric
-    // scan shares, and the labels are the whole proof, so nothing collects the prefix - and a prefix
-    // nothing collects is exactly what the split folds: the statement runs as a region-side partial
-    // aggregate and a final fold above it.
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    // scan shares, and these tables' key columns always decode a value, so the labels are the whole
+    // proof and nothing collects the prefix - and a prefix nothing collects is exactly what the
+    // split folds: the statement runs as a region-side partial aggregate and a final fold above it.
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
         "sum(count_over_time(some_metric[5m]))",
         true,
@@ -10927,7 +11064,8 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
 #[tokio::test]
 async fn a_label_rewrite_keeps_a_float_answer_on_the_route() {
     let query = "label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\")";
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
     let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
     let display = plan.display_indent_schema().to_string();
     let fused = find_fused_series(&plan)
@@ -10940,21 +11078,45 @@ async fn a_label_rewrite_keeps_a_float_answer_on_the_route() {
         field.data_type(),
         "{query} declared a histogram column for a float answer: {display}"
     );
-    // A histogram answer standing on a canonical merge is out of this route's reach for now: the
-    // canonical boundary carrying histogram frames is the follow-up's subject. Both orderings
-    // count - the merge at the root, and a merge below a map that answers floats - because a merge
-    // anywhere in the tree is a boundary that would carry histograms.
-    for query in [
-        "label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")",
-        "histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
-        "sum(histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
+    // A histogram answer standing on the same collection crosses it: the merge carries histogram
+    // frames, and where the statement answers a float the map reducing them sits above the boundary.
+    // Both orderings are admitted because the merge only concatenates one field's samples - what it
+    // carries is its child's business - so each of these names the kind it publishes.
+    for (query, histogram) in [
+        (
+            "label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")",
+            true,
+        ),
+        (
+            "histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+            false,
+        ),
+        (
+            "sum(histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
+            false,
+        ),
     ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query} left the route instead of answering: {display}"));
+        assert_eq!(
+            if histogram {
+                native_histogram_value_type().as_arrow_type()
+            } else {
+                ArrowDataType::Float64
+            },
+            *native_value_field(fused, &format!("{query}: {display}")).data_type(),
+            "{query} declared the wrong column kind: {display}"
+        );
+        let trees = fused_trees(&plan);
         assert!(
-            find_fused_series(&plan).is_none(),
-            "{query} took a histogram answer through the canonical boundary: {}",
-            plan.display_indent_schema()
+            trees
+                .iter()
+                .any(|tree| tree.contains("Merge: canonical label-set merge")),
+            "{query} answers without the merge the rewrite needs: {trees:?}"
         );
     }
     // The map inside the rewrite answers a float, so the one collection left is the rewrite's own,
@@ -10963,7 +11125,8 @@ async fn a_label_rewrite_keeps_a_float_answer_on_the_route() {
     // statement therefore stays on the route, where it was collected twice before.
     let query =
         "sum(label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\"))";
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
     let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
     let display = plan.display_indent_schema().to_string();
     let fused = find_fused_series(&plan)
@@ -10984,7 +11147,8 @@ async fn a_segmented_parent_answers_the_kind_of_the_uncut_root() {
         "count_over_time(some_metric[5m]) + on (__name__) count_over_time(some_metric[5m])",
         "histogram_count(some_metric) + on (__name__) histogram_count(some_metric)",
     ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         let fused = find_fused_series(&plan).unwrap_or_else(|| {
@@ -11001,7 +11165,8 @@ async fn a_segmented_parent_answers_the_kind_of_the_uncut_root() {
     // `some_metric * 2` drops the metadata labels over one metric, which the labels prove, so no
     // merge carries histogram frames and the gate that refuses one is never reached.
     let query = "some_metric * 2 + on (__name__) some_metric * 2";
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
     let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
     let display = plan.display_indent_schema().to_string();
     assert!(
@@ -11040,6 +11205,157 @@ async fn native_histogram_selector_plans_a_native_producer() {
     );
 }
 
+/// A nullable key column collects a histogram statement onto a canonical boundary.
+///
+/// A metric-engine table is built with nullable tag columns, so a metadata drop over one is collected
+/// for the `NULL`/`''` pair it normalizes into one label set - and for a histogram answer that
+/// collection is a canonical merge carrying histogram frames. It is the boundary a float answer gets:
+/// a producer running the statement's own tree per partition, the router collecting one label set
+/// from every partition with the kernel that merges floats as it merges histograms, and a consumer
+/// answering the histogram column above it. The same statement over a table whose key columns always
+/// decode a value is proved by its labels, so nothing is collected and the histogram answer is one
+/// node.
+#[tokio::test]
+async fn a_nullable_key_column_answers_a_histogram_statement_over_a_canonical_boundary() {
+    for query in ["rate(some_metric[5m])", "some_metric * 2"] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("`{query}` left the route instead of answering: {display}"));
+        assert_eq!(
+            &native_histogram_value_type().as_arrow_type(),
+            native_value_field(fused, &format!("`{query}`: {display}")).data_type(),
+            "`{query}` declared something other than the histogram it answers: {display}"
+        );
+        // The merge is the collection the drop is paid for, and it answers what its child answers:
+        // the statement's kind, histograms included.
+        let trees = fused_trees(&plan);
+        assert!(
+            trees
+                .iter()
+                .any(|tree| tree.contains("Merge: canonical label-set merge")),
+            "`{query}` answers without the merge its drop is collected into: {trees:?}"
+        );
+        // What crosses the boundary is the histogram payload itself: the merge that collected the
+        // drop answers histograms, so the frames the producer hands over are histogram frames.
+        assert!(
+            fused_merges_answer_histograms(&plan),
+            "`{query}` collected a field that is not the histogram it answers: {display}"
+        );
+    }
+    // Over a table whose keys always decode a value the labels alone prove the drop, so the answer
+    // is one node and nothing collects it.
+    for query in ["rate(some_metric[5m])", "some_metric * 2"] {
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let trees = fused_trees(&plan);
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}`: the proved drop left the route: {display}"
+        );
+        assert!(
+            !trees.iter().any(|tree| tree.starts_with("Merge")),
+            "`{query}` collected a proved drop: {trees:?}"
+        );
+    }
+}
+
+/// A float answer reduces the histograms a boundary carried, and the boundary stays below it.
+///
+/// `histogram_count(rate(h[5m]))` answers a float, so nothing about its root kind says how the
+/// window below it is carried: `rate` drops the metadata labels over a nullable key, so the window
+/// is collected into a canonical merge that hands histogram frames across the boundary, and
+/// `histogram_count` maps those histograms to floats above it. The frames the producer publishes are
+/// still histogram frames - the payload struct is what says so - and the consumer answers the float
+/// column.
+#[tokio::test]
+async fn a_float_answer_reduces_the_histograms_a_boundary_carried() {
+    let query = "histogram_count(rate(some_metric[5m]))";
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("`{query}` left the route instead of answering: {display}"));
+    assert_eq!(
+        &ArrowDataType::Float64,
+        native_value_field(fused, &format!("`{query}`: {display}")).data_type(),
+        "`{query}` declared a histogram column for a float answer: {display}"
+    );
+    let trees = fused_trees(&plan);
+    let boundary = trees
+        .iter()
+        .find(|tree| tree.contains("Merge: canonical label-set merge"))
+        .unwrap_or_else(|| panic!("`{query}` answers without the collected window: {trees:?}"));
+    // What the merge collects is the window that dropped the name, and the field it hands over is
+    // the histogram payload: the native frame schema carries the histogram struct's own columns.
+    assert!(
+        boundary.contains("Window: rate "),
+        "`{query}`: the boundary collects something other than the window: {boundary}"
+    );
+    // The frames the boundary hands over hold histograms, which is what says the map above it reads
+    // histograms rather than floats handed to it in their place.
+    assert!(
+        fused_merges_answer_histograms(&plan),
+        "`{query}`: the boundary carries a field that is not a histogram: {display}"
+    );
+    // The map that answers the float reads the collected frames, so it sits above the boundary.
+    let reducing = trees
+        .iter()
+        .position(|tree| tree.contains("histogram_count"))
+        .unwrap_or_else(|| panic!("`{query}` has no map that reduces the histograms: {trees:?}"));
+    let collecting = trees
+        .iter()
+        .position(|tree| tree.contains("Merge: canonical label-set merge"))
+        .expect("the boundary was found above");
+    assert!(
+        reducing != collecting,
+        "`{query}`: the reduction is the boundary itself: {trees:?}"
+    );
+}
+
+/// A histogram answer that crosses a collected drop still segments.
+///
+/// The tree's two operands each drop the metadata labels over a nullable key, so each is collected,
+/// and the match above them reads a histogram from each side. Segmentation cuts the tree into
+/// segments that run where their inputs are read and keeps the collected boundary as a frame stage,
+/// exactly as it does for a float answer - so the histogram frames cross a boundary that is not the
+/// statement's own root.
+#[tokio::test]
+async fn a_segmented_histogram_answer_crosses_its_collected_boundary() {
+    let query = "some_metric * 2 + on (__name__) some_metric * 2";
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("`{query}` left the route instead of answering: {display}"));
+    assert_eq!(
+        &native_histogram_value_type().as_arrow_type(),
+        native_value_field(fused, &format!("`{query}`: {display}")).data_type(),
+        "`{query}` declared something other than the histogram it answers: {display}"
+    );
+    let trees = fused_trees(&plan);
+    assert!(
+        trees.len() > 1,
+        "`{query}` answers in one node, so nothing was segmented: {trees:?}"
+    );
+    let collected = trees
+        .iter()
+        .filter(|tree| tree.contains("Merge: canonical label-set merge"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        2,
+        collected.len(),
+        "`{query}`: each operand pays for its own drop: {trees:?}"
+    );
+    assert!(
+        fused_merges_answer_histograms(&plan),
+        "`{query}` collected a field that is not a histogram: {display}"
+    );
+}
+
 /// A histogram fold is admitted below a pointwise operator.
 ///
 /// The gate cannot look at the root alone: `sum(h) * 2` has a binary root and the fold sits below
@@ -11057,7 +11373,8 @@ async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
         "avg(some_metric) + 1",
         "-sum(some_metric)",
     ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         let final_node = find_final_split(&plan)
@@ -11160,7 +11477,8 @@ async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
     // A bare scan drops nothing, and `last_over_time` keeps the metric name, so neither hands out a
     // label set two of its series could meet under.
     for query in ["some_metric", "last_over_time(some_metric[5m])"] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         assert!(
             find_fused_series(&plan).is_some(),
@@ -11177,7 +11495,8 @@ async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
         "sum_over_time(some_metric[5m])",
         "some_metric * 2",
     ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         let fused = find_fused_series(&plan).unwrap_or_else(|| {
@@ -16299,7 +16618,8 @@ async fn a_histogram_sum_or_avg_folds_natively() {
         "sum(rate(some_metric[5m]))",
         "avg by (tag_0) (some_metric)",
     ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         let final_node = find_final_split(&plan)

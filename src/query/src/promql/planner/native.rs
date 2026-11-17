@@ -55,7 +55,7 @@ use datatypes::series::time::EvalGrid;
 use futures::future::BoxFuture;
 use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
-    RawSeriesSource, input_locality, matching_operands_drop_key,
+    RawSeriesSource, input_locality, keys_survive_metadata_drop, matching_operands_drop_key,
 };
 use promql::native::plan::{
     AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree,
@@ -65,7 +65,7 @@ use promql::native::plan::{
 use promql::native::segment::{
     self, NATIVE_ORDERING, canonical_boundary_stages, canonical_local_prefix,
     contains_canonical_merge, contains_global_consumer, groups_by_metric_name,
-    merge_answers_histogram, region_local_segment, segment_tree, with_row_name_column,
+    region_local_segment, segment_tree, with_row_name_column,
 };
 // Kept reachable here because this crate reads them through this module's own path: the dist
 // planner's commutativity check asks whether a fused node is per-series work, and this crate's
@@ -186,11 +186,12 @@ type PreparedInput = (
     // `split_series`: whether that partition splits one series across regions, which a bare scan
     // cannot reconcile. A partition on tags keeps every series whole in one region.
     bool,
-    // `key_is_nullable`: whether the resolved table keys its series by a column that can hold
-    // `NULL` in one series and `''` in another. The canonical pass no longer asks it - the drop's
-    // proof is the labels alone - so a statement over such a table is answered with the label-set
-    // check the key columns used to decide left off. It is read here, from the table's own
-    // metadata, to count those statements: see `SKIPPED_LABELSET_CHECK_NULLABLE_KEY`.
+    // `keys_survive`: whether the resolved table keys its series by columns that always decode a
+    // value, read from its own primary key through `keys_survive_metadata_drop`. It is the half of
+    // the metadata drop's proof a tree cannot answer about itself: the drop removes every empty
+    // label value with the name, so a column holding `NULL` in one series and `''` in another
+    // leaves both under one label set. The canonical pass collects the drop when this is `false`,
+    // and `SKIPPED_LABELSET_CHECK_NULLABLE_KEY` counts the statements collected for that reason.
     bool,
 );
 
@@ -253,14 +254,14 @@ thread_local! {
     #[cfg(test)]
     static REPORTED_DECLINE: std::cell::Cell<Option<&'static str>> =
         const { std::cell::Cell::new(None) };
-    /// The reason this thread's statement is answered with its duplicate label-set check left off.
+    /// The reason this thread's statement had its metadata drop collected for its key columns.
     ///
     /// The canonical pass decides that while it rewrites a tree, and the counter that reports it is
     /// taken once per statement by the offer that answers the plan - so the reason travels beside
     /// the tree the way a refusal travels beside the `None` it answers.
     static SKIPPED_LABELSET_CHECK: std::cell::Cell<Option<&'static str>> =
         const { std::cell::Cell::new(None) };
-    /// The reason the counter last reported for a skipped label-set check.
+    /// The reason the counter last reported for a drop collected over a nullable key.
     ///
     /// The counter is not something a test can read back; this holds the same reason it carries.
     #[cfg(test)]
@@ -271,8 +272,9 @@ thread_local! {
 /// The cause reported when a refusal was answered without recording one.
 const NATIVE_DECLINE_UNRECORDED: &str = "cause_not_recorded";
 
-/// The reason a statement's duplicate label-set check was skipped: the scan that answers it keys its
-/// series by a column that can hold `NULL` in one series and `''` in another.
+/// The reason a statement's metadata drop was collected: the scan that answers it keys its series by
+/// a column that can hold `NULL` in one series and `''` in another, so the labels alone cannot prove
+/// the drop tells two of its series apart.
 const SKIPPED_LABELSET_CHECK_NULLABLE_KEY: &str = "nullable_key";
 
 /// Answers the `None` that hands this expression to the existing planner, recording why.
@@ -302,7 +304,7 @@ pub(crate) fn take_reported_decline() -> Option<&'static str> {
     REPORTED_DECLINE.with(|reported| reported.replace(None))
 }
 
-/// Takes the reason the route last reported for a skipped duplicate label-set check.
+/// Takes the reason the route last reported for a drop collected over a nullable key.
 #[cfg(test)]
 pub(crate) fn take_reported_skipped_labelset_check() -> Option<&'static str> {
     REPORTED_SKIPPED_LABELSET_CHECK.with(|reported| reported.replace(None))
@@ -404,13 +406,17 @@ impl PromPlanner {
         // label-set answer from one region's share of it.
         let partitioned = table_meta.partition_column_names().next().is_some();
         // A kernel that drops the metadata labels drops every label whose value is empty with them,
-        // so two stored series whose key columns hold `NULL` and `''` leave it as one identity. The
-        // table's own primary key says whether that can happen; the canonical pass does not ask it
-        // any more, so what is left is the count of statements that relied on it.
-        let key_is_nullable = table_meta
-            .primary_key_indices
-            .iter()
-            .any(|index| table_meta.schema.column_schemas()[*index].is_nullable());
+        // so two stored series whose key columns hold `NULL` and `''` leave it as one identity. This
+        // is the fact the drop's proof needs beside the labels - the same rule the physical
+        // per-series scan reads to decide whether a node may stream - and the canonical pass
+        // collects the drop when it does not hold.
+        let keys_survive = keys_survive_metadata_drop(
+            tags.iter().map(String::as_str),
+            table_meta
+                .primary_key_indices
+                .iter()
+                .map(|index| &table_meta.schema.column_schemas()[*index]),
+        );
         // An engine without a raw-series scanner has no frame to give this node, and by the time the physical
         // planner asks, the logical plan is already this node: the refusal there is a planning error, not a
         // fallback. So the engine is checked here. A file-engine table is the concrete case, since its
@@ -489,7 +495,7 @@ impl PromPlanner {
             tags,
             partitioned,
             split_series,
-            key_is_nullable,
+            keys_survive,
         )))
     }
 
@@ -506,9 +512,9 @@ impl PromPlanner {
         let planned = self
             .try_plan_native(prom_expr, query_engine_state, FusedOutputFormat::PlainRows)
             .await?;
-        // Whether this statement is one whose label-set check the canonical pass left off. The
-        // attempts below record it where they decide it; taking it here keeps the count one per
-        // statement and leaves nothing behind for the next one.
+        // Whether this statement is one whose metadata drop the canonical pass collected for its
+        // key columns alone. The attempts below record it where they decide it; taking it here
+        // keeps the count one per statement and leaves nothing behind for the next one.
         let skipped = SKIPPED_LABELSET_CHECK.with(|skipped| skipped.replace(None));
         match planned {
             // A whole statement answers a row table. A frame is what a composition reads from its
@@ -1083,9 +1089,10 @@ impl PromPlanner {
                     // makes the whole input partitioned.
                     let mut discovered_partitioned = false;
                     let mut discovered_split_series = false;
-                    // One discovered metric's key columns can still hold `NULL` where another's
-                    // hold `''`, so the union inherits the fact from any of them.
-                    let mut discovered_key_is_nullable = false;
+                    // Every discovered metric's own key columns decide its series, so the union
+                    // survives the drop only when all of them do - and a metric whose keys do not
+                    // is enough to collect the whole input.
+                    let mut discovered_keys_survive = true;
                     for table in metrics {
                         self.ctx.table_name = Some(table.table_info().name.clone());
                         if self.setup_context().await?.is_some() {
@@ -1099,7 +1106,7 @@ impl PromPlanner {
                             mut tags,
                             partitioned,
                             split_series,
-                            key_is_nullable,
+                            keys_survive,
                         )) = self
                             .prepare_one_scan(
                                 matchers.clone(),
@@ -1116,7 +1123,7 @@ impl PromPlanner {
                         };
                         discovered_partitioned |= partitioned;
                         discovered_split_series |= split_series;
-                        discovered_key_is_nullable |= key_is_nullable;
+                        discovered_keys_survive &= keys_survive;
                         // The union reads every discovered metric, so it is region-local only when
                         // every metric it reads is.
                         let Some(metric) = metric else {
@@ -1198,7 +1205,7 @@ impl PromPlanner {
                         tags,
                         discovered_partitioned,
                         discovered_split_series,
-                        discovered_key_is_nullable,
+                        discovered_keys_survive,
                     ));
                     continue;
                 }
@@ -1499,11 +1506,11 @@ impl PromPlanner {
             .iter()
             .map(|(_, _, metric, _, _, _, _, _)| metric.clone())
             .collect::<Vec<_>>();
-        // Whether any input keys its series by a column that can hold `NULL` in one series and `''`
-        // in another. The canonical pass does not ask it - the drop's proof is the labels alone - so
-        // a statement over such a table is answered with the label-set check the key columns used to
-        // decide left off; it is counted below rather than left silent.
-        let key_is_nullable = prepared.iter().any(|input| input.7);
+        // The drop's other half, and the one no tree can answer about itself: whether every input
+        // keys its series by columns that always decode a value. One input that cannot say so - a
+        // nullable primary-key column, or a discovered selector whose metrics disagree - is enough
+        // for the pass to collect the drop rather than trust it.
+        let keys_survive = prepared.iter().all(|input| input.7);
         // Whether any input's table is split into regions along a partition column. Only the canonical
         // boundary claims a whole-query label-set answer, and a region-local producer cannot see the pieces
         // another region holds.
@@ -1516,21 +1523,22 @@ impl PromPlanner {
             &compiled.tree,
             &runtime_source_tags,
             &runtime_source_metrics,
+            keys_survive,
         ) {
             Ok(tree) => tree,
             Err(_) => return Ok(declined("label_rewrites_do_not_merge")),
         };
-        // The label-set check the pass would have made and no longer makes: a node that drops the
-        // metadata labels is judged by the labels alone, so the pair a primary-key column can spell
-        // as `NULL` in one series and `''` in another is left to its consumer. Counting the
-        // statements that relied on that is what keeps the omission observable.
-        if key_is_nullable
-            && promql::native::plan::leaves_a_drop_to_the_storage_keys(
-                &tree,
-                &runtime_source_tags,
-                &runtime_source_metrics,
-            )
-        {
+        // What those collections cost: a node that drops the metadata labels is proved by its labels
+        // and its scan's key columns together now, so a drop the labels alone would have proved is
+        // collected exactly when the keys do not survive it - the pair a primary-key column can
+        // spell as `NULL` in one series and `''` in another. Counting the statements collected for
+        // that reason is what keeps the price of the fact observable.
+        if promql::native::plan::leaves_a_drop_to_the_storage_keys(
+            &tree,
+            &runtime_source_tags,
+            &runtime_source_metrics,
+            keys_survive,
+        ) {
             SKIPPED_LABELSET_CHECK
                 .with(|skipped| skipped.set(Some(SKIPPED_LABELSET_CHECK_NULLABLE_KEY)));
         }
@@ -1640,16 +1648,13 @@ impl PromPlanner {
         // The kind the tree's root answers with, which every output column follows. It is not the kind the
         // inputs carry: `count_over_time`, `histogram_count` and `timestamp` reduce a histogram to a
         // float, while a selector, a histogram-answering range function and a label rewrite pass it on.
+        // A canonical merge hands on the samples it was given, so an answer kind crosses it unchanged:
+        // a histogram answer keeps its frames over the boundary, and the router merges them with the
+        // same kernel it merges floats with.
         // A shape whose kind cannot be named keeps the existing plan rather than declaring a column the
         // first batch might not fill.
         let root_kind = match statement_kind {
             Some(FieldKind::Histogram) => {
-                // A histogram answer standing on a canonical merge would run through the canonical
-                // boundary carrying histogram frames, a pairing nothing exercises yet, so such a
-                // statement keeps the existing plan. Every merge counts, not only a root one.
-                if merge_answers_histogram(root, FieldKind::Histogram) {
-                    return Ok(declined("merge_boundary_would_carry_histogram_state"));
-                }
                 match root.output_field_kind(Some(FieldKind::Histogram)) {
                     Some(root_kind) => root_kind,
                     None => return Ok(declined("root_declares_no_field_kind")),
@@ -3441,8 +3446,9 @@ mod tests {
             fused_output_tags(tree.root(), &columns),
             "a written name is a column the output publishes"
         );
-        let collected = promql::native::canonicalize::merge_label_rewrites(&tree, &runtime, &[])
-            .expect("the pass produces a legal tree");
+        let collected =
+            promql::native::canonicalize::merge_label_rewrites(&tree, &runtime, &[], true)
+                .expect("the pass produces a legal tree");
         assert!(
             matches!(collected.root().expr, NativeExpr::Merge { .. }),
             "a name rewrite writes an existing runtime label: {collected}"
@@ -3489,8 +3495,9 @@ mod tests {
         ]];
         let tree =
             compiled_test_tree(r#"label_replace(abs(x), "__name__", "same", "missing", "(.*)")"#);
-        let collected = promql::native::canonicalize::merge_label_rewrites(&tree, &runtime, &[])
-            .expect("the pass produces a legal tree");
+        let collected =
+            promql::native::canonicalize::merge_label_rewrites(&tree, &runtime, &[], true)
+                .expect("the pass produces a legal tree");
         assert!(
             matches!(collected.root().expr, NativeExpr::Merge { .. }),
             "the merge sits above the name rewrite: {collected}"
@@ -3509,8 +3516,9 @@ mod tests {
         // A fresh ordinary destination above the same kernel is still uncollected: no scan can carry
         // an ordinary label it does not declare.
         let fresh = compiled_test_tree(r#"label_replace(abs(x), "dst", "$1", "host", "(.*)")"#);
-        let collected = promql::native::canonicalize::merge_label_rewrites(&fresh, &runtime, &[])
-            .expect("the pass produces a legal tree");
+        let collected =
+            promql::native::canonicalize::merge_label_rewrites(&fresh, &runtime, &[], true)
+                .expect("the pass produces a legal tree");
         assert_eq!(
             1,
             collected.to_string().matches("Merge").count(),
