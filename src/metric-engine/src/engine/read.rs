@@ -460,6 +460,8 @@ mod test {
                     sampled_files: 0,
                     proposal_files: 0,
                     validation_files: 0,
+                    shared_files: 0,
+                    directory_files: 0,
                     rounds: 0,
                     gaps: vec![],
                 })

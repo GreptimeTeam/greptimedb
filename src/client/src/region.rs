@@ -815,6 +815,8 @@ mod tests {
             sampled_files: 2048,
             proposal_files: 1024,
             validation_files: 1024,
+            shared_files: 0,
+            directory_files: 0,
             rounds: 5,
             ..Default::default()
         };
