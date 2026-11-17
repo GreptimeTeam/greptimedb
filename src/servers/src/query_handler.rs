@@ -378,6 +378,22 @@ pub trait CopyInHandler: Send + Sync {
         query_ctx: QueryContextRef,
     ) -> Result<Option<TableInfoRef>>;
 
+    /// Ingests Arrow batches through the same bulk path as Flight DoPut.
+    /// The COPY transport owns framing and memory admission; implementations
+    /// retain stream-level authorization and schema reconciliation.
+    fn copy_in_arrow(
+        &self,
+        _stream: crate::grpc::flight::PutRecordBatchRequestStream,
+        _query_ctx: QueryContextRef,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<common_grpc::flight::do_put::DoPutResponse>>,
+    > {
+        crate::error::NotSupportedSnafu {
+            feat: "Arrow COPY ingestion",
+        }
+        .fail()
+    }
+
     /// Inserts a parsed batch produced by a COPY stream. Returns the
     /// number of affected rows.
     async fn copy_in_insert(

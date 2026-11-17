@@ -94,6 +94,20 @@ impl CopyInHandler for Instance {
         Ok(table_info)
     }
 
+    fn copy_in_arrow(
+        &self,
+        stream: servers::grpc::flight::PutRecordBatchRequestStream,
+        query_ctx: QueryContextRef,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<common_grpc::flight::do_put::DoPutResponse>>,
+    > {
+        Ok(
+            servers::query_handler::grpc::GrpcQueryHandler::handle_put_record_batch_stream(
+                self, stream, query_ctx,
+            ),
+        )
+    }
+
     async fn copy_in_insert(
         &self,
         requests: RowInsertRequests,

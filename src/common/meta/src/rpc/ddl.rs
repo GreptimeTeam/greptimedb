@@ -68,6 +68,8 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
+/// Ordered source table IDs pinned by the caller of an automatic logical-table ALTER.
+pub const ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY: &str = "__greptime_alter_logical_tables.ids";
 /// Reserved query-context extension key for the authenticated database creator.
 pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
 /// Internal gRPC metadata key for the authenticated database creator.
@@ -1707,6 +1709,24 @@ impl QueryContext {
         &self.extensions
     }
 
+    pub(crate) fn pinned_logical_table_ids(&self) -> Result<Option<Vec<TableId>>> {
+        self.extensions
+            .get(ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY)
+            .map(|ids| {
+                ids.split(',')
+                    .map(|id| {
+                        id.parse::<TableId>().map_err(|error| {
+                            error::AlterLogicalTablesInvalidArgumentsSnafu {
+                                err_msg: format!("Invalid pinned logical table ID: {error}"),
+                            }
+                            .build()
+                        })
+                    })
+                    .collect()
+            })
+            .transpose()
+    }
+
     /// Get the channel
     pub fn channel(&self) -> u8 {
         self.channel
@@ -1890,6 +1910,32 @@ mod tests {
     use table::test_util::table_info::test_table_info;
 
     use super::{AlterTableTask, CreateTableTask, *};
+
+    #[test]
+    fn test_pinned_logical_table_ids_wire_compatibility() {
+        let legacy = include_bytes!(
+            "../../../../../tests/compatibility/wire/read_preference/legacy_query_context.pb"
+        );
+        let mut context = QueryContext::from(PbQueryContext::decode(legacy.as_slice()).unwrap());
+        assert_eq!(context.pinned_logical_table_ids().unwrap(), None);
+        context.extensions.insert(
+            "__greptime_alter_logical_tables.ids".into(),
+            "1025,1024".into(),
+        );
+        let wire = PbQueryContext::from(context.clone()).encode_to_vec();
+        let decoded = QueryContext::from(PbQueryContext::decode(wire.as_slice()).unwrap());
+        assert_eq!(decoded, context);
+        assert_eq!(
+            decoded.pinned_logical_table_ids().unwrap(),
+            Some(vec![1025, 1024])
+        );
+        for invalid in ["", "1024,", "1024,no", "-1", "4294967296"] {
+            context
+                .extensions
+                .insert(ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY.into(), invalid.into());
+            assert!(context.pinned_logical_table_ids().is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn test_ddl_timeout_secs() {

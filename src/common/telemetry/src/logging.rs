@@ -15,6 +15,7 @@
 //! logging stuffs, inspired by databend
 mod file_retention;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
@@ -24,6 +25,9 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::serde::empty_string_as_default;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use file_retention::{DirectoryRetention, LogFileKind, build_file_appender};
 use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::trace::TracerProvider;
@@ -33,6 +37,7 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{Sampler, Tracer};
 use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
+use snafu::{Location, Snafu};
 use tracing::callsite;
 use tracing::metadata::LevelFilter;
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
@@ -44,6 +49,31 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry, filter};
 
 use crate::tracing_sampler::{TracingSampleOptions, create_sampler};
+
+/// Failure to initialize a file appender.
+#[derive(Snafu)]
+#[stack_trace_debug]
+pub enum InitLoggingError {
+    #[snafu(display("Failed to initialize file logging in {directory}: {error}.{hint}"))]
+    FileAppender {
+        directory: String,
+        #[snafu(source)]
+        error: tracing_appender::rolling::InitError,
+        hint: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+}
+
+impl ErrorExt for InitLoggingError {
+    fn status_code(&self) -> StatusCode {
+        StatusCode::InvalidArguments
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 /// The default endpoint when use gRPC exporter protocol.
 pub const DEFAULT_OTLP_GRPC_ENDPOINT: &str = "http://localhost:4317";
@@ -474,13 +504,16 @@ pub fn init_default_ut_logging() {
             level: Some(level),
             ..Default::default()
         };
-        *g = Some(init_global_logging(
-            "unittest",
-            &opts,
-            &TracingOptions::default(),
-            None,
-            None,
-        ));
+        *g = Some(
+            init_global_logging(
+                "unittest",
+                &opts,
+                &TracingOptions::default(),
+                None,
+                None,
+            )
+            .expect("failed to initialize test logging"),
+        );
 
         crate::info!("logs dir = {}", dir);
     });
@@ -498,15 +531,12 @@ pub fn init_global_logging(
     tracing_opts: &TracingOptions,
     node_id: Option<String>,
     slow_query_opts: Option<&SlowQueryOptions>,
-) -> Vec<WorkerGuard> {
-    static START: Once = Once::new();
+) -> Result<Vec<WorkerGuard>, InitLoggingError> {
+    static START: OnceCell<()> = OnceCell::new();
     let mut guards = vec![];
     let node_id = node_id.unwrap_or_else(|| "none".to_string());
 
-    START.call_once(|| {
-        // Enable log compatible layer to convert log record to tracing span.
-        LogTracer::init().expect("log tracer must be valid");
-
+    START.get_or_try_init(|| -> Result<(), InitLoggingError> {
         let stdout_writer = if opts.append_stdout {
             let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
             guards.push(guard);
@@ -531,7 +561,7 @@ pub fn init_global_logging(
         // Configure the file logging layer with rolling policy.
         let file_logging_layer = if file_logging_enabled {
             let rolling_appender =
-                build_file_appender(opts, LogFileKind::Default, retention.as_ref());
+                build_file_appender(opts, LogFileKind::Default, retention.as_ref())?;
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -543,7 +573,7 @@ pub fn init_global_logging(
         // Configure the error file logging layer with rolling policy.
         let err_file_logging_layer = if file_logging_enabled {
             let rolling_appender =
-                build_file_appender(opts, LogFileKind::Error, retention.as_ref());
+                build_file_appender(opts, LogFileKind::Error, retention.as_ref())?;
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -555,14 +585,23 @@ pub fn init_global_logging(
             None
         };
 
-        if slow_query_logging_enabled {
+        let slow_query_logger = if slow_query_logging_enabled {
+            Some(build_slow_query_logger(
+                opts,
+                stdout_writer,
+                retention.as_ref(),
+                &mut guards,
+            )?)
+        } else {
+            None
+        };
+
+        // Build all file appenders before installing any global logging state.
+        // A filesystem failure can then be returned without poisoning initialization.
+        LogTracer::init().expect("log tracer must be valid");
+        if let Some(logger) = slow_query_logger {
             SLOW_QUERY_LOGGER
-                .set(build_slow_query_logger(
-                    opts,
-                    stdout_writer,
-                    retention.as_ref(),
-                    &mut guards,
-                ))
+                .set(logger)
                 .expect("slow query logger already initialized");
         }
 
@@ -659,9 +698,10 @@ pub fn init_global_logging(
 
         tracing::subscriber::set_global_default(subscriber)
             .expect("error setting global tracing subscriber");
-    });
+        Ok(())
+    })?;
 
-    guards
+    Ok(guards)
 }
 
 fn create_tracer(app_name: &str, node_id: &str, opts: &LoggingOptions) -> Tracer {
@@ -747,12 +787,12 @@ fn build_slow_query_logger(
     stdout_writer: Option<NonBlocking>,
     retention: Option<&DirectoryRetention>,
     guards: &mut Vec<WorkerGuard>,
-) -> tracing::Dispatch {
+) -> Result<tracing::Dispatch, InitLoggingError> {
     let stdout_layer = stdout_writer.map(|writer| {
         build_logging_layer(writer, opts.log_format, std::io::stdout().is_terminal())
     });
     let file_layer = if opts.enable_file_logging && !opts.dir.is_empty() {
-        let rolling_appender = build_file_appender(opts, LogFileKind::SlowQuery, retention);
+        let rolling_appender = build_file_appender(opts, LogFileKind::SlowQuery, retention)?;
         let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
         guards.push(guard);
         Some(build_logging_layer(writer, opts.log_format, false))
@@ -764,12 +804,12 @@ fn build_slow_query_logger(
         *metadata.level() == tracing::Level::INFO && metadata.fields().field("slow").is_some()
     })
     .with_max_level_hint(LevelFilter::INFO);
-    tracing::Dispatch::new(
+    Ok(tracing::Dispatch::new(
         Registry::default()
             .with(filter)
             .with(stdout_layer)
             .with(file_layer),
-    )
+    ))
 }
 
 fn build_logging_layer<S>(
@@ -801,6 +841,100 @@ mod tests {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
 
     use super::*;
+
+    #[test]
+    fn test_file_logging_initialization_failure() {
+        const CHILD_ENV: &str = "GREPTIME_TEST_LOGGING_INIT_FAILURE";
+        if env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "logging::tests::test_file_logging_initialization_failure",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = LoggingOptions {
+            dir: dir.path().to_str().unwrap().to_string(),
+            max_log_dir_size: ReadableSize::mb(1),
+            append_stdout: false,
+            ..Default::default()
+        };
+        let slow_opts = SlowQueryOptions {
+            enable: true,
+            record_type: SlowQueriesRecordType::Log,
+            ..Default::default()
+        };
+        for link in [
+            ".greptimedb.current",
+            ".greptimedb-err.current",
+            ".greptimedb-slow-queries.current",
+        ] {
+            let path = dir.path().join(link);
+            // A directory collision fails even on runners allowed to create symlinks.
+            std::fs::create_dir(&path).unwrap();
+            let error = init_global_logging(
+                "test",
+                &opts,
+                &TracingOptions::default(),
+                None,
+                Some(&slow_opts),
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("logging.max_log_dir_size"), "{message}");
+            assert!(message.contains(&opts.dir), "{message}");
+            assert!(message.contains("Developer Mode"), "{message}");
+            assert!(LOG_RELOAD_HANDLE.get().is_none());
+            assert!(SLOW_QUERY_LOGGER.get().is_none());
+            std::fs::remove_dir(path).unwrap();
+            for entry in std::fs::read_dir(dir.path()).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_symlink() {
+                    std::fs::remove_file(entry.path()).unwrap();
+                }
+            }
+        }
+
+        // Disabling retention succeeds with the same collision and after failed attempts.
+        std::fs::create_dir(dir.path().join(".greptimedb.current")).unwrap();
+        opts.max_log_dir_size = ReadableSize::default();
+        let guards = init_global_logging(
+            "test",
+            &opts,
+            &TracingOptions::default(),
+            None,
+            Some(&slow_opts),
+        )
+        .unwrap();
+        crate::error!("logging works after initialization failures");
+        drop(guards);
+        let error_log = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("greptimedb-err.")
+            })
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(error_log)
+                .unwrap()
+                .contains("logging works after initialization failures")
+        );
+    }
 
     #[test]
     fn test_slow_query_logging() {
@@ -915,7 +1049,8 @@ mod tests {
             &TracingOptions::default(),
             None,
             (case != "no_options").then_some(&slow_opts),
-        );
+        )
+        .unwrap();
 
         for level in ["warn", "error", "off", "info"] {
             LOG_RELOAD_HANDLE

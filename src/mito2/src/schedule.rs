@@ -15,7 +15,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common_base::cancellation::CancellationHandle;
+use tokio_util::sync::CancellationToken;
 
 pub mod remote_job_scheduler;
 pub mod scheduler;
@@ -23,7 +23,7 @@ pub mod scheduler;
 /// Shared state for cooperatively cancelling a task until it starts committing.
 #[derive(Debug, Clone)]
 pub(crate) struct CancellableTaskState {
-    cancel_handle: Arc<CancellationHandle>,
+    cancel_token: CancellationToken,
     commit_started: Arc<Mutex<bool>>,
     started: Arc<AtomicBool>,
 }
@@ -31,7 +31,7 @@ pub(crate) struct CancellableTaskState {
 impl CancellableTaskState {
     pub(crate) fn new() -> Self {
         Self {
-            cancel_handle: Arc::new(CancellationHandle::default()),
+            cancel_token: CancellationToken::new(),
             commit_started: Arc::new(Mutex::new(false)),
             started: Arc::new(AtomicBool::new(false)),
         }
@@ -47,12 +47,12 @@ impl CancellableTaskState {
         self.started.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn cancel_handle(&self) -> Arc<CancellationHandle> {
-        self.cancel_handle.clone()
+    pub(crate) fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancel_handle.is_cancelled()
+        self.cancel_token.is_cancelled()
     }
 
     /// Returns whether the task has crossed the non-cancellable publication boundary.
@@ -65,7 +65,7 @@ impl CancellableTaskState {
     /// Returns false if cancellation was requested first.
     pub(crate) fn mark_commit_started(&self) -> bool {
         let mut commit_started = self.commit_started.lock().unwrap();
-        if self.cancel_handle.is_cancelled() {
+        if self.cancel_token.is_cancelled() {
             return false;
         }
         *commit_started = true;
@@ -78,11 +78,11 @@ impl CancellableTaskState {
         if *commit_started {
             return RequestCancelResult::TooLateToCancel;
         }
-        if self.cancel_handle.is_cancelled() {
+        if self.cancel_token.is_cancelled() {
             return RequestCancelResult::AlreadyCancelling;
         }
 
-        self.cancel_handle.cancel();
+        self.cancel_token.cancel();
         RequestCancelResult::CancelIssued
     }
 }

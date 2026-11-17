@@ -31,6 +31,7 @@
 //! arms. Builders resolve a `FORMAT` name (and its aliases) through
 //! [`REGISTERED_FORMATS`]. See the `codec` module docs.
 
+mod arrow;
 mod codec;
 mod csv;
 mod influxdb;
@@ -102,13 +103,13 @@ pub(crate) const COPY_IN_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 type FormatBuilder = fn(options::CopyOptionSet) -> PgWireResult<CopyFormat>;
 
 /// The registered COPY FROM STDIN formats: accepted `FORMAT` name to
-/// builder. `csv` is the only implemented format; the others are
-/// registered so they report a clear "not supported yet" instead of an
-/// unknown-format error.
+/// builder. Unimplemented PostgreSQL text/binary formats are registered
+/// to report a clear "not supported yet" instead of an unknown-format error.
 const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("csv", csv::build_csv_codec),
     ("jsonl", jsonl::build_jsonl_codec),
     ("json", jsonl::build_jsonl_codec),
+    ("arrow", arrow::build_arrow_codec),
     ("influxdb", influxdb::build_influxdb_codec),
     ("influxdb_line", influxdb::build_influxdb_codec),
     ("otlp", otlp::build_otlp_codec),
@@ -253,7 +254,7 @@ pub(crate) struct CopyInState {
     query_ctx: QueryContextRef,
     payload: Payload,
     /// Reservations against the shared request-memory limiter for the
-    /// bytes buffered by a Prometheus payload, acquired per CopyData
+    /// bytes buffered by a table-less payload, acquired per CopyData
     /// chunk as it arrives and held until the buffer is flushed or the
     /// copy ends — the receive-stage counterpart of HTTP's
     /// body-accounting middleware, so concurrent unfinished COPY
@@ -296,6 +297,8 @@ impl BufferedReservation {
 }
 
 enum Payload {
+    /// Table-bound Arrow IPC batches, written without protobuf row conversion.
+    Arrow(Box<arrow::ArrowCopyState>),
     /// Table-bound rows: parsed against `grpc_schema` and flushed to
     /// `table_name` via `copy_in_insert`. The schema is cloned into each
     /// flushed batch: `Rows.schema` is an owned `Vec` in the proto
@@ -432,10 +435,14 @@ impl CopyInState {
         self.codec_format_code
     }
 
-    /// Prometheus bodies are charged against the shared request-memory limiter
-    /// as they arrive, before decode and conversion acquire additional memory.
+    /// Whether the payload buffers raw CopyData bytes until `CopyDone`
+    /// (the table-less formats); such bytes are charged against the
+    /// shared request-memory limiter as they arrive.
     fn buffers_payload(&self) -> bool {
-        matches!(self.payload, Payload::PromWrite { .. })
+        matches!(
+            self.payload,
+            Payload::Influxdb { .. } | Payload::Otlp { .. } | Payload::PromWrite { .. }
+        )
     }
 
     /// The payload bytes currently buffered (charged or not).
@@ -444,7 +451,7 @@ impl CopyInState {
             Payload::Influxdb { data, .. }
             | Payload::Otlp { data, .. }
             | Payload::PromWrite { data, .. } => data.len() as u64,
-            Payload::Table { .. } => 0,
+            Payload::Table { .. } | Payload::Arrow(_) => 0,
         }
     }
 
@@ -483,6 +490,8 @@ impl CopyInState {
     fn feed(&mut self, data: &[u8]) -> PgWireResult<()> {
         match &mut self.payload {
             Payload::Table { parser, rows, .. } => rows.extend(parser.feed(data)?),
+            // Arrow's asynchronous feed writes each complete batch immediately.
+            Payload::Arrow(_) => return Err(bad_copy_data("Arrow requires asynchronous feed")),
             Payload::Influxdb { data: buffered, .. }
             | Payload::Otlp { data: buffered, .. }
             | Payload::PromWrite { data: buffered, .. } => {
@@ -503,6 +512,8 @@ impl CopyInState {
     fn finish(&mut self) -> PgWireResult<()> {
         match &mut self.payload {
             Payload::Table { parser, rows, .. } => rows.extend(parser.finish()?),
+            // Finalized asynchronously by on_copy_done.
+            Payload::Arrow(_) => {}
             // The whole payload is one request body; nothing to finalize.
             Payload::Influxdb { .. } | Payload::Otlp { .. } | Payload::PromWrite { .. } => {}
         }
@@ -512,6 +523,7 @@ impl CopyInState {
     fn should_flush(&self) -> bool {
         match &self.payload {
             Payload::Table { rows, .. } => rows.len() >= COPY_IN_FLUSH_ROWS,
+            Payload::Arrow(_) => false,
             // Completed once at CopyDone, not mid-stream.
             Payload::Influxdb { .. } | Payload::Otlp { .. } | Payload::PromWrite { .. } => false,
         }
@@ -544,14 +556,18 @@ impl CopyInState {
     }
 
     /// Takes the buffered OTLP payload and its options, if any.
-    fn take_otlp(&mut self) -> Option<(OtlpOptions, Vec<u8>)> {
+    fn take_otlp(&mut self) -> Option<(OtlpOptions, Vec<u8>, BufferedReservation)> {
         let Payload::Otlp { options, data } = &mut self.payload else {
             return None;
         };
         if data.is_empty() {
             return None;
         }
-        Some((options.clone(), std::mem::take(data)))
+        Some((
+            options.clone(),
+            std::mem::take(data),
+            self.take_reservation(),
+        ))
     }
 
     /// Takes the buffered remote-write body and its options, if any.
@@ -572,19 +588,20 @@ impl CopyInState {
     /// Takes the buffered payload as one line-protocol request body, if
     /// any — the same bytes an HTTP write of the same records would
     /// carry.
-    fn take_lines(&mut self) -> PgWireResult<Option<InfluxdbRequest>> {
+    fn take_lines(&mut self) -> PgWireResult<Option<(InfluxdbRequest, BufferedReservation)>> {
         let Payload::Influxdb { data, precision } = &mut self.payload else {
             return Ok(None);
         };
         if data.is_empty() {
             return Ok(None);
         }
-        let lines = String::from_utf8(std::mem::take(data))
-            .map_err(|e| bad_copy_data(format!("COPY FROM STDIN data is not valid UTF-8: {e}")))?;
-        Ok(Some(InfluxdbRequest {
+        let request = InfluxdbRequest {
             precision: *precision,
-            lines,
-        }))
+            lines: String::from_utf8(std::mem::take(data)).map_err(|e| {
+                bad_copy_data(format!("COPY FROM STDIN data is not valid UTF-8: {e}"))
+            })?,
+        };
+        Ok(Some((request, self.take_reservation())))
     }
 }
 
@@ -685,10 +702,53 @@ impl PostgresServerHandlerInner {
         // Each format states its own target rule and ingestion shape
         // explicitly.
         let state = match &stmt.format {
-            // Table-bound formats require a target table: records are
-            // parsed against its columns and inserted in batches.
+            // Row-based table-bound formats parse records against the
+            // target columns and insert them in batches.
             CopyFormat::Csv(codec) => self.table_bound_state(&stmt, codec).await?,
             CopyFormat::Jsonl(codec) => self.table_bound_state(&stmt, codec).await?,
+            CopyFormat::Arrow(options) => {
+                if stmt.table.is_empty() {
+                    return Err(unsupported("format arrow requires a target table"));
+                }
+                if !stmt.columns.is_empty() {
+                    return Err(unsupported(
+                        "format arrow uses IPC field names; omit the COPY column list",
+                    ));
+                }
+                let (catalog, schema, table) = resolve_table_name(&query_ctx, &stmt.table)?;
+                // Validate against the original context, including COPY's
+                // cross-catalog policy, before changing the target scope.
+                if self
+                    .copy_in_handler
+                    .copy_in_table(&catalog, &schema, &table, query_ctx.clone())
+                    .await
+                    .map_err(convert_err)?
+                    .is_none()
+                {
+                    return Err(copy_in_error(
+                        PgErrorCode::Ec42P01,
+                        format!("relation \"{}\" does not exist", stmt.table.join(".")),
+                    ));
+                }
+                let query_ctx =
+                    options.query_context(&adjust_query_context(query_ctx, &catalog, &schema));
+                let arrow = arrow::ArrowCopyState::new(
+                    table,
+                    &self.copy_in_handler,
+                    query_ctx.clone(),
+                    self.memory_limiter.clone(),
+                )
+                .await?;
+                CopyInState {
+                    query_ctx,
+                    payload: Payload::Arrow(Box::new(arrow)),
+                    memory_guards: Vec::new(),
+                    granted_bytes: 0,
+                    codec_name: "arrow",
+                    codec_format_code: 1,
+                    rows_written: 0,
+                }
+            }
             // influxdb forbids a target table — each line names its own
             // measurement — and completes through the line-protocol
             // pipeline the HTTP write endpoints use; the server must be
@@ -743,6 +803,8 @@ impl PostgresServerHandlerInner {
         };
         let num_columns = match &state.payload {
             Payload::Table { grpc_schema, .. } => grpc_schema.len(),
+            // The IPC schema arrives after the COPY handshake.
+            Payload::Arrow(_) => 0,
             // No fixed column set: the format routes per record.
             Payload::Influxdb { .. } | Payload::Otlp { .. } | Payload::PromWrite { .. } => 0,
         };
@@ -804,13 +866,23 @@ impl PostgresServerHandlerInner {
         // timestamp alignment and inserts are identical to an HTTP
         // write of the same bytes. The context stays this connection's
         // postgres context.
-        if let Some((options, bytes)) = state.take_otlp() {
+        if let Some((options, bytes, reservation)) = state.take_otlp() {
             let Some(otlp_handler) = &self.otlp_handler else {
                 return Err(unsupported("this server is not wired for the otlp format"));
             };
-            return self
-                .flush_otlp(otlp_handler, options, bytes, query_ctx)
-                .await;
+            // The reservation outlives the payload: it is dropped when
+            // the payload's bytes are consumed below.
+            let rows = self
+                .flush_otlp(
+                    otlp_handler,
+                    options,
+                    bytes,
+                    reservation.charged_bytes(),
+                    query_ctx,
+                )
+                .await?;
+            drop(reservation);
+            return Ok(rows);
         }
         if let Some((options, bytes, reservation)) = state.take_prom_write() {
             let Some(prom_write_state) = &self.prom_write_state else {
@@ -822,7 +894,7 @@ impl PostgresServerHandlerInner {
                 .flush_prom_write(prom_write_state, options, bytes, reservation, query_ctx)
                 .await;
         }
-        if let Some(request) = state.take_lines()? {
+        if let Some((request, reservation)) = state.take_lines()? {
             let Some(influxdb_handler) = &self.influxdb_handler else {
                 return Err(unsupported(
                     "this server is not wired for the influxdb line protocol format",
@@ -832,6 +904,7 @@ impl PostgresServerHandlerInner {
                 .exec(request, query_ctx)
                 .await
                 .map_err(convert_err)?;
+            drop(reservation);
             return match output.data {
                 OutputData::AffectedRows(rows) => Ok(rows as u64),
                 OutputData::RecordBatches(_) | OutputData::Stream(_) => Ok(0),
@@ -865,6 +938,7 @@ impl PostgresServerHandlerInner {
         otlp_handler: &crate::query_handler::OpenTelemetryProtocolHandlerRef,
         options: OtlpOptions,
         bytes: Vec<u8>,
+        body_reserved_bytes: u64,
         query_ctx: QueryContextRef,
     ) -> PgWireResult<u64> {
         use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -900,7 +974,7 @@ impl PostgresServerHandlerInner {
                     .metrics(
                         request,
                         Arc::new(ctx),
-                        Some((self.memory_limiter.clone(), 0)),
+                        Some((self.memory_limiter.clone(), body_reserved_bytes)),
                     )
                     .await
                     .map_err(convert_err)?;
@@ -1122,12 +1196,16 @@ impl CopyHandler for PostgresServerHandlerInner {
         // otherwise a pooled connection would retain failed-import
         // buffers until its next COPY. On success it is put back.
         //
-        // Buffered Prometheus payloads charge their bytes against the
+        // Buffered table-less payloads charge their bytes against the
         // shared request-memory limiter as they arrive (the
         // receive-stage counterpart of HTTP's body accounting); the
         // reservation is held until the buffer is flushed or the state
         // is dropped.
-        if state.buffers_payload() {
+        if let Payload::Arrow(arrow) = &mut state.payload {
+            let rows = arrow.feed(&copy_data.data).await?;
+            state.rows_written += rows;
+            METRIC_POSTGRES_COPY_IN_ROWS.inc_by(rows);
+        } else if state.buffers_payload() {
             let chunk_bytes = u64::try_from(copy_data.data.len())
                 .map_err(|_| bad_copy_data("chunk too large"))?;
             // Charge only this chunk's uncovered delta against the
@@ -1185,8 +1263,12 @@ impl CopyHandler for PostgresServerHandlerInner {
                 "CopyDone message received outside COPY FROM STDIN",
             ));
         };
-        state.finish()?;
-        let rows = self.flush_copy_in(&mut state).await?;
+        let rows = if let Payload::Arrow(arrow) = &mut state.payload {
+            arrow.finish().await?
+        } else {
+            state.finish()?;
+            self.flush_copy_in(&mut state).await?
+        };
         state.rows_written += rows;
         METRIC_POSTGRES_COPY_IN_ROWS.inc_by(rows);
 

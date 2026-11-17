@@ -55,6 +55,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use pgwire::error::PgWireResult;
 
+use crate::postgres::copy_in::arrow::ArrowOptions;
 use crate::postgres::copy_in::csv::CsvCodec;
 use crate::postgres::copy_in::influxdb::InfluxdbOptions;
 use crate::postgres::copy_in::jsonl::JsonlCodec;
@@ -71,6 +72,9 @@ pub(super) enum CopyFormat {
     /// targeted table's columns through arrow-json, the engine behind
     /// file-based `COPY ... FROM 'file.json'`.
     Jsonl(JsonlCodec),
+    /// Table-bound Arrow IPC stream, completed batch-by-batch through Flight's
+    /// bulk ingestion handler. Advertises binary wire format code 1.
+    Arrow(ArrowOptions),
     /// Table-less influxdb line protocol: the whole payload is one
     /// bounded request body, completed through the line-protocol
     /// pipeline the HTTP write endpoints use (one COPY statement is one
@@ -95,6 +99,7 @@ impl CopyFormat {
         match self {
             CopyFormat::Csv(_) => "csv",
             CopyFormat::Jsonl(_) => "jsonl",
+            CopyFormat::Arrow(_) => "arrow",
             CopyFormat::Influxdb(_) => "influxdb",
             CopyFormat::Otlp(_) => "otlp",
             CopyFormat::PromWrite(_) => "promwrite",
@@ -104,8 +109,8 @@ impl CopyFormat {
 
 /// A table-bound COPY format: records decode against the targeted
 /// table's columns into insertable rows (csv, jsonl). Implemented by
-/// the codec config structs; the copy lifecycle treats every
-/// table-bound format identically through it.
+/// the codec config structs; the copy lifecycle treats these row-based
+/// formats identically through it. Arrow IPC uses a separate bulk-ingestion path.
 pub(crate) trait TableBoundCodec: Send + Sync {
     /// Validates that a column of `data_type` can be ingested.
     fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()>;

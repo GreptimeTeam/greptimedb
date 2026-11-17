@@ -13,11 +13,12 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
-| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, and native histogram columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
+| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, native histogram, and exemplar-label columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
 | `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
+| `auto_create_physical_table_timestamp_unit` | String | Unset | Time index unit for physical metric tables created by auto table creation<br/>(Prometheus remote write, OTLP metrics, and other metric-engine ingestion).<br/>New logical tables created under such a physical table inherit its unit.<br/>Options: "Second", "Millisecond" (default), "Microsecond", "Nanosecond". |
 | `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but such users cannot log in over MySQL:<br/>`static_user_provider` and `watch_file_user_provider` only negotiate `mysql_native_password`, which cannot verify these formats.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
-| `max_in_flight_write_bytes` | String | 0 | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
-| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
+| `max_in_flight_write_bytes` | String | 0 | Shared quota for concurrent write request bodies and messages (HTTP, gRPC, Flight)<br/>plus retained decoder memory and estimated PB-to-Arrow conversion memory for ordinary-table batching.<br/>A batch must fit together with its request's existing reservations; only additional memory is acquired.<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
+| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"<br/>Table-batch conversion never waits for additional memory. Under a wait policy,<br/>temporary contention returns a retryable error; requests that cannot fit are rejected. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
 | `max_concurrent_queries` | Integer | `0` | The maximum concurrent region-read streams. Zero means unlimited.<br/>A single query can consume multiple permits. |
@@ -259,7 +260,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
@@ -291,11 +292,12 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
-| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, and native histogram columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
+| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, native histogram, and exemplar-label columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
 | `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
+| `auto_create_physical_table_timestamp_unit` | String | Unset | Time index unit for physical metric tables created by auto table creation<br/>(Prometheus remote write, OTLP metrics, and other metric-engine ingestion).<br/>New logical tables created under such a physical table inherit its unit.<br/>Options: "Second", "Millisecond" (default), "Microsecond", "Nanosecond". |
 | `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but such users cannot log in over MySQL:<br/>`static_user_provider` and `watch_file_user_provider` only negotiate `mysql_native_password`, which cannot verify these formats.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
-| `max_in_flight_write_bytes` | String | 0 | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
-| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
+| `max_in_flight_write_bytes` | String | 0 | Shared quota for concurrent write request bodies and messages (HTTP, gRPC, Flight)<br/>plus retained decoder memory and estimated PB-to-Arrow conversion memory for ordinary-table batching.<br/>A batch must fit together with its request's existing reservations; only additional memory is acquired.<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
+| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"<br/>Table-batch conversion never waits for additional memory. Under a wait policy,<br/>temporary contention returns a retryable error; requests that cannot fit are rejected. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | Auto | The number of threads to execute the runtime for global read operations.<br/>Defaults to max(num_cpus, 2). |
 | `runtime.compact_rt_size` | Integer | Auto | The number of threads to execute compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
@@ -420,7 +422,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
@@ -539,7 +541,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
@@ -555,7 +557,7 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `node_id` | Integer | Unset | The datanode identifier and should be unique in the cluster. |
-| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, and native histogram columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
+| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, native histogram, and exemplar-label columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
@@ -746,7 +748,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
@@ -807,7 +809,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |

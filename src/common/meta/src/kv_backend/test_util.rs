@@ -22,8 +22,8 @@ use crate::error::Result;
 use crate::kv_backend::txn::{Txn, TxnResponse};
 use crate::kv_backend::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, KvBackend, PutRequest, PutResponse,
-    RangeRequest, RangeResponse, TxnService,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, KvBackend, KvBackendRef, PutRequest,
+    PutResponse, RangeRequest, RangeResponse, TxnService,
 };
 
 pub type MockFn<Req, Resp> = Arc<dyn Fn(Req) -> Result<Resp> + Send + Sync>;
@@ -131,5 +131,62 @@ impl KvBackend for MockKvBackend {
         } else {
             unimplemented!()
         }
+    }
+}
+
+/// A [KvBackend] that runs `before_txn` before each transaction of `inner`.
+pub struct TxnObservingKvBackend {
+    /// The kv backend every request is forwarded to.
+    pub inner: KvBackendRef,
+    /// Runs before each transaction is forwarded to `inner`.
+    pub before_txn: Box<dyn Fn() + Send + Sync>,
+}
+
+#[async_trait::async_trait]
+impl TxnService for TxnObservingKvBackend {
+    type Error = crate::error::Error;
+
+    async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
+        (self.before_txn)();
+        self.inner.txn(txn).await
+    }
+
+    fn max_txn_ops(&self) -> usize {
+        self.inner.max_txn_ops()
+    }
+}
+
+#[async_trait::async_trait]
+impl KvBackend for TxnObservingKvBackend {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+        self.inner.range(req).await
+    }
+
+    async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+        self.inner.put(req).await
+    }
+
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        self.inner.batch_put(req).await
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        self.inner.batch_get(req).await
+    }
+
+    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        self.inner.delete_range(req).await
+    }
+
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        self.inner.batch_delete(req).await
     }
 }

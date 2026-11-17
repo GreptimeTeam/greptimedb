@@ -2519,7 +2519,7 @@ async fn test_request_cancel_state_transitions() {
     let state = status.start_local_task();
 
     assert_eq!(status.request_cancel(), RequestCancelResult::CancelIssued);
-    assert!(state.cancel_handle().is_cancelled());
+    assert!(state.cancel_token().is_cancelled());
     assert_eq!(
         status.request_cancel(),
         RequestCancelResult::AlreadyCancelling

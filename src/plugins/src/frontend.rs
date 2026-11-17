@@ -18,6 +18,7 @@ use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
 use common_base::Plugins;
 use common_base::secrets::ExposeSecret;
 use common_meta::cache::CacheRegistryBuilder;
+use common_meta::cache_invalidator::KvCacheInvalidatorRef;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::FrontendHeartbeatExtensions;
@@ -87,7 +88,10 @@ pub async fn start_frontend_plugins(_instance: &Instance) -> Result<()> {
 }
 
 /// Allows frontend plugins to add cache invalidators to the layered registry.
-pub fn configure_cache_registry(_plugins: &Plugins) -> Option<CacheRegistryBuilder> {
+pub fn configure_cache_registry(
+    _plugins: &Plugins,
+    _kv_cache: KvCacheInvalidatorRef,
+) -> Option<CacheRegistryBuilder> {
     None
 }
 
