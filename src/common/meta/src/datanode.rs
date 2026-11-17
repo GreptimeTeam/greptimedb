@@ -790,46 +790,36 @@ mod tests {
 
     #[test]
     fn test_has_pending_tails_wire() {
-        // A statistic of a release without the field.
-        let legacy: RegionStatistic = serde_json::from_str(
-            r#"{"memtable_size":0,"wal_size":0,"manifest_size":0,"sst_size":0,"sst_num":0}"#,
-        )
-        .unwrap();
-        assert!(!legacy.has_pending_tails);
-        for has_pending_tails in [false, true] {
-            let statistic = RegionStatistic {
-                has_pending_tails,
-                ..Default::default()
-            };
-            // Only a true flag is written, so a false one keeps the encoding of a release
-            // without the field.
-            let encoded = serde_json::to_value(&statistic).unwrap();
-            assert_eq!(
-                encoded.get("has_pending_tails").is_some(),
-                has_pending_tails
-            );
-            let mut region = api::v1::meta::RegionStat::default();
-            region.extensions.insert(
-                REGION_STATISTIC_KEY.to_string(),
-                serde_json::to_vec(&statistic).unwrap(),
-            );
-            let stat = RegionStat::from(&region);
-            assert_eq!(stat.has_pending_tails, has_pending_tails);
+        // Frozen encodings of a release without the field.
+        let legacy_statistic: &[u8] = include_bytes!(
+            "../../../../tests/compatibility/wire/region_statistic_pending_tails/legacy_region_statistic.json"
+        );
+        let legacy_stat: &[u8] = include_bytes!(
+            "../../../../tests/compatibility/wire/region_statistic_pending_tails/legacy_region_stat.json"
+        );
+        let statistic: RegionStatistic = serde_json::from_slice(legacy_statistic).unwrap();
+        assert!(!statistic.has_pending_tails);
+        // A false flag is not written, so the encoding stays as it was.
+        assert_eq!(serde_json::to_vec(&statistic).unwrap(), legacy_statistic);
+        let stat: RegionStat = serde_json::from_slice(legacy_stat).unwrap();
+        assert!(!stat.has_pending_tails);
+        assert_eq!(serde_json::to_vec(&stat).unwrap(), legacy_stat);
 
-            let mut wire = serde_json::to_value(&stat).unwrap();
-            assert_eq!(wire.get("has_pending_tails").is_some(), has_pending_tails);
-            assert_eq!(
-                serde_json::from_value::<RegionStat>(wire.clone()).unwrap(),
-                stat
-            );
-            // A stored statistic of a release without the field.
-            wire.as_object_mut().unwrap().remove("has_pending_tails");
-            assert!(
-                !serde_json::from_value::<RegionStat>(wire)
-                    .unwrap()
-                    .has_pending_tails
-            );
-        }
+        // A true flag travels from the heartbeat extension to the stored statistic.
+        let statistic = RegionStatistic {
+            has_pending_tails: true,
+            ..statistic
+        };
+        let mut region = api::v1::meta::RegionStat::default();
+        region.extensions.insert(
+            REGION_STATISTIC_KEY.to_string(),
+            serde_json::to_vec(&statistic).unwrap(),
+        );
+        let stat = RegionStat::from(&region);
+        assert!(stat.has_pending_tails);
+        let stored: RegionStat =
+            serde_json::from_slice(&serde_json::to_vec(&stat).unwrap()).unwrap();
+        assert_eq!(stored, stat);
     }
 
     #[test]
