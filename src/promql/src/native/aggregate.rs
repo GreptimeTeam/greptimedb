@@ -57,8 +57,7 @@ use datatypes::series::time::{EvalGrid, GridRange, TimeAxis, union_positions};
 
 use crate::aggregate::{
     AggregateOp, FloatAggregator, FloatMerger, Grouping, HistogramEvidence, HistogramSamples,
-    aggregate_quantile,
-    histogram_samples, validate_aggregate_series,
+    aggregate_quantile, histogram_samples, validate_aggregate_series,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{GridSeriesBuilder, series_bytes};

@@ -12329,6 +12329,7 @@ fn quantile_answers_what_the_kernel_answers() {
                 kind: AggregateKind::Quantile { quantile: 0.9 },
                 group: grouping.clone(),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         ))
         .unwrap();
@@ -12399,6 +12400,7 @@ fn quantile_parameter_costs_the_points_held_not_the_span_between_them() {
             kind: AggregateKind::Quantile { quantile: 0.5 },
             group: Grouping::By(Arc::new([])),
             stage: AggregateStage::Complete,
+            field_kind: FieldKind::Float,
         },
     ))
     .unwrap();
@@ -12445,6 +12447,7 @@ fn a_quantile_over_no_input_answers_nothing() {
             kind: AggregateKind::Quantile { quantile: 0.5 },
             group: Grouping::By(Arc::new([])),
             stage: AggregateStage::Complete,
+            field_kind: FieldKind::Float,
         },
     ))
     .unwrap();
@@ -12510,6 +12513,7 @@ fn a_quantile_bills_a_shared_buffer_once() {
                 kind,
                 group: Grouping::By(Arc::new([])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         ))
         .unwrap();
@@ -12568,6 +12572,7 @@ fn a_quantile_bills_the_allocation_its_slices_point_into_once() {
             kind: AggregateKind::Quantile { quantile: 0.5 },
             group: Grouping::By(Arc::new([])),
             stage: AggregateStage::Complete,
+            field_kind: FieldKind::Float,
         },
     ))
     .unwrap();
@@ -12653,6 +12658,7 @@ fn a_quantile_skips_histogram_samples_and_reports_it_like_min() {
                 kind,
                 group: Grouping::By(Arc::new([])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         ))
         .unwrap();
@@ -12737,7 +12743,7 @@ fn a_quantile_stage_the_runtime_does_not_compute_is_named() {
     // The state layout a `Sum` exports is enough to build the stage's tree: what this test asks is
     // which stages the runtime starts, and a `quantile` state is refused before it is read.
     let (state_kind, components) =
-        crate::native::plan::aggregate_state_binding(AggregateKind::Sum).unwrap();
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum, FieldKind::Float).unwrap();
     let state_schema = || {
         Arc::new(AggregateStateSchema {
             group: Grouping::By(Arc::new([])),
@@ -12770,6 +12776,7 @@ fn a_quantile_stage_the_runtime_does_not_compute_is_named() {
                 kind: AggregateKind::Quantile { quantile: 0.5 },
                 group: Grouping::By(Arc::new([])),
                 stage,
+                field_kind: FieldKind::Float,
             },
             output,
         )

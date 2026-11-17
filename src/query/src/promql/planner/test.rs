@@ -4793,35 +4793,83 @@ async fn native_composed_binary_admits_complex_operands() {
         assert!(!display.contains("Join:"), "{query}: {display}");
     }
 
-    // An operand that folds a histogram column is still refused: `sum` has no histogram state to
-    // fold into, so a second fold above one cannot be composed either.
-    for query in [
-        "hist * on(tag_0) sum by (tag_0) (hist)",
-        "hist * on(tag_0) sum by (tag_0) (sum(hist))",
-    ] {
-        let plan =
-            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
-                .await;
-        let display = plan.display_indent().to_string();
-        assert!(
-            find_fused_series(&plan).is_none(),
-            "`{query}` has no composed answer: {display}"
-        );
-        let legacy = PromPlanner::stmt_to_plan_with_annotations(
-            native_mixed_kind_provider().await,
-            &build_eval_stmt(query),
-            &build_query_engine_state(),
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            legacy.display_indent().to_string(),
-            display,
-            "`{query}` must keep the existing plan"
-        );
-    }
+    // An operand that folds a histogram column composes too, even when the pair itself answers
+    // nothing: `histogram * histogram` is not an error in Prometheus. The operator is restricted
+    // to `+` and `-`, and any other one removes the element and files an info annotation
+    // (`vector_match::unsupported_histogram_arithmetic`), which is what the native matcher answers
+    // for this pair. So the pair is admitted exactly like the ones above, with one difference the
+    // column has to carry: no sample can come out of it, and admission keeps the legacy float
+    // layout for that empty answer - "With no possible samples, retain the legacy float layout for
+    // an empty result" (`native::plan::binary_output_field_kind`, whose
+    // `(Histogram, Mul, Histogram)` case `native/plan/tests.rs` pins). Nothing falls back, so the
+    // statement is not compared against the existing plan.
+    let fused_query = "hist * on(tag_0) sum by (tag_0) (hist)";
+    let plan = build_native_fused_plan_with_provider(
+        fused_query,
+        true,
+        native_mixed_kind_provider().await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{fused_query}: {display}"));
+    assert!(
+        matches!(fused.tree().root().expr, NativeExpr::Binary { .. }),
+        "{fused_query}: the statement root matches two frames: {display}"
+    );
+    assert_eq!(2, fused.children().len(), "{fused_query}: {display}");
+    assert!(!display.contains("Join:"), "{fused_query}: {display}");
+    let operand = find_fused_series(&fused.children()[1])
+        .unwrap_or_else(|| panic!("{fused_query}: missing aggregate operand frame: {display}"));
+    assert_eq!(
+        promql::extension_plan::FusedOutputFormat::SeriesFrame,
+        operand.format(),
+        "{fused_query}: {display}"
+    );
+    // The operand is the split's `Final` half: it merges the state the `Partial` half exported.
+    assert!(
+        operand.reads_aggregate_state(),
+        "{fused_query}: the operand must be the Final half: {display}"
+    );
+    // Both operands answer histograms - `hist` is one and `sum` folds one - so a float column here
+    // is the empty layout itself rather than a float sample: a pair that answered a histogram would
+    // declare the histogram struct instead.
+    assert_eq!(
+        &ArrowDataType::Float64,
+        native_value_field(fused, fused_query).data_type(),
+        "{fused_query}: the empty answer keeps the legacy float layout: {display}"
+    );
+
+    // A fold above a fold is still refused, and not because the inner one has no histogram state:
+    // `sum(sum(hist))` is an aggregate over a split aggregate, which the split declines
+    // ("an aggregate above a split aggregate"), so the state that inner fold exports cannot cross
+    // the boundary. A tree that binds histogram state anywhere and whose split declined keeps the
+    // existing plan, so the whole statement is answered there rather than segmented.
+    let refused_query = "hist * on(tag_0) sum by (tag_0) (sum(hist))";
+    let plan = build_native_fused_plan_with_provider(
+        refused_query,
+        true,
+        native_mixed_kind_provider().await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "`{refused_query}` has no composed answer: {display}"
+    );
+    let legacy = PromPlanner::stmt_to_plan_with_annotations(
+        native_mixed_kind_provider().await,
+        &build_eval_stmt(refused_query),
+        &build_query_engine_state(),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy.display_indent().to_string(),
+        display,
+        "`{refused_query}` must keep the existing plan"
+    );
 }
 
 /// A composed binary that meets a shape its kernels refuse keeps the existing plan.
