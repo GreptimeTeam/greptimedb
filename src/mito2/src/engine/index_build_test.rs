@@ -36,7 +36,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType};
 use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter};
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
     AddColumn, AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCloseRequest,
     RegionCompactRequest, RegionFlushRequest, RegionRequest, RegionTruncateRequest, SetIndexOption,
@@ -64,7 +64,8 @@ use crate::sst::index::{CompletedEntry, IndexBuildType};
 use crate::sst::location;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
+    CheckpointTaskBlocker, CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows,
+    reopen_region, rows_schema,
 };
 
 pub(crate) fn async_build_mode_config(is_create_on_flush: bool) -> MitoConfig {
@@ -3319,4 +3320,109 @@ async fn test_manual_rebuild_reports_budget_discard_of_new_plugin() {
             .contains(&IndexType::InvertedIndex)
     );
     engine.stop().await.unwrap();
+}
+
+/// Tests that the worker applies an index publication of a region, and serves other regions,
+/// while a graceful downgrade of that region waits for the pending checkpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_worker_serves_regions_while_downgrade_waits_for_checkpoint() {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
+    let mut env =
+        TestEnv::with_prefix("test_worker_serves_regions_while_downgrade_waits_for_checkpoint_")
+            .await
+            .with_mock_layer(mock_layer);
+    let gate = Arc::new(IndexPublicationGate::new(
+        IndexPublicationPhase::AfterManifestCommit,
+    ));
+    let mut config = async_build_mode_config(true);
+    config.num_workers = 1;
+    config.manifest_checkpoint_distance = 1;
+    let engine = env
+        .create_engine_with(config, None, Some(gate.clone()), None)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let other_region_id = RegionId::new(2, 1);
+    for (id, table_dir) in [(region_id, "test"), (other_region_id, "other")] {
+        env.get_schema_metadata_manager()
+            .register_region_table_info(
+                id.table_id(),
+                "test_table",
+                "test_catalog",
+                "test_schema",
+                None,
+                env.get_kv_backend(),
+            )
+            .await;
+        let request = CreateRequestBuilder::new()
+            .table_dir(table_dir)
+            .build_with_index();
+        engine
+            .handle_request(id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+    }
+    let column_schemas = rows_schema(&CreateRequestBuilder::new().build_with_index());
+
+    // The flush commit starts a checkpoint whose cleanup blocks. The index build of the flushed
+    // file then commits its own manifest version and stops before notifying the worker.
+    put_and_flush(&engine, region_id, &column_schemas, 0..20).await;
+    tokio::time::timeout(Duration::from_secs(10), blocker.wait_until_blocked())
+        .await
+        .expect("checkpoint cleanup did not start");
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(1))
+        .await
+        .expect("index build did not commit the manifest");
+
+    let region = engine.get_region(region_id).unwrap();
+    let wait_started = region
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .checkpointer()
+        .pending_checkpoint_wait_started();
+    // Register before starting the transition so the notification cannot be lost.
+    let wait_started = wait_started.notified();
+    let engine_for_downgrade = engine.clone();
+    let downgrade = tokio::spawn(async move {
+        engine_for_downgrade
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), wait_started)
+        .await
+        .expect("downgrade did not start waiting for the checkpoint");
+
+    // The worker handles the index publication of the downgrading region, which reads its
+    // manifest, and then a write to the other region.
+    gate.release(1);
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_finished(1))
+        .await
+        .expect("worker did not apply the index publication");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        put_rows(
+            &engine,
+            other_region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: build_rows(0, 1),
+            },
+        ),
+    )
+    .await
+    .expect("write to another region on the same worker blocked");
+    assert!(
+        !downgrade.is_finished(),
+        "downgrade returned before checkpoint cleanup finished"
+    );
+
+    blocker.release();
+    let response = tokio::time::timeout(Duration::from_secs(10), downgrade)
+        .await
+        .expect("downgrade did not finish")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(response, SetRegionRoleStateResponse::Success(_)));
 }
