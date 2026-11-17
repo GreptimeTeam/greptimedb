@@ -139,46 +139,10 @@ impl MultiDimPartitionRule {
             }
         );
 
-        if matches!(self.eval_context, PartitionEvalContext::WithTableId { .. }) {
-            let mut fields = Vec::new();
-            let mut arrays = Vec::new();
-            for (name, value) in self.partition_columns.iter().zip(values) {
-                if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
-                    continue;
-                }
-                let vector = Helper::try_from_row_into_vector(
-                    std::slice::from_ref(value),
-                    &value.data_type(),
-                )
-                .context(error::ConvertToVectorSnafu)?;
-                let array = vector.to_arrow_array();
-                fields.push(Field::new(name, array.data_type().clone(), true));
-                arrays.push(array);
-            }
-            let batch = RecordBatch::try_new_with_options(
-                Arc::new(Schema::new(fields)),
-                arrays,
-                &RecordBatchOptions::new().with_row_count(Some(1)),
-            )
-            .context(error::ComputeArrowKernelSnafu)?;
-            let masks = self.split_record_batch(&batch)?;
-            return masks
-                .into_iter()
-                .find(|(_, mask)| !mask.select_none())
-                .map(|(region, _)| region)
-                .context(error::UnexpectedSnafu {
-                    err_msg: "No partition selected the row",
-                });
+        match self.eval_context {
+            PartitionEvalContext::FromPayload => self.find_region_from_payload(values),
+            PartitionEvalContext::WithTableId { .. } => self.find_region_with_context(values),
         }
-
-        for (region_index, expr) in self.exprs.iter().enumerate() {
-            if self.evaluate_expr(expr, values)? {
-                return Ok(self.regions[region_index]);
-            }
-        }
-
-        // return the default region number
-        Ok(DEFAULT_REGION)
     }
 
     fn evaluate_expr(&self, expr: &PartitionExpr, values: &[Value]) -> Result<bool> {
@@ -307,46 +271,8 @@ impl MultiDimPartitionRule {
         &self,
         record_batch: &RecordBatch,
     ) -> Result<HashMap<RegionNumber, RegionMask>> {
-        let routing_batch;
-        let record_batch = if let PartitionEvalContext::WithTableId { table_id } = self.eval_context
-            && self.partition_columns.iter().any(|name| {
-                name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
-                    || record_batch.column_by_name(name).is_none()
-            }) {
-            // Materialize only the routing input. The original write payload stays logical.
-            let mut fields = Vec::with_capacity(record_batch.num_columns() + 1);
-            let mut columns = Vec::with_capacity(record_batch.num_columns() + 1);
-            for (field, column) in record_batch
-                .schema()
-                .fields()
-                .iter()
-                .zip(record_batch.columns())
-            {
-                if field.name() != DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
-                    fields.push(field.clone());
-                    columns.push(column.clone());
-                }
-            }
-            for name in &self.partition_columns {
-                if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
-                    fields.push(Arc::new(Field::new(name, ArrowDataType::UInt32, false)));
-                    columns.push(Arc::new(UInt32Array::from(vec![
-                        table_id;
-                        record_batch.num_rows()
-                    ])));
-                } else if record_batch.column_by_name(name).is_none() {
-                    // The manager validates these columns against the logical schema.
-                    // Omitted payload columns retain row routing's NULL semantics.
-                    fields.push(Arc::new(Field::new(name, ArrowDataType::Null, true)));
-                    columns.push(Arc::new(NullArray::new(record_batch.num_rows())));
-                }
-            }
-            routing_batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
-                .context(error::ComputeArrowKernelSnafu)?;
-            &routing_batch
-        } else {
-            record_batch
-        };
+        let routing_batch = self.build_routing_batch(record_batch)?;
+        let record_batch = routing_batch.as_ref().unwrap_or(record_batch);
         let num_rows = record_batch.num_rows();
         if self.regions.len() == 1 {
             return Ok([(
@@ -454,6 +380,96 @@ impl MultiDimPartitionRule {
             }
         }
         Ok(result)
+    }
+
+    /// Finds a region using the supplied scalar partition values.
+    fn find_region_from_payload(&self, values: &[Value]) -> Result<RegionNumber> {
+        for (region_index, expr) in self.exprs.iter().enumerate() {
+            if self.evaluate_expr(expr, values)? {
+                return Ok(self.regions[region_index]);
+            }
+        }
+
+        // return the default region number
+        Ok(DEFAULT_REGION)
+    }
+
+    /// Evaluates one row through the same context-aware batch path as bulk writes.
+    fn find_region_with_context(&self, values: &[Value]) -> Result<RegionNumber> {
+        let mut fields = Vec::new();
+        let mut arrays = Vec::new();
+        for (name, value) in self.partition_columns.iter().zip(values) {
+            if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                continue;
+            }
+            let vector =
+                Helper::try_from_row_into_vector(std::slice::from_ref(value), &value.data_type())
+                    .context(error::ConvertToVectorSnafu)?;
+            let array = vector.to_arrow_array();
+            fields.push(Field::new(name, array.data_type().clone(), true));
+            arrays.push(array);
+        }
+        let batch = RecordBatch::try_new_with_options(
+            Arc::new(Schema::new(fields)),
+            arrays,
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .context(error::ComputeArrowKernelSnafu)?;
+        let masks = self.split_record_batch(&batch)?;
+        masks
+            .into_iter()
+            .find(|(_, mask)| !mask.select_none())
+            .map(|(region, _)| region)
+            .context(error::UnexpectedSnafu {
+                err_msg: "No partition selected the row",
+            })
+    }
+
+    /// Supplies contextual identity and missing payload inputs for complete expressions.
+    /// Other partition columns remain in the batch, so mixed-column predicates use
+    /// the same evaluator as predicates over table id alone.
+    fn build_routing_batch(&self, record_batch: &RecordBatch) -> Result<Option<RecordBatch>> {
+        let PartitionEvalContext::WithTableId { table_id } = self.eval_context else {
+            return Ok(None);
+        };
+        let needs_inputs = self.partition_columns.iter().any(|name| {
+            name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME || record_batch.column_by_name(name).is_none()
+        });
+        if !needs_inputs {
+            return Ok(None);
+        }
+
+        // Materialize only the routing input. The original write payload stays logical.
+        let mut fields = Vec::with_capacity(record_batch.num_columns() + 1);
+        let mut columns = Vec::with_capacity(record_batch.num_columns() + 1);
+        for (field, column) in record_batch
+            .schema()
+            .fields()
+            .iter()
+            .zip(record_batch.columns())
+        {
+            if field.name() != DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                fields.push(field.clone());
+                columns.push(column.clone());
+            }
+        }
+        for name in &self.partition_columns {
+            if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                fields.push(Arc::new(Field::new(name, ArrowDataType::UInt32, false)));
+                columns.push(Arc::new(UInt32Array::from(vec![
+                    table_id;
+                    record_batch.num_rows()
+                ])));
+            } else if record_batch.column_by_name(name).is_none() {
+                // The manager validates these columns against the logical schema.
+                // Omitted payload columns retain row routing's NULL semantics.
+                fields.push(Arc::new(Field::new(name, ArrowDataType::Null, true)));
+                columns.push(Arc::new(NullArray::new(record_batch.num_rows())));
+            }
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .map(Some)
+            .context(error::ComputeArrowKernelSnafu)
     }
 
     fn plan_physical_exprs(&self, input_schema: Arc<Schema>) -> Result<PhysicalPartitionExprs> {

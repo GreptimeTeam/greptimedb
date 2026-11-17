@@ -388,12 +388,14 @@ mod tests {
 
     #[test]
     fn test_physical_batch_routes_each_logical_table_id() {
-        use crate::batcher::logical_table::test_util::mock_aligned_tag_batch;
         use arrow::array::UInt32Array;
         use datatypes::value::Value;
         use partition::expr::col;
         use partition::multi_dim::MultiDimPartitionRule;
         use partition::partition::PartitionEvalContext;
+        use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
+
+        use crate::batcher::logical_table::test_util::mock_aligned_tag_batch;
 
         let tables = [10, 20].map(|table_id| TableBatch {
             table_name: format!("metric_{table_id}"),
@@ -410,11 +412,11 @@ mod tests {
         .unwrap();
         let combined = batch_convert::concat_modified_batches(&modified, &tables).unwrap();
         let rule = MultiDimPartitionRule::try_new(
-            vec!["__table_id".to_string()],
+            vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string()],
             vec![1, 2],
             vec![
-                col("__table_id").lt(Value::UInt32(15)),
-                col("__table_id").gt_eq(Value::UInt32(15)),
+                col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME).lt(Value::UInt32(15)),
+                col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME).gt_eq(Value::UInt32(15)),
             ],
             true,
         )
@@ -437,7 +439,7 @@ mod tests {
                 .unwrap();
             assert_eq!(decoded, combined.slice(index, 1));
             let ids = decoded
-                .column_by_name("__table_id")
+                .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
                 .unwrap()
                 .as_any()
                 .downcast_ref::<UInt32Array>()

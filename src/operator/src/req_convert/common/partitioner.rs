@@ -29,7 +29,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::row_converter::sparse::{SparseOffsetsCache, SparsePrimaryKeyView};
 use partition::PartitionRuleRef;
 use partition::manager::PartitionRuleManager;
-use partition::partition::{PartitionEvalContext, RegionMask};
+use partition::partition::RegionMask;
 use partition::splitter::RowSplitter;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::consts;
@@ -645,10 +645,7 @@ impl TablePartitioner {
         region_id: RegionId,
         version: Option<PartitionExprVersion>,
     ) -> bool {
-        // Logical writes must be evaluated again with their table identity after a
-        // route refresh, even if the old physical region still has the same version.
-        self.rule.eval_context() == PartitionEvalContext::FromPayload
-            && region_id.table_id() == self.table_id
+        region_id.table_id() == self.table_id
             && self.versions.get(&region_id.region_number()) == Some(&version)
     }
 
@@ -689,6 +686,7 @@ mod tests {
     use partition::expr;
     use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
     use partition::multi_dim::MultiDimPartitionRule;
+    use partition::partition::PartitionEvalContext;
     use store_api::metric_engine_consts;
 
     use super::*;
@@ -787,7 +785,11 @@ mod tests {
         let table_info = build_sparse_table_info();
         let batch = build_sparse_batch();
         let mut fields = batch.schema().fields().to_vec();
-        fields.push(Arc::new(Field::new("__table_id", DataType::UInt32, false)));
+        fields.push(Arc::new(Field::new(
+            metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            DataType::UInt32,
+            false,
+        )));
         let mut columns = batch.columns().to_vec();
         columns.push(Arc::new(UInt32Array::from(vec![42, 43, 44, 45, 46])));
         let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
@@ -805,11 +807,13 @@ mod tests {
             table_id: 1,
             rule: Arc::new(
                 MultiDimPartitionRule::try_new(
-                    vec!["__table_id".to_string()],
+                    vec![metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string()],
                     vec![1, 2],
                     vec![
-                        expr::col("__table_id").lt(DataValue::UInt32(44)),
-                        expr::col("__table_id").gt_eq(DataValue::UInt32(44)),
+                        expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                            .lt(DataValue::UInt32(44)),
+                        expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                            .gt_eq(DataValue::UInt32(44)),
                     ],
                     true,
                 )
@@ -857,10 +861,7 @@ mod tests {
             let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
                 unreachable!()
             };
-            let decoded = FlightDecoder::try_from_schema_bytes(&ipc.schema)
-                .unwrap()
-                .try_decode_record_batch(&ipc.data_header, &ipc.payload)
-                .unwrap();
+            let decoded = decode_ipc(&ipc);
             let (offset, len) = if index == 0 { (0, 2) } else { (2, 3) };
             assert_eq!(decoded, batch.slice(offset, len));
             assert_eq!(owners, Some((offset..offset + len).collect()));
@@ -999,10 +1000,7 @@ mod tests {
             let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = bulk.body else {
                 unreachable!()
             };
-            let actual = FlightDecoder::try_from_schema_bytes(&ipc.schema)
-                .unwrap()
-                .try_decode_record_batch(&ipc.data_header, &ipc.payload)
-                .unwrap();
+            let actual = decode_ipc(&ipc);
             let mask = if RegionId::from_u64(bulk.region_id).region_number() == 1 {
                 vec![true, false, true, true, true]
             } else {
@@ -1224,7 +1222,7 @@ mod tests {
             );
             assert_eq!(
                 partitioner.rule.eval_context(),
-                partition::partition::PartitionEvalContext::WithTableId { table_id }
+                PartitionEvalContext::WithTableId { table_id }
             );
             assert_eq!(partitioner.versions.len(), 3);
             let version = partitioner.version(expected_region);
@@ -1261,27 +1259,39 @@ mod tests {
             assert_eq!(split_rows.rows.as_ptr(), split_pointer);
             assert_eq!(split_version, &version.map(|version| version.value));
 
-            // A stale target is rerouted even though its region still exists.
             for insert in [true, false] {
+                // A leader change can reuse a correctly routed request with the same version.
+                let request = if insert {
+                    build_request(Body::Inserts(InsertRequests {
+                        requests: inserts.clone(),
+                    }))
+                } else {
+                    build_request(Body::Deletes(DeleteRequests {
+                        requests: deletes.clone(),
+                    }))
+                };
+                let pointer = row_request_parts(&request).2.rows.as_ptr();
+                let rebuilt = partitioner
+                    .rebuild_write_requests(request, &table_info)
+                    .unwrap();
+                assert_eq!(rebuilt.len(), 1);
+                let (region_id, rebuilt_version, rebuilt_rows) = row_request_parts(&rebuilt[0]);
+                assert_eq!(region_id, RegionId::new(table_id, expected_region).as_u64());
+                assert_eq!(rebuilt_version, version.map(|v| v.value));
+                assert_eq!(rebuilt_rows, &expected_rows);
+                assert_eq!(rebuilt_rows.rows.as_ptr(), pointer);
+
+                // Repartitioning replaces the old catch-all expression while retaining region 0.
+                let old_expr = expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                    .gt_eq(DataValue::UInt32(0))
+                    .as_json_str()
+                    .unwrap();
                 for stale_version in [
                     None,
-                    Some(common_base::hash::partition_expr_version(Some(
-                        &context_regions()[0]
-                            .1
-                            .as_ref()
-                            .unwrap()
-                            .as_json_str()
-                            .unwrap(),
-                    ))),
+                    Some(common_base::hash::partition_expr_version(Some(&old_expr))),
                 ] {
                     let mut stale =
                         build_row_request(expected_rows.clone(), insert, 0, stale_version);
-                    let stale_rows = match stale.body.as_ref().unwrap() {
-                        Body::Inserts(inserts) => inserts.requests[0].rows.as_ref().unwrap(),
-                        Body::Deletes(deletes) => deletes.requests[0].rows.as_ref().unwrap(),
-                        _ => unreachable!(),
-                    };
-                    let stale_pointer = stale_rows.rows.as_ptr();
                     match stale.body.as_mut().unwrap() {
                         Body::Inserts(inserts) => {
                             inserts.requests[0].region_id = RegionId::new(table_id, 0).as_u64()
@@ -1299,10 +1309,6 @@ mod tests {
                     assert_eq!(region_id, RegionId::new(table_id, expected_region).as_u64());
                     assert_eq!(rebuilt_version, version.map(|version| version.value));
                     assert_eq!(rebuilt_rows, &expected_rows);
-                    if expected_region == 0 && stale_version == version.map(|v| v.value) {
-                        // The target was already correct, so the payload is kept as is.
-                        assert_eq!(rebuilt_rows.rows.as_ptr(), stale_pointer);
-                    }
                 }
             }
         }
@@ -1416,19 +1422,28 @@ mod tests {
         assert_eq!(ipc.data_header, original.data_header);
         assert_eq!(ipc.payload, original.payload);
 
-        for version in [
-            None,
-            Some(PartitionExprVersion {
-                value: common_base::hash::partition_expr_version(Some(
-                    &context_regions()[0]
-                        .1
-                        .as_ref()
-                        .unwrap()
-                        .as_json_str()
-                        .unwrap(),
-                )),
-            }),
-        ] {
+        // Unchanged routing keeps schema alignment and ownership without rebuilding IPC.
+        let mut unchanged = requests[0].clone();
+        unchanged.aligned_schema_version = Some(AlignedSchemaVersion {
+            schema_version: 123,
+        });
+        let request = build_request(Body::BulkInsert(unchanged));
+        let rebuilt = partitioner
+            .rebuild_write_requests(request.clone(), &table_info)
+            .unwrap();
+        assert_eq!(rebuilt, vec![request.clone()]);
+        let owners = vec![0, 1, 2];
+        let owners_pointer = owners.as_ptr();
+        let tracked = partitioner
+            .rebuild_tracked_write_requests(request.clone(), &table_info, Some(owners))
+            .unwrap();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].0, request);
+        assert_eq!(tracked[0].1.as_ref().unwrap(), &[0, 1, 2]);
+        assert_eq!(tracked[0].1.as_ref().unwrap().as_ptr(), owners_pointer);
+
+        // Region 0 previously accepted all rows without a partition expression.
+        for version in [None, Some(PartitionExprVersion { value: 0 })] {
             let mut stale = requests[0].clone();
             stale.region_id = RegionId::new(1029, 0).as_u64();
             stale.partition_expr_version = version;
@@ -1526,10 +1541,7 @@ mod tests {
                 let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
                     unreachable!()
                 };
-                let decoded = FlightDecoder::try_from_schema_bytes(&ipc.schema)
-                    .unwrap()
-                    .try_decode_record_batch(&ipc.data_header, &ipc.payload)
-                    .unwrap();
+                let decoded = decode_ipc(&ipc);
                 assert_eq!(decoded.num_columns(), 1);
                 let actual = decoded
                     .column(0)
@@ -1545,13 +1557,8 @@ mod tests {
                         .collect::<Vec<_>>()
                 );
             }
-            // All physical regions and versions remain available, but retries re-evaluate ctx.
-            let mut stale = build_row_request(
-                build_rows(&[1, 20]),
-                true,
-                0,
-                partitioner.version(0).map(|v| v.value),
-            );
+            // The old unpartitioned region remains, but its expression has changed.
+            let mut stale = build_row_request(build_rows(&[1, 20]), true, 0, Some(0));
             let Some(Body::Inserts(inserts)) = stale.body.as_mut() else {
                 unreachable!()
             };
@@ -1589,6 +1596,13 @@ mod tests {
             backend,
         );
         (manager, cache)
+    }
+
+    fn decode_ipc(ipc: &ArrowIpc) -> RecordBatch {
+        FlightDecoder::try_from_schema_bytes(&ipc.schema)
+            .unwrap()
+            .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+            .unwrap()
     }
 
     fn build_request(body: Body) -> RegionRequest {
@@ -1800,10 +1814,7 @@ mod tests {
                 let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = bulk.body else {
                     panic!("expected Arrow IPC")
                 };
-                let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
-                    .unwrap()
-                    .try_decode_record_batch(&ipc.data_header, &ipc.payload)
-                    .unwrap();
+                let batch = decode_ipc(&ipc);
                 assert_eq!(batch.num_rows(), 1);
                 let values = batch
                     .column(0)
@@ -1964,10 +1975,7 @@ mod tests {
                     let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &request.body else {
                         panic!("expected Arrow IPC")
                     };
-                    let payload = FlightDecoder::try_from_schema_bytes(&ipc.schema)
-                        .unwrap()
-                        .try_decode_record_batch(&ipc.data_header, &ipc.payload)
-                        .unwrap();
+                    let payload = decode_ipc(ipc);
                     let actual_rows = payload
                         .column(0)
                         .as_any()

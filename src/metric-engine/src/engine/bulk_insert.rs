@@ -246,7 +246,8 @@ mod tests {
     use mito2::sst::parquet::metadata::MetadataLoader;
     use mito2::sst::parquet::reader::MetadataCacheMetrics;
     use store_api::metric_engine_consts::{
-        METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY, PRIMARY_KEY_ENCODING,
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+        PRIMARY_KEY_ENCODING,
     };
     use store_api::mito_engine_options::EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING;
     use store_api::path_utils::table_dir;
@@ -523,7 +524,11 @@ mod tests {
             // The batcher retains identity for routing; sparse storage still uses the
             // identity encoded in __primary_key, including after WAL recovery.
             let mut fields = physical_batch.schema().fields().to_vec();
-            fields.push(Arc::new(Field::new("__table_id", DataType::UInt32, false)));
+            fields.push(Arc::new(Field::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                DataType::UInt32,
+                false,
+            )));
             let mut columns = physical_batch.columns().to_vec();
             columns.push(Arc::new(datatypes::arrow::array::UInt32Array::from(vec![
                 logical_region_id.table_id(); physical_batch.num_rows()

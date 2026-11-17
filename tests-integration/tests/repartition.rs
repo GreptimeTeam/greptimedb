@@ -40,7 +40,7 @@ use session::Session;
 use session::context::{Channel, QueryContext, QueryContextRef};
 use sqlx::Row;
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metric_engine_consts::METRIC_DATA_REGION_GROUP;
+use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_DATA_REGION_GROUP};
 use store_api::storage::{RegionId, TableId};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{
@@ -49,7 +49,7 @@ use tests_integration::test_util::{
 };
 use tokio::sync::oneshot;
 
-// Keep each partition/format combination independent for object-store CI timeouts.
+/// Each partition/format combination uses its own cluster and test timeout.
 #[macro_export]
 macro_rules! table_id_partition_tests {
     ($service:ident, $(($name:ident, $mixed:expr, $hashed:expr, $flat:expr, $encoding:ident)),+ $(,)?) => {
@@ -1539,6 +1539,7 @@ ORDER BY partition_ordinal_position;",
     .unwrap();
 }
 
+/// Verifies table-id repartitioning, optionally with user columns and hash expressions.
 pub async fn test_partition_unpartitioned_metric_by_table_id(
     store_type: StorageType,
     mixed: bool,
@@ -1682,7 +1683,7 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
         };
         ("iceberg_hash(__table_id)", i64::from(boundary))
     } else {
-        ("__table_id", i64::from(high_table_id))
+        (DATA_SCHEMA_TABLE_ID_COLUMN_NAME, i64::from(high_table_id))
     };
     let partition_columns = if mixed {
         "`__table_id`, `host`"
@@ -1721,7 +1722,7 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
             .partition_rules()
             .unwrap()
             .extra_phy_cols_not_in_logical_table,
-        vec!["__table_id"]
+        vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME]
     );
 
     if mixed {
