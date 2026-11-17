@@ -599,6 +599,7 @@ fn aggregate_over_window(out: Arc<EvalGrid>) -> NativeTree {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Histogram,
             },
         },
         output: evaluated(out),

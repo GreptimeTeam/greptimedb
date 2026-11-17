@@ -7324,9 +7324,10 @@ async fn native_fused_quantile_is_never_folded_per_partition() {
             "partition on {partition_key_indices:?}: the quantile must not be split: {display}"
         );
         // The fold is above the prefixes: the node that holds it reads a segment rather than the
-        // scan, and the statement is still named by the quantile it wrote.
+        // scan, and the tree still shows the quantile the statement wrote rather than a fold of
+        // something else.
         assert!(
-            display.contains("quantile(0.5, some_metric)"),
+            display.contains("Aggregate: quantile 0.5"),
             "partition on {partition_key_indices:?}: {display}"
         );
     }
