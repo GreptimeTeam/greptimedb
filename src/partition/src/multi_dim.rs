@@ -80,7 +80,8 @@ pub struct MultiDimPartitionRule {
     /// Cache of physical expressions.
     #[serde(skip)]
     physical_expr_cache: RwLock<PhysicalExprCache>,
-    /// Write-local routing context; not persisted and defaults to Normal on deserialization.
+    /// Write-local routing context; not persisted. Deserialization defaults to
+    /// [`PartitionEvalContext::FromPayload`].
     #[serde(skip)]
     eval_context: PartitionEvalContext,
 }
@@ -108,7 +109,7 @@ impl MultiDimPartitionRule {
             regions,
             exprs,
             physical_expr_cache: RwLock::new(None),
-            eval_context: PartitionEvalContext::Normal,
+            eval_context: PartitionEvalContext::FromPayload,
         };
 
         if check_exprs {
@@ -138,7 +139,7 @@ impl MultiDimPartitionRule {
             }
         );
 
-        if matches!(self.eval_context, PartitionEvalContext::LogicalTable { .. }) {
+        if matches!(self.eval_context, PartitionEvalContext::WithTableId { .. }) {
             let mut fields = Vec::new();
             let mut arrays = Vec::new();
             for (name, value) in self.partition_columns.iter().zip(values) {
@@ -307,8 +308,7 @@ impl MultiDimPartitionRule {
         record_batch: &RecordBatch,
     ) -> Result<HashMap<RegionNumber, RegionMask>> {
         let routing_batch;
-        let record_batch = if let PartitionEvalContext::LogicalTable { table_id } =
-            self.eval_context
+        let record_batch = if let PartitionEvalContext::WithTableId { table_id } = self.eval_context
             && self.partition_columns.iter().any(|name| {
                 name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
                     || record_batch.column_by_name(name).is_none()
@@ -646,8 +646,7 @@ mod tests {
             .unwrap();
             let ordinary = rule.split_record_batch(&batch).unwrap();
             let serialized = serde_json::to_string(&rule).unwrap();
-            let rule =
-                rule.with_eval_context(PartitionEvalContext::LogicalTable { table_id: 1029 });
+            let rule = rule.with_eval_context(PartitionEvalContext::WithTableId { table_id: 1029 });
             assert_eq!(serde_json::to_string(&rule).unwrap(), serialized);
             let logical = rule
                 .split_record_batch(&batch.project(&[1]).unwrap())

@@ -519,6 +519,19 @@ mod tests {
             physical_batch.column_by_name("job").is_some(),
             retain_partition_columns
         );
+        let physical_batch = if retain_partition_columns {
+            // The batcher retains identity for routing; sparse storage still uses the
+            // identity encoded in __primary_key, including after WAL recovery.
+            let mut fields = physical_batch.schema().fields().to_vec();
+            fields.push(Arc::new(Field::new("__table_id", DataType::UInt32, false)));
+            let mut columns = physical_batch.columns().to_vec();
+            columns.push(Arc::new(datatypes::arrow::array::UInt32Array::from(vec![
+                logical_region_id.table_id(); physical_batch.num_rows()
+            ])));
+            RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).unwrap()
+        } else {
+            physical_batch
+        };
         let request = build_bulk_request(physical_region_id, physical_batch, skip_wal);
         let response = env
             .metric()

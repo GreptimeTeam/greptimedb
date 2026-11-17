@@ -256,11 +256,11 @@ impl PartitionRuleManager {
                     return error::UndefinedColumnSnafu { column }.fail();
                 }
             }
-            PartitionEvalContext::LogicalTable {
+            PartitionEvalContext::WithTableId {
                 table_id: table_info.table_id(),
             }
         } else {
-            PartitionEvalContext::Normal
+            PartitionEvalContext::FromPayload
         };
         let partition_rule = Arc::new(
             MultiDimPartitionRule::try_new(partition_columns, regions, exprs, false)?

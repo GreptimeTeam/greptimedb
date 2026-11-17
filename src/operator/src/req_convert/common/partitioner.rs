@@ -647,7 +647,7 @@ impl TablePartitioner {
     ) -> bool {
         // Logical writes must be evaluated again with their table identity after a
         // route refresh, even if the old physical region still has the same version.
-        self.rule.eval_context() == PartitionEvalContext::Normal
+        self.rule.eval_context() == PartitionEvalContext::FromPayload
             && region_id.table_id() == self.table_id
             && self.versions.get(&region_id.region_number()) == Some(&version)
     }
@@ -778,6 +778,93 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_physical_bulk_retry_preserves_per_row_table_ids() {
+        use datatypes::arrow::array::UInt32Array;
+
+        let table_info = build_sparse_table_info();
+        let batch = build_sparse_batch();
+        let mut fields = batch.schema().fields().to_vec();
+        fields.push(Arc::new(Field::new("__table_id", DataType::UInt32, false)));
+        let mut columns = batch.columns().to_vec();
+        columns.push(Arc::new(UInt32Array::from(vec![42, 43, 44, 45, 46])));
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        // Initially no partition uses table id, but the payload must retain it.
+        let initial = TablePartitioner {
+            table_id: 1,
+            rule: Arc::new(MultiDimPartitionRule::try_new(vec![], vec![1], vec![], false).unwrap()),
+            versions: HashMap::from([(1, Some(PartitionExprVersion { value: 1 }))]),
+        };
+        let requests = initial
+            .partition_bulk_insert_requests(batch.clone(), None, false)
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        let refreshed = TablePartitioner {
+            table_id: 1,
+            rule: Arc::new(
+                MultiDimPartitionRule::try_new(
+                    vec!["__table_id".to_string()],
+                    vec![1, 2],
+                    vec![
+                        expr::col("__table_id").lt(DataValue::UInt32(44)),
+                        expr::col("__table_id").gt_eq(DataValue::UInt32(44)),
+                    ],
+                    true,
+                )
+                .unwrap(),
+            ),
+            versions: HashMap::from([
+                (1, Some(PartitionExprVersion { value: 2 })),
+                (2, Some(PartitionExprVersion { value: 2 })),
+            ]),
+        };
+        assert_eq!(
+            refreshed.rule.eval_context(),
+            PartitionEvalContext::FromPayload
+        );
+        let request = build_request(Body::BulkInsert(requests[0].clone()));
+        let mut plain = refreshed
+            .rebuild_write_requests(request.clone(), &table_info)
+            .unwrap();
+        plain.sort_by_key(|r| match r.body.as_ref().unwrap() {
+            Body::BulkInsert(b) => b.region_id,
+            _ => unreachable!(),
+        });
+        let mut tracked = refreshed
+            .rebuild_tracked_write_requests(request, &table_info, Some(vec![0, 1, 2, 3, 4]))
+            .unwrap();
+        tracked.sort_by_key(|(r, _)| match r.body.as_ref().unwrap() {
+            Body::BulkInsert(b) => b.region_id,
+            _ => unreachable!(),
+        });
+        assert_eq!(plain.len(), 2);
+        assert_eq!(tracked.len(), 2);
+        for (index, (request, owners)) in tracked.into_iter().enumerate() {
+            assert_eq!(request.body, plain[index].body);
+            let Some(Body::BulkInsert(request)) = request.body else {
+                unreachable!()
+            };
+            assert_eq!(
+                request.region_id,
+                RegionId::new(1, index as u32 + 1).as_u64()
+            );
+            assert_eq!(
+                request.partition_expr_version,
+                Some(PartitionExprVersion { value: 2 })
+            );
+            let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
+                unreachable!()
+            };
+            let decoded = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                .unwrap()
+                .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                .unwrap();
+            let (offset, len) = if index == 0 { (0, 2) } else { (2, 3) };
+            assert_eq!(decoded, batch.slice(offset, len));
+            assert_eq!(owners, Some((offset..offset + len).collect()));
+        }
     }
 
     #[tokio::test]
@@ -1137,7 +1224,7 @@ mod tests {
             );
             assert_eq!(
                 partitioner.rule.eval_context(),
-                partition::partition::PartitionEvalContext::LogicalTable { table_id }
+                partition::partition::PartitionEvalContext::WithTableId { table_id }
             );
             assert_eq!(partitioner.versions.len(), 3);
             let version = partitioner.version(expected_region);

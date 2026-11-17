@@ -26,14 +26,21 @@ use crate::error::Result;
 
 pub type PartitionRuleRef = Arc<dyn PartitionRule>;
 
-/// Table identity available while evaluating a write's physical partition expressions.
+/// Supplies additional inputs when evaluating a write's physical partition expressions.
+/// The variants describe input sources, not whether the original write targets a logical table.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PartitionEvalContext {
-    /// Partition values come from the write payload.
+    /// Reads partition values directly from the payload.
+    /// Physical metric batches combining logical tables use this variant: their payload
+    /// carries a per-row `__table_id` column that is retained across routing retries.
     #[default]
-    Normal,
-    /// The internal table-id column comes from the logical table's identity.
-    LogicalTable { table_id: TableId },
+    FromPayload,
+    /// Supplies one table id for every row, overriding any payload `__table_id` value.
+    /// Used for single-logical-table writes whose payload omits internal columns.
+    /// Other partition values still come from the payload; omitted columns declared
+    /// in the logical schema are evaluated as NULL. Already-converted physical metric
+    /// batches carry per-row identities and use [`Self::FromPayload`] instead.
+    WithTableId { table_id: TableId },
 }
 
 pub trait PartitionRule: Sync + Send {
@@ -43,13 +50,13 @@ pub trait PartitionRule: Sync + Send {
 
     /// Context for this table's write routing; it is not shared physical-route metadata.
     fn eval_context(&self) -> PartitionEvalContext {
-        PartitionEvalContext::Normal
+        PartitionEvalContext::FromPayload
     }
 
     /// Finds the target region by the partition values.
     ///
     /// Note that the `values` should have the same length as the `partition_columns`.
-    /// With [`PartitionEvalContext::LogicalTable`], the context supplies `__table_id`;
+    /// With [`PartitionEvalContext::WithTableId`], the context supplies `__table_id`;
     /// the value in its payload slot is ignored.
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber>;
 

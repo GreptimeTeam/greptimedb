@@ -387,6 +387,66 @@ mod tests {
     }
 
     #[test]
+    fn test_physical_batch_routes_each_logical_table_id() {
+        use crate::batcher::logical_table::test_util::mock_aligned_tag_batch;
+        use arrow::array::UInt32Array;
+        use datatypes::value::Value;
+        use partition::expr::col;
+        use partition::multi_dim::MultiDimPartitionRule;
+        use partition::partition::PartitionEvalContext;
+
+        let tables = [10, 20].map(|table_id| TableBatch {
+            table_name: format!("metric_{table_id}"),
+            table_id,
+            batches: vec![mock_aligned_tag_batch("host", "node", 1000, 1.0)],
+            row_count: 1,
+        });
+        // Keep identity even when the rule at conversion time does not reference it.
+        let modified = batch_convert::transform_logical_batches_to_physical(
+            &tables,
+            &HashMap::from([("host".to_string(), 1)]),
+            &HashSet::new(),
+        )
+        .unwrap();
+        let combined = batch_convert::concat_modified_batches(&modified, &tables).unwrap();
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["__table_id".to_string()],
+            vec![1, 2],
+            vec![
+                col("__table_id").lt(Value::UInt32(15)),
+                col("__table_id").gt_eq(Value::UInt32(15)),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(rule.eval_context(), PartitionEvalContext::FromPayload);
+        let planned = plan_region_batches(combined.clone(), 1024, &rule).unwrap();
+        assert_eq!(planned.len(), 2);
+        for batch in planned {
+            let index = batch.region_id.region_number() as usize - 1;
+            let request = encode_region_write_request(batch, false, &HashMap::new()).unwrap();
+            let Some(region_request::Body::BulkInsert(request)) = request.body else {
+                panic!("expected bulk insert")
+            };
+            let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
+                panic!("expected IPC")
+            };
+            let decoded = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                .unwrap()
+                .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                .unwrap();
+            assert_eq!(decoded, combined.slice(index, 1));
+            let ids = decoded
+                .column_by_name("__table_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
+            assert_eq!(ids.values().as_ref(), &[tables[index].table_id]);
+        }
+    }
+
+    #[test]
     fn test_plan_region_batches_preserves_partition_columns_through_encoding() {
         let logical_batch = RecordBatch::try_new(
             Arc::new(ArrowSchema::new(vec![
@@ -419,7 +479,8 @@ mod tests {
             &HashSet::from(["host"]),
         )
         .unwrap();
-        let combined_batch = batch_convert::concat_modified_batches(&modified).unwrap();
+        let combined_batch =
+            batch_convert::concat_modified_batches(&modified, &table_batches).unwrap();
         assert!(combined_batch.column_by_name("host").is_some());
         assert!(combined_batch.column_by_name("zone").is_none());
         let expected = combined_batch.clone();
@@ -436,10 +497,10 @@ mod tests {
         assert_eq!(2, planned_batches.len());
         assert_eq!(RegionId::new(1024, 1), planned_batches[0].region_id);
         assert_eq!(1, planned_batches[0].num_rows());
-        assert_eq!(4, planned_batches[0].batch.num_columns());
+        assert_eq!(5, planned_batches[0].batch.num_columns());
         assert_eq!(RegionId::new(1024, 2), planned_batches[1].region_id);
         assert_eq!(1, planned_batches[1].num_rows());
-        assert_eq!(4, planned_batches[1].batch.num_columns());
+        assert_eq!(5, planned_batches[1].batch.num_columns());
 
         let partition_versions = HashMap::from([(1, Some(7)), (2, Some(8))]);
         for (index, planned) in planned_batches.into_iter().enumerate() {

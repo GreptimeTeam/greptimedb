@@ -120,7 +120,7 @@ impl<'a> SplitReadRowHelper<'a> {
     fn split_to_regions(&self) -> Result<HashMap<RegionNumber, Vec<usize>>> {
         if matches!(
             self.partition_rule.eval_context(),
-            PartitionEvalContext::LogicalTable { .. }
+            PartitionEvalContext::WithTableId { .. }
         ) {
             let batch = self.routing_batch()?;
             return Ok(self
@@ -377,7 +377,7 @@ mod tests {
             false,
         )
         .unwrap()
-        .with_eval_context(PartitionEvalContext::LogicalTable { table_id: 1025 });
+        .with_eval_context(PartitionEvalContext::WithTableId { table_id: 1025 });
         let splitter = RowSplitter::new(Arc::new(rule));
         for (datatype, values) in [
             (-1, vec![ValueData::I32Value(1).into()]),
