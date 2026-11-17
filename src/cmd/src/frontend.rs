@@ -384,7 +384,8 @@ impl StartCommand {
             &opts.component.tracing,
             opts.component.node_id.clone(),
             Some(&opts.component.slow_query),
-        );
+        )
+        .context(crate::error::InitLoggingSnafu)?;
 
         common_runtime::init_global_runtimes(&opts.runtime);
 

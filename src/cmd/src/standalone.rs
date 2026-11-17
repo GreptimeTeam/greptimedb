@@ -498,7 +498,8 @@ impl StartCommand {
             &opts.component.tracing,
             None,
             Some(&opts.component.slow_query),
-        );
+        )
+        .context(crate::error::InitLoggingSnafu)?;
 
         common_runtime::init_standalone_runtimes(&opts.runtime);
 
