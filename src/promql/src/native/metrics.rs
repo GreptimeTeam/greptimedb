@@ -32,6 +32,8 @@
 //! - `peak_reserved_bytes` alone carries `p<partition>`, because the reader sums gauges by name and
 //!   a sum of peaks is not a peak.
 
+use std::collections::HashMap;
+
 use datafusion::physical_plan::metrics::MetricValue;
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, Time,
@@ -88,6 +90,103 @@ impl NodeMetric {
     ];
 }
 
+/// The figures every node of one execution left, keyed by the path it was registered under.
+///
+/// A path is the one [`NodeMetrics::register`] was called with (`root`, `root.left`, ...), which is
+/// exactly what the runtime builds while it compiles the tree: a reader that walks the *same* tree
+/// reaches the same path for the same node, so a figure is found rather than guessed.
+///
+/// Partitions are combined here because a node is registered once per partition: counts and times
+/// add up, and `peak_reserved_bytes` — the one figure whose name carries its partition, because a
+/// sum of peaks is not a peak — is the highest of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeMetricsSnapshot {
+    nodes: HashMap<String, Vec<(String, usize)>>,
+}
+
+impl NodeMetricsSnapshot {
+    /// Reads every native node figure in `set`.
+    ///
+    /// `set` may hold other metrics, and holds nothing at all before an execution: a snapshot of a
+    /// plan that never ran is empty, which is how a plain `EXPLAIN` shows a tree without figures.
+    ///
+    /// The partitions of one node are combined here rather than by
+    /// [`MetricsSet::aggregate_by_name`](datafusion::physical_plan::metrics::MetricsSet::aggregate_by_name),
+    /// which adds at least one nanosecond to every time it touches: a node whose timer never ran
+    /// would then report time it did not spend.
+    pub fn read(set: &ExecutionPlanMetricsSet) -> Self {
+        let mut nodes: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+        for metric in set.clone_inner().iter() {
+            let Some((path, name)) = split_name(metric.value().name()) else {
+                continue;
+            };
+            let value = metric.value().as_usize();
+            let figures = nodes.entry(path.to_string()).or_default();
+            match figures.iter_mut().find(|(figure, _)| figure == name) {
+                // A peak is per partition because partitions peak at different moments: the node's
+                // peak is the highest of theirs, never their sum.
+                Some((_, accumulated)) if name == NodeMetric::PEAK_RESERVED_BYTES => {
+                    *accumulated = (*accumulated).max(value)
+                }
+                Some((_, accumulated)) => *accumulated = accumulated.saturating_add(value),
+                None => figures.push((name.to_string(), value)),
+            }
+        }
+        for figures in nodes.values_mut() {
+            figures.sort_by_key(|(name, _)| node_metric_order(name));
+        }
+        Self { nodes }
+    }
+
+    /// What this node recorded, as `name: value`, dropping the figures that are zero.
+    ///
+    /// A node registers every figure it may record, so a node that did one thing would otherwise
+    /// report ten things it did not: the tree would stop reading as a tree. A node that recorded
+    /// nothing therefore reports nothing, the same way one that never ran does.
+    pub fn described(&self, path: &str) -> Vec<(String, usize)> {
+        self.of(path)
+            .iter()
+            .filter(|(_, value)| *value != 0)
+            .cloned()
+            .collect()
+    }
+
+    /// What this node recorded, in [`NodeMetric::ALL`] order, or an empty list when it recorded
+    /// nothing.
+    pub fn of(&self, path: &str) -> &[(String, usize)] {
+        self.nodes.get(path).map(Vec::as_slice).unwrap_or_default()
+    }
+}
+
+/// Splits a registered metric name into the node path and the figure it reports.
+///
+/// A name is `native.<path>.<metric>`, and `native.p<partition>.<path>.<metric>` for a figure that
+/// is registered per partition. The partition belongs to that registration rather than to the
+/// node, so it is dropped here and its values are combined by [`NodeMetricsSnapshot::read`]. A name
+/// that is not one of this module's is not a node figure, and is left to whoever else reads `set`.
+fn split_name(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix(NATIVE_PREFIX)?.strip_prefix('.')?;
+    let rest = match rest.strip_prefix('p').and_then(|rest| rest.split_once('.')) {
+        Some((partition, rest))
+            if !partition.is_empty() && partition.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            rest
+        }
+        _ => rest,
+    };
+    let (path, metric) = rest.rsplit_once('.')?;
+    NodeMetric::ALL.contains(&metric).then_some((path, metric))
+}
+
+/// Where `metric` sits in the declared order, so a node's figures read the same on every node and
+/// on every run.
+fn node_metric_order(metric: &str) -> usize {
+    NodeMetric::ALL
+        .iter()
+        .position(|declared| *declared == metric)
+        .unwrap_or(usize::MAX)
+}
+
 /// The metric handles one node updates as it runs.
 ///
 /// The node writes these directly; it never looks a metric up by name, and it never formats a path
@@ -123,6 +222,12 @@ impl Default for NodeMetrics {
             state_entries: Gauge::new(),
         }
     }
+}
+
+/// Whether `name` is a figure a node of a native tree reports, rather than one of an operator.
+pub fn is_node_metric(name: &str) -> bool {
+    name.strip_prefix(NATIVE_PREFIX)
+        .is_some_and(|rest| rest.starts_with('.'))
 }
 
 /// The full metric name for `metric` reported by the node called `name`.
@@ -286,9 +391,11 @@ impl NodeMetrics {
 
 #[cfg(test)]
 mod tests {
-    use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue};
+    use datafusion::physical_plan::metrics::{
+        Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue,
+    };
 
-    use super::{NodeMetric, NodeMetrics};
+    use super::{NodeMetric, NodeMetrics, NodeMetricsSnapshot};
 
     fn metrics_named(set: &ExecutionPlanMetricsSet) -> Vec<String> {
         set.clone_inner()
@@ -379,6 +486,66 @@ mod tests {
         assert_eq!(
             peak(&second, "native.p1.root.peak_reserved_bytes"),
             Some(2048)
+        );
+    }
+
+    /// A node is registered once per partition, so one node's figures are the sum of its
+    /// partitions' - except the peak, which is the highest one, because partitions peak at
+    /// different moments.
+    #[test]
+    fn a_node_reports_one_set_of_figures_across_its_partitions() {
+        let set = ExecutionPlanMetricsSet::new();
+        for (partition, batches, samples, peak) in [(0, 2, 10, 1024), (1, 3, 20, 4096)] {
+            let metrics = NodeMetrics::default();
+            metrics.record_input(batches, samples);
+            metrics.record_reserved_bytes(peak);
+            metrics.register("root", &set, partition);
+        }
+
+        let snapshot = NodeMetricsSnapshot::read(&set);
+        let figure = |name: &str| {
+            snapshot
+                .of("root")
+                .iter()
+                .find_map(|(figure, value)| (figure == name).then_some(*value))
+                .unwrap_or_else(|| panic!("{name} is reported"))
+        };
+        assert_eq!(figure(NodeMetric::INPUT_BATCHES), 5);
+        assert_eq!(figure(NodeMetric::INPUT_SAMPLES), 30);
+        assert_eq!(figure(NodeMetric::PEAK_RESERVED_BYTES), 4096);
+    }
+
+    /// The path is what the registration named, and a partition segment is not part of it: the two
+    /// partitions above file under one node rather than under `p0.root` and `p1.root`.
+    #[test]
+    fn a_partition_belongs_to_the_registration_and_not_to_the_path() {
+        let set = ExecutionPlanMetricsSet::new();
+        NodeMetrics::default().register("root.left", &set, 7);
+
+        let snapshot = NodeMetricsSnapshot::read(&set);
+        assert!(!snapshot.of("root.left").is_empty());
+        assert!(snapshot.of("root").is_empty());
+        assert!(snapshot.of("p7.root.left").is_empty());
+    }
+
+    /// A metric this module did not name is not a node figure, so it is not filed under a node.
+    #[test]
+    fn a_name_outside_the_grammar_is_not_a_node_figure() {
+        let set = ExecutionPlanMetricsSet::new();
+        let metrics = NodeMetrics::default();
+        metrics.register("root", &set, 0);
+        MetricBuilder::new(&set).build(MetricValue::Count {
+            name: "output_rows".into(),
+            count: Count::new(),
+        });
+
+        let snapshot = NodeMetricsSnapshot::read(&set);
+        assert_eq!(snapshot.of("root").len(), NodeMetric::ALL.len());
+        assert!(
+            snapshot
+                .of("root")
+                .iter()
+                .all(|(name, _)| NodeMetric::ALL.contains(&name.as_str()))
         );
     }
 
