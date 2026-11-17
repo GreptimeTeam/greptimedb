@@ -25,6 +25,7 @@ use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_runtime::global::RuntimeOptions;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
 use common_test_util::temp_dir::create_named_temp_file;
+use common_time::timestamp::TimeUnit;
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
@@ -249,6 +250,7 @@ fn test_load_frontend_example_config() {
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
+            auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -430,6 +432,7 @@ fn test_load_standalone_example_config() {
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
+            auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
                 sync_period: Some(Duration::from_secs(5)),

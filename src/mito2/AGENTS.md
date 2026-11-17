@@ -87,6 +87,9 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   `tests/compatibility/manifest/table_compaction/` and
   `tests/compatibility/manifest/pending_tails/`.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
+- **Index extensions**: shared contracts and provider validation live in `sst/index/registry.rs`;
+  typed sketch options are enterprise-gated. Lifecycle and failure tests live in
+  `engine/index_build_test.rs` and `compaction/`.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may
@@ -195,6 +198,11 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Direct SST imports without a staging binding cannot publish into staging.
   `worker/handle_manifest.rs` seals edit admission while EnterStaging drains accepted
   edits. Scheduler-owned DDLs resume through execution, bypassing initial admission.
+- The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
+  region instance, so a reopen during catchup keeps it. Every path that removes a region from
+  a worker's region map must also remove its record: `RegionWorkerLoop::remove_region`
+  (`worker/handle_close.rs`, also used after a close-time flush), `drop_region`
+  (`worker/handle_drop.rs`) and `RegionWorkerLoop::clean` (`worker.rs`).
 
 ## Maintenance contract
 

@@ -174,9 +174,50 @@ To move the WAL to another location, stop the instance, copy every object under 
 
 The check does not catch every change of location. A location whose prefix already holds objects passes a region that never flushed, and a region whose watermark names an object at or below the newest object holding entries there, whatever history those objects hold. A refused start on an empty prefix leaves its start object behind when the process ends before the delete completes or when the delete fails, which is logged; the next start then finds a prefix with only start objects and passes a region that never flushed, while it still refuses every region whose watermark names an object. The same holds when the store created a region before the refusal. When it admitted an append or a release before the refusal, as it can when regions open while the instance already serves, the store withdraws nothing and the prefix keeps an object holding entries, which may already have collected the start object; the next start then also passes every region whose watermark names an object at or below that one.
 
-**Metrics.** The store exports metrics under `greptime_logstore_object_store_wal_`. The write path reports `seal_to_durable_seconds`, the time from sealing a batch until its object is durable, `append_ack_seconds`, the time an append waits for its acknowledgement in the `durable` mode, `object_bytes` and `object_entries`, the size and the entry count of every object sealed, and `created_objects_total`, the creates that succeeded, an identical retry included; a create is counted and timed whether or not its batch is still there to be indexed, since an object a poisoned store gave up on is as durable as any other. `indexed_objects` and `indexed_bytes` are the objects and the bytes the catalog holds, set by a recovery that succeeded and moved by every object indexed or unindexed afterwards, so a collection takes the object it deleted off both, and a recovery that is abandoned publishes neither. A recovery that succeeds reports `recovery_seconds` and the objects it read footers from in `recovered_objects_total`, both of the same recoveries, so one that is abandoned at a fetch or rejected by the catalog contributes to neither; a read stream reports `read_seconds` once it has been read to its end, and one that fails or is dropped part way reports nothing. The failure paths are counted: `create_conflicts_total` for a create that found a conflicting object, `create_failures_total` for one the object store did not confirm, `poisoned_total` for a store that recorded a terminal error, `skipped_segments_total` for a segment a read skipped, `missing_history_accepted_total` for a region that `accept_missing_history` let open without its history, and `stalled_appends_total` with `stalled_append_seconds` for an append held back because the sealed batches were full, in either mode, or by the `enqueued` backlog thresholds, timed until it is admitted or refused, a stop, a terminal error, a failing store or the teardown of the actor releasing it included. The gauge `failing` counts the stores whose backlog the object store refuses with an error that requires intervention, and `rejected_appends_total` the appends and releases such a store rejected; the attempts of a failing store are counted in `create_failures_total`. The delete counters of a collection and the release record counter are described under *Entry ids*. The histogram buckets are chosen for the default flush interval of 100 ms and the default `max_batch_bytes` of 8 MiB.
+**Metrics.** The store exports metrics under `greptime_logstore_object_store_wal_`. The write path reports `seal_to_durable_seconds`, the time from sealing a batch until its object is durable, `append_ack_seconds`, the time an append waits for its acknowledgement in the `durable` mode, `object_bytes` and `object_entries`, the size and the entry count of every object sealed, and `created_objects_total`, the creates that succeeded, an identical retry included; a create is counted and timed whether or not its batch is still there to be indexed, since an object a poisoned store gave up on is as durable as any other. `indexed_objects` and `indexed_bytes` are the objects and the bytes the catalog holds, set by a recovery that succeeded and moved by every object indexed or unindexed afterwards, so a collection takes the object it deleted off both, and a recovery that is abandoned publishes neither. A recovery that succeeds reports `recovery_seconds` and the objects it read footers from in `recovered_objects_total`, both of the same recoveries, so one that is abandoned at a fetch or rejected by the catalog contributes to neither; a read stream reports `read_seconds` once it has been read to its end, and one that fails or is dropped part way reports nothing. The failure paths are counted: `create_conflicts_total` for a create that found a conflicting object, `create_failures_total` for one the object store did not confirm, `poisoned_total` for a store that recorded a terminal error, `skipped_segments_total` for a segment a read skipped, `missing_history_accepted_total` for a region that `accept_missing_history` let open without its history, and `stalled_appends_total` with `stalled_append_seconds` for an append held back because the sealed batches were full, in either mode, or by the `enqueued` backlog thresholds, timed until it is admitted or refused, a stop, a terminal error, a failing store or the teardown of the actor releasing it included. The gauge `failing` counts the stores whose backlog the object store refuses with an error that requires intervention, and `rejected_appends_total` the appends and releases such a store rejected; the attempts of a failing store are counted in `create_failures_total`. The gauge `io_permission_unavailable` counts live stores observed without permission to initiate object-store I/O, including idle stores and those awaiting their first grant. Each store is counted once while permission is unavailable and removed from the count when permission returns or its actor exits; the gauge measures permission availability, not backlog size. The delete counters of a collection and the release record counter are described under *Entry ids*. The histogram buckets are chosen for the default flush interval of 100 ms and the default `max_batch_bytes` of 8 MiB.
 
 A `testing` cargo feature exposes hooks to wait for admitted appends, to seal the open batch, to hold and release creates and to make creates fail, so engine tests can flush deterministically and observe entries that are admitted but not durable.
+
+### Node lease and recovery fencing
+
+A metasrv-controlled datanode accepts object-store WAL only when its plugins
+contain `EnableObjectStoreWal`; OSS does not register this marker. The builder
+installs an I/O permit backed by Mito's node lease before opening regions. The
+permit exposes only whether new object-store I/O is allowed; the WAL does not
+own deadlines or heartbeat renewal. Standalone installs no permit. The node
+prefix retains the fixed `epochs/0` directory across restarts, independently of
+the heartbeat node epoch and the store epoch in object headers. Metasrv
+configuration, failover integration and Enterprise registration remain separate
+prerequisites for enabling the distributed WAL.
+Startup's initial object and its withdrawal after a missing-history failure are
+exempt so startup does not depend on a heartbeat that has not started yet.
+
+Every new upload, including a retry or release-only object, and every collection
+delete checks the permit immediately before issuance. Issued operations may
+finish, including their transport retries. The flush timer checks expiry and
+renewal without sealing while expired. Expiry fails durable open and unindexed
+batches with a retryable error, ignores their late upload results and never
+reuses their ids. Enqueued batches already acknowledged remain pending until
+renewal. Release records remain available for a later batch, while their current
+waiters fail. An admission that would wait for upload capacity fails immediately
+while expired; ordinary admissions continue to rely on the region write lease.
+
+The datanode keeps the heartbeat running until the object-store WAL stops, then
+closes the heartbeat and regions. If the lease expires during shutdown, the WAL
+drops its unindexed backlog without waiting for uploads, and still waits for
+issued deletes. Expiry is checked on the next flush timer tick, including during
+shutdown, so detection can take one configured flush interval plus actor
+scheduling delay. Dropping acknowledged enqueued entries has crash semantics.
+
+Recovery still selects the latest complete chain, but before writing its initial
+object checks that the selected tip carries the maximum epoch among all listed
+headers. Falling back to an older epoch fails without modifying storage, with
+the skipped epochs, object counts and sequence ranges in the error. Explicit
+`accept_missing_history` permits this fallback only as an operator recovery:
+previous writers must have exited and acknowledged unflushed data may be lost.
+The new initial object's epoch exceeds every listed epoch. An incomplete branch
+within the selected epoch does not trigger this rejection. Remote readers always
+reject an older-epoch fallback, independent of this setting.
 
 ## Mito integration
 
@@ -271,7 +312,7 @@ The reference implementation was validated on the following evidence; the tests 
 - Object store access: an unwritable store; a listing, a trailer fetch, a footer fetch, a segment fetch and a delete that fail; a delete that fails and is retried by the next collection; an object collected between the listing and its fetch, below and at the tip's reclaim boundary; an object store that answers slowly.
 - Store state: an object the catalog rejects, per-region entry id exhaustion, the catalog refusing a next sequence past the maximum, every stop path with several creates in flight that succeed, fail transiently or conflict after stop began, a stop with a delete in flight, an append held back by full sealed batches, and the appends the backlog thresholds were holding back released by admission, by a stop, by a terminal error and by the teardown of the actor.
 - Pipelined uploader: concurrent creates acknowledged in sequence order, every sealed batch linked to its pipeline predecessor, the open batch sealing at the threshold while creates are in flight, a transient failure failing every batch that is not indexed, created ones included, a permanent failure poisoning the store.
-- Chain recovery: a linear chain, orphans below and above the tip, a broken tip falling back to the latest complete object, a late object of an earlier epoch next to the chain of a later one, a missing predecessor, objects present without a complete chain, orphans raising the next sequence, and the start object on an empty prefix and meeting objects of an earlier and of a later epoch.
+- Chain recovery: a linear chain, orphans below and above the tip, an incomplete branch within the selected epoch, rejection of an older-epoch fallback before any mutation and its explicit acceptance with `accept_missing_history`, a late object of an earlier epoch next to the chain of a later one, a missing predecessor, objects present without a complete chain, orphans raising the next sequence, and the start object on an empty prefix and meeting objects of an earlier and of a later epoch.
 
 ### What the evidence does not cover
 

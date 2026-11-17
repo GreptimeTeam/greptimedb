@@ -132,8 +132,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::compaction_task::{self, CompactionTaskEntry};
-use store_api::logstore::LogStore;
 use store_api::logstore::provider::{KafkaProvider, Provider};
+use store_api::logstore::{LogStore, ObjectStoreWalIoPermit};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
@@ -346,15 +346,48 @@ impl MitoEngine {
         self.inner.workers.node_lease().enable();
     }
 
+    /// Returns the node-lease permission used to fence object-store WAL I/O.
+    pub fn object_store_wal_io_permit(&self) -> Arc<dyn ObjectStoreWalIoPermit> {
+        self.inner.workers.node_lease_permit()
+    }
+
     /// Renews the lease of this node from a heartbeat response that carries region leases.
     pub fn renew_node_lease(&self, deadline: Instant) {
         self.inner.workers.node_lease().renew(deadline);
+    }
+
+    /// Records a lease of a heartbeat sent at `sent_at` as the latest one the region received, if
+    /// it is the latest. The region may also be a region of a group that received the lease as a
+    /// whole, such as the data region of a metric engine region. Only records it: the region's role
+    /// does not change. Does nothing if the region is not open.
+    pub fn record_granted_lease(
+        &self,
+        region_id: RegionId,
+        sent_at: Instant,
+        candidate_lease_id: Option<u64>,
+    ) {
+        self.inner
+            .workers
+            .granted_leases()
+            .record(region_id, sent_at, candidate_lease_id, || {
+                self.inner.find_region(region_id).is_ok()
+            });
     }
 
     /// Freezes the clock of the lease checks at `at`.
     #[cfg(any(test, feature = "test"))]
     pub fn freeze_lease_clock(&self, at: Instant) {
         self.inner.workers.node_lease().freeze_clock(at);
+    }
+
+    /// Returns the candidate lease id of the latest lease granted to the region.
+    #[cfg(any(test, feature = "test"))]
+    pub fn granted_candidate_lease_id(&self, region_id: RegionId) -> Option<u64> {
+        self.inner
+            .workers
+            .granted_leases()
+            .get(region_id)
+            .and_then(|lease| lease.candidate_lease_id)
     }
 
     pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
@@ -1698,7 +1731,10 @@ impl RegionEngine for MitoEngine {
         role: RegionRole,
         sent_at: Instant,
         deadline: Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
+        // Before the role, so a lease the region ignores still counts.
+        self.record_granted_lease(region_id, sent_at, candidate_lease_id);
         let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
         // Before the role, and even if the role leaves the region's state unchanged.
         if role.writable() {

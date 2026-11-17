@@ -116,6 +116,7 @@ impl RegionEngine for RelationalEngine {
         role: RegionRole,
         _sent_at: Instant,
         _deadline: Instant,
+        _candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
         self.set_region_role(region_id, role).map(|_| true)
     }

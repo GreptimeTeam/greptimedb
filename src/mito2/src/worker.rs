@@ -68,10 +68,10 @@ use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRe
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::compaction::{CancelCompactionResult, CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
-use crate::error::{self, CreateDirSnafu, ExternalSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
-use crate::lease::NodeLease;
+use crate::lease::{GrantedLeases, NodeLease};
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
@@ -169,6 +169,7 @@ pub(crate) struct WorkerGroup {
     /// Gc limiter to limit concurrent gc jobs.
     gc_limiter: GcLimiterRef,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
     /// Puffin manager factory.
@@ -268,6 +269,7 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let granted_leases = Arc::new(GrantedLeases::default());
         let staging_regions = StagingRegionsRef::default();
         let wal = Wal::new(log_store);
 
@@ -303,6 +305,7 @@ impl WorkerGroup {
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    granted_leases: granted_leases.clone(),
                     staging_regions: staging_regions.clone(),
                 }
                 .start()
@@ -319,6 +322,7 @@ impl WorkerGroup {
             file_ref_manager,
             gc_limiter,
             node_lease,
+            granted_leases,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -427,9 +431,18 @@ impl WorkerGroup {
         &self.node_lease
     }
 
+    /// Returns the latest lease each region of this group received.
+    pub(crate) fn granted_leases(&self) -> &GrantedLeases {
+        &self.granted_leases
+    }
+
     /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
     pub(crate) fn notify_writable(&self, region: &MitoRegionRef) {
         handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
+    }
+
+    pub(crate) fn node_lease_permit(&self) -> Arc<NodeLease> {
+        self.node_lease.clone()
     }
 
     /// Asks the worker of `region` to cancel its tail replay, if one runs, without waiting.
@@ -554,6 +567,7 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let granted_leases = Arc::new(GrantedLeases::default());
         let staging_regions = StagingRegionsRef::default();
         let wal = Wal::new(log_store);
         let workers = (0..config.num_workers)
@@ -588,6 +602,7 @@ impl WorkerGroup {
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    granted_leases: granted_leases.clone(),
                     staging_regions: staging_regions.clone(),
                 }
                 .start()
@@ -604,6 +619,7 @@ impl WorkerGroup {
             file_ref_manager,
             gc_limiter,
             node_lease,
+            granted_leases,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -677,16 +693,7 @@ fn index_registry(
     config: &MitoConfig,
     provider: Option<IndexKindProviderRef>,
 ) -> Result<IndexRegistryRef> {
-    IndexRegistry::new(
-        config.inverted_index.clone(),
-        config.fulltext_index.clone(),
-        config.bloom_filter_index.clone(),
-    )
-    .with_provider(provider)
-    .map(Arc::new)
-    .with_context(|_| ExternalSnafu {
-        context: "registering index handlers".to_string(),
-    })
+    IndexRegistry::from_config(config, provider).map(Arc::new)
 }
 
 /// Worker start config.
@@ -725,6 +732,7 @@ struct WorkerStarter<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     staging_regions: StagingRegionsRef,
 }
 
@@ -833,6 +841,7 @@ impl<S: LogStore> WorkerStarter<S> {
             #[cfg(feature = "hdfs-object-store")]
             sweep_limiter: self.sweep_limiter,
             node_lease: self.node_lease,
+            granted_leases: self.granted_leases,
             staging_regions: self.staging_regions,
             tail_replays: HashMap::new(),
         };
@@ -1296,6 +1305,7 @@ struct RegionWorkerLoop<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     /// Staging regions of this node that have received writes.
     staging_regions: StagingRegionsRef,
     /// Running tail replays, which stay here until they report their end.
@@ -1900,6 +1910,9 @@ impl<S> RegionWorkerLoop<S> {
         .await;
 
         self.regions.clear();
+        for region in regions {
+            self.granted_leases.remove(region.region_id);
+        }
     }
 
     /// Notifies the whole group that a flush job is finished so other

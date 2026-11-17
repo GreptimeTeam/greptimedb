@@ -498,6 +498,7 @@ impl RegionServer {
         role: RegionRole,
         sent_at: std::time::Instant,
         deadline: std::time::Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool> {
         let engine = self
             .inner
@@ -505,7 +506,7 @@ impl RegionServer {
             .get(&region_id)
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
-            .set_region_role_with_lease(region_id, role, sent_at, deadline)
+            .set_region_role_with_lease(region_id, role, sent_at, deadline, candidate_lease_id)
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
@@ -2469,7 +2470,7 @@ mod tests {
     use common_error::ext::{ErrorExt, RetryHint};
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
-    use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use common_wal::config::object_store::{FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig};
     use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
@@ -3735,7 +3736,7 @@ mod tests {
             ObjectStore::new(Memory::default()).unwrap(),
             &wal_config,
             0,
-            STANDALONE_GENERATION,
+            FIXED_DIRECTORY_GENERATION,
         )
         .await
         .unwrap();
@@ -3745,7 +3746,7 @@ mod tests {
         let mut region_server = mock_region_server();
         region_server.register_engine(Arc::new(engine));
         let wal_options = serde_json::to_string(&WalOptions::ObjectStore(
-            ObjectStoreWalOptions::new(wal_config.node_prefix(0, STANDALONE_GENERATION)),
+            ObjectStoreWalOptions::new(wal_config.node_prefix(0, FIXED_DIRECTORY_GENERATION)),
         ))
         .unwrap();
         (region_server, log_store, wal_options)

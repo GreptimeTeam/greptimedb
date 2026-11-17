@@ -91,6 +91,7 @@ pub struct GreptimeDbStandaloneBuilder {
     slow_query_options: SlowQueryOptions,
     event_recorder_options: EventRecorderOptions,
     auto_create_table: bool,
+    auto_create_physical_table_timestamp_unit: Option<common_time::timestamp::TimeUnit>,
     logical_batcher: Option<BatcherOptions>,
     table_batcher: BatcherOptions,
     max_in_flight_write_bytes: ReadableSize,
@@ -114,6 +115,7 @@ impl GreptimeDbStandaloneBuilder {
             },
             event_recorder_options: EventRecorderOptions::default(),
             auto_create_table: true,
+            auto_create_physical_table_timestamp_unit: None,
             logical_batcher: None,
             table_batcher: BatcherOptions::default(),
             max_in_flight_write_bytes: ReadableSize(0),
@@ -160,6 +162,16 @@ impl GreptimeDbStandaloneBuilder {
     #[must_use]
     pub fn with_auto_create_table(mut self, auto_create_table: bool) -> Self {
         self.auto_create_table = auto_create_table;
+        self
+    }
+
+    /// Sets the time index unit for auto-created physical metric tables.
+    #[must_use]
+    pub fn with_auto_create_physical_table_timestamp_unit(
+        mut self,
+        unit: common_time::timestamp::TimeUnit,
+    ) -> Self {
+        self.auto_create_physical_table_timestamp_unit = Some(unit);
         self
     }
 
@@ -420,6 +432,9 @@ impl GreptimeDbStandaloneBuilder {
             slow_query: self.slow_query_options.clone(),
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
+            auto_create_physical_table_timestamp_unit: self
+                .auto_create_physical_table_timestamp_unit
+                .unwrap_or(common_time::timestamp::TimeUnit::Millisecond),
             pipeline: self.pipeline_options.clone(),
             max_in_flight_write_bytes: self.max_in_flight_write_bytes,
             pending_rows_batcher: PendingRowsBatcherOptions {
