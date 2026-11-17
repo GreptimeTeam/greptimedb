@@ -79,6 +79,7 @@ use crate::metrics::METRIC_POSTGRES_COPY_IN_ROWS;
 use crate::postgres::PostgresServerHandlerInner;
 use crate::postgres::types::PgErrorCode;
 use crate::postgres::utils::convert_err;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 
 /// Number of parsed rows buffered before flushing a batch to the handler.
 ///
@@ -309,6 +310,7 @@ enum Payload {
         parser: Box<dyn RecordParser + Send>,
         /// Parsed rows not yet flushed to the handler.
         rows: Vec<GrpcRow>,
+        memory: TableCopyMemory,
     },
     /// The whole buffered influxdb line-protocol payload with its
     /// request precision. One COPY statement is one bounded ingestion
@@ -332,13 +334,90 @@ enum Payload {
     },
 }
 
+/// Estimated working-set reservation for a row-based COPY stream.
+///
+/// Arrow retains decoder capacity across flushes, so the reservation follows the
+/// largest batch seen, not the cumulative import size. It stays held through
+/// inserts and until the decoder is dropped (including errors and disconnects).
+/// This is admission accounting, not an exact bound on allocator/RSS usage.
+struct TableCopyMemory {
+    limiter: ServerMemoryLimiter,
+    guards: Vec<
+        common_memory_manager::MemoryGuard<crate::request_memory_metrics::RequestMemoryMetrics>,
+    >,
+    granted_bytes: u64,
+    fixed_bytes: u64,
+    batch_bytes: u64,
+}
+
+impl TableCopyMemory {
+    // Covers variable-sized decoder/tape buffers, capacity growth, Arrow arrays
+    // and protobuf strings coexisting during conversion. Fixed per-cell storage
+    // is charged separately so sparse JSON and empty CSV fields are not free.
+    const INPUT_EXPANSION: u64 = 16;
+    // Bound speculative admission and CPU work before checking for a full batch.
+    const DECODE_BYTES: usize = 8 * 1024;
+
+    async fn new(limiter: ServerMemoryLimiter, columns: usize) -> PgWireResult<Self> {
+        // Two copies of fixed cell/row storage plus Arrow validity/offset buffers
+        // and CSV's field offsets/initial data allocation. Reserve before creating
+        // the decoder, including for streams that never send a complete record.
+        let cell_bytes = std::mem::size_of::<api::v1::Value>() + 32;
+        let fixed_bytes = columns
+            .checked_mul(cell_bytes)
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<GrpcRow>()))
+            .and_then(|bytes| bytes.checked_mul(COPY_IN_FLUSH_ROWS * 2))
+            .and_then(|bytes| bytes.checked_add(1024))
+            .ok_or_else(|| bad_copy_data("COPY decode memory estimate overflow"))?
+            as u64;
+        let mut memory = Self {
+            limiter,
+            guards: Vec::new(),
+            granted_bytes: 0,
+            fixed_bytes,
+            batch_bytes: 0,
+        };
+        memory.reserve_input(0, 0).await?;
+        Ok(memory)
+    }
+
+    async fn reserve_input(&mut self, bytes: usize, wire_bytes: u64) -> PgWireResult<()> {
+        let required = self
+            .batch_bytes
+            .checked_add(bytes as u64)
+            .and_then(|bytes| bytes.checked_mul(Self::INPUT_EXPANSION))
+            .and_then(|bytes| bytes.checked_add(self.fixed_bytes))
+            .ok_or_else(|| bad_copy_data("COPY decode memory estimate overflow"))?;
+        let uncovered = required.saturating_sub(self.granted_bytes);
+        if uncovered != 0 {
+            // Unlimited managers do not round grants. Keep tiny CopyData
+            // fragments from adding one guard per byte even in that mode.
+            let uncovered = uncovered.max(1024);
+            let held = self
+                .granted_bytes
+                .checked_add(wire_bytes)
+                .ok_or_else(|| bad_copy_data("COPY decode memory estimate overflow"))?;
+            self.limiter
+                .check_request_fits(uncovered, held)
+                .map_err(convert_err)?;
+            let guard = self.limiter.acquire(uncovered).await.map_err(|error| {
+                convert_err(crate::prom_remote_write::map_memory_acquire_timeout(error))
+            })?;
+            self.granted_bytes += guard.granted_bytes();
+            self.guards.push(guard);
+        }
+        Ok(())
+    }
+}
+
 impl CopyInState {
-    fn new(
+    async fn new(
         codec: &dyn TableBoundCodec,
         columns: Vec<String>,
         table_info: Arc<TableInfo>,
         query_ctx: QueryContextRef,
         table_name: String,
+        memory_limiter: ServerMemoryLimiter,
     ) -> PgWireResult<Self> {
         let schema = table_info.meta.schema.clone();
         let timestamp_index = schema.timestamp_index();
@@ -353,6 +432,7 @@ impl CopyInState {
                 )));
             }
         }
+        let memory = TableCopyMemory::new(memory_limiter, columns.len()).await?;
         let parser = codec.create_parser(&columns, query_ctx.timezone().to_string().as_str())?;
 
         let grpc_schema = columns
@@ -366,7 +446,8 @@ impl CopyInState {
                 grpc_schema,
                 table_name,
                 parser,
-                rows: Vec::with_capacity(COPY_IN_FLUSH_ROWS),
+                rows: Vec::new(),
+                memory,
             },
             memory_guards: Vec::new(),
             granted_bytes: 0,
@@ -489,7 +570,7 @@ impl CopyInState {
     /// (csv) or payload bytes (influxdb).
     fn feed(&mut self, data: &[u8]) -> PgWireResult<()> {
         match &mut self.payload {
-            Payload::Table { parser, rows, .. } => rows.extend(parser.feed(data)?),
+            Payload::Table { .. } => return Err(bad_copy_data("Table requires accounted decode")),
             // Arrow's asynchronous feed writes each complete batch immediately.
             Payload::Arrow(_) => return Err(bad_copy_data("Arrow requires asynchronous feed")),
             Payload::Influxdb { data: buffered, .. }
@@ -853,7 +934,15 @@ impl PostgresServerHandlerInner {
         // when the COPY target is qualified.
         let query_ctx = adjust_query_context(query_ctx, &catalog, &schema);
 
-        CopyInState::new(codec, stmt.columns.clone(), table_info, query_ctx, table)
+        CopyInState::new(
+            codec,
+            stmt.columns.clone(),
+            table_info,
+            query_ctx,
+            table,
+            self.memory_limiter.clone(),
+        )
+        .await
     }
 
     /// Flushes the buffered payload of an in-progress copy. Returns the
@@ -1236,7 +1325,51 @@ impl CopyHandler for PostgresServerHandlerInner {
                 state.feed(&copy_data.data)?;
             }
         } else {
-            state.feed(&copy_data.data)?;
+            let Payload::Table { memory, .. } = &state.payload else {
+                return Err(bad_copy_data("expected table COPY payload"));
+            };
+            // pgwire has already received this frame. Keep its entire body
+            // charged while decoding slices or awaiting an insert; unconsumed
+            // bytes of a large frame remain live throughout the loop.
+            self.memory_limiter
+                .check_request_fits(copy_data.data.len() as u64, memory.granted_bytes)
+                .map_err(convert_err)?;
+            let wire_guard = self
+                .memory_limiter
+                .acquire(copy_data.data.len() as u64)
+                .await
+                .map_err(|error| {
+                    convert_err(crate::prom_remote_write::map_memory_acquire_timeout(error))
+                })?;
+            let mut data = copy_data.data.as_ref();
+            while !data.is_empty() {
+                let Payload::Table {
+                    parser,
+                    rows,
+                    memory,
+                    ..
+                } = &mut state.payload
+                else {
+                    return Err(bad_copy_data("expected table COPY payload"));
+                };
+                let input = &data[..data.len().min(TableCopyMemory::DECODE_BYTES)];
+                memory
+                    .reserve_input(input.len(), wire_guard.granted_bytes())
+                    .await?;
+                let consumed = parser.decode(input)?;
+                memory.batch_bytes += consumed as u64;
+                data = &data[consumed..];
+                if parser.is_full() {
+                    *rows = parser.flush()?;
+                    // The guards remain held: Arrow retains its buffer capacity.
+                    memory.batch_bytes = 0;
+                    let written = self.flush_copy_in(&mut state).await?;
+                    state.rows_written += written;
+                    METRIC_POSTGRES_COPY_IN_ROWS.inc_by(written);
+                } else if consumed == 0 {
+                    return Err(bad_copy_data("COPY decoder made no progress"));
+                }
+            }
         }
         if state.should_flush() {
             let rows = self.flush_copy_in(&mut state).await?;
@@ -1274,6 +1407,9 @@ impl CopyHandler for PostgresServerHandlerInner {
 
         let rows_written = state.rows_written;
         let codec_name = state.codec_name;
+        // Release decoder capacity and its reservation before acknowledging COPY.
+        // A slow client reading the response must not keep ingestion memory live.
+        drop(state);
         info!(
             "PostgreSQL COPY FROM STDIN (format {}) finished: {} rows written",
             codec_name, rows_written
@@ -1315,6 +1451,97 @@ impl CopyHandler for PostgresServerHandlerInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_table_copy_memory_tracks_peak_not_total() {
+        let limiter = ServerMemoryLimiter::new(
+            64 * 1024 * 1024,
+            common_memory_manager::OnExhaustedPolicy::Fail,
+        );
+        let mut memory = TableCopyMemory::new(limiter.clone(), 2).await.unwrap();
+        let fixed = limiter.used_bytes();
+        assert!(fixed > 0);
+        for _ in 0..100 {
+            // Tiny chunks share the rounding headroom; resetting the current
+            // batch reuses the high-water reservation, including after a flush.
+            for _ in 0..1024 {
+                memory.reserve_input(1, 0).await.unwrap();
+                memory.batch_bytes += 1;
+            }
+            memory.batch_bytes = 0;
+            assert_eq!(
+                limiter.used_bytes(),
+                fixed + 1024 * TableCopyMemory::INPUT_EXPANSION
+            );
+        }
+        assert!(memory.guards.len() <= 17);
+        drop(memory);
+        assert_eq!(limiter.used_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_table_copy_memory_unlimited_tiny_chunks() {
+        let limiter = ServerMemoryLimiter::default();
+        let mut memory = TableCopyMemory::new(limiter.clone(), 2).await.unwrap();
+        for _ in 0..1024 {
+            memory.reserve_input(1, 0).await.unwrap();
+            memory.batch_bytes += 1;
+        }
+        assert!(memory.guards.len() <= 17);
+        drop(memory);
+        assert_eq!(limiter.used_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_table_copy_memory_includes_held_wire_bytes() {
+        let limiter = ServerMemoryLimiter::new(
+            32 * 1024 * 1024,
+            common_memory_manager::OnExhaustedPolicy::default(),
+        );
+        let mut memory = TableCopyMemory::new(limiter.clone(), 2).await.unwrap();
+        let wire = limiter
+            .acquire(limiter.limit_bytes() - memory.granted_bytes - 1024)
+            .await
+            .unwrap();
+        // It cannot fit alongside its OWN frame. Fail immediately, not after
+        // waiting for permits that only this request can release.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            memory.reserve_input(8192, wire.granted_bytes()),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        drop(memory);
+        drop(wire);
+        assert_eq!(limiter.used_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_table_copy_memory_waits_for_other_request() {
+        let probe = TableCopyMemory::new(ServerMemoryLimiter::default(), 2)
+            .await
+            .unwrap();
+        let limiter = ServerMemoryLimiter::new(
+            probe.granted_bytes,
+            common_memory_manager::OnExhaustedPolicy::default(),
+        );
+        let first = TableCopyMemory::new(limiter.clone(), 2).await.unwrap();
+        let second = TableCopyMemory::new(limiter.clone(), 2);
+        tokio::pin!(second);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut second)
+                .await
+                .is_err()
+        );
+        drop(first);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), second)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(second);
+        assert_eq!(limiter.used_bytes(), 0);
+    }
 
     #[test]
     fn test_parse_copy_from_stdin_requires_format() {

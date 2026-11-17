@@ -2266,11 +2266,188 @@ async fn test_postgres_copy_in_prom_write_shared_receive_quota() {
     server.shutdown().await.unwrap();
 }
 
+/// CSV and JSONL reserve their decoder working set, including incomplete
+/// records, and release it on quota/parse errors, CopyFail and disconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_table_memory_quota() {
+    use servers::request_memory_limiter::ServerMemoryLimiter;
+    use std::time::Duration;
+
+    init_default_ut_logging();
+    let limiter = ServerMemoryLimiter::new(
+        32 * 1024 * 1024,
+        common_memory_manager::OnExhaustedPolicy::Fail,
+    );
+    let server = quota_test_server_with_limiter("pg_copy_table_quota", limiter.clone()).await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+    client
+        .simple_query("CREATE TABLE copy_quota (host STRING, ts TIMESTAMP TIME INDEX)")
+        .await
+        .unwrap();
+
+    for (format, prefix, valid, invalid) in [
+        ("csv", "\"", "a,2024-01-01\n", "a,not-a-timestamp\n"),
+        (
+            "jsonl",
+            "{\"host\":\"",
+            "{\"host\":\"a\",\"ts\":\"2024-01-01\"}\n",
+            "{\"host\":\"a\",\"ts\":\"not-a-timestamp\"}\n",
+        ),
+    ] {
+        let sql = format!("COPY copy_quota FROM STDIN WITH (FORMAT {format})");
+        // One unfinished field across many messages used to grow uncharged.
+        let payload = format!("{prefix}{}", "x".repeat(2 * 1024 * 1024));
+        let error = feed_copy_in(
+            &client,
+            &sql,
+            payload
+                .as_bytes()
+                .chunks(4096)
+                .map(Bytes::copy_from_slice)
+                .collect(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .as_db_error()
+                .unwrap()
+                .message()
+                .to_lowercase()
+                .contains("memory"),
+            "{error}"
+        );
+        client.simple_query("SELECT 1").await.unwrap();
+        assert_eq!(limiter.used_bytes(), 0, "quota error: {format}");
+
+        let error = feed_copy_in(
+            &client,
+            &sql,
+            vec![Bytes::copy_from_slice(invalid.as_bytes())],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.as_db_error().is_some());
+        client.simple_query("SELECT 1").await.unwrap();
+        assert_eq!(limiter.used_bytes(), 0, "parse error: {format}");
+
+        // A large partial record remains charged between CopyData messages.
+        let mut first = Box::pin(client.copy_in(&sql).await.unwrap());
+        let baseline = limiter.used_bytes();
+        assert!(baseline > 0);
+        first
+            .as_mut()
+            .send(Bytes::from(format!("{prefix}{}", "x".repeat(1024 * 1024))))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while limiter.used_bytes() <= limiter.limit_bytes() - baseline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let second_client = connect(port).await;
+        let error = match second_client.copy_in::<_, Bytes>(&sql).await {
+            Ok(_) => panic!("concurrent {format} COPY must exceed the shared quota"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .as_db_error()
+                .unwrap()
+                .message()
+                .to_lowercase()
+                .contains("memory"),
+            "{error}"
+        );
+        drop(first); // CopyFail
+        client.simple_query("SELECT 1").await.unwrap();
+        assert_eq!(limiter.used_bytes(), 0, "CopyFail: {format}");
+
+        assert_eq!(
+            feed_copy_in(
+                &client,
+                &sql,
+                vec![Bytes::copy_from_slice(valid.as_bytes())]
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(limiter.used_bytes(), 0, "success: {format}");
+
+        // Abort the transport rather than sending CopyFail.
+        let (disconnect_client, connection) =
+            tokio_postgres::connect(&format!("host=127.0.0.1 port={port} dbname=public"), NoTls)
+                .await
+                .unwrap();
+        let connection = tokio::spawn(connection);
+        let sink = disconnect_client.copy_in::<_, Bytes>(&sql).await.unwrap();
+        assert!(limiter.used_bytes() > 0);
+        connection.abort();
+        let _ = connection.await;
+        drop(sink);
+        drop(disconnect_client);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while limiter.used_bytes() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    server.shutdown().await.unwrap();
+}
+
+/// A single frame can contain several batches. Admission follows the peak
+/// batch, and successful completion releases even retained decoder capacity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_table_memory_multi_batch() {
+    use servers::request_memory_limiter::ServerMemoryLimiter;
+
+    let limiter = ServerMemoryLimiter::new(
+        64 * 1024 * 1024,
+        common_memory_manager::OnExhaustedPolicy::Fail,
+    );
+    let server = quota_test_server_with_limiter("pg_copy_table_batches", limiter.clone()).await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    client
+        .simple_query("CREATE TABLE copy_batches (host STRING, ts TIMESTAMP TIME INDEX)")
+        .await
+        .unwrap();
+    for (format, record) in [
+        ("csv", "a,2024-01-01\n"),
+        ("jsonl", "{\"host\":\"a\",\"ts\":\"2024-01-01\"}\n"),
+    ] {
+        let sql = format!("COPY copy_batches FROM STDIN WITH (FORMAT {format})");
+        let count = 3 * 32768 + 1;
+        let rows = feed_copy_in(&client, &sql, vec![Bytes::from(record.repeat(count))])
+            .await
+            .unwrap();
+        assert_eq!(rows, count as u64);
+        assert_eq!(limiter.used_bytes(), 0);
+    }
+    server.shutdown().await.unwrap();
+}
+
 /// A pg server with a tiny shared request-memory limiter carrying the
 /// given policy, wired like the frontend does.
 async fn quota_test_server(
     name: &str,
     policy: common_memory_manager::OnExhaustedPolicy,
+) -> std::sync::Arc<Box<dyn servers::server::Server>> {
+    quota_test_server_with_limiter(
+        name,
+        servers::request_memory_limiter::ServerMemoryLimiter::new(64 * 1024, policy),
+    )
+    .await
+}
+
+async fn quota_test_server_with_limiter(
+    name: &str,
+    limiter: servers::request_memory_limiter::ServerMemoryLimiter,
 ) -> std::sync::Arc<Box<dyn servers::server::Server>> {
     let instance = crate::standalone::GreptimeDbStandaloneBuilder::new(name)
         .build()
@@ -2303,10 +2480,7 @@ async fn quota_test_server(
     )
     .with_influxdb_handler(fe.clone())
     .with_otlp_handler(fe.clone(), true)
-    .with_memory_limiter(servers::request_memory_limiter::ServerMemoryLimiter::new(
-        64 * 1024,
-        policy,
-    ))
+    .with_memory_limiter(limiter)
     .with_prom_remote_write(fe.clone(), Some(fe.clone()), true, Default::default(), None);
     use servers::server::Server;
     let mut pg_server = Box::new(pg_server) as Box<dyn Server>;
