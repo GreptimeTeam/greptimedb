@@ -340,6 +340,21 @@ fn native_anchored_timestamp_selection_boundaries() {
 fn timestamp_refuses_two_series_that_collapse_to_one_label_set() {
     let stmt = stmt("timestamp(a @ 1)", 0, 4000, 3000);
     let tree = compile(&stmt, schema(1), SeriesOrdering::KeyThenTime).unwrap();
+    // The refusal is the canonical pass's, so this test makes the pass the planner makes: the facts
+    // it hands over for a scan bound to one metric are the labels that scan's series carry -
+    // `__name__` among them, named by the binding - and the one metric it is bound to. `timestamp`
+    // drops the metadata labels, and `__type__` is one of them, so two of that scan's series can
+    // become one label set; the pass therefore collects the pieces above the node, and the merge is
+    // what reports the collision. The node itself keeps no table to check.
+    let source_tags = vec![vec![
+        "job".to_string(),
+        "__type__".to_string(),
+        "__name__".to_string(),
+    ]];
+    let source_metrics = vec![Some(Arc::<str>::from("a"))];
+    let tree =
+        promql::native::canonicalize::merge_label_rewrites(&tree, &source_tags, &source_metrics)
+            .expect("the canonical pass accepts the tree");
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 24));
     let state = NativeExecutionState::try_new(&tree, pool, None).unwrap();
     let mut executor = NativeExecutor::new(state);

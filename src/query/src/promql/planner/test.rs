@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::promql::planner::native::{
+    take_native_attempts, take_reported_decline, take_reported_skipped_labelset_check,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -521,6 +524,7 @@ async fn plan_direct_or(
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     planner
         .or_operator(
@@ -611,6 +615,7 @@ async fn mixed_direct_or(histogram_on_left: bool) -> (PromPlanner, LogicalPlan) 
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let left_context = direct_or_context("lhs", &["job", "k"], "v");
     let right_context = direct_or_context("rhs", &["job", "k"], "v");
@@ -684,6 +689,7 @@ async fn mixed_aggregate_input(histograms: Vec<NativeHistogram>) -> (PromPlanner
         },
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     (planner, plan)
 }
@@ -3234,6 +3240,144 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     );
 }
 
+/// A single-metric `rate` streams: the window drops the metric name, but every series the scan
+/// hands over is named the same one, so the drop tells none of them apart. Nothing has to collect
+/// what the window hands out, and the plan keeps the one node over the scan.
+#[tokio::test]
+async fn native_fused_single_metric_rate_streams_without_a_canonical_merge() {
+    let query = "rate(some_metric[5m])";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("the native route answers the query");
+    assert_eq!(
+        Some("some_metric"),
+        fused.binding().metric_name.as_deref(),
+        "the binding names the one metric the scan reads"
+    );
+    assert!(
+        !fused.is_canonical_producer(),
+        "`{query}` needs no canonical boundary: {plan}"
+    );
+    assert!(
+        matches!(fused.tree().root().expr, NativeExpr::Window { .. }),
+        "`{query}`: the root stays the window: {:?}",
+        fused.tree().root().expr
+    );
+    let [child] = fused.children() else {
+        panic!("`{query}` reads one input: {plan}");
+    };
+    assert!(
+        matches!(child, LogicalPlan::TableScan(_)),
+        "`{query}`: the window reads the scan itself: {plan}"
+    );
+}
+
+/// A `rate` over a selector that discovered several metrics keeps its collection: two of those
+/// metrics can agree on every ordinary label, so the name the window drops is the only thing
+/// telling them apart - and the merge is what reports the collision.
+#[tokio::test]
+async fn native_fused_multi_metric_rate_keeps_its_canonical_merge() {
+    let query = r#"rate({tag_0="x"}[5m])"#;
+    let plan = build_native_fused_plan_with_provider(
+        query,
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    let consumer =
+        find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}` is not native: {plan}"));
+    let [child] = consumer.children() else {
+        panic!("`{query}`: the boundary has one producer: {plan}");
+    };
+    let producer = find_fused_series(child).unwrap_or_else(|| panic!("`{query}`: {plan}"));
+    assert!(producer.is_canonical_producer(), "`{query}`: {plan}");
+    assert!(
+        matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+        "`{query}`: the window's pieces are collected: {:?}",
+        producer.tree().root().expr
+    );
+}
+
+/// A statement whose scan keys its series by a nullable column is answered with the duplicate
+/// label-set check left off, and the counter says so once per statement.
+///
+/// The check is the labels alone: `rate(some_metric[5m])` over one metric collects nothing, because
+/// the name it drops is the one every series of the scan shares. The one pair the labels cannot see
+/// is a key column holding `NULL` in one series and `''` in another - this fixture's `le` is exactly
+/// that - and reading it per query is the cost the check was dropped for. What is left is the count,
+/// which is what makes the omission observable.
+///
+/// A window that keeps the name drops nothing, so it relies on nothing and counts nothing.
+#[tokio::test]
+async fn a_nullable_key_statement_records_the_skipped_label_set_check() {
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan =
+        build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`rate(some_metric[5m])` left the native route: {}",
+        plan.display_indent_schema()
+    );
+    assert_eq!(
+        Some("nullable_key"),
+        take_reported_skipped_labelset_check(),
+        "the statement's label-set check was skipped and not counted: {}",
+        plan.display_indent_schema()
+    );
+
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "last_over_time(some_metric[5m])",
+        true,
+        table_provider,
+    )
+    .await;
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`last_over_time(some_metric[5m])` left the native route: {}",
+        plan.display_indent_schema()
+    );
+    assert_eq!(
+        None,
+        take_reported_skipped_labelset_check(),
+        "a window that keeps the name skips no check: {}",
+        plan.display_indent_schema()
+    );
+}
+
+/// A scan that carries `__type__` or `__unit__` as a tag can hold two series that agree on
+/// everything else, and a range function drops those two along with the name. A fixed metric name
+/// proves nothing about them, so the collection stays.
+#[tokio::test]
+async fn native_fused_metadata_tag_in_the_binding_keeps_the_collection() {
+    for metadata in ["__type__", "__unit__"] {
+        let query = "rate(some_metric[5m])";
+        let specs = vec![(
+            (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+            2,
+            1,
+        )];
+        let tags = vec![vec!["tag_0".to_string(), metadata.to_string()]];
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            build_test_table_provider_with_tsid_tag_names(&specs, &tags, None).await,
+        )
+        .await;
+        let consumer = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{metadata}: `{query}` is not native: {plan}"));
+        let [child] = consumer.children() else {
+            panic!("{metadata}: `{query}`: the boundary has one producer: {plan}");
+        };
+        let producer =
+            find_fused_series(child).unwrap_or_else(|| panic!("{metadata}: `{query}`: {plan}"));
+        assert!(
+            matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+            "{metadata}: `{query}` keeps the collection: {:?}",
+            producer.tree().root().expr
+        );
+    }
+}
+
 #[tokio::test]
 async fn native_fused_time_partitioned_table_reads_through_a_raw_source() {
     let table_provider = native_engine_provider(vec![1]).await;
@@ -3811,6 +3955,130 @@ async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
     }
 }
 
+/// Every statement is offered to the native route once, and a statement the flag leaves alone is
+/// offered none.
+///
+/// The count is what bounds planning: one offer compiles the whole tree below it, so a route that
+/// re-offered a subtree for every operator below it would cost the square of the expression's size.
+#[tokio::test]
+async fn native_offer_is_counted_once_per_statement() {
+    let _ = take_native_attempts();
+    let plan = build_native_fused_plan("rate(some_metric[5m])", true).await;
+    assert!(find_fused_series(&plan).is_some(), "{plan}");
+    assert_eq!(
+        1,
+        take_native_attempts(),
+        "the statement is offered exactly once"
+    );
+
+    let plan = build_native_fused_plan("rate(some_metric[5m])", false).await;
+    assert!(find_fused_series(&plan).is_none(), "{plan}");
+    assert_eq!(
+        0,
+        take_native_attempts(),
+        "the flag off offers nothing to the native route"
+    );
+}
+
+/// A propagated matcher is offered once for the operand it rewrote, and nothing below it.
+///
+/// `matching_filters::propagate` writes a matcher into an operand's scan, which makes that operand
+/// an expression the offer spent at its parent never compiled: that offer read the statement as it
+/// was written, and the matcher reached the scan afterwards. The rewrite is therefore offered of
+/// its own, and the offer it is handed is spent again by the rewritten operand's own subtree,
+/// exactly as this one was. So `N` operators below the rewrite buy one offer - not `N`, and not the
+/// `N` positions times `N` subtrees an unconditional re-offer would compile.
+#[tokio::test]
+async fn native_offer_counts_a_propagated_operand_once() {
+    // The same match with the rewritten operand two operators deep and six deep: the matcher
+    // crosses in both, and the four extra operators are the operand's subtree rather than more
+    // expressions to offer.
+    let shallow = "((some_metric * 2) * 2) / on(tag_0) \
+                   some_metric{tag_0=\"x\",__field__=\"field_0\"}";
+    let deep = "((((((some_metric * 2) * 2) * 2) * 2) * 2) * 2) / on(tag_0) \
+                some_metric{tag_0=\"x\",__field__=\"field_0\"}";
+    let mut counts = Vec::new();
+    for query in [shallow, deep] {
+        let _ = take_native_attempts();
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        // The count below is only a bound if the matcher really crossed to the other operand.
+        assert!(
+            display.contains("some_metric.tag_0 = Utf8(\"x\")"),
+            "{query}: the matcher reached the other operand's scan: {display}"
+        );
+        counts.push(take_native_attempts());
+    }
+    // Seven offers either way: the statement, its root's own retry under the legacy-only
+    // `__field__` matcher, the frame operands the composed attempts beside those two read, and the
+    // propagated operand itself. The four operators that make the deep statement deeper are inside
+    // that operand's subtree, so they buy no offer of their own - an offer that was not spent again
+    // by the rewrite would compile each of them, and the deep statement would cost four more.
+    assert_eq!(
+        (7, 7),
+        (counts[0], counts[1]),
+        "a propagated operand is offered once whatever its depth: seven offers at both depths"
+    );
+}
+
+/// The same matcher-propagating match, with its rewritten operand `depth` operators deep.
+fn propagation_query(depth: usize) -> String {
+    let operand = (0..depth).fold("some_metric".to_string(), |inner, _| {
+        format!("({inner} * 2)")
+    });
+    format!("{operand} / on(tag_0) some_metric{{tag_0=\"x\",__field__=\"field_0\"}}")
+}
+
+/// How a statement of [`propagation_query`] plans: whether a native node answers the rewritten
+/// operand, and whether the propagated matcher reached the other operand's scan.
+async fn propagation_route(depth: usize) -> (bool, bool) {
+    let plan = build_native_fused_plan(&propagation_query(depth), true).await;
+    let display = plan.display_indent().to_string();
+    (
+        find_fused_series(&plan).is_some(),
+        display.contains("some_metric.tag_0 = Utf8(\"x\")"),
+    )
+}
+
+/// A chain under a propagated matcher plans on the stack a query worker has, however deep it is.
+///
+/// The planner recurses once per operator and charges every level's frame to the stack of the level
+/// above it, so a chain of constant multiplications deep enough - eight operators was enough on a
+/// two-megabyte thread before the descent grew its own stack - aborted the process rather than
+/// answering. nextest's own test thread is not a worker's, so the depths are planned on a thread
+/// this test sizes like one.
+#[test]
+fn a_deep_propagated_operand_plans_within_a_worker_stack() {
+    let route = std::thread::Builder::new()
+        .name("deep_propagated_operand".to_string())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime");
+            runtime.block_on(async {
+                let shallow = propagation_route(2).await;
+                for depth in [8, 10, 12] {
+                    assert_eq!(
+                        shallow,
+                        propagation_route(depth).await,
+                        "an operand {depth} operators deep plans as one 2 operators deep does"
+                    );
+                }
+                shallow
+            })
+        })
+        .expect("a thread with a worker's stack")
+        .join()
+        .expect("operands 2, 8, 10 and 12 operators deep plan on a two-megabyte stack");
+    assert_eq!(
+        (true, true),
+        route,
+        "the rewritten operand is native and the matcher reached the other operand's scan"
+    );
+}
+
 /// A metric table without logical-table metadata declines to the legacy plan.
 #[tokio::test]
 async fn native_fused_metric_table_without_logical_metadata_falls_back() {
@@ -3901,6 +4169,12 @@ async fn native_fused_engine_without_raw_series_falls_back() {
         native.display_indent().to_string(),
         without_flag.display_indent().to_string(),
         "a file-engine table must keep the existing plan"
+    );
+    // The refusal is reported with its cause, not a bare Ok(None).
+    assert_eq!(
+        take_reported_decline(),
+        Some("engine_without_raw_series_scanner"),
+        "the refusal names the engine's missing raw-series scanner"
     );
 }
 
@@ -4907,8 +5181,10 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
     );
 
     // An operand that is not a frame leaves the statement's own wrapper in place: the pair is
-    // refused, so the existing plan answers the statement while the operand that does compose keeps
-    // its own answer below it.
+    // refused, so the existing plan answers the statement. The offer is the statement's, and the
+    // binary that makes it spends it for the whole subtree below: the operand is planned by the
+    // existing path too, because a refused chain of n operators would otherwise compile its
+    // subtrees again at every operator.
     for query in [
         // A scalar root is not a frame: composing it by vector matching would broadcast it as if it
         // were a one-series vector, which is not what the query asked for.
@@ -4916,7 +5192,7 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
         // Neither is a scalar function, however it is written.
         "(hist * on(tag_0) floats) / time()",
         // A comparison between a histogram and a float has no kernel at this pair either, so the
-        // operand's own answer stops where it was admitted.
+        // whole statement stops where the pair was refused.
         "(hist * on(tag_0) floats) > on(tag_0) floats",
     ] {
         let plan =
@@ -4928,8 +5204,22 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
             "`{query}` has no composed answer: {display}"
         );
         assert!(
-            find_fused_series(&plan).is_some(),
-            "`{query}` keeps the operand's own answer: {display}"
+            find_fused_series(&plan).is_none(),
+            "`{query}` spends its one offer above the operand: {display}"
+        );
+        let legacy = PromPlanner::stmt_to_plan_with_annotations(
+            native_mixed_kind_provider().await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            false,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("`{query}`: the existing route must answer it: {error}"));
+        assert_eq!(
+            legacy.display_indent().to_string(),
+            display,
+            "`{query}` must keep the existing plan"
         );
     }
 }
@@ -5839,7 +6129,6 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
         "1 - some_metric / some_metric",
         "(some_metric / some_metric) * 100",
         "abs(some_metric - on(tag_0) some_metric)",
-        "(some_metric > some_metric) * 100",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
@@ -5851,6 +6140,44 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
             "{query}"
         );
         assert_eq!(2, fused.inputs().len(), "{query}");
+    }
+
+    // A filtering comparison keeps the metric name, so it hands its series over under a label set
+    // that still tells them apart; the arithmetic broadcast above it drops that name, and the drop
+    // is only injective when the name it removes is one value over every series below it. The label
+    // walk cannot prove that across a match - a match reports its operands' labels, not one
+    // metric's - so the broadcast is collected, and the collection turns the statement into a
+    // canonical boundary over one segment that reads each occurrence through its own source.
+    let query = "(some_metric > some_metric) * 100";
+    let plan = build_native_fused_plan(query, true).await;
+    let consumer = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+    assert!(
+        matches!(consumer.tree().root().expr, NativeExpr::Input(_)),
+        "{query}: the consumer reads the collected boundary: {plan}"
+    );
+    let [child] = consumer.children() else {
+        panic!("{query}: the boundary has one producer: {plan}");
+    };
+    let producer = find_fused_series(child).unwrap_or_else(|| panic!("{query}: {plan}"));
+    assert!(producer.is_canonical_producer(), "{query}: {plan}");
+    assert!(
+        matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+        "{query} collects the broadcast's name drop: {:?}",
+        producer.tree().root().expr
+    );
+    // The merge collects what the two occurrences produced, so the work below the boundary is one
+    // segment reading each occurrence through its own source.
+    let [segment] = producer.children() else {
+        panic!("{query}: the producer reads one segment: {plan}");
+    };
+    let segment = find_fused_series(segment).unwrap_or_else(|| panic!("{query}: {plan}"));
+    assert_eq!(2, segment.inputs().len(), "{query}: {plan}");
+    for input in segment.inputs() {
+        assert!(
+            matches!(input, LogicalPlan::Extension(extension)
+                if extension.node.as_any().is::<RawSeriesSource>()),
+            "{query}: each occurrence reads its own source: {plan}"
+        );
     }
 
     let query = "ceil(some_metric)";
@@ -6841,7 +7168,7 @@ async fn native_fused_limitk_over_a_windowed_aggregate_keeps_its_shape() {
     );
     assert_eq!(
         Some(true),
-        unifies_its_own_contributions(window_node),
+        unifies_its_own_contributions(window_node, &[], &[]),
         "`{query}`: the window emits one series per label set, so `limitk` collects nothing"
     );
     let NativeExpr::Aggregate {
@@ -9541,6 +9868,7 @@ async fn comparison_binary_join_uses_tsid_and_keeps_it_in_filtered_result() {
         ctx: PromPlannerContext::from_eval_stmt(&eval_stmt).unwrap(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let plan = planner
         .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
@@ -10561,8 +10889,11 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
             pending.extend(node.inputs());
         }
     }
-    // A float-producing window still permits the aggregate itself to split natively: its count,
-    // not the input histogram, reaches the fold.
+    // A float-producing window still answers on the route: its count, not the input histogram,
+    // reaches the fold. The name `count_over_time` drops is the one every series of a single-metric
+    // scan shares, and the labels are the whole proof, so nothing collects the prefix - and a prefix
+    // nothing collects is exactly what the split folds: the statement runs as a region-side partial
+    // aggregate and a final fold above it.
     let table_provider = build_test_native_histogram_table_provider("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
         "sum(count_over_time(some_metric[5m]))",
@@ -10570,10 +10901,17 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
         table_provider,
     )
     .await;
+    let display = plan.display_indent_schema().to_string();
+    let partial = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("the float prefix left the native route: {display}"));
     assert!(
         find_final_split(&plan).is_some(),
-        "the float prefix no longer splits natively: {}",
-        plan.display_indent_schema()
+        "the uncollected prefix did not split: {display}"
+    );
+    assert!(
+        matches!(partial.tree().root().expr, NativeExpr::Aggregate { .. }),
+        "the state-exporting producer folds: {}\n{display}",
+        partial.tree()
     );
 }
 
@@ -10581,28 +10919,27 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
 ///
 /// The canonicalization pass wraps a collapsed rewrite in a merge, which the kind walk used to
 /// leave undescribed. "Cannot name it" then read as "possibly a histogram", so
-/// `label_replace(histogram_count(h), ...)` and its aggregated form kept the existing plan even
-/// though both answer floats. The walk now names a merge (it concatenates samples of one field)
-/// and a set operation (its sides agree on the kind), so those statements stay on the route while
-/// a histogram that really does enter an aggregate still keeps the existing plan.
+/// `label_replace(histogram_count(h), ...)` kept the existing plan even though it answers floats.
+/// The walk now names a merge (it concatenates samples of one field) and a set operation (its sides
+/// agree on the kind), so that statement stays on the route - while a fold above the collection the
+/// same rewrite's input needs, and a histogram that really does enter an aggregate or stand on a
+/// canonical merge, still keep the existing plan.
 #[tokio::test]
 async fn a_label_rewrite_keeps_a_float_answer_on_the_route() {
-    for query in [
-        "label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\")",
-        "sum(label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\"))",
-    ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
-        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
-        let display = plan.display_indent_schema().to_string();
-        let fused = find_fused_series(&plan)
-            .unwrap_or_else(|| panic!("{query} left the route instead of answering: {display}"));
-        let field = native_value_field(fused, &format!("{query}: {display}"));
-        assert_eq!(
-            &ArrowDataType::Float64,
-            field.data_type(),
-            "{query} declared a histogram column for a float answer: {display}"
-        );
-    }
+    let query = "label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\")";
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("{query} left the route instead of answering: {display}"));
+    // The value column is resolved by its type: the expression names it, so the compiled field
+    // name is not what a reader can address.
+    let field = native_value_field(fused, &format!("{query}: {display}"));
+    assert_eq!(
+        &ArrowDataType::Float64,
+        field.data_type(),
+        "{query} declared a histogram column for a float answer: {display}"
+    );
     // A histogram answer standing on a canonical merge is out of this route's reach for now: the
     // canonical boundary carrying histogram frames is the follow-up's subject. Both orderings
     // count - the merge at the root, and a merge below a map that answers floats - because a merge
@@ -10620,23 +10957,32 @@ async fn a_label_rewrite_keeps_a_float_answer_on_the_route() {
             plan.display_indent_schema()
         );
     }
+    // The map inside the rewrite answers a float, so the one collection left is the rewrite's own,
+    // and a fold above that merge does not carry a histogram: the name `histogram_count` drops is
+    // the one every series of a single-metric scan shares, which the labels alone prove. The
+    // statement therefore stays on the route, where it was collected twice before.
+    let query =
+        "sum(label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\"))";
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("{query} left the route instead of answering: {display}"));
+    let field = native_value_field(fused, &format!("{query}: {display}"));
+    assert_eq!(
+        &ArrowDataType::Float64,
+        field.data_type(),
+        "{query} declared a histogram column for a float answer: {display}"
+    );
 }
 
 #[tokio::test]
 async fn a_segmented_parent_answers_the_kind_of_the_uncut_root() {
-    for (query, histogram) in [
-        (
-            "count_over_time(some_metric[5m]) + on (__name__) count_over_time(some_metric[5m])",
-            false,
-        ),
-        (
-            "histogram_count(some_metric) + on (__name__) histogram_count(some_metric)",
-            false,
-        ),
-        // The same segmentation over a tree that does answer histograms keeps the histogram
-        // column, which is what tells the two derivations apart: a kind forced to `Float` would
-        // pass the two cases above and fail this one.
-        ("some_metric * 2 + on (__name__) some_metric * 2", true),
+    // Both operands answer floats, so the parent's column is the float one whatever the segments
+    // below it read: a kind taken from the scan's histogram field would declare the wrong column.
+    for query in [
+        "count_over_time(some_metric[5m]) + on (__name__) count_over_time(some_metric[5m])",
+        "histogram_count(some_metric) + on (__name__) histogram_count(some_metric)",
     ] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
@@ -10645,16 +10991,35 @@ async fn a_segmented_parent_answers_the_kind_of_the_uncut_root() {
             panic!("{query} left the native route instead of segmenting: {display}")
         });
         let field = native_value_field(fused, &format!("{query}: {display}"));
-        let expected = if histogram {
-            native_histogram_value_type().as_arrow_type()
-        } else {
-            ArrowDataType::Float64
-        };
         assert_eq!(
-            &expected,
+            &ArrowDataType::Float64,
             field.data_type(),
             "{query} declared the wrong column kind: {display}"
         );
+    }
+    // A histogram answer through the same match stays on the route as long as nothing collects it:
+    // `some_metric * 2` drops the metadata labels over one metric, which the labels prove, so no
+    // merge carries histogram frames and the gate that refuses one is never reached.
+    let query = "some_metric * 2 + on (__name__) some_metric * 2";
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "{query} left the native route although nothing collects it: {display}"
+    );
+    let mut pending = vec![&plan];
+    while let Some(node) = pending.pop() {
+        if let LogicalPlan::Extension(Extension { node }) = node
+            && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        {
+            assert!(
+                !matches!(fused.tree().root().expr, NativeExpr::Merge { .. }),
+                "{query} collects a histogram answer: {}\n{display}",
+                fused.tree()
+            );
+        }
+        pending.extend(node.inputs());
     }
 }
 
@@ -10792,18 +11157,36 @@ async fn presence_and_order_aggregates_fold_histograms_natively() {
 
 #[tokio::test]
 async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
-    for query in [
-        "some_metric",
-        "rate(some_metric[5m])",
-        "sum_over_time(some_metric[5m])",
-        "some_metric * 2",
-    ] {
+    // A bare scan drops nothing, and `last_over_time` keeps the metric name, so neither hands out a
+    // label set two of its series could meet under.
+    for query in ["some_metric", "last_over_time(some_metric[5m])"] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         assert!(
             find_fused_series(&plan).is_some(),
             "{query} left the native route: {}",
             plan.display_indent_schema()
+        );
+    }
+    // `rate`, `sum_over_time` and `some_metric * 2` all answer a histogram, and each drops the
+    // metadata labels over one metric - which the labels alone prove, whatever the scan's `le`
+    // column can hold. Nothing collects them, so no merge carries a histogram frame and the gate
+    // that refuses one is never reached: all three stay on the route.
+    for query in [
+        "rate(some_metric[5m])",
+        "sum_over_time(some_metric[5m])",
+        "some_metric * 2",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| {
+            panic!("{query} left the native route although nothing collects it: {display}")
+        });
+        assert!(
+            !matches!(fused.tree().root().expr, NativeExpr::Merge { .. }),
+            "{query} collects a histogram answer: {}\n{display}",
+            fused.tree()
         );
     }
     // `rate` answers histograms, so an aggregate over it folds histograms - and that folds now
@@ -11565,6 +11948,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
         },
         promql_annotations: Some(collector.clone()),
         native_fused: false,
+        native_binary_offer: true,
     };
     let input = LogicalPlan::Extension(Extension {
         node: Arc::new(
@@ -13055,6 +13439,7 @@ async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
         ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")).unwrap(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     planner.ctx.time_index_column = Some("timestamp".to_string());
     planner.ctx.start = 1_000;
@@ -13925,6 +14310,7 @@ async fn test_direct_or_numeric_value_types() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let left_context = direct_or_context("lhs", &["job"], "v");
     let right_context = direct_or_context("rhs", &["job"], "v");
@@ -15159,6 +15545,7 @@ async fn test_mixed_or_value_aliases_do_not_replace_labels() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let left = LogicalPlanBuilder::from(scan(&left))
         .project(vec![
@@ -15978,11 +16365,6 @@ async fn native_composed_binary_admits_a_source_free_frame_operand() {
 /// shape that did not would decline to the existing plan; neither may re-offer the same expression.
 #[tokio::test]
 async fn native_composed_binary_recursion_terminates_on_a_deep_expression() {
-    fn count_fused(plan: &LogicalPlan) -> usize {
-        usize::from(is_fused_series(plan))
-            + plan.inputs().into_iter().map(count_fused).sum::<usize>()
-    }
-
     let depth = 32;
     let mut query = "hist * on(tag_0) floats".to_string();
     for _ in 1..depth {
@@ -15999,9 +16381,80 @@ async fn native_composed_binary_recursion_terminates_on_a_deep_expression() {
     assert!(!display.contains("Join:"), "{depth}-deep: {display}");
     // One composition per operator, plus the leaf frames below them.
     assert!(
-        count_fused(&plan) > depth,
+        count_fused_nodes(&plan) > depth,
         "{depth}-deep: {} fused nodes: {display}",
-        count_fused(&plan)
+        count_fused_nodes(&plan)
+    );
+}
+
+/// The same match over two field kinds, `depth` binary operators deep.
+fn composition_query(depth: usize) -> String {
+    let mut query = "hist * on(tag_0) floats".to_string();
+    for _ in 1..depth {
+        query = format!("({query}) / on(tag_0) floats");
+    }
+    query
+}
+
+fn count_fused_nodes(plan: &LogicalPlan) -> usize {
+    usize::from(is_fused_series(plan))
+        + plan
+            .inputs()
+            .into_iter()
+            .map(count_fused_nodes)
+            .sum::<usize>()
+}
+
+/// A deep native composition plans on the stack a query worker has.
+///
+/// `try_plan_native` and `try_plan_native_composed_binary` call each other once per binary operator,
+/// and every level's frames are charged to the stack of the level above it. A left-deep chain of
+/// matches over two field kinds 64 operators deep aborted the process - a stack overflow, not a
+/// declined plan - on the two megabytes a query worker has, before `try_plan_native` grew its stack
+/// for the poll of its future; 56 operators deep still planned. nextest's own test thread is not a
+/// worker's, so the depths here are planned on a thread this test sizes like one, and the deepest of
+/// them is twice the depth that aborted.
+#[test]
+fn a_deep_native_composition_plans_within_a_worker_stack() {
+    let depths = [10, 24, 48, 64, 128];
+    let planned = std::thread::Builder::new()
+        .name("deep_native_composition".to_string())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime");
+            runtime.block_on(async {
+                let mut planned = Vec::new();
+                for depth in depths {
+                    let query = composition_query(depth);
+                    let plan = build_native_fused_plan_with_provider(
+                        &query,
+                        true,
+                        native_mixed_kind_provider().await,
+                    )
+                    .await;
+                    let display = plan.display_indent().to_string();
+                    assert!(!display.contains("Join:"), "{depth}-deep: {display}");
+                    // One composition per operator, plus the leaf frames below them.
+                    assert!(
+                        count_fused_nodes(&plan) > depth,
+                        "{depth}-deep: {} fused nodes: {display}",
+                        count_fused_nodes(&plan)
+                    );
+                    planned.push(depth);
+                }
+                planned
+            })
+        })
+        .expect("a thread with a worker's stack")
+        .join()
+        .expect("compositions 10, 24, 48, 64 and 128 operators deep plan on a two-megabyte stack");
+    assert_eq!(
+        depths.to_vec(),
+        planned,
+        "every depth plans as a native composition"
     );
 }
 
@@ -16019,6 +16472,7 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
         ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
         promql_annotations: None,
         native_fused: true,
+        native_binary_offer: true,
     };
     let before = format!("{:?}", planner.ctx);
     let refused = planner
