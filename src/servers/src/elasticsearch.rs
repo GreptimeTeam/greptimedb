@@ -41,6 +41,7 @@ use crate::error::{
     InvalidElasticsearchInputSnafu, ParseJsonSnafu, Result as ServersResult,
     status_code_to_http_status,
 };
+use crate::http::HttpResponse;
 use crate::http::event::{
     LogIngesterQueryParams, LogState, PipelineIngestRequest,
     extract_pipeline_params_map_from_headers, ingest_logs_inner,
@@ -226,17 +227,22 @@ async fn do_handle_bulk_api(
     };
     let pipeline_params =
         GreptimePipelineParams::from_map(extract_pipeline_params_map_from_headers(&headers));
-    if let Err(e) = ingest_logs_inner(
+    let ingest_result = ingest_logs_inner(
         log_state.log_handler,
         pipeline,
         requests,
         Arc::new(query_ctx),
         pipeline_params,
     )
-    .await
-    {
-        error!(e; "Failed to ingest logs");
-        let http_status = status_code_to_http_status(&e.status_code());
+    .await;
+    let failure = match ingest_result {
+        Ok(response) => ingest_failure(&response),
+        Err(e) => {
+            error!(e; "Failed to ingest logs");
+            Some((status_code_to_http_status(&e.status_code()), e.to_string()))
+        }
+    };
+    if let Some((http_status, reason)) = failure {
         return (
             http_status,
             elasticsearch_headers(),
@@ -244,7 +250,7 @@ async fn do_handle_bulk_api(
                 start.elapsed().as_millis() as i64,
                 0,
                 http_status.as_u16() as u32,
-                e.to_string().as_str(),
+                reason.as_str(),
             )),
         );
     }
@@ -264,6 +270,22 @@ async fn do_handle_bulk_api(
             "",
         )),
     )
+}
+
+/// Returns the HTTP status and reason if the ingestion response reports a failure.
+///
+/// `ingest_logs_inner` returns `Ok` even when inserting the transformed rows fails,
+/// carrying the insert error in an [`HttpResponse::Error`]. Without this check those
+/// documents would be acknowledged with `201` although nothing was written.
+fn ingest_failure(response: &HttpResponse) -> Option<(StatusCode, String)> {
+    match response {
+        HttpResponse::Error(err) => {
+            let status = common_error::status_code::StatusCode::from_u32(err.code())
+                .unwrap_or(common_error::status_code::StatusCode::Unknown);
+            Some((status_code_to_http_status(&status), err.error().to_string()))
+        }
+        _ => None,
+    }
 }
 
 // It will generate the following response when write _bulk request to GreptimeDB successfully:
@@ -450,6 +472,34 @@ fn get_log_value_from_msg_field(v: VrlValue, msg_field: &str) -> VrlValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::result::error_result::ErrorResponse;
+    use crate::http::result::greptime_result_v1::GreptimedbV1Response;
+
+    #[test]
+    fn test_ingest_failure() {
+        // A failed insert is returned as an `Ok` error response and must be reported.
+        let response = HttpResponse::Error(ErrorResponse::from_error_message(
+            common_error::status_code::StatusCode::InvalidArguments,
+            "column age expect type Int64, given: STRING".to_string(),
+        ));
+        let (status, reason) = ingest_failure(&response).unwrap();
+        assert_eq!(StatusCode::BAD_REQUEST, status);
+        assert_eq!("column age expect type Int64, given: STRING", reason);
+
+        let response = HttpResponse::Error(ErrorResponse::from_error_message(
+            common_error::status_code::StatusCode::Internal,
+            "region unavailable".to_string(),
+        ));
+        let (status, _) = ingest_failure(&response).unwrap();
+        assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, status);
+
+        let response = HttpResponse::GreptimedbV1(GreptimedbV1Response {
+            output: vec![],
+            execution_time_ms: 0,
+            resp_metrics: Default::default(),
+        });
+        assert!(ingest_failure(&response).is_none());
+    }
 
     #[test]
     fn test_parse_bulk_request() {
