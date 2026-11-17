@@ -33,8 +33,8 @@ use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
-    frame_schema_with, pack_raw_series, raw_series_frame_schema_with_ordering,
-    series_frame_ordering, unpack_raw_series,
+    PendingBatching, frame_schema_with, pack_raw_series_with,
+    raw_series_frame_schema_with_ordering, series_frame_ordering, unpack_raw_series,
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -511,7 +511,12 @@ impl ExecutionPlan for RawSeriesSourceExec {
         // The scan may promise a finer order than this node declares. Exchange the promise here so
         // the published frame carries the schema the plan was built with, which is what the region
         // and the frontend both compare.
-        pack_raw_series(Box::pin(DeclaredOrdering(relabelled)))
+        // This node runs inside the query engine's DataFusion execution, whose runtimes enable the
+        // time driver, so the packer may hold a partially filled batch across a pending period.
+        pack_raw_series_with(
+            Box::pin(DeclaredOrdering(relabelled)),
+            PendingBatching::Deadline,
+        )
     }
 }
 

@@ -1643,12 +1643,20 @@ async fn large_repeated_tags_across_small_batches() {
 #[test]
 fn reusable_payload_decoder_preserves_bounds_and_recovers_after_errors() {
     let mut decoder = codec::PayloadDecoder::default();
+    // Counting the contexts a decoder builds is the only way to observe its reuse: a stream owns
+    // one decoder, so it must build one context and keep it for every block it decodes.
+    let contexts = codec::contexts_built();
     let plain = b"already uncompressed";
     let borrowed = decoder.decompress(plain, 0, plain.len()).unwrap();
     assert_eq!(borrowed.as_ptr(), plain.as_ptr());
     assert!(decoder.decompress(plain, 0, plain.len() - 1).is_err());
     assert!(decoder.decompress(plain, 42, plain.len()).is_err());
     assert!(decoder.decompress(plain, 1, usize::MAX).is_err());
+    assert_eq!(
+        contexts,
+        codec::contexts_built(),
+        "uncompressed and rejected payloads build no context"
+    );
 
     let first = vec![7; 4096];
     let compressed = codec::compress(&first, Compression::Zstd, 3).unwrap();
@@ -1680,15 +1688,16 @@ fn reusable_payload_decoder_preserves_bounds_and_recovers_after_errors() {
         smaller
     );
 
+    // One modern frame per payload is what the writer emits and what the retained context is charged
+    // for, so a payload carrying a second frame is refused rather than decoded into memory the
+    // context's own size does not describe.
     let mut concatenated = compressed.clone();
     concatenated.extend_from_slice(&smaller_frame);
     let expected = [first.as_slice(), smaller.as_slice()].concat();
-    assert_eq!(
-        decoder
-            .decompress(&concatenated, 1, expected.len())
-            .unwrap(),
-        expected
-    );
+    let error = decoder
+        .decompress(&concatenated, 1, expected.len())
+        .expect_err("a second frame after the first is not a payload this reader charges for");
+    assert!(error.to_string().contains("one zstd frame"), "{error}");
     concatenated.push(255);
     assert!(
         decoder
@@ -1699,4 +1708,101 @@ fn reusable_payload_decoder_preserves_bounds_and_recovers_after_errors() {
         decoder.decompress(&compressed, 1, first.len()).unwrap(),
         first
     );
+    // Every block above, the failing ones included, reused the context the first compressed block
+    // built: one decoder costs its stream one context however many blocks it decodes.
+    assert_eq!(
+        contexts + 1,
+        codec::contexts_built(),
+        "one decoder builds one context for all its blocks"
+    );
+}
+
+/// A legacy frame is refused before it reaches the context, because the context cannot describe it.
+///
+/// This build of zstd decodes legacy frames, and their decompressor buffers by the window the frame
+/// declares before any window cap applies, outside the size `DCtx::sizeof` reports. The writer emits
+/// modern frames only, so a legacy frame here is malformed input rather than a compatibility need, and
+/// so is a legacy frame appended after a modern one.
+#[test]
+fn legacy_frames_are_refused_before_they_reach_the_context() {
+    let mut decoder = codec::PayloadDecoder::default();
+    let contexts = codec::contexts_built();
+    // A v0.7 frame declaring a 16 MiB window: decoding it would buffer far more than the context
+    // reports, so the frame's magic has to be refused first.
+    let legacy = [
+        0x27, 0xb5, 0x2f, 0xfd, 0x00, 0x70, 0x40, 0x00, 0x01, 0x07, 0xc0, 0x00, 0x00,
+    ];
+    let error = decoder
+        .decompress(&legacy, 1, legacy.len())
+        .expect_err("a legacy frame is not a payload this reader decodes");
+    assert!(error.to_string().contains("modern zstd frame"), "{error}");
+
+    let plain = vec![7_u8; 4096];
+    let modern = codec::compress(&plain, Compression::Zstd, 3).unwrap();
+    let mut mixed = modern.clone();
+    mixed.extend_from_slice(&legacy);
+    let error = decoder
+        .decompress(&mixed, 1, plain.len() + legacy.len())
+        .expect_err("a legacy frame after a modern one is refused too");
+    assert!(error.to_string().contains("one zstd frame"), "{error}");
+    // Neither refusal built a context, and the decoder still decodes what it accepts.
+    assert_eq!(
+        contexts,
+        codec::contexts_built(),
+        "a refused payload builds no context"
+    );
+    assert_eq!(decoder.decompress(&modern, 1, plain.len()).unwrap(), plain);
+}
+
+#[test]
+fn released_payload_decoder_drops_context_and_bounds_scratch() {
+    let mut decoder = codec::PayloadDecoder::default();
+    let contexts = codec::contexts_built();
+    // An uncompressed payload never builds a context.
+    decoder.decompress(b"plain", 0, 5).unwrap();
+    assert!(!decoder.holds_context());
+    assert_eq!(contexts, codec::contexts_built());
+
+    let large = vec![7u8; 4 * 1024 * 1024];
+    let frame = codec::compress(&large, Compression::Zstd, 3).unwrap();
+    assert_eq!(decoder.decompress(&frame, 1, large.len()).unwrap(), large);
+    assert!(decoder.holds_context());
+    assert_eq!(
+        contexts + 1,
+        codec::contexts_built(),
+        "the first compressed block builds the stream's only context"
+    );
+    assert!(decoder.retained_output_bytes() > codec::RELEASED_OUTPUT_BYTES);
+
+    decoder.release();
+    // Releasing before a wait for I/O gives the context back and bounds the scratch, while the
+    // decoder itself stays: the next block rebuilds the context instead of the caller.
+    assert!(!decoder.holds_context());
+    assert!(decoder.retained_output_bytes() <= codec::RELEASED_OUTPUT_BYTES);
+    assert_eq!(
+        contexts + 1,
+        codec::contexts_built(),
+        "releasing a decoder builds nothing"
+    );
+    assert_eq!(decoder.decompress(&frame, 1, large.len()).unwrap(), large);
+    assert!(decoder.holds_context());
+    assert_eq!(
+        contexts + 2,
+        codec::contexts_built(),
+        "the released context is rebuilt once for the next block"
+    );
+    decoder.release();
+
+    // A modest buffer survives the release, so consecutive blocks of one stream share it.
+    let small = vec![3u8; 1024];
+    let small_frame = codec::compress(&small, Compression::Zstd, 3).unwrap();
+    assert_eq!(
+        decoder.decompress(&small_frame, 1, small.len()).unwrap(),
+        small
+    );
+    assert_eq!(contexts + 3, codec::contexts_built());
+    let retained = decoder.retained_output_bytes();
+    assert!(retained >= small.len());
+    decoder.release();
+    assert_eq!(retained, decoder.retained_output_bytes());
 }

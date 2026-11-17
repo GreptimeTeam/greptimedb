@@ -140,6 +140,12 @@ struct RawScanPreparation {
     predicates: Vec<Arc<dyn PhysicalExpr>>,
 }
 
+/// Memoized raw-scan preflight: the label binding it was computed for, and its answer.
+///
+/// The answer carries the preparation together with whether its data comes from the columnar
+/// prepared source; `None` means the raw path is unavailable for this scan.
+type PreflightCache = Option<(RawLabelSource, Option<(RawScanPreparation, bool)>)>;
+
 struct CandidateReceiver {
     receiver: mpsc::UnboundedReceiver<Result<SeriesReaderInput>>,
     active_receivers: Arc<AtomicUsize>,
@@ -202,6 +208,19 @@ pub struct SeriesScan {
     /// Metrics for each partition.
     /// The scanner only sets in query and keeps it empty during compaction.
     metrics_list: Arc<PartitionMetricsList>,
+    /// Memoized result of [`Self::prepare_raw_scan`] for the label binding it was computed for.
+    ///
+    /// Preflight only reads pinned scanner state, and one execution asks for it once per output
+    /// partition, so the first answer serves the rest. Errors are never stored, and every entry
+    /// that mutates the state the answer depends on clears the entry. The guard is taken and
+    /// released inside a synchronous call, so it never spans an await.
+    preflight: Mutex<PreflightCache>,
+    /// Test-only number of preflight computations performed by this scanner.
+    ///
+    /// A cached answer does not increment it, so a test can prove that a repeated preflight over
+    /// the same pinned state is served from [`Self::preflight`].
+    #[cfg(test)]
+    preflight_runs: AtomicUsize,
 }
 
 impl SeriesScan {
@@ -245,7 +264,44 @@ impl SeriesScan {
             legacy_receivers: Mutex::new(Vec::new()),
             candidate_receivers: Mutex::new(Vec::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
+            preflight: Mutex::new(None),
+            #[cfg(test)]
+            preflight_runs: AtomicUsize::new(0),
         }
+    }
+
+    /// Returns the number of preflight computations this scanner has run.
+    ///
+    /// Test-only: a memoized preflight does not count, so a test can distinguish a cache hit from a
+    /// recomputation.
+    #[cfg(test)]
+    pub(crate) fn preflight_runs(&self) -> usize {
+        self.preflight_runs.load(Ordering::Relaxed)
+    }
+
+    /// Drops the memoized preflight.
+    ///
+    /// Every entry point that mutates state the preflight reads calls this, so a stale answer can
+    /// never outlive the state it was derived from.
+    fn clear_preflight_cache(&self) {
+        *self.preflight.lock().unwrap() = None;
+    }
+
+    /// Returns the memoized preflight, if it was computed for the same label binding.
+    ///
+    /// A binding only matches when its immutable identity matches as well: the preflight validates
+    /// the pinned metadata snapshot and the label binding, so an answer for another binding must
+    /// never be reused even when the labels look alike.
+    fn cached_preflight(
+        &self,
+        label_source: &RawLabelSource,
+    ) -> Option<Option<(RawScanPreparation, bool)>> {
+        let cache = self.preflight.lock().unwrap();
+        let (cached_source, cached) = cache.as_ref()?;
+        if !prepared::same_labels(cached_source, label_source) {
+            return None;
+        }
+        Some(cached.clone())
     }
 
     fn uses_columnar(&self) -> bool {
@@ -297,10 +353,33 @@ impl SeriesScan {
     }
 
     /// Prepares the raw scan and reports whether its data comes from the columnar prepared source.
+    ///
+    /// The answer only depends on pinned scanner state plus the label binding, and an execution
+    /// asks for it once per output partition, so it is memoized per binding. Only successful
+    /// answers are stored: a rejected binding must fail on every call, not replay a rejection or
+    /// hide a later one.
     fn prepare_raw_scan(
         &self,
         label_source: &RawLabelSource,
     ) -> Result<Option<(RawScanPreparation, bool)>, BoxedError> {
+        if let Some(cached) = self.cached_preflight(label_source) {
+            return Ok(cached);
+        }
+        let computed = self.prepare_raw_scan_uncached(label_source)?;
+        // Both sides of the cache are cheap to clone, and callers own their copy: the merge schema
+        // helper rewrites the field indices and predicates of the preparation it is given, which
+        // must never reach the stored answer.
+        *self.preflight.lock().unwrap() = Some((label_source.clone(), computed.clone()));
+        Ok(computed)
+    }
+
+    /// Computes a fresh [`Self::prepare_raw_scan`] answer from the pinned scanner state.
+    fn prepare_raw_scan_uncached(
+        &self,
+        label_source: &RawLabelSource,
+    ) -> Result<Option<(RawScanPreparation, bool)>, BoxedError> {
+        #[cfg(test)]
+        self.preflight_runs.fetch_add(1, Ordering::Relaxed);
         let input = &self.stream_ctx.input;
         let metadata = input.mapper.metadata();
         match label_source {
@@ -1054,6 +1133,7 @@ impl RegionScanner for SeriesScan {
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.prepared = Arc::new(prepared::Preparation::default());
+        self.clear_preflight_cache();
         self.properties.prepare(request);
 
         self.check_scan_limit().map_err(BoxedError::new)?;
@@ -1074,11 +1154,15 @@ impl RegionScanner for SeriesScan {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
-        self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
+        let matched = self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs);
+        // The added filters change the predicate group the preflight inspects.
+        self.clear_preflight_cache();
+        matched
     }
 
     fn reset_state(&mut self) {
         self.prepared = Arc::new(prepared::Preparation::default());
+        self.clear_preflight_cache();
         self.stream_ctx.input.predicate.clear_dyn_filters();
         let num_workers = common_stat::get_total_cpu_cores().max(1);
         self.pruner = match self.mode {

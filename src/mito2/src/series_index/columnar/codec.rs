@@ -68,9 +68,37 @@ pub(crate) fn decompress(bytes: &[u8], compression: u16, decoded: usize) -> Resu
     Ok(output)
 }
 
+/// Output scratch a released decoder keeps: the next block of the same stream reuses the
+/// allocation instead of growing a new one.
+pub(crate) const RELEASED_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// The magic number every modern zstd frame starts with, little-endian.
+///
+/// This build of zstd also decodes legacy frames, and their decompressor buffers by the window the
+/// frame declares before any window cap applies (a 13-byte legacy frame can ask for megabytes). The
+/// writer emits modern frames only, so anything else is malformed input rather than a compatibility
+/// requirement, and it is refused before it reaches the decoder.
+const MODERN_FRAME_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
+
+#[cfg(test)]
+std::thread_local! {
+    /// Decompression contexts this thread has built. A stream must build one and reuse it for
+    /// every block it decodes, which nothing observable outside that stream shows, so tests
+    /// count the allocations directly. The counter is thread-local because a current-thread
+    /// runtime polls a stream on one thread and a decoder never moves between streams.
+    static CONTEXTS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: decompression contexts this thread has built so far.
+#[cfg(test)]
+pub(crate) fn contexts_built() -> usize {
+    CONTEXTS_BUILT.with(std::cell::Cell::get)
+}
+
 /// Scratch state for synchronous decoding of one sample block's columns.
 /// The caller reserves decoded column memory before allocating this output buffer.
-/// No buffer or context is shared with another stream or retained in a cache.
+/// A stream owns one decoder and reuses it for every block it reads; no buffer or context is
+/// shared with another stream or retained in a cache.
 #[derive(Default)]
 pub(crate) struct PayloadDecoder {
     context: Option<zstd::zstd_safe::DCtx<'static>>,
@@ -78,6 +106,17 @@ pub(crate) struct PayloadDecoder {
 }
 
 impl PayloadDecoder {
+    /// Releases the decompression context and any scratch above [`RELEASED_OUTPUT_BYTES`].
+    ///
+    /// A stream calls this before it waits for I/O that does not need the decoder: the context is
+    /// its only sizeable state, and the next compressed block builds it again. A modest output
+    /// buffer survives, so consecutive blocks of one stream still share it.
+    pub(crate) fn release(&mut self) {
+        self.context = None;
+        self.output.clear();
+        self.output.shrink_to(RELEASED_OUTPUT_BYTES);
+    }
+
     pub(crate) fn decompress<'a>(
         &'a mut self,
         bytes: &'a [u8],
@@ -94,12 +133,28 @@ impl PayloadDecoder {
                 Ok(bytes)
             }
             1 => {
+                // One modern frame per payload is what the writer emits. Anything else is refused
+                // here rather than decoded: a legacy frame's decompressor buffers by the window the
+                // frame declares before any window limit applies, so a corrupt artifact could ask
+                // for unbounded memory, and a payload carrying more than one frame has no place in
+                // this format at all.
+                require(
+                    bytes.starts_with(MODERN_FRAME_MAGIC),
+                    "series payload is not a modern zstd frame",
+                )?;
+                require(
+                    zstd::zstd_safe::find_frame_compressed_size(bytes).ok() == Some(bytes.len()),
+                    "series payload is not one zstd frame",
+                )?;
                 let context = match self.context {
                     Some(ref mut context) => context,
-                    None => self.context.insert(
-                        zstd::zstd_safe::DCtx::try_create()
-                            .ok_or_else(|| invalid("cannot allocate series decoder context"))?,
-                    ),
+                    None => {
+                        let created = zstd::zstd_safe::DCtx::try_create()
+                            .ok_or_else(|| invalid("cannot allocate series decoder context"))?;
+                        #[cfg(test)]
+                        CONTEXTS_BUILT.with(|built| built.set(built.get() + 1));
+                        self.context.insert(created)
+                    }
                 };
                 // Reset even after a previous corrupt, truncated, or oversized frame.
                 context
@@ -123,6 +178,18 @@ impl PayloadDecoder {
             }
             id => Err(unsupported(format!("series compression {id}"))),
         }
+    }
+}
+
+/// Test-only views of the decoder's scratch, so a test can assert what a release gives back.
+#[cfg(test)]
+impl PayloadDecoder {
+    pub(crate) fn holds_context(&self) -> bool {
+        self.context.is_some()
+    }
+
+    pub(crate) fn retained_output_bytes(&self) -> usize {
+        self.output.capacity()
     }
 }
 

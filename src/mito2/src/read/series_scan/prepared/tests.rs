@@ -2749,3 +2749,162 @@ async fn visibility_fast_path_preserves_buffers_and_partial_filtering() {
     }
     engine.stop().await.unwrap();
 }
+
+/// A label binding that carries the same labels over a distinct pinned metadata snapshot.
+fn rebuilt_binding(binding: &RawLabelSource) -> RawLabelSource {
+    let RawLabelSource::PrimaryKey {
+        metric_name,
+        physical_metadata,
+        logical_tags,
+    } = binding
+    else {
+        unreachable!("the fixture binds a primary key source");
+    };
+    RawLabelSource::PrimaryKey {
+        metric_name: metric_name.clone(),
+        physical_metadata: Arc::new((**physical_metadata).clone()),
+        logical_tags: logical_tags.clone(),
+    }
+}
+
+/// One execution asks the bound scanner for the same preflight from every output partition, in the
+/// order `SeriesScanExec::execute` uses: `raw_series_schema`, then
+/// `raw_series_has_explicit_labels`, then `scan_series_partition`. All three validate the same
+/// pinned state and label binding, so the whole execution must run the preflight once, not once
+/// per partition per call.
+#[tokio::test]
+async fn preflight_runs_once_for_every_partition_of_one_execution() {
+    let (_env, engine, region) = fixture().await;
+    write(&engine, &region, 0, 1000, Some(1.0)).await;
+    write(&engine, &region, 0, 2000, Some(1.0)).await;
+    write(&engine, &region, 1, 1000, Some(2.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+
+    let mut scanner = scanner(&region, region.series_index_store.clone().unwrap());
+    let binding = labels(scanner.metadata());
+    let ranges = scanner.properties().partitions[0].clone();
+    scanner
+        .prepare(PrepareRequest::default().with_ranges(vec![ranges, vec![], vec![]]))
+        .unwrap();
+    let partitions = scanner.properties().num_partitions();
+    assert!(
+        partitions > 1,
+        "several partitions are what makes repeated preflights observable"
+    );
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+
+    for partition in 0..partitions {
+        assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
+        assert!(scanner.raw_series_has_explicit_labels(&binding).unwrap());
+        let stream = scanner
+            .scan_series_partition(&ctx, &metrics, partition, &binding)
+            .unwrap()
+            .expect("the fixture prepares its columnar sources");
+        stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(
+            1,
+            scanner.preflight_runs(),
+            "partition {partition} re-ran a preflight the execution already answered"
+        );
+    }
+    engine.stop().await.unwrap();
+}
+
+/// The memoized preflight must not outlive the state it was derived from, and it must never answer
+/// for another binding: the preflight validates the pinned metadata snapshot, so a look-alike
+/// binding is still rejected on every call.
+#[tokio::test]
+async fn reset_state_and_other_bindings_drop_the_preflight_cache() {
+    let (_env, engine, region) = fixture().await;
+    write(&engine, &region, 0, 1000, Some(1.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+
+    let mut scanner = scanner(&region, region.series_index_store.clone().unwrap());
+    let binding = labels(scanner.metadata());
+    assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
+    assert_eq!(1, scanner.preflight_runs());
+    // An unchanged binding is served from the cache.
+    assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
+    assert_eq!(1, scanner.preflight_runs());
+
+    // A look-alike binding is not a cache hit, and its rejection is not cached either.
+    let look_alike = rebuilt_binding(&binding);
+    assert!(scanner.raw_series_schema(&look_alike).is_err());
+    assert_eq!(2, scanner.preflight_runs());
+    assert!(scanner.raw_series_schema(&look_alike).is_err());
+    assert_eq!(3, scanner.preflight_runs());
+
+    // `reset_state` rewrites the state the preflight read, so it must drop the cached answer.
+    scanner.reset_state();
+    assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
+    assert_eq!(
+        4,
+        scanner.preflight_runs(),
+        "reset_state must drop the memoized preflight"
+    );
+    assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
+    assert_eq!(4, scanner.preflight_runs());
+
+    // `prepare` rewrites the partition assignment the preflight read as well.
+    scanner.prepare(PrepareRequest::default()).unwrap();
+    assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
+    assert_eq!(
+        5,
+        scanner.preflight_runs(),
+        "prepare must drop the memoized preflight"
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A dynamic filter joins the predicate group the preflight inspects, and the preflight rejects
+/// every dynamic filter because a fresh execution cannot promise to keep its semantics. An
+/// execution that already holds an answer must therefore recompute it once a filter is added:
+/// replaying the cached preparation would keep sending rows through the raw path that ignores the
+/// new predicate.
+#[tokio::test]
+async fn added_dynamic_filters_drop_the_preflight_cache() {
+    use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
+
+    let (_env, engine, region) = fixture().await;
+    write(&engine, &region, 0, 1000, Some(1.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+
+    let mut scanner = scanner(&region, region.series_index_store.clone().unwrap());
+    let binding = labels(scanner.metadata());
+    // The fixture's static filters pass the preflight, and the second ask is served from the cache
+    // the first one filled.
+    assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
+    assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
+
+    // Only the presence of a dynamic filter matters to the preflight, not its contents.
+    let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(true)));
+    assert_eq!(
+        vec![true],
+        scanner.add_dyn_filter_to_predicate(vec![dynamic_filter])
+    );
+
+    // The cached answer no longer describes the scan's predicate, so asking again must reject the
+    // raw path instead of replaying the preparation that ignored the filter.
+    assert!(
+        scanner.raw_series_schema(&binding).unwrap().is_none(),
+        "an added dynamic filter must reach the next preflight"
+    );
+    assert!(!scanner.raw_series_has_explicit_labels(&binding).unwrap());
+    assert!(
+        scanner
+            .prepare_series(
+                &QueryScanContext::default(),
+                &ExecutionPlanMetricsSet::new(),
+                &binding,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "the ordinary scan covers a scan that added a dynamic filter"
+    );
+    engine.stop().await.unwrap();
+}

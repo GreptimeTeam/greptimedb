@@ -2546,6 +2546,174 @@ impl SeriesFrameDecoder {
         if self.shape.content != FrameContent::Raw {
             return invalid_series("a raw frame decoder cannot read an evaluated frame");
         }
+        self.decode_raw_chunks(batch)
+    }
+
+    /// Builds every raw chunk of one batch straight from its columns.
+    ///
+    /// A raw row holds exactly what one [`RawSeriesChunk`] holds, so an intermediate row list would
+    /// only hold the chunk's parts for a few lines and unpack them again. No payload is copied either
+    /// way - a `ListArray::value` is a handle over the parent's buffer, not a copy - so what this path
+    /// avoids is the row list itself and the per-row work that builds it: one `FrameRow` allocation
+    /// per row and one temporary Arrow handle per row per field, from handles downcast once per batch
+    /// instead.
+    ///
+    /// Every check the row path made still happens here, with the same constraints and the same whole-batch rejection, and the chunks are
+    /// still built through [`RawTimestamps::try_new`], [`SeriesFields::try_from_vec`], and
+    /// [`RawSeriesChunk::try_new`]. A batch that fails anywhere fails as a whole: the chunks of the
+    /// rows before the bad one are dropped with the error rather than returned, because a caller
+    /// has no way to tell which part of a contradictory batch is the true one.
+    ///
+    /// The checks run in the order the row path ran them, over the same two passes: every row is
+    /// decoded first (its structure, then its labels, then its payloads), and only then are the
+    /// chunks built in row order. A batch carrying more than one defect therefore reports the same
+    /// error through either path, which the differential tests hold this one to.
+    fn decode_raw_chunks(&self, batch: &RecordBatch) -> Result<Vec<RawSeriesChunk>> {
+        self.validate_batch(batch)?;
+        let cols = batch.columns();
+        let keys = down::<BinaryArray>(&cols[0], "read_key")?;
+        let lasts = down::<BooleanArray>(&cols[1], "is_last")?;
+        let time_struct = down::<StructArray>(&cols[2], "time")?;
+        let fs = down::<StructArray>(&cols[3], "fields")?;
+        let (names, labels) = if self.shape.labels == FrameLabelMode::Explicit {
+            (
+                Some(down::<StringArray>(&cols[4], "name")?),
+                Some(down::<ListArray>(&cols[5], "labels")?),
+            )
+        } else {
+            (None, None)
+        };
+        let times = down::<ListArray>(time_struct.column(0), "timestamps")?;
+        let time_values = down::<Int64Array>(times.values(), "timestamp values")?;
+        let payloads = raw_field_columns(fs)?;
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            if lasts.is_null(row) || time_struct.is_null(row) || fs.is_null(row) {
+                return invalid_series("null required frame parent");
+            }
+            // A raw row carries its key under either label mode: key mode names the series only by
+            // it, and explicit mode keeps the chunk's own key beside the decoded labels.
+            if keys.is_null(row) {
+                return invalid_series(match self.shape.labels {
+                    FrameLabelMode::Key => "null required frame parent",
+                    FrameLabelMode::Explicit => "a raw explicit frame row carries no key",
+                });
+            }
+            if times.is_null(row) {
+                return invalid_series("null required raw frame parent");
+            }
+            let (time_start, positions) = list_range(times.value_offsets(), row)?;
+            reject_nulls(time_values.nulls(), time_start, positions, "null timestamp")?;
+            let metric = match (names, labels) {
+                (None, None) => None,
+                (Some(ns), Some(ls)) => {
+                    if ls.is_null(row) {
+                        return invalid_series("null labels list");
+                    }
+                    let label_values = ls.value(row);
+                    let label_struct = down::<StructArray>(&label_values, "labels")?;
+                    if label_struct.null_count() != 0 {
+                        return invalid_series("null label struct element");
+                    }
+                    let ln = down::<StringArray>(label_struct.column(0), "label names")?;
+                    let lv = down::<StringArray>(label_struct.column(1), "label values")?;
+                    if ln.null_count() != 0 || lv.null_count() != 0 {
+                        return invalid_series("null label element");
+                    }
+                    let tags = (0..ln.len())
+                        .map(|i| Label {
+                            name: Arc::from(ln.value(i)),
+                            value: Arc::from(lv.value(i)),
+                        })
+                        .collect();
+                    Some(SeriesLabels::try_new(
+                        (!ns.is_null(row)).then(|| Arc::from(ns.value(row))),
+                        tags,
+                    )?)
+                }
+                _ => return invalid_series("incomplete explicit label columns"),
+            };
+            let mut samples = Vec::with_capacity(payloads.len());
+            for payload in &payloads {
+                if payload.payload.is_null(row) {
+                    return invalid_series("null field payload");
+                }
+                let has_float = !payload.floats.is_null(row);
+                let has_hist = !payload.histogram.is_null(row);
+                if !has_float && !has_hist {
+                    return invalid_series("field has neither float nor histogram payload");
+                }
+                let floats = if has_float {
+                    let (start, len) = list_range(payload.floats.value_offsets(), row)?;
+                    payload.float_values.slice(start, len)
+                } else {
+                    Float64Array::new_null(0)
+                };
+                if has_float && floats.len() != positions {
+                    return invalid_series("float payload length mismatch");
+                }
+                let decoded = if !has_hist {
+                    Samples::from_float(floats)
+                } else {
+                    if payload.indices.is_null(row) || payload.tables.is_null(row) {
+                        return invalid_series("null histogram indices or table");
+                    }
+                    let indices =
+                        down::<UInt32Array>(&payload.indices.value(row), "histogram indices")?
+                            .clone();
+                    if indices.len() != positions {
+                        return invalid_series("histogram index length mismatch");
+                    }
+                    let table =
+                        down::<StructArray>(&payload.tables.value(row), "histogram table")?.clone();
+                    let batch = Arc::new(HistogramBatch::try_from_arrow(table)?);
+                    if has_float {
+                        Samples::try_from_mixed(floats, HistogramSamples::try_new(indices, batch)?)?
+                    } else {
+                        Samples::try_from_histogram(indices, batch)?
+                    }
+                };
+                samples.push(decoded);
+            }
+            rows.push(RawRow {
+                key: binary_slice(keys, row)?,
+                metric,
+                samples,
+                is_last: lasts.value(row),
+                time_start,
+                positions,
+            });
+        }
+        // Every row is decoded before any chunk is built, and the chunk-level checks then run in
+        // row order: a row's timestamps must be strictly increasing, its samples must form fields,
+        // and the chunk must agree with the frame's schema.
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let time =
+                RawTimestamps::try_new(time_values.values().slice(row.time_start, row.positions))?;
+            let fields = SeriesFields::try_from_vec(row.samples)?;
+            out.push(RawSeriesChunk::try_new(
+                &self.schema,
+                row.key,
+                row.metric,
+                time,
+                fields,
+                row.is_last,
+            )?);
+        }
+        Ok(out)
+    }
+
+    /// Decodes a raw batch through the former intermediate row list.
+    ///
+    /// This is the reference the direct path is diffed against in tests only: keeping it reachable
+    /// there is what makes the two paths comparable row for row, and it is compiled out of every
+    /// non-test build so it cannot become a second production path.
+    #[cfg(test)]
+    fn decode_raw_via_rows(&self, batch: &RecordBatch) -> Result<Vec<RawSeriesChunk>> {
+        if self.shape.content != FrameContent::Raw {
+            return invalid_series("a raw frame decoder cannot read an evaluated frame");
+        }
         let rows = self.decode_rows(batch)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -2618,8 +2786,11 @@ impl SeriesFrameDecoder {
         Ok(out)
     }
 
-    /// Decodes all rows of one batch, checking its reserved metadata, declared fields, and rows.
-    fn decode_rows(&self, batch: &RecordBatch) -> Result<Vec<FrameRow>> {
+    /// Checks the reserved metadata, declaration text, and field layout of one frame batch.
+    ///
+    /// Every entry point of this codec goes through it, so a batch is refused for the same reasons
+    /// whichever way it is decoded.
+    fn validate_batch(&self, batch: &RecordBatch) -> Result<()> {
         let actual = batch.schema();
         validate_ordering(actual.as_ref(), self.shape.content)?;
         for key in [LAYOUT, CONTENT, LABELS, TIME, GRID, LABEL_DECODE] {
@@ -2638,6 +2809,12 @@ impl SeriesFrameDecoder {
         if actual.fields() != self.expected.fields() {
             return invalid_series("frame schema mismatch");
         }
+        Ok(())
+    }
+
+    /// Decodes all rows of one batch, checking its reserved metadata, declared fields, and rows.
+    fn decode_rows(&self, batch: &RecordBatch) -> Result<Vec<FrameRow>> {
+        self.validate_batch(batch)?;
         let cols = batch.columns();
         let keys = down::<BinaryArray>(&cols[0], "read_key")?;
         let lasts = down::<BooleanArray>(&cols[1], "is_last")?;
@@ -2818,13 +2995,99 @@ pub fn unpack_raw_series_frame(
 }
 
 fn binary_slice(array: &BinaryArray, row: usize) -> Result<Buffer> {
-    let offsets = array.value_offsets();
-    let start = usize::try_from(offsets[row]).map_err(|_| err("negative binary offset"))?;
-    let end = usize::try_from(offsets[row + 1]).map_err(|_| err("negative binary offset"))?;
+    let (start, len) = list_range(array.value_offsets(), row)?;
+    Ok(array.values().slice_with_length(start, len))
+}
+
+/// The `(start, len)` window of one list slot in its child array.
+///
+/// Read straight from the parent's offsets, which is what [`ListArray::value`] does internally: a
+/// caller that only needs the window in order to slice the child itself avoids the temporary
+/// `ArrayRef` a per-row `value(row)` would allocate.
+fn list_range(offsets: &[i32], row: usize) -> Result<(usize, usize)> {
+    let start = usize::try_from(offsets[row]).map_err(|_| err("negative list offset"))?;
+    let end = usize::try_from(offsets[row + 1]).map_err(|_| err("negative list offset"))?;
     let len = end
         .checked_sub(start)
-        .ok_or_else(|| err("invalid binary offsets"))?;
-    Ok(array.values().slice_with_length(start, len))
+        .ok_or_else(|| err("invalid list offsets"))?;
+    Ok((start, len))
+}
+
+/// Rejects nulls in the `[start, start + len)` window of one child column.
+///
+/// A parent column that carries no null at all costs one branch, which is the common case; a column
+/// that does is checked per row exactly where the row's own slice is checked.
+fn reject_nulls(nulls: Option<&NullBuffer>, start: usize, len: usize, reason: &str) -> Result<()> {
+    if let Some(nulls) = nulls
+        && nulls.slice(start, len).null_count() != 0
+    {
+        return invalid_series(reason);
+    }
+    Ok(())
+}
+
+/// One decoded raw row, before its chunk is built.
+///
+/// A row keeps its timestamps as the window they occupy in the time column, so the chunk is built
+/// from the same values instead of another handle over them: the row-list path held a
+/// [`RawTimestamps`] buffer per row (`RowTime::Timestamps`), and the chunk consumed it. Everything
+/// else here is a slice or a move: the key is a slice of the key column, and a field's samples are
+/// slices of their own columns.
+struct RawRow {
+    /// The row's exact key.
+    key: Buffer,
+    /// The row's labels, in explicit label mode.
+    metric: Option<SeriesLabels>,
+    /// The row's samples, one entry per field.
+    samples: Vec<Samples>,
+    /// Whether the row closes its series.
+    is_last: bool,
+    /// Start of the row's timestamps in the time column's values.
+    time_start: usize,
+    /// Positions the row carries, i.e. the length of its timestamp window.
+    positions: usize,
+}
+
+/// One raw field's payload columns, borrowed and downcast once per batch.
+///
+/// The raw decode reads one row of every field per row of the batch, so a downcast per row would
+/// repeat the same work for every row. These are the five columns a row of one field needs, and
+/// nothing here decides anything: the shape checks stay in the decode loop itself.
+struct RawFieldColumns<'a> {
+    /// The per-row payload struct, whose validity says a field has a payload at all.
+    payload: &'a StructArray,
+    /// Every row's `float_values` list.
+    floats: &'a ListArray,
+    /// The `float_values` child array those lists index into.
+    float_values: &'a Float64Array,
+    /// Every row's `histogram` struct.
+    histogram: &'a StructArray,
+    /// Every row's histogram `indices` list.
+    indices: &'a ListArray,
+    /// Every row's histogram `table` list.
+    tables: &'a ListArray,
+}
+
+impl<'a> RawFieldColumns<'a> {
+    /// Downcasts one field column of the frame's `fields` struct.
+    fn of(column: &'a ArrayRef) -> Result<Self> {
+        let payload = down::<StructArray>(column, "field payload")?;
+        let floats = down::<ListArray>(payload.column(0), "float values")?;
+        let histogram = down::<StructArray>(payload.column(1), "histogram payload")?;
+        Ok(Self {
+            payload,
+            float_values: down::<Float64Array>(floats.values(), "float values")?,
+            floats,
+            histogram,
+            indices: down::<ListArray>(histogram.column(0), "histogram indices")?,
+            tables: down::<ListArray>(histogram.column(1), "histogram table")?,
+        })
+    }
+}
+
+/// Downcasts every field column of a raw frame's `fields` struct once.
+fn raw_field_columns(fs: &StructArray) -> Result<Vec<RawFieldColumns<'_>>> {
+    fs.columns().iter().map(RawFieldColumns::of).collect()
 }
 
 fn checked_offset(len: usize) -> Result<i32> {

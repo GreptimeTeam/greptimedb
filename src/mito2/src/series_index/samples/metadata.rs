@@ -25,6 +25,7 @@ pub(super) const HEADER_SIZE: u64 = 16;
 pub(super) const TRAILER_SIZE: u64 = 120;
 pub(super) const PAGE_LIMIT: usize = 65536;
 pub(super) const ROOT_CAPACITY: usize = (PAGE_LIMIT - 12) / 72;
+/// Largest decoded block payload, and therefore the largest frame a decoder has to decompress.
 const CHUNK_LIMIT: usize = 1024 * 1024;
 /// Fixed part of a block descriptor, before its 44-byte column descriptors.
 ///
