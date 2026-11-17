@@ -14,12 +14,13 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use api::v1::Rows;
 use common_base::Plugins;
 use common_recordbatch::RecordBatches;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionCloseRequest, RegionRequest};
+use store_api::region_request::{PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -27,7 +28,8 @@ use crate::engine::flush_test::MockRegionHook;
 use crate::engine::listener::AlterFlushListener;
 use crate::engine::region_hook::RegionHookRef;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+    CheckpointTaskBlocker, CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows,
+    rows_schema,
 };
 
 #[tokio::test]
@@ -276,4 +278,211 @@ async fn test_engine_close_region_flush_on_close_while_flushing() {
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(6, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+}
+
+#[rstest::rstest]
+#[case::skip_wal(true, [false, false])]
+#[case::flush_on_close(false, [true, false])]
+#[tokio::test]
+async fn test_repeated_close_during_edit_preserves_flush_requirement(
+    #[case] skip_wal: bool,
+    #[case] flush_on_close: [bool; 2],
+) {
+    use crate::manifest::action::RegionEdit;
+    use crate::region::{RegionLeaderState, RegionRoleState};
+    use crate::request::{DdlRequest, SenderDdlRequest, WorkerRequest};
+    use store_api::region_request::RegionPutRequest;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let other_id = RegionId::new(1, 2);
+    let create = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&create);
+    for id in [region_id, other_id] {
+        engine
+            .handle_request(id, RegionRequest::Create(create.clone()))
+            .await
+            .unwrap();
+    }
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema,
+                    rows: build_rows(0, 3),
+                },
+                hint: None,
+                partition_expr_version: None,
+                skip_wal,
+            }),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let guard = region.manifest_ctx.manifest_manager.write().await;
+    // A removal of a nonexistent file exercises manifest serialization without fake SSTs.
+    let e = engine.clone();
+    let edit = tokio::spawn(async move {
+        e.edit_region(
+            region_id,
+            RegionEdit {
+                files_to_remove: vec![crate::sst::file::FileMeta {
+                    region_id,
+                    file_id: store_api::storage::FileId::random(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut closes = Vec::new();
+    for flush_on_close in flush_on_close {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        engine
+            .inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                WorkerRequest::Ddl(SenderDdlRequest {
+                    region_id,
+                    sender: sender.into(),
+                    request: DdlRequest::Close(RegionCloseRequest { flush_on_close }),
+                }),
+            )
+            .await
+            .unwrap();
+        closes.push(receiver);
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        flush_region(&engine, other_id, None),
+    )
+    .await
+    .unwrap();
+    for close in &mut closes {
+        assert!(matches!(
+            close.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+    drop(guard);
+    tokio::time::timeout(std::time::Duration::from_secs(5), edit)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    for close in closes {
+        assert_eq!(
+            0,
+            tokio::time::timeout(std::time::Duration::from_secs(5), close)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        );
+    }
+    assert!(!engine.is_region_exists(region_id));
+    // WAL replay could hide a skipped flush after reopening. Check the committed SST first.
+    assert!(!region.manifest_ctx.manifest().await.files.is_empty());
+    crate::test_util::reopen_region(&engine, region_id, create.table_dir, true, create.options)
+        .await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_engine_stop_waits_for_checkpoint() {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_last_checkpoint_write();
+    let mut env = TestEnv::with_prefix("stop-waits-for-checkpoint")
+        .await
+        .with_mock_layer(mock_layer);
+    let config = MitoConfig {
+        manifest_checkpoint_distance: 1,
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    // The flush starts a checkpoint, which blocks after it has created `_last_checkpoint`
+    // and before it has written the pointer.
+    flush_region(&engine, region_id, None).await;
+    blocker.wait_until_blocked().await;
+    let wait_started = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .checkpointer()
+        .pending_checkpoint_wait_started();
+
+    let mut reopen = tokio::spawn(async move {
+        let engine = env.reopen_engine(engine, config).await;
+        let open = RegionRequest::Open(RegionOpenRequest {
+            engine: String::new(),
+            table_dir,
+            path_type: PathType::Bare,
+            options: Default::default(),
+            skip_wal_replay: false,
+            checkpoint: None,
+            requirements: Default::default(),
+        });
+        let result = engine.handle_request(region_id, open).await;
+        (env, result)
+    });
+    tokio::time::timeout(Duration::from_secs(10), wait_started.notified())
+        .await
+        .expect("the engine stop does not wait for the checkpoint");
+    // The new engine would read the empty pointer while the old checkpoint is blocked.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), &mut reopen)
+            .await
+            .is_err()
+    );
+    blocker.release();
+    let (_env, result) = tokio::time::timeout(Duration::from_secs(10), reopen)
+        .await
+        .unwrap()
+        .unwrap();
+    result.unwrap();
 }

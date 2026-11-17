@@ -19,16 +19,26 @@ use async_trait::async_trait;
 use common_query::Output;
 use session::context::QueryContextRef;
 use table::metadata::TableInfoRef;
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::error::Result;
+
+/// Keeps a request's admission slot and conversion memory alive across its submissions.
+pub type PendingRowsPermit = Arc<dyn Send + Sync>;
 
 /// Accepts prepared table writes without coupling the inserter to a batcher implementation.
 /// Schema creation, alteration and default evaluation remain the caller's responsibility.
 #[async_trait]
 pub trait PendingRowsBatcher: Send + Sync {
-    /// Acquires one slot per original request, shared by all of its table submissions.
-    async fn acquire(&self) -> Result<Arc<OwnedSemaphorePermit>>;
+    /// Returns the conversion memory limit, or zero when byte admission is disabled.
+    fn memory_limit_bytes(&self) -> u64 {
+        0
+    }
+
+    /// Admits an original request before conversion, retaining its slot and estimated
+    /// Arrow memory across all table submissions. Memory acquisition must not wait
+    /// because the caller can already hold transport and decoded-row reservations.
+    /// `held_bytes` counts those reservations, which cannot be released during conversion.
+    async fn acquire(&self, estimated_bytes: usize, held_bytes: u64) -> Result<PendingRowsPermit>;
 
     /// Submits rows according to the acknowledgement policy, retaining the slot until
     /// writing completes even when the response acknowledges queue admission only.
@@ -39,6 +49,6 @@ pub trait PendingRowsBatcher: Send + Sync {
         table_info: TableInfoRef,
         batch: RecordBatch,
         ctx: QueryContextRef,
-        permit: Arc<OwnedSemaphorePermit>,
+        permit: PendingRowsPermit,
     ) -> Result<Output>;
 }

@@ -498,6 +498,7 @@ impl RegionServer {
         role: RegionRole,
         sent_at: std::time::Instant,
         deadline: std::time::Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool> {
         let engine = self
             .inner
@@ -505,7 +506,7 @@ impl RegionServer {
             .get(&region_id)
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
-            .set_region_role_with_lease(region_id, role, sent_at, deadline)
+            .set_region_role_with_lease(region_id, role, sent_at, deadline, candidate_lease_id)
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
@@ -1865,6 +1866,20 @@ impl RegionServerInner {
         &self,
         batch_request: BatchRegionDdlRequest,
     ) -> Result<RegionResponse> {
+        // Drops may remove dependent regions and may partially succeed. Complete each
+        // request's registration changes before proceeding to the next request.
+        if let BatchRegionDdlRequest::Drop(requests) = batch_request {
+            let mut response = RegionResponse::new(0);
+            for (region_id, request) in requests {
+                let result = self
+                    .handle_request(region_id, RegionRequest::Drop(request))
+                    .await?;
+                response.affected_rows += result.affected_rows;
+                response.extensions.extend(result.extensions);
+            }
+            return Ok(response);
+        }
+
         let region_changes = match &batch_request {
             BatchRegionDdlRequest::Create(requests) => requests
                 .iter()
@@ -1985,6 +2000,12 @@ impl RegionServerInner {
             CurrentEngine::EarlyReturn(rows) => return Ok(RegionResponse::new(rows)),
         };
 
+        let logical_regions = if matches!(region_change, RegionChange::Deregisters) {
+            self.prepare_logical_regions_for_deregistration(&engine, region_id)
+        } else {
+            Vec::new()
+        };
+
         // Sets corresponding region status to registering/deregistering before the operation.
         self.set_region_status_not_ready(region_id, &engine, &region_change);
 
@@ -1997,6 +2018,14 @@ impl RegionServerInner {
         }
         match result {
             Ok(result) => {
+                for (logical_region, _) in logical_regions {
+                    self.set_region_status_ready(
+                        logical_region,
+                        engine.clone(),
+                        RegionChange::Deregisters,
+                    )
+                    .await?;
+                }
                 // Sets corresponding region status to ready.
                 self.set_region_status_ready(region_id, engine.clone(), region_change)
                     .await?;
@@ -2008,6 +2037,9 @@ impl RegionServerInner {
                 })
             }
             Err(err) => {
+                for (logical_region, status) in logical_regions {
+                    self.region_map.insert(logical_region, status);
+                }
                 // Removes the region status if the operation fails.
                 self.unset_region_status(region_id, &engine, region_change);
                 Err(err)
@@ -2141,6 +2173,26 @@ impl RegionServerInner {
             }
         }
         Ok(())
+    }
+
+    /// Captures only existing registrations so failures cannot resurrect closed logical regions.
+    fn prepare_logical_regions_for_deregistration(
+        &self,
+        engine: &RegionEngineRef,
+        physical_region_id: RegionId,
+    ) -> Vec<(RegionId, RegionEngineWithStatus)> {
+        let Some(metric_engine) = engine.as_any().downcast_ref::<MetricEngine>() else {
+            return Vec::new();
+        };
+        let logical_regions = metric_engine
+            .loaded_logical_regions(physical_region_id)
+            .into_iter()
+            .filter_map(|id| self.region_map.get(&id).map(|status| (id, status.clone())))
+            .collect::<Vec<_>>();
+        for (region_id, _) in &logical_regions {
+            self.set_region_status_not_ready(*region_id, engine, &RegionChange::Deregisters);
+        }
+        logical_regions
     }
 
     async fn register_logical_regions(
@@ -3722,6 +3774,202 @@ mod tests {
             rows: Some(rows),
             partition_expr_version: None,
             skip_wal: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metric_physical_drop_and_close_unregister_logical_regions() {
+        for mode in ["drop", "close", "batch_drop"] {
+            let mut env = TestEnv::with_prefix("region-server-metric-drop").await;
+            let mito = env.create_engine(MitoConfig::default()).await;
+            let metric = Arc::new(
+                MetricEngine::try_new(mito.clone(), metric_engine::config::EngineConfig::default())
+                    .unwrap(),
+            );
+            let mut server = mock_region_server();
+            server.register_engine(metric.clone());
+            // Keep a second physical group alive to catch overbroad unregistering.
+            for table in [10, 20] {
+                let physical = RegionId::new(table, 0);
+                let logical = RegionId::new(table + 1, 0);
+                let mut create = CreateRequestBuilder::new().build();
+                create.engine = METRIC_ENGINE_NAME.to_string();
+                create.column_metadatas = vec![
+                    store_api::metadata::ColumnMetadata {
+                        column_id: 0,
+                        semantic_type: SemanticType::Timestamp,
+                        column_schema: ColumnSchema::new(
+                            "greptime_timestamp",
+                            ConcreteDataType::timestamp_millisecond_datatype(),
+                            false,
+                        ),
+                    },
+                    store_api::metadata::ColumnMetadata {
+                        column_id: 1,
+                        semantic_type: SemanticType::Field,
+                        column_schema: ColumnSchema::new(
+                            "greptime_value",
+                            ConcreteDataType::float64_datatype(),
+                            false,
+                        ),
+                    },
+                ];
+                create.primary_key.clear();
+                create.table_dir = format!("metric-drop/{table}/");
+                create.options = HashMap::from([(
+                    store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY.to_string(),
+                    String::new(),
+                )]);
+                server
+                    .handle_request(physical, RegionRequest::Create(create.clone()))
+                    .await
+                    .unwrap();
+                create.table_dir = format!("metric-drop/{}/", table + 1);
+                create.options = HashMap::from([(
+                    store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY.to_string(),
+                    physical.as_u64().to_string(),
+                )]);
+                server
+                    .handle_request(logical, RegionRequest::Create(create.clone()))
+                    .await
+                    .unwrap();
+                if table == 10 {
+                    let closed = RegionId::new(12, 0);
+                    server
+                        .handle_request(closed, RegionRequest::Create(create.clone()))
+                        .await
+                        .unwrap();
+                    server
+                        .handle_request(closed, RegionRequest::Close(RegionCloseRequest::default()))
+                        .await
+                        .unwrap();
+                }
+            }
+            let physical = RegionId::new(10, 0);
+            let logical = RegionId::new(11, 0);
+            let mut dependents = metric.loaded_logical_regions(physical);
+            dependents.sort_unstable();
+            assert_eq!(dependents, vec![logical, RegionId::new(12, 0)]);
+            assert!(metric.loaded_logical_regions(logical).is_empty());
+            // Rejection must leave both registrations usable for a subsequent forced drop.
+            assert!(
+                server
+                    .handle_request(
+                        physical,
+                        RegionRequest::Drop(RegionDropRequest {
+                            fast_path: false,
+                            force: false,
+                            partial_drop: false,
+                        })
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(!server.inner.region_map.contains_key(&RegionId::new(12, 0)));
+            for id in [physical, logical] {
+                assert!(matches!(
+                    server.inner.region_map.get(&id).unwrap().value(),
+                    RegionEngineWithStatus::Ready(_)
+                ));
+            }
+            server
+                .inner
+                .region_map
+                .insert(logical, RegionEngineWithStatus::Registering(metric.clone()));
+            assert!(
+                server
+                    .handle_request(
+                        physical,
+                        RegionRequest::Drop(RegionDropRequest {
+                            fast_path: false,
+                            force: false,
+                            partial_drop: false,
+                        })
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(matches!(
+                server.inner.region_map.get(&logical).unwrap().value(),
+                RegionEngineWithStatus::Registering(_)
+            ));
+            server
+                .inner
+                .region_map
+                .insert(logical, RegionEngineWithStatus::Ready(metric.clone()));
+            if mode == "batch_drop" {
+                // First group commits, second rejects. Retrying must not resurrect the first.
+                for _ in 0..2 {
+                    assert!(
+                        server
+                            .inner
+                            .handle_batch_ddl_requests(BatchRegionDdlRequest::Drop(vec![
+                                (
+                                    physical,
+                                    RegionDropRequest {
+                                        fast_path: false,
+                                        force: true,
+                                        partial_drop: false
+                                    }
+                                ),
+                                (
+                                    RegionId::new(20, 0),
+                                    RegionDropRequest {
+                                        fast_path: false,
+                                        force: false,
+                                        partial_drop: false
+                                    }
+                                ),
+                            ]))
+                            .await
+                            .is_err()
+                    );
+                    assert!(!server.inner.region_map.contains_key(&physical));
+                    assert!(!server.inner.region_map.contains_key(&logical));
+                }
+            }
+            let request = || {
+                if mode == "close" {
+                    RegionRequest::Close(RegionCloseRequest::default())
+                } else {
+                    RegionRequest::Drop(RegionDropRequest {
+                        fast_path: false,
+                        force: true,
+                        partial_drop: false,
+                    })
+                }
+            };
+            // A retry of an already completed removal remains harmless.
+            for _ in 0..2 {
+                if mode == "batch_drop" {
+                    server
+                        .inner
+                        .handle_batch_ddl_requests(BatchRegionDdlRequest::Drop(vec![(
+                            physical,
+                            RegionDropRequest {
+                                fast_path: false,
+                                force: true,
+                                partial_drop: false,
+                            },
+                        )]))
+                        .await
+                        .unwrap();
+                } else {
+                    server.handle_request(physical, request()).await.unwrap();
+                }
+            }
+            for id in [physical, logical] {
+                assert!(!server.inner.region_map.contains_key(&id));
+            }
+            assert!(metric.loaded_logical_regions(physical).is_empty());
+            for id in [RegionId::new(20, 0), RegionId::new(21, 0)] {
+                assert!(server.inner.region_map.contains_key(&id));
+            }
+            assert_eq!(
+                metric.loaded_logical_regions(RegionId::new(20, 0)),
+                vec![RegionId::new(21, 0)]
+            );
+            server.stop().await.unwrap();
         }
     }
 

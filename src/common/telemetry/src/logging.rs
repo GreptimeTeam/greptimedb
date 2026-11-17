@@ -265,7 +265,7 @@ enum TraceState {
 }
 
 /// The logging options that used to initialize the logger.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingOptions {
     /// The directory to store log files. If not set, logs will be written to stdout.
@@ -303,11 +303,51 @@ pub struct LoggingOptions {
     pub otlp_export_protocol: Option<OtlpExportProtocol>,
 
     /// Additional HTTP headers for OTLP exporter.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "serialize_otlp_headers"
+    )]
     pub otlp_headers: HashMap<String, String>,
 
     /// Whether to enable per-region metrics.
     pub enable_per_region_metrics: bool,
+}
+
+impl std::fmt::Debug for LoggingOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoggingOptions")
+            .field("dir", &self.dir)
+            .field("level", &self.level)
+            .field("log_format", &self.log_format)
+            .field("max_log_files", &self.max_log_files)
+            .field("max_log_dir_size", &self.max_log_dir_size)
+            .field("append_stdout", &self.append_stdout)
+            .field("enable_file_logging", &self.enable_file_logging)
+            .field("enable_otlp_tracing", &self.enable_otlp_tracing)
+            .field("otlp_endpoint", &self.otlp_endpoint)
+            .field("tracing_sample_ratio", &self.tracing_sample_ratio)
+            .field("otlp_export_protocol", &self.otlp_export_protocol)
+            .field("enable_per_region_metrics", &self.enable_per_region_metrics)
+            .field("otlp_headers", &redacted_otlp_headers(&self.otlp_headers))
+            .finish()
+    }
+}
+
+fn redacted_otlp_headers(headers: &HashMap<String, String>) -> HashMap<&str, &str> {
+    headers
+        .keys()
+        .map(|key| (key.as_str(), "[REDACTED]"))
+        .collect()
+}
+
+fn serialize_otlp_headers<S>(
+    headers: &HashMap<String, String>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    redacted_otlp_headers(headers).serialize(serializer)
 }
 
 /// The protocol of OTLP export.
@@ -1259,6 +1299,26 @@ mod tests {
         let http_json = r#""http""#;
         let protocol: OtlpExportProtocol = serde_json::from_str(http_json).unwrap();
         assert_eq!(protocol, OtlpExportProtocol::Http);
+    }
+
+    #[test]
+    fn test_otlp_headers_are_redacted() {
+        let options: LoggingOptions = serde_json::from_value(serde_json::json!({
+            "otlp_headers": {"authorization": "Bearer otlp-secret", "x-api-key": "api-secret"}
+        }))
+        .unwrap();
+        assert_eq!(options.otlp_headers["authorization"], "Bearer otlp-secret");
+        assert_eq!(options.otlp_headers["x-api-key"], "api-secret");
+        for output in [
+            serde_json::to_string(&options).unwrap(),
+            format!("{options:#?}"),
+        ] {
+            assert!(!output.contains("otlp-secret"));
+            assert!(!output.contains("api-secret"));
+            assert!(output.contains("authorization"));
+            assert!(output.contains("x-api-key"));
+            assert!(output.contains("[REDACTED]"));
+        }
     }
 
     #[test]

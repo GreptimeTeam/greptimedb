@@ -26,7 +26,7 @@ use common_procedure::{
     Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, Peekable};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::async_trait;
@@ -54,12 +54,14 @@ pub(crate) enum DropTableTarget {
     Physical,
 }
 
+type TableStream = Peekable<BoxStream<'static, Result<(String, TableNameValue)>>>;
+
 /// Context of [DropDatabaseProcedure] execution.
 pub(crate) struct DropDatabaseContext {
     catalog: String,
     schema: String,
     drop_if_exists: bool,
-    tables: Option<BoxStream<'static, Result<(String, TableNameValue)>>>,
+    tables: Option<TableStream>,
     retrying: bool,
 }
 

@@ -24,7 +24,7 @@ use api::v1::{ColumnDataType, Row, RowInsertRequests, Value};
 use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
 use common_grpc::precision::Precision;
 use common_query::prelude::{
-    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, greptime_timestamp, greptime_value,
+    EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels, greptime_timestamp, greptime_value,
 };
 use datatypes::json;
 use metric_engine::row_modifier::TsidGenerator;
@@ -120,7 +120,7 @@ where
                     greptime_timestamp(),
                     greptime_value(),
                     EXEMPLAR_METRIC_COLUMN,
-                    EXEMPLAR_LABELS_COLUMN,
+                    greptime_exemplar_labels(),
                     DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
                     DATA_SCHEMA_TSID_COLUMN_NAME,
                 ]
@@ -225,7 +225,7 @@ pub fn into_rows(exemplars: Vec<Exemplar>) -> Result<(RowInsertRequests, BTreeSe
         row_writer::write_by_schema(
             table,
             std::iter::once((
-                row_writer::build_json2_column_schema(EXEMPLAR_LABELS_COLUMN)?,
+                row_writer::build_json2_column_schema(greptime_exemplar_labels())?,
                 Some(row_writer::encode_json2(exemplar.labels)?),
             )),
             &mut row,
@@ -276,9 +276,18 @@ mod tests {
         for name in [
             DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
             DATA_SCHEMA_TSID_COLUMN_NAME,
+            greptime_exemplar_labels(),
         ] {
             assert!(labels([(name.into(), "x".into())], false, validate_label_name).is_err());
         }
+        assert!(
+            labels(
+                [("exemplar_labels".into(), "x".into())],
+                false,
+                validate_label_name,
+            )
+            .is_ok()
+        );
         assert_eq!(timestamp_from_millis(-1).unwrap(), -1_000_000);
         assert!(timestamp_from_millis(i64::MAX).is_err());
     }

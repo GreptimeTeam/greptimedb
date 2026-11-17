@@ -97,7 +97,7 @@ impl CreateLogicalTablesProcedure {
         self.check_input_tasks()?;
         // Sets physical region numbers
         self.fill_physical_table_info().await?;
-        // Add partition columns from physical table to logical table schemas
+        // Add the physical table's user partition columns to logical table schemas.
         self.merge_partition_columns_into_logical_tables()?;
         // Checks if the tables exist
         self.check_tables_already_exist().await?;
@@ -325,6 +325,10 @@ pub struct CreateTablesData {
     physical_table_id: TableId,
     physical_region_numbers: Vec<RegionNumber>,
     physical_columns: Vec<ColumnMetadata>,
+    /// Partition column names of the physical table.
+    ///
+    /// Procedures persisted before engine identity columns were filtered may store them
+    /// here, so the merge re-checks the names instead of trusting this list.
     physical_partition_columns: Vec<String>,
 }
 

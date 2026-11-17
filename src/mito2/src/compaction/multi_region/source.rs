@@ -109,7 +109,7 @@ pub(crate) struct SharedSource {
     window: (Timestamp, Timestamp),
     pub(crate) limits: MemoryLimits,
     peak_group_bytes: AtomicU64,
-    cancellation: Arc<common_base::cancellation::CancellationHandle>,
+    cancellation: CancellationToken,
     stop: CancellationToken,
     counters: Arc<SourceCounters>,
 }

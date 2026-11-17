@@ -15,23 +15,26 @@
 //! Index build tests for mito engine.
 //!
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::v1::region::{StrictWindow, compact_request};
 use api::v1::{Rows, SemanticType};
 use async_trait::async_trait;
+use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datafusion_expr::expr::InList;
 use datafusion_expr::{Expr, col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, SkippingIndexOptions, SkippingIndexType};
+use datatypes::schema::{ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType};
+use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
@@ -48,15 +51,23 @@ use crate::engine::MitoEngine;
 use crate::engine::compaction_test::put_and_flush;
 use crate::engine::listener::{EventListener, GateIndexBuildListener, IndexBuildListener};
 use crate::manifest::action::RegionEdit;
+use crate::read::Batch;
 use crate::read::scan_region::{ScanRegion, Scanner};
-use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
+use crate::sst::file::{FileMeta, IndexType, RegionFileId, RegionIndexId};
+use crate::sst::index::handler::{
+    BuildContext, IndexCreator, IndexKindHandler, IndexKindProvider, IndexKindProviderRef,
+    PlanContext, PlanEntry, PlannedIndex,
+};
+use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
+use crate::sst::index::puffin_manager::SstPuffinWriter;
+use crate::sst::index::{CompletedEntry, IndexBuildType};
 use crate::sst::location;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
 
-fn async_build_mode_config(is_create_on_flush: bool) -> MitoConfig {
+pub(crate) fn async_build_mode_config(is_create_on_flush: bool) -> MitoConfig {
     let mut config = MitoConfig::default();
     config.index.build_mode = IndexBuildMode::Async;
     if !is_create_on_flush {
@@ -736,7 +747,8 @@ async fn test_index_build_uses_physical_file_region_and_logical_manifest_region(
             .manifest()
             .await
             .files
-            .get(&target_files[0].file_id),
+            .get(&target_files[0].file_id)
+            .map(AsRef::as_ref),
         Some(&target_files[0])
     );
     assert!(!current_file_metas(&engine, source_region_id).await[0].exists_index());
@@ -1178,22 +1190,23 @@ async fn test_consecutive_schema_changes_publish_latest_index_generation() {
     ));
 }
 
+#[rstest::rstest]
+#[case(IndexBuildType::Flush)]
+#[case(IndexBuildType::Compact)]
 #[tokio::test]
-async fn test_unrelated_schema_change_retries_stale_flush_index_build() {
+async fn test_unrelated_schema_change_retries_background_index_without_provider(
+    #[case] build_type: IndexBuildType,
+) {
     let mut env =
         TestEnv::with_prefix("test_unrelated_schema_change_retries_stale_index_build_").await;
     let gate = Arc::new(IndexPublicationGate::new(
         IndexPublicationPhase::BeforeManifestCommit,
     ));
-    let engine = Arc::new(
-        env.create_engine_with(
-            async_build_mode_config(true),
-            None,
-            Some(gate.clone()),
-            None,
-        )
-        .await,
-    );
+    let plugins = Plugins::new();
+    plugins.insert::<IndexKindProviderRef>(Arc::new(RebuildSketchProvider::default()));
+    let mut setup_config = async_build_mode_config(false);
+    setup_config.index.build_mode = IndexBuildMode::Sync;
+    let setup_engine = env.create_engine_with_plugins(setup_config, plugins).await;
 
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
@@ -1207,16 +1220,60 @@ async fn test_unrelated_schema_change_retries_stale_flush_index_build() {
         )
         .await;
 
-    let request = CreateRequestBuilder::new().build_with_index();
+    let mut request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "4")
+        .build_with_index();
+    request.column_metadatas[0]
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
+    let table_dir = request.table_dir.clone();
+    let options = request.options.clone();
     let column_schemas = rows_schema(&request);
-    engine
+    setup_engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
-    put_and_flush(&engine, region_id, &column_schemas, 0..20).await;
+    if build_type == IndexBuildType::Compact {
+        put_and_flush(&setup_engine, region_id, &column_schemas, 0..10).await;
+        put_and_flush(&setup_engine, region_id, &column_schemas, 10..20).await;
+    }
+    setup_engine.stop().await.unwrap();
+    drop(setup_engine);
+    env.log_store = None;
+    let engine = Arc::new(
+        env.create_engine_with(
+            async_build_mode_config(build_type == IndexBuildType::Flush),
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await,
+    );
+    reopen_region(&engine, region_id, table_dir, true, options).await;
+    if build_type == IndexBuildType::Flush {
+        put_and_flush(&engine, region_id, &column_schemas, 0..20).await;
+    } else {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: compact_request::Options::StrictWindow(StrictWindow {
+                        window_seconds: 3600,
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+    }
     tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(1))
         .await
-        .expect("flush index build did not reach manifest publication");
+        .expect("background index build did not reach manifest publication");
 
     engine
         .handle_request(
@@ -1244,7 +1301,7 @@ async fn test_unrelated_schema_change_retries_stale_flush_index_build() {
     gate.release(1);
     tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(2))
         .await
-        .expect("stale flush index build was not retried");
+        .expect("stale background index build was not retried");
     gate.release(1);
     tokio::time::timeout(Duration::from_secs(10), gate.wait_stopped(2))
         .await
@@ -1266,6 +1323,11 @@ async fn test_unrelated_schema_change_retries_stale_flush_index_build() {
         .await
         .unwrap();
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+    assert_eq!(
+        files[0].available_indexes.as_slice(),
+        &[IndexType::InvertedIndex]
+    );
+    engine.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -2576,4 +2638,685 @@ async fn test_truncate_while_indexing_encoded_bulk_part_removes_uploaded_sst() {
         .filter(|path| path.ends_with(".parquet") || path.ends_with(".puffin"))
         .collect::<Vec<_>>();
     assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[derive(Debug, Default, Clone)]
+struct RebuildSketchProvider {
+    fail_manual_plan: bool,
+    memory_limit: Option<usize>,
+    manual_build: bool,
+    manual_finished: Arc<AtomicBool>,
+    manual_plans: Arc<AtomicUsize>,
+    compact_plans: Arc<AtomicUsize>,
+    creates: Arc<AtomicUsize>,
+    readable_inputs: Arc<Mutex<Vec<(RegionIndexId, bool)>>>,
+}
+
+impl IndexKindProvider for RebuildSketchProvider {
+    fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+        vec![Arc::new(self.clone())]
+    }
+}
+
+impl IndexKindHandler for RebuildSketchProvider {
+    fn kinds(&self) -> &[IndexKind] {
+        &[IndexKind::Extension(ExtensionIndexKind::Hll)]
+    }
+
+    fn validate(&self, _: &PlanContext<'_>) -> Result<(), BoxedError> {
+        Ok(())
+    }
+
+    fn plan(&self, context: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+        if context.build_type == IndexBuildType::Compact {
+            self.compact_plans.fetch_add(1, Ordering::Relaxed);
+        }
+        if context.build_type == IndexBuildType::Manual {
+            self.manual_plans.fetch_add(1, Ordering::Relaxed);
+            if self.fail_manual_plan {
+                return Err(BoxedError::new(PlainError::new(
+                    "injected manual plan failure".into(),
+                    StatusCode::Internal,
+                )));
+            }
+        }
+        if context.build_type == IndexBuildType::Flush {
+            return Ok(None);
+        }
+        if matches!(
+            context.build_type,
+            IndexBuildType::Manual | IndexBuildType::SchemaChange
+        ) && self.memory_limit.is_none()
+            && !context
+                .existing_indexes
+                .iter()
+                .any(|column| column.created_indexes.contains(&IndexType::HllIndex))
+        {
+            return Ok(None);
+        }
+        assert!(
+            context
+                .metadata
+                .column_by_id(0)
+                .unwrap()
+                .column_schema
+                .metadata()
+                .contains_key(datatypes::schema::HLL_KEY)
+        );
+        Ok(Some(Arc::new(Self {
+            manual_build: context.build_type == IndexBuildType::Manual,
+            ..self.clone()
+        })))
+    }
+}
+
+#[async_trait]
+impl PlannedIndex for RebuildSketchProvider {
+    fn kinds(&self) -> &[IndexKind] {
+        IndexKindHandler::kinds(self)
+    }
+    fn entries(&self) -> &[PlanEntry] {
+        &[PlanEntry {
+            column_id: 0,
+            kind: IndexKind::Extension(ExtensionIndexKind::Hll),
+            format_version: 1,
+        }]
+    }
+    fn is_current(&self, file: &FileMeta, _: &PlanContext<'_>) -> bool {
+        self.manual_finished.load(Ordering::Relaxed)
+            && file
+                .indexes
+                .iter()
+                .any(|column| column.created_indexes.contains(&IndexType::HllIndex))
+    }
+
+    fn memory_limit(&self) -> Option<usize> {
+        self.memory_limit
+    }
+
+    async fn build(
+        &self,
+        context: &BuildContext<'_>,
+    ) -> Result<Option<Box<dyn IndexCreator>>, BoxedError> {
+        for input in context.inputs.iter() {
+            // Initial compaction may read flush files that have no sketches yet.
+            if !input.meta_ref().indexes.iter().any(|column| {
+                column.created_indexes.iter().any(|kind| {
+                    matches!(
+                        kind,
+                        IndexType::HllIndex | IndexType::KllIndex | IndexType::MgIndex
+                    )
+                })
+            }) {
+                continue;
+            }
+            let reader = context
+                .input_puffin_manager
+                .reader(&input.index_id())
+                .await
+                .unwrap();
+            let metadata = reader.metadata().await.unwrap();
+            assert!(
+                metadata
+                    .blobs
+                    .iter()
+                    .any(|blob| blob.blob_type == "test.sketch")
+            );
+            self.readable_inputs
+                .lock()
+                .unwrap()
+                .push((input.index_id(), context.can_merge_inputs));
+        }
+        self.creates.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(Box::new(RebuildSketchCreator {
+            rows: 0,
+            manual_finished: self.manual_build.then(|| self.manual_finished.clone()),
+        })))
+    }
+}
+
+#[derive(Debug)]
+struct RebuildSketchCreator {
+    rows: usize,
+    manual_finished: Option<Arc<AtomicBool>>,
+}
+
+#[async_trait]
+impl IndexCreator for RebuildSketchCreator {
+    async fn update(&mut self, batch: &mut Batch) -> Result<(), BoxedError> {
+        self.rows += batch.num_rows();
+        Ok(())
+    }
+
+    async fn update_flat(&mut self, batch: &RecordBatch) -> Result<(), BoxedError> {
+        self.rows += batch.num_rows();
+        Ok(())
+    }
+
+    async fn finish(
+        &mut self,
+        writer: &mut SstPuffinWriter,
+    ) -> Result<Vec<CompletedEntry>, BoxedError> {
+        writer
+            .put_blob(
+                "test.sketch",
+                futures::io::Cursor::new(self.rows.to_le_bytes().to_vec()),
+                Default::default(),
+                HashMap::new(),
+            )
+            .await
+            .map_err(BoxedError::new)?;
+        if let Some(finished) = &self.manual_finished {
+            finished.store(true, Ordering::Relaxed);
+        }
+        Ok(vec![CompletedEntry {
+            column_id: Some(0),
+            kind: IndexKind::Extension(ExtensionIndexKind::Hll),
+            format_version: 1,
+        }])
+    }
+
+    async fn abort(&mut self) -> Result<(), BoxedError> {
+        Ok(())
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.rows * std::mem::size_of::<u64>()
+    }
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn test_async_compaction_builds_only_builtin_indexes(#[case] registered: bool) {
+    let mut env = TestEnv::new().await;
+    let provider = Arc::new(RebuildSketchProvider::default());
+    let plugins = Plugins::new();
+    plugins.insert::<IndexKindProviderRef>(provider.clone());
+    let mut setup_config = async_build_mode_config(false);
+    setup_config.index.build_mode = IndexBuildMode::Sync;
+    let engine = env.create_engine_with_plugins(setup_config, plugins).await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let mut request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "4")
+        .build_with_index();
+    request.column_metadatas[0]
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
+    let table_dir = request.table_dir.clone();
+    let options = request.options.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &schema, 0..2).await;
+    put_and_flush(&engine, region_id, &schema, 2..4).await;
+    let inputs = engine
+        .get_region(region_id)
+        .unwrap()
+        .all_manifest_files()
+        .await
+        .0;
+    assert_eq!(inputs.len(), 2);
+    assert!(inputs.iter().all(|file| file.available_indexes.is_empty()));
+    engine.stop().await.unwrap();
+
+    let plugins = Plugins::new();
+    if registered {
+        plugins.insert::<IndexKindProviderRef>(provider.clone());
+    }
+    let engine = env
+        .new_mito_engine_with_plugins(async_build_mode_config(false), plugins)
+        .await;
+    reopen_region(&engine, region_id, table_dir, true, options).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 3600,
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let files = region.all_manifest_files().await.0;
+            if let [output] = files.as_slice()
+                && !inputs.iter().any(|input| input.file_id == output.file_id)
+                && output.available_indexes.contains(&IndexType::InvertedIndex)
+            {
+                assert_eq!(
+                    output.available_indexes.as_slice(),
+                    &[IndexType::InvertedIndex]
+                );
+                assert_eq!(output.num_rows, 4);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("async compaction did not publish built-in indexes");
+    assert_eq!(provider.compact_plans.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.creates.load(Ordering::Relaxed), 0);
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_async_flush_without_sketch_provider_builds_builtin_indexes() {
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    plugins.insert::<IndexKindProviderRef>(Arc::new(RebuildSketchProvider::default()));
+    let mut setup_config = async_build_mode_config(false);
+    setup_config.index.build_mode = IndexBuildMode::Sync;
+    let engine = env.create_engine_with_plugins(setup_config, plugins).await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build_with_index();
+    request.column_metadatas[0]
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
+    request.column_metadatas[0]
+        .column_schema
+        .set_skipping_options(&SkippingIndexOptions::new_unchecked(
+            1,
+            0.0001,
+            SkippingIndexType::BloomFilter,
+        ))
+        .unwrap();
+    request.column_metadatas[1].column_schema =
+        ColumnSchema::new("field_0", ConcreteDataType::string_datatype(), true);
+    request.column_metadatas[1]
+        .column_schema
+        .set_fulltext_options(&FulltextOptions {
+            enable: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let rows = |start, end| {
+        let mut rows = build_rows(start, end);
+        for row in &mut rows {
+            row.values[1] = api::v1::Value {
+                value_data: Some(api::v1::value::ValueData::StringValue("sample text".into())),
+            };
+        }
+        rows
+    };
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: rows(0, 2),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let mut historical = region.all_manifest_files().await.0.pop().unwrap();
+    historical.available_indexes.push(IndexType::HllIndex);
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![historical.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let historical = region.all_manifest_files().await.0.pop().unwrap();
+
+    // Reopen without the provider. Neither schema options nor an unrelated
+    // historical sketch may prevent built-in indexes on the next flushed file.
+    let engine = env
+        .reopen_engine(engine, async_build_mode_config(true))
+        .await;
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: rows(2, 4),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let files = region.all_manifest_files().await.0;
+            if let Some(file) = files.iter().find(|file| file.file_id != historical.file_id)
+                && [
+                    IndexType::InvertedIndex,
+                    IndexType::FulltextIndex,
+                    IndexType::BloomFilterIndex,
+                ]
+                .iter()
+                .all(|kind| file.available_indexes.contains(kind))
+            {
+                assert_eq!(
+                    files.iter().find(|file| file.file_id == historical.file_id),
+                    Some(&historical)
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("async flush did not publish built-in indexes");
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manual_rebuild_without_required_provider_preserves_sketch_metadata() {
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    plugins.insert::<IndexKindProviderRef>(Arc::new(RebuildSketchProvider {
+        memory_limit: Some(1024 * 1024),
+        ..Default::default()
+    }));
+    let mut config = async_build_mode_config(false);
+    config.index.build_mode = IndexBuildMode::Sync;
+    let engine = env
+        .create_engine_with_plugins(config.clone(), plugins)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build_with_index();
+    request.column_metadatas[0]
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &schema, 0..2).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap();
+    let file = engine
+        .get_region(region_id)
+        .unwrap()
+        .all_manifest_files()
+        .await
+        .0
+        .pop()
+        .unwrap();
+    assert!(file.available_indexes.contains(&IndexType::HllIndex));
+
+    let engine = env.reopen_engine(engine, config).await;
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    for _ in 0..2 {
+        let error = engine
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("no registered handler"));
+        assert_eq!(
+            engine
+                .get_region(region_id)
+                .unwrap()
+                .all_manifest_files()
+                .await
+                .0,
+            vec![file.clone()]
+        );
+    }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_targeted_rebuild_drops_unconfigured_sketch_metadata() {
+    let mut env = TestEnv::new().await;
+    let mut config = async_build_mode_config(false);
+    config.index.build_mode = IndexBuildMode::Sync;
+    let engine = env.create_engine(config).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build_with_index();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for start in [0, 2] {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(start, start + 2),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let mut files = region.all_manifest_files().await.0;
+    assert_eq!(files.len(), 2);
+    let target = files.pop().unwrap();
+    let mut historical = files.pop().unwrap();
+    historical.available_indexes.push(IndexType::HllIndex);
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![historical.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    for file in [&target, &historical] {
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(1);
+        engine
+            .inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                crate::request::WorkerRequest::Background {
+                    region_id,
+                    notify: crate::request::BackgroundNotify::IndexBuildRetry(
+                        crate::request::BuildIndexRequest {
+                            region_id,
+                            build_type: IndexBuildType::SchemaChange,
+                            file_metas: vec![file.clone()],
+                            result_senders: vec![result_tx],
+                        },
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), result_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        outcome.unwrap();
+        if file.file_id == target.file_id {
+            let current = region.all_manifest_files().await.0;
+            let unrelated = current
+                .iter()
+                .find(|file| file.file_id == historical.file_id)
+                .unwrap();
+            assert_eq!(unrelated.available_indexes, historical.available_indexes);
+            assert_eq!(unrelated.index_version, historical.index_version);
+        }
+    }
+    let current = region.all_manifest_files().await.0;
+    assert!(
+        current
+            .iter()
+            .find(|file| file.file_id == target.file_id)
+            .unwrap()
+            .available_indexes
+            .contains(&IndexType::InvertedIndex)
+    );
+    let historical_current = current
+        .iter()
+        .find(|file| file.file_id == historical.file_id)
+        .unwrap();
+    assert_eq!(
+        historical_current.available_indexes.as_slice(),
+        &[IndexType::InvertedIndex]
+    );
+    assert!(historical_current.index_version > historical.index_version);
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manual_rebuild_plan_failure_returns_before_scheduling() {
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    let provider = Arc::new(RebuildSketchProvider {
+        fail_manual_plan: true,
+        ..Default::default()
+    });
+    plugins.insert::<IndexKindProviderRef>(provider.clone());
+    let engine = env
+        .create_engine_with_plugins(async_build_mode_config(false), plugins)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 2),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let before = region.all_manifest_files().await.0;
+    assert_eq!(before.len(), 1);
+    let error = engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("injected manual plan failure"));
+    // Selection and task preparation would each plan again; only entry preflight ran.
+    assert_eq!(provider.manual_plans.load(Ordering::Relaxed), 1);
+    assert_eq!(provider.creates.load(Ordering::Relaxed), 0);
+    assert_eq!(region.all_manifest_files().await.0, before);
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manual_rebuild_reports_budget_discard_of_new_plugin() {
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    let provider = Arc::new(RebuildSketchProvider {
+        memory_limit: Some(1),
+        ..Default::default()
+    });
+    plugins.insert::<IndexKindProviderRef>(provider.clone());
+    let engine = env
+        .create_engine_with_plugins(async_build_mode_config(false), plugins)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas[0]
+        .column_schema
+        .set_inverted_index(true);
+    request.column_metadatas[0]
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 2),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let error = engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("Index build did not complete"),
+        "{error:?}"
+    );
+    assert_eq!(error.status_code(), StatusCode::IllegalState);
+    assert_eq!(provider.creates.load(Ordering::Relaxed), 1);
+    let region = engine.get_region(region_id).unwrap();
+    let files = region.all_manifest_files().await.0;
+    assert_eq!(files.len(), 1);
+    assert!(!files[0].available_indexes.contains(&IndexType::HllIndex));
+    assert!(
+        files[0]
+            .available_indexes
+            .contains(&IndexType::InvertedIndex)
+    );
+    engine.stop().await.unwrap();
 }

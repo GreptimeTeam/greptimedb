@@ -464,7 +464,9 @@ impl StartCommand {
         )
         .context(error::BuildCacheRegistrySnafu)?;
 
-        if let Some(plugin_cache_builder) = plugins::frontend::configure_cache_registry(&plugins) {
+        if let Some(plugin_cache_builder) =
+            plugins::frontend::configure_cache_registry(&plugins, cached_meta_backend.clone())
+        {
             layered_cache_builder =
                 layered_cache_builder.add_cache_registry(plugin_cache_builder.build());
         }
