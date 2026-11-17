@@ -1421,6 +1421,7 @@ async fn constant_topk_over_parameterized_topk_keeps_suffix_rows() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::from([Arc::from(HOST)])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: output.clone(),
@@ -1742,6 +1743,7 @@ fn ungroupable_aggregate_tree() -> NativeTree {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new([field])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: root.output.clone(),
@@ -1769,6 +1771,7 @@ fn aggregate_tree() -> NativeTree {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::Samples(Arc::new(SeriesSchema {
@@ -1879,6 +1882,7 @@ fn state_tree(stage: AggregateStage, input: NativeType) -> NativeTree {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new([Arc::from(JOB)])),
                 stage,
+                field_kind: FieldKind::Float,
             },
         },
         output,
@@ -6672,7 +6676,8 @@ fn partial_tree(prefix: NativeTree, kind: AggregateKind, grouped_by: &[&str]) ->
         .clone()
         .expect("partial input is evaluated");
     let (state_kind, components) =
-        crate::native::plan::aggregate_state_binding(kind).expect("mergeable aggregate");
+        crate::native::plan::aggregate_state_binding(kind, FieldKind::Float)
+            .expect("mergeable aggregate");
     let state = Arc::new(AggregateStateSchema {
         group: Grouping::By(
             grouped_by
@@ -6699,6 +6704,7 @@ fn partial_tree(prefix: NativeTree, kind: AggregateKind, grouped_by: &[&str]) ->
                         .into(),
                 ),
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::AggregateState(state),
@@ -6712,6 +6718,7 @@ fn partial_op(kind: AggregateKind, grouped_by: &[&str]) -> BoundAggregate {
         kind,
         group: Grouping::By(labels.into()),
         stage: AggregateStage::Complete,
+        field_kind: FieldKind::Float,
     }
 }
 
@@ -7357,6 +7364,7 @@ fn final_root_refuses_samples_binding() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new([Arc::from(JOB)])),
                 stage: AggregateStage::Final,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::Samples(Arc::new(SeriesSchema {
@@ -8487,6 +8495,7 @@ fn histogram_over_sum_tree(group: Grouping, function: HistogramFunction) -> Nati
                 kind: AggregateKind::Sum,
                 group,
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: output.clone(),
@@ -9082,6 +9091,7 @@ async fn histogram_split_colocates_metadata_distinct_results_before_their_merge(
                         kind: AggregateKind::Sum,
                         group: grouping,
                         stage: AggregateStage::Complete,
+                        field_kind: FieldKind::Float,
                     },
                 },
                 output: output.clone(),

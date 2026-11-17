@@ -452,6 +452,7 @@ mod tests {
     use datatypes::series::SeriesOrdering;
     use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use promql::extension_plan::FieldKind;
     use promql::extension_plan::{FusedSeries, FusedSeriesBinding, RawSeriesSource};
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
@@ -538,6 +539,7 @@ mod tests {
             &stmt,
             &|_| Ok(Arc::clone(&series_schema)),
             SeriesOrdering::Contiguous,
+            Some(FieldKind::Float),
         )
         .unwrap()
         .tree;
@@ -909,6 +911,7 @@ mod tests {
                     kind: AggregateKind::Sum,
                     group: group.clone(),
                     stage: AggregateStage::Partial,
+                    field_kind: FieldKind::Float,
                 },
             },
             output: NativeType::AggregateState(Arc::new(AggregateStateSchema {

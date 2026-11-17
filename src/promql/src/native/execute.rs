@@ -547,7 +547,11 @@ impl NodeBuffer {
     ///
     /// The name identifies the operator and its tree location, such as `native.window at
     /// root.left`, for errors and the pool's report. It labels the reservation, it does not key it.
-    fn new(name: impl Into<String>, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {
+    pub(super) fn new(
+        name: impl Into<String>,
+        metrics: Arc<NodeMetrics>,
+        pool: &Arc<dyn MemoryPool>,
+    ) -> Self {
         let consumer = MemoryConsumer::new(name.into());
         Self {
             metrics,
@@ -2879,7 +2883,11 @@ impl NodeState {
         }
     }
 
-    fn new(name: impl Into<String>, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {
+    pub(super) fn new(
+        name: impl Into<String>,
+        metrics: Arc<NodeMetrics>,
+        pool: &Arc<dyn MemoryPool>,
+    ) -> Self {
         let name = name.into();
         Self {
             queued: VecDeque::new(),

@@ -199,6 +199,10 @@ macro_rules! http_tests {
                 test_remote_write_v2_histogram_prometheus_native_route,
                 test_remote_write_v2_histogram_float_prefix_native_route,
                 test_remote_write_v2_histogram_count_and_group_native_route,
+                test_remote_write_v2_histogram_sum_over_range,
+                test_remote_write_v2_histogram_sum_and_avg_native_route,
+                test_remote_write_v2_histogram_avg_native_partitions,
+                test_remote_write_v2_histogram_sum_incompatible_layouts_warns,
                 test_remote_write_v2_histogram_native_annotations,
                 test_remote_write_v2_histogram_native_arithmetic,
                 test_remote_write_v2_histogram_native_composition,
@@ -6943,6 +6947,561 @@ pub async fn test_remote_write_v2_histogram_count_and_group_native_route(store_t
             .as_str()
             .is_some_and(|text| text.contains("ignored native histogram samples"))),
         "the skipped-sample info did not reach the response: {body}"
+    );
+}
+
+/// `sum` over a native histogram answers every point of a range, not one point per run.
+///
+/// A split aggregate exports one state row per grid point and folds those rows elsewhere, and three
+/// adjacent samples are where a row addressed by its run instead of by its point collapses: every
+/// point of a run is written into the run's first row and the frame drops the rest, so the range
+/// answers one point carrying the run's last count. The counts written here are 1, 2 and 3, so a
+/// range answering 1, 2, 3 has one row per point and a range answering 3 alone has one row per run.
+/// Every current fixture is a single point or an instant query, which is why none of them sees it.
+pub async fn test_remote_write_v2_histogram_sum_over_range(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_sum_over_range",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    // Three adjacent samples of one series: the range below selects one of them per grid point, so
+    // the aggregate folds a run of three and the split exports a state row for each.
+    let metric = "native_histogram_range_sum";
+    for (timestamp, count, sum) in [(1000, 1u64, 10.0), (2000, 2, 20.0), (3000, 3, 30.0)] {
+        write_native_histogram(
+            &client,
+            &[(prom_store::METRIC_NAME_LABEL, metric), ("job", "api")],
+            timestamp,
+            count,
+            sum,
+        )
+        .await;
+    }
+    observer.clear();
+    let url = format!("/v1/prometheus/api/v1/query_range?query=sum({metric})&start=1&end=3&step=1");
+    let response = client
+        .get(&url)
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the range failed natively"
+    );
+    let body: Value = response.json().await;
+    assert_eq!(body["data"]["resultType"], "matrix");
+    let results = body["data"]["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no result in {body}"));
+    assert_eq!(results.len(), 1, "one group: {body}");
+    let histograms = results[0]["histograms"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no histograms in {body}"));
+    // One histogram per grid point, in grid order: a run collapsed into its first row answers one.
+    assert_eq!(
+        histograms.len(),
+        3,
+        "the range answers every point of the run: {body}"
+    );
+    for (index, (count, sum)) in [("1", "10"), ("2", "20"), ("3", "30")]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            histograms[index][0].as_f64(),
+            Some(1.0 + index as f64),
+            "point {index} is its own timestamp: {body}"
+        );
+        assert_eq!(
+            histograms[index][1]["count"].as_str(),
+            Some(count),
+            "point {index} answers the count of its own sample: {body}"
+        );
+        assert_eq!(
+            histograms[index][1]["sum"].as_str(),
+            Some(sum),
+            "point {index} answers the sum of its own sample: {body}"
+        );
+    }
+    // The answer came from the native route, which is the only one that exports this state.
+    let fused = observer.take_all("sum over a range");
+    assert!(
+        fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+        "sum over a range executed a node that is not the fused producer: {fused:?}"
+    );
+}
+
+// Writes one native histogram sample: `count` observations totalling `sum`, in `schema`.
+///
+/// A custom-bucket histogram is one with `schema: CUSTOM_BUCKETS_SCHEMA`; its bucket counts are
+/// spread the same way over the `custom_values` bounds. The deltas are increments, so the decoded
+/// bucket counts are their running sums and the last one is the second half of `count`.
+async fn write_native_histogram_sample(
+    client: &TestClient,
+    labels: &[(&str, &str)],
+    schema: i32,
+    custom_values: Vec<f64>,
+    timestamp: i64,
+    count: u64,
+    sum: f64,
+) {
+    let mut request = remote_write_v2::request_with_labels_and_samples(labels.to_vec(), vec![]);
+    let label_refs = labels
+        .iter()
+        .flat_map(|(name, value)| {
+            let name_ref = request.symbols.iter().position(|s| s == name).unwrap() as u32;
+            let value_ref = request.symbols.iter().position(|s| s == value).unwrap() as u32;
+            [name_ref, value_ref]
+        })
+        .collect();
+    let first = count / 2;
+    let second = count - first;
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: label_refs,
+        histograms: vec![Histogram {
+            count: Some(Count::CountInt(count)),
+            sum,
+            schema,
+            custom_values,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_deltas: vec![
+                i64::try_from(first).expect("count fits a bucket delta"),
+                i64::try_from(second - first).expect("count fits a bucket delta"),
+            ],
+            reset_hint: 2,
+            timestamp,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let response = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = response.status();
+    let body = response.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+}
+
+/// The fused node that publishes the statement's rows.
+///
+/// A split aggregate executes twice: the partial producer exports state frames, and the final
+/// consumer above the series router answers the statement. Only the consumer answers the statement's
+/// rows, so its schema is what tells the two apart.
+///
+/// `sum` and `avg` over native histograms answer a histogram (they add the payloads and the
+/// counts), so the answer column is a column whose type is the native histogram value type. Its
+/// name is the expression's now (`sum(some_metric)`), which is why the type and not the name
+/// identifies it.
+///
+/// The two schemas are otherwise unrelated: a state frame's columns are `read_key`, `is_last`,
+/// `time`, `fields`, `name` and `labels`, while the consumer's are the time index, the answer and
+/// the tags. The producer does carry a histogram, but only inside its accumulator column: `fields`
+/// types every state component in one struct, so the live histogram is a field of a list element
+/// under `fields` rather than a column of that schema. This check therefore reads the schema's own
+/// fields and never descends: the answer is a column of the rows the statement publishes, and
+/// looking deeper would be reading the merge state instead of those rows.
+fn answer_consumer(nodes: &[Arc<dyn ExecutionPlan>]) -> &Arc<dyn ExecutionPlan> {
+    use datatypes::prelude::DataType;
+
+    let histogram_type =
+        common_query::native_histogram::native_histogram_value_type().as_arrow_type();
+    let mut consumers = nodes.iter().filter(|node| {
+        node.schema()
+            .fields()
+            .iter()
+            .any(|field| field.data_type() == &histogram_type)
+    });
+    let consumer = consumers
+        .next()
+        .unwrap_or_else(|| panic!("no fused node answers a histogram column: {nodes:?}"));
+    assert!(
+        consumers.next().is_none(),
+        "more than one fused node answers the histogram column: {nodes:?}"
+    );
+    consumer
+}
+
+/// One histogram answer's `count` and `sum`, read out of the Prometheus HTTP API's JSON.
+fn histogram_fields(result: &Value) -> (f64, f64) {
+    let histogram = &result["histogram"][1];
+    let read = |field: &str| {
+        let text = histogram[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("no `{field}` in {result}"));
+        text.parse::<f64>()
+            .unwrap_or_else(|_| panic!("`{field}` is not a number in {result}"))
+    };
+    (read("count"), read("sum"))
+}
+
+/// Compares two `(count, sum)` pairs with a relative tolerance.
+fn assert_histogram_fields_close(
+    actual: (f64, f64),
+    expected: (f64, f64),
+    tolerance: f64,
+    context: &str,
+) {
+    for (actual, expected, field) in [
+        (actual.0, expected.0, "count"),
+        (actual.1, expected.1, "sum"),
+    ] {
+        assert!(
+            (actual - expected).abs() <= tolerance * expected.abs().max(1.0),
+            "{context}: {field} {actual} differs from {expected}"
+        );
+    }
+}
+
+/// `sum` and `avg` over native histograms run natively, and agree with the existing path on a
+/// fixture whose arithmetic is well conditioned.
+///
+/// Decision 1 of the design lists homogeneous layouts with small integers as a case where the two
+/// paths agree: they part widely only where the compensated sum matters (`1e16, 1, -1e16` and the
+/// like), so `sum` is compared exactly. `avg` is compared with a tolerance, because the two divide
+/// differently: v3.15 divides the sum by the sample count, while the existing path scales by the
+/// reciprocal, which the fixture above makes visible as `12 * (1/3)` - one ulp below the `4` the
+/// compensated divide answers. The native answer itself is still asserted exactly. The three series
+/// deliberately carry two different exponential schemas, because resolution reduction is part of
+/// the merge and must not disturb the scalar fields.
+pub async fn test_remote_write_v2_histogram_sum_and_avg_native_route(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_sum_and_avg",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_summed";
+    for (job, schema, count, sum) in [("a", 1, 2, 1.0), ("b", 0, 4, 2.0), ("c", 1, 6, 3.0)] {
+        write_native_histogram_sample(
+            &client,
+            &[(prom_store::METRIC_NAME_LABEL, metric), ("job", job)],
+            schema,
+            vec![],
+            2_000,
+            count,
+            sum,
+        )
+        .await;
+    }
+
+    // `count` and `sum` add exactly: 2 + 4 + 6 observations totalling 1 + 2 + 3, and an average of
+    // three samples divides both by three.
+    for (query, encoded, expected) in [
+        ("sum(h)", format!("sum({metric})"), (12.0, 6.0)),
+        ("avg(h)", format!("avg({metric})"), (4.0, 2.0)),
+    ] {
+        let url = format!("/v1/prometheus/api/v1/query?query={encoded}&time=2");
+        observer.clear();
+        let native = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=true")
+            .send()
+            .await;
+        assert_eq!(native.status(), StatusCode::OK, "{query} failed natively");
+        let native: Value = native.json().await;
+        let results = native["data"]["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no results in {native}"));
+        assert_eq!(results.len(), 1, "{query}: one group: {native}");
+        assert_eq!(
+            histogram_fields(&results[0]),
+            expected,
+            "{query} answered the wrong histogram: {native}"
+        );
+
+        // The existing path answers the same histogram. It is compared with a tolerance rather than
+        // exactly: it scales by the reciprocal where v3.15 divides, and on this fixture that is the
+        // one-ulp difference `12 * (1/3) = 3.9999999999999996` against `12 / 3 = 4`.
+        let legacy = client.get(&url).send().await;
+        assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
+        let legacy: Value = legacy.json().await;
+        assert_histogram_fields_close(
+            histogram_fields(&legacy["data"]["result"][0]),
+            expected,
+            1e-15,
+            &format!("{query}: the existing path answered something else: {legacy}"),
+        );
+
+        // Both halves of the split executed: the partial producer folded each partition and the
+        // final consumer merged that state into the answer above.
+        let fused = observer.take_all(query);
+        assert_eq!(
+            fused.len(),
+            2,
+            "{query}: expected the split's two nodes: {fused:?}"
+        );
+        let consumer = answer_consumer(&fused);
+        assert_eq!(consumer.name(), "FusedSeriesExec");
+    }
+}
+
+/// A histogram average over several scan partitions answers what one partition answers.
+///
+/// The fixture is eight series worth of small integers, one flush each, so the scan hands the
+/// producer several series batches and the query asks for four partitions. Nothing overflows and
+/// every division is exact, so a merge that weighted its partitions differently from the single
+/// execution would still have to reach the same numbers: `count` and `sum` are compared exactly.
+pub async fn test_remote_write_v2_histogram_avg_native_partitions(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_avg_partitions",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        parallelism: 4,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_averaged";
+    for index in 0..8u64 {
+        let job = format!("job{index}");
+        let host = format!("host{index}");
+        write_native_histogram_sample(
+            &client,
+            &[
+                (prom_store::METRIC_NAME_LABEL, metric),
+                ("job", &job),
+                ("instance", &host),
+            ],
+            1,
+            vec![],
+            2_000,
+            1 + index,
+            2.0 * (1 + index) as f64,
+        )
+        .await;
+        tests_integration::test_util::execute_sql(
+            instance.fe_instance(),
+            &format!("ADMIN FLUSH_TABLE('{metric}')"),
+        )
+        .await;
+    }
+
+    let url = format!("/v1/prometheus/api/v1/query?query=avg({metric})&time=2");
+    observer.clear();
+    let partitioned = client
+        .get(&url)
+        .header(
+            "x-greptime-hints",
+            "query.experimental_native_promql=true,query_parallelism=4",
+        )
+        .send()
+        .await;
+    assert_eq!(partitioned.status(), StatusCode::OK, "avg failed natively");
+    let partitioned: Value = partitioned.json().await;
+    let results = partitioned["data"]["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no results in {partitioned}"));
+    assert_eq!(results.len(), 1, "one group: {partitioned}");
+    // Eight samples of 1..=8 observations totalling 2, 4, ... 16: the mean is 4.5 observations
+    // summing to 9, and every step of it is exact in binary.
+    assert_eq!(
+        histogram_fields(&results[0]),
+        (4.5, 9.0),
+        "the partitioned average is wrong: {partitioned}"
+    );
+    let fused = observer.take_all("avg over partitions");
+    let consumer = answer_consumer(&fused);
+    assert_eq!(consumer.name(), "FusedSeriesExec");
+    assert_eq!(
+        fused.len(),
+        2,
+        "the split's partial and final nodes both execute: {fused:?}"
+    );
+    // The producer runs once per partition that read rows, which is what makes this a merge and not
+    // a single fold.
+    let producer = fused
+        .iter()
+        .find(|node| !Arc::ptr_eq(node, consumer))
+        .expect("the partial producer");
+    let metrics = producer.metrics().expect("producer metrics");
+    let mut partitions: BTreeMap<usize, usize> = BTreeMap::new();
+    for metric in metrics.iter() {
+        if metric.value().name() == "native.root.output_values"
+            && let MetricValue::Count { count, .. } = metric.value()
+        {
+            *partitions
+                .entry(metric.partition().expect("partition label"))
+                .or_insert(0usize) += count.value();
+        }
+    }
+    assert_eq!(
+        partitions.len(),
+        4,
+        "the statement asks for four partitions and the producer runs one per partition: {partitions:?}"
+    );
+    // Routing hashes each series' label set, so eight series over four partitions can legitimately
+    // leave one of them empty, and on this fixture the flushes land on three of the four. What the
+    // topology has to guarantee is that the fold is spread over more than one partition, since one
+    // fold is what the merge has to be told apart from; that no series was lost is the answer
+    // asserted above, which counts every one of them exactly once.
+    let non_empty = partitions.values().filter(|count| **count > 0).count();
+    assert!(
+        non_empty >= 2,
+        "the average folded in one partition, so nothing was merged: {partitions:?}"
+    );
+
+    // The same statement over the same data asking for one partition: the merge has to answer what
+    // the single fold answers.
+    observer.clear();
+    let single = client
+        .get(&url)
+        .header(
+            "x-greptime-hints",
+            "query.experimental_native_promql=true,query_parallelism=1",
+        )
+        .send()
+        .await;
+    assert_eq!(single.status(), StatusCode::OK, "avg failed natively");
+    let single: Value = single.json().await;
+    assert_eq!(
+        single["data"]["result"], partitioned["data"]["result"],
+        "one partition and four answered differently"
+    );
+    assert_eq!(
+        observer.take_all("avg over one partition").len(),
+        2,
+        "the single-partition query still runs the split"
+    );
+}
+
+/// A point whose samples disagree on their bucket layout is removed, and the response says why.
+///
+/// One series carries exponential buckets and the other custom ones, which no addition can merge.
+/// Prometheus drops the point rather than the statement, so the group answers nothing and the
+/// warning reaches the caller - from the node that merged the state, which is the only place the
+/// outcome is final.
+pub async fn test_remote_write_v2_histogram_sum_incompatible_layouts_warns(
+    store_type: StorageType,
+) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_incompatible_layouts",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_mixed_layouts";
+    write_native_histogram_sample(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, metric),
+            ("job", "exponential"),
+        ],
+        1,
+        vec![],
+        2_000,
+        2,
+        1.0,
+    )
+    .await;
+    write_native_histogram_sample(
+        &client,
+        &[(prom_store::METRIC_NAME_LABEL, metric), ("job", "custom")],
+        -53,
+        vec![1.0, 2.0],
+        2_000,
+        2,
+        2.0,
+    )
+    .await;
+
+    observer.clear();
+    let response = client
+        .get(&format!(
+            "/v1/prometheus/api/v1/query?query=sum({metric})&time=2"
+        ))
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK, "the statement failed");
+    let body: Value = response.json().await;
+    assert_eq!(
+        body["data"]["result"].as_array().map(Vec::len),
+        Some(0),
+        "a group whose layouts disagree has no histogram to answer: {body}"
+    );
+    // The route has to have run before the warning can exist, so it is checked first: a missing
+    // warning is then read as an annotation problem and not as a fall back to the existing plan.
+    let fused = observer.take_all("sum over mixed layouts");
+    assert_eq!(
+        fused.len(),
+        2,
+        "the split's partial and final nodes both execute: {fused:?}"
+    );
+    answer_consumer(&fused);
+    let warnings = body["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings in {body}"));
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("incompatible native histogram layouts"))),
+        "the removed point did not report its layout: {body}"
     );
 }
 

@@ -21,7 +21,8 @@ use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::aggregate_state::{
-    AggregateStateKind, AggregateStateSchema, AggregateStateValues, StateComponent, StateSeries,
+    AggregateStateKind, AggregateStateSchema, AggregateStateValues, StateComponent, StatePayload,
+    StateSeries,
 };
 use datatypes::series::frame::{FrameLabelMode, StateFrameRow};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
@@ -64,6 +65,26 @@ fn state_schema(kind: AggregateStateKind) -> Arc<AggregateStateSchema> {
             StateComponent::Mean,
             StateComponent::Count,
         ],
+        AggregateStateKind::HistogramSum => vec![
+            StateComponent::HistogramValue,
+            StateComponent::HistogramCompensation,
+            StateComponent::Poisoned,
+            StateComponent::IncompatibleLayout,
+            StateComponent::CustomBoundsReconciled,
+            StateComponent::CounterResetSeen,
+            StateComponent::NotCounterResetSeen,
+        ],
+        AggregateStateKind::HistogramAvg => vec![
+            StateComponent::HistogramValue,
+            StateComponent::HistogramCompensation,
+            StateComponent::Count,
+            StateComponent::IncrementalMean,
+            StateComponent::Poisoned,
+            StateComponent::IncompatibleLayout,
+            StateComponent::CustomBoundsReconciled,
+            StateComponent::CounterResetSeen,
+            StateComponent::NotCounterResetSeen,
+        ],
     };
     Arc::new(AggregateStateSchema::try_new(kind, components).unwrap())
 }
@@ -95,7 +116,7 @@ fn wrong_grid_schema() -> Arc<SeriesSchema> {
     })
 }
 
-fn input(fields: Vec<Vec<Option<AggregateStateValues>>>) -> (StateSeries, bool) {
+fn input(fields: Vec<Vec<Option<StatePayload>>>) -> (StateSeries, bool) {
     let time = TimeAxis::from_grid_spans(evaluated_grid(), vec![GridSpan::new(1, 3)]).unwrap();
     (
         StateSeries {
@@ -157,12 +178,12 @@ async fn rows(
     rows
 }
 
-fn values(value: f64) -> Option<AggregateStateValues> {
-    Some(AggregateStateValues {
+fn values(value: f64) -> Option<StatePayload> {
+    Some(StatePayload::Float(AggregateStateValues {
         value,
         compensation: value / 10.0,
         ..Default::default()
-    })
+    }))
 }
 
 fn assert_state_row(row: &StateFrameRow, expected: &[f64], last: bool) {

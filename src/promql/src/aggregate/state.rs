@@ -35,15 +35,16 @@ use datafusion::arrow::array::Array;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesLabels;
 use datatypes::series::aggregate_state::{
-    AggregateStateKind, AggregateStateValues, StateComponent, StateFieldsBatch, StateSeries,
+    AggregateStateKind, HistogramState, StateComponent, StateFieldsBatch, StatePayload, StateSeries,
 };
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{GridSpan, TimeAxis};
 
 use crate::aggregate::{
-    AggregateOp, BLOCK_POINTS, Counts, FloatAggregator, FloatState, Group, LabelKey,
-    btree_backing_bytes, count_series, finish_groups, finish_groups_budgeted,
-    hash_map_backing_bytes, kahan_inc, label_key, metric_bytes, next_hash_capacity,
+    AggregateOp, BLOCK_POINTS, Counts, FloatAggregator, FloatState, Group, HistogramAccumulator,
+    HistogramEvidence, LabelKey, accumulator_bytes, btree_backing_bytes, count_series,
+    evidence_summary, finish_groups, finish_groups_budgeted, hash_map_backing_bytes,
+    histogram_backing_bytes, kahan_inc, label_key, metric_bytes, next_hash_capacity,
 };
 use crate::map::validate_float_series;
 
@@ -121,20 +122,33 @@ impl FloatAggregator {
         let width = self.schema.fields.len();
         let mut partial_bytes = self.groups.len().saturating_mul(size_of::<StateSeries>());
         for group in &self.groups {
-            let points = seen_points(group, width);
+            // A group that folded histograms keeps them in its own map instead of the blocks, so
+            // the points it exports and what each of their payloads builds come from there: the
+            // export builds two one-row Arrow batches per point, which the chunk they are handed
+            // to is charged for only once that chunk exists.
+            let (points, payloads) = if group.histograms.is_empty() {
+                (seen_points(group, width), 0)
+            } else {
+                let payloads = group
+                    .histograms
+                    .values()
+                    .fold(0usize, |bytes, accumulator| {
+                        bytes.saturating_add(exported_payload_bytes(accumulator))
+                    });
+                (group.histograms.len(), payloads)
+            };
             partial_bytes = partial_bytes
                 .saturating_add(size_of::<TimeAxis>())
                 .saturating_add(
                     points.saturating_mul(size_of::<GridSpan>().saturating_add(size_of::<usize>())),
                 )
-                .saturating_add(
-                    width.saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>()),
-                )
+                .saturating_add(width.saturating_mul(size_of::<Vec<Option<StatePayload>>>()))
                 .saturating_add(
                     points
                         .saturating_mul(width)
-                        .saturating_mul(size_of::<Option<AggregateStateValues>>()),
-                );
+                        .saturating_mul(size_of::<Option<StatePayload>>()),
+                )
+                .saturating_add(payloads);
         }
         budget(self.state_bytes().saturating_add(partial_bytes))?;
         self.finish_partial_inner()
@@ -153,10 +167,59 @@ impl FloatAggregator {
         let grid_len = grid.spec().len as usize;
         let mut groups: Vec<StateSeries> = Vec::with_capacity(self.groups.len());
         for group in self.groups {
-            let points = seen_points(&group, width);
+            let points = if group.histograms.is_empty() {
+                seen_points(&group, width)
+            } else {
+                // A field's state is one family, so a group that kept histogram payloads exports
+                // those: a float state beside them would be one column carrying two kinds.
+                if group
+                    .blocks
+                    .values()
+                    .any(|states| states.iter().any(|state| state.seen))
+                {
+                    return Err(DataFusionError::Execution(
+                        "an aggregate field cannot carry both float and histogram state".into(),
+                    ));
+                }
+                group.histograms.len()
+            };
             let mut spans: Vec<GridSpan> = Vec::with_capacity(points.min(1));
-            let mut states: Vec<Vec<Option<AggregateStateValues>>> =
+            let mut states: Vec<Vec<Option<StatePayload>>> =
                 (0..width).map(|_| Vec::with_capacity(points)).collect();
+            if !group.histograms.is_empty() {
+                // The histogram fold is keyed by absolute position, and its keys are ordered, so one
+                // pass visits each carried position once with its fields' payloads.
+                let mut position = None;
+                for (&(point, field), accumulator) in &group.histograms {
+                    if position != Some(point) {
+                        if point >= grid_len {
+                            return Err(DataFusionError::Execution(format!(
+                                "aggregate state point {point} exceeds a grid of {grid_len}"
+                            )));
+                        }
+                        extend_spans(&mut spans, point);
+                        for field_states in &mut states {
+                            field_states.push(None);
+                        }
+                        position = Some(point);
+                    }
+                    // The row just opened is the one this position's payloads belong to. It is the
+                    // row the field's states just grew, not the one the span *count* names: adjacent
+                    // points share one span while each of them still opens its own row, so a run
+                    // index would write every point of the run into the run's first row, leave the
+                    // rest empty, and the frame would drop them.
+                    let row = states[field].len() - 1;
+                    states[field][row] = Some(accumulator.payload(self.op)?);
+                }
+                let time = TimeAxis::from_grid_spans(Arc::clone(grid), spans)
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+                groups.push(StateSeries {
+                    metric: group.metric,
+                    time,
+                    states,
+                });
+                continue;
+            }
             for (&block, block_states) in &group.blocks {
                 for (offset, point) in block_states.chunks_exact(width).enumerate() {
                     if !point.iter().any(|state| state.seen) {
@@ -168,14 +231,9 @@ impl FloatAggregator {
                             "aggregate state point {position} exceeds a grid of {grid_len}"
                         )));
                     }
-                    match spans.last_mut() {
-                        Some(span) if span.start() + span.len() == position => {
-                            *span = GridSpan::new(span.start(), span.len() + 1);
-                        }
-                        _ => spans.push(GridSpan::new(position, 1)),
-                    }
+                    extend_spans(&mut spans, position);
                     for (field, state) in point.iter().enumerate() {
-                        states[field].push(state.partial());
+                        states[field].push(state.partial().map(StatePayload::Float));
                     }
                 }
             }
@@ -192,6 +250,52 @@ impl FloatAggregator {
             groups,
         })
     }
+}
+
+/// Appends `position` to `spans`, extending the last run when it continues.
+fn extend_spans(spans: &mut Vec<GridSpan>, position: usize) {
+    match spans.last_mut() {
+        Some(span) if span.start() + span.len() == position => {
+            *span = GridSpan::new(span.start(), span.len() + 1);
+        }
+        _ => spans.push(GridSpan::new(position, 1)),
+    }
+}
+
+/// Bytes one one-row batch of the frame's histogram layout costs before its bucket data.
+///
+/// Every column of the layout owns an Arrow array node with its own buffers, and that cost does not
+/// shrink for a histogram with one bucket: one row measures 2.6 KB whatever the bucket count, which
+/// is what a payload reports once the batch exists to be measured. It is rounded up here, so a batch
+/// whose bucket lists land at the top of their buffer capacity is covered too.
+pub(super) const HISTOGRAM_LAYOUT_ROW_BYTES: usize = 3 * 1024;
+
+/// Bytes one exported point's payload builds: the boxed state and the two one-row batches
+/// [`HistogramAccumulator::payload`] makes from the accumulator's live histogram and its
+/// compensation.
+///
+/// It is counted from the histograms the payload is built from rather than from the batches, which
+/// is the point: this is what the export admits before those batches exist. The bucket data a batch
+/// writes is charged at the width of the padded Rust pair, which bounds the `f64` each bucket costs,
+/// and the layout is charged per batch.
+pub(super) fn exported_payload_bytes(accumulator: &HistogramAccumulator) -> usize {
+    // The batch the payload builds from the live value is the mean once an average switched, and
+    // the other one is the compensation paired with it: the widest of the three bounds both.
+    let widest = [
+        Some(&accumulator.value),
+        accumulator.mean.as_ref(),
+        accumulator.compensation.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|histogram| histogram.heap_bytes())
+    .max()
+    .unwrap_or(0);
+    size_of::<HistogramState>().saturating_add(
+        HISTOGRAM_LAYOUT_ROW_BYTES
+            .saturating_add(widest)
+            .saturating_mul(2),
+    )
 }
 
 /// The points of `group` that carry a state: the ones a partial of it holds.
@@ -270,12 +374,20 @@ impl FloatMerger {
         self.retained
     }
 
+    /// What the merged inputs recorded about their points.
+    pub(crate) fn evidence_summary(&self) -> HistogramEvidence {
+        evidence_summary(&self.groups)
+    }
+
     /// Merges one Arrow-backed state row directly, without materializing a partial aggregate.
     pub(crate) fn merge_row(
         &mut self,
         row: &StateRow,
         mut budget: impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
+        if row.fields.kind().is_histogram() {
+            return self.merge_histogram_row(row, budget);
+        }
         let op = crate::native::state::op_of_state(row.kind);
         if op != self.op {
             return Err(DataFusionError::Execution(format!(
@@ -358,6 +470,140 @@ impl FloatMerger {
         Ok(())
     }
 
+    /// Merges one Arrow-backed histogram state row: every present field's payload is merged into
+    /// that position's own state.
+    ///
+    /// A histogram state is sparse in both directions - a position is carried when any field has a
+    /// contribution there, and a field may be absent at a carried position - so the row is walked
+    /// position by position and each present component is merged where it belongs.
+    fn merge_histogram_row(
+        &mut self,
+        row: &StateRow,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
+        if crate::native::state::op_of_state(row.kind) != self.op {
+            return Err(DataFusionError::Execution(format!(
+                "cannot merge {:?} state into {:?}",
+                row.kind, self.op
+            )));
+        }
+        let width = self.schema.fields.len();
+        if row.fields.len() != width {
+            return Err(DataFusionError::Execution(
+                "aggregate state does not match the grid or fields of the merge".into(),
+            ));
+        }
+        let grid_len = self
+            .schema
+            .eval_grid
+            .as_ref()
+            .expect("checked at construction")
+            .spec()
+            .len as usize;
+        let mut opened = None;
+        for (point, position) in row.time.positions() {
+            if point >= grid_len {
+                return Err(DataFusionError::Execution(
+                    "aggregate state does not match the grid or fields of the merge".into(),
+                ));
+            }
+            let index = match opened {
+                Some(index) => index,
+                None => {
+                    let index = self.open_row_group(&row.metric, &mut budget)?;
+                    opened = Some(index);
+                    index
+                }
+            };
+            let mut present = false;
+            for field in 0..width {
+                let Some(payload) = histogram_state_at(&row.fields, field, position)? else {
+                    continue;
+                };
+                present = true;
+                self.merge_payload(index, point, field, &payload, &mut budget)?;
+            }
+            if !present {
+                return Err(DataFusionError::Execution(
+                    "aggregate state names a position with no contribution".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The group this row's labels name, opening it (and its key) on first sight.
+    fn open_row_group(
+        &mut self,
+        metric: &SeriesLabels,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+    ) -> Result<usize> {
+        budget(self.retained.saturating_add(key_workspace_bytes(metric)))?;
+        let key = label_key(metric);
+        let live = key_bytes(&key);
+        match self.group_index.get(&key).copied() {
+            Some(index) => Ok(index),
+            None => self.open_group(metric.clone(), key, live, budget),
+        }
+    }
+
+    /// Merges one field's payload into the state of `(point, field)`, admitting what it allocates.
+    fn merge_payload(
+        &mut self,
+        index: usize,
+        point: usize,
+        field: usize,
+        payload: &StatePayload,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
+        let StatePayload::Histogram(payload) = payload else {
+            return Err(DataFusionError::Execution(
+                "a histogram state carries a numeric payload".into(),
+            ));
+        };
+        let key = (point, field);
+        let histograms = &mut self.groups[index].histograms;
+        let vacant = !histograms.contains_key(&key);
+        let backing = if vacant {
+            histogram_backing_bytes(histograms.len() + 1)
+                .saturating_sub(histogram_backing_bytes(histograms.len()))
+        } else {
+            0
+        };
+        if vacant {
+            // Admit the state this position is about to hold before allocating it: both histograms
+            // the payload carries and the map node that holds them.
+            let incoming = payload.value.as_arrow().get_array_memory_size()
+                + payload.compensation.as_arrow().get_array_memory_size();
+            budget(
+                self.retained
+                    .saturating_add(size_of::<HistogramAccumulator>())
+                    .saturating_add(incoming)
+                    .saturating_add(backing),
+            )?;
+            let accumulator = HistogramAccumulator::from_payload(self.op, payload)?;
+            let bytes = accumulator_bytes(&accumulator).saturating_add(backing);
+            histograms.insert(key, accumulator);
+            self.retained = self.retained.saturating_add(bytes);
+            return Ok(());
+        }
+        let accumulator = histograms.get_mut(&key).expect("checked as occupied above");
+        let before = accumulator_bytes(accumulator);
+        let incoming = payload.value.as_arrow().get_array_memory_size()
+            + payload.compensation.as_arrow().get_array_memory_size();
+        budget(
+            self.retained
+                .saturating_add(before)
+                .saturating_add(incoming),
+        )?;
+        accumulator.merge_state(self.op, payload)?;
+        self.retained = self
+            .retained
+            .saturating_sub(before)
+            .saturating_add(accumulator_bytes(accumulator));
+        Ok(())
+    }
+
     /// Adds a group and its key, admitting the group vector and index growth first.
     fn open_group(
         &mut self,
@@ -404,6 +650,7 @@ impl FloatMerger {
         self.groups.push(Group {
             metric,
             blocks: BTreeMap::new(),
+            histograms: BTreeMap::new(),
         });
         let index = self.groups.len() - 1;
         self.group_index.insert(key, index);
@@ -481,6 +728,116 @@ impl FloatMerger {
     }
 }
 
+/// One present field's histogram state at one position, read from the row's component arrays.
+///
+/// The two payload components are decoded into the kernel's own histograms, and the components a
+/// kind may omit - an average's count and mode flag - default to what the merge would fold from.
+fn histogram_state_at(
+    fields: &StateFieldsBatch,
+    field: usize,
+    position: usize,
+) -> Result<Option<StatePayload>> {
+    if !fields
+        .is_present(field, position)
+        .map_err(crate::grid_series::external)?
+    {
+        return Ok(None);
+    }
+    let mut state = datatypes::series::aggregate_state::HistogramState {
+        value: Arc::new(payload_histogram(
+            fields,
+            field,
+            StateComponent::HistogramValue,
+            position,
+        )?),
+        compensation: Arc::new(payload_histogram(
+            fields,
+            field,
+            StateComponent::HistogramCompensation,
+            position,
+        )?),
+        count: 0.0,
+        incremental_mean: false,
+        poisoned: false,
+        incompatible_layout: false,
+        custom_bounds_reconciled: false,
+        counter_reset_seen: false,
+        not_counter_reset_seen: false,
+    };
+    for &component in fields.components() {
+        match component {
+            StateComponent::HistogramValue | StateComponent::HistogramCompensation => {}
+            StateComponent::Count => {
+                state.count = payload_float(fields, field, component, position)?
+            }
+            StateComponent::IncrementalMean
+            | StateComponent::Poisoned
+            | StateComponent::IncompatibleLayout
+            | StateComponent::CustomBoundsReconciled
+            | StateComponent::CounterResetSeen
+            | StateComponent::NotCounterResetSeen => {
+                let flag = payload_bool(fields, field, component, position)?;
+                match component {
+                    StateComponent::IncrementalMean => state.incremental_mean = flag,
+                    StateComponent::Poisoned => state.poisoned = flag,
+                    StateComponent::IncompatibleLayout => state.incompatible_layout = flag,
+                    StateComponent::CustomBoundsReconciled => state.custom_bounds_reconciled = flag,
+                    StateComponent::CounterResetSeen => state.counter_reset_seen = flag,
+                    _ => state.not_counter_reset_seen = flag,
+                }
+            }
+            StateComponent::Value | StateComponent::Mean | StateComponent::Compensation => {
+                return Err(DataFusionError::Execution(
+                    "a histogram state declares a numeric component".into(),
+                ));
+            }
+        }
+    }
+    Ok(Some(StatePayload::Histogram(Box::new(state))))
+}
+
+fn payload_histogram(
+    fields: &StateFieldsBatch,
+    field: usize,
+    component: StateComponent,
+    position: usize,
+) -> Result<datatypes::series::histogram::HistogramBatch> {
+    fields
+        .field_histogram(field, component, position)
+        .map_err(crate::grid_series::external)?
+        .ok_or_else(missing_payload_component)
+}
+
+fn payload_float(
+    fields: &StateFieldsBatch,
+    field: usize,
+    component: StateComponent,
+    position: usize,
+) -> Result<f64> {
+    fields
+        .field_values(field, component)
+        .map_err(crate::grid_series::external)?
+        .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+        .ok_or_else(missing_payload_component)
+}
+
+fn payload_bool(
+    fields: &StateFieldsBatch,
+    field: usize,
+    component: StateComponent,
+    position: usize,
+) -> Result<bool> {
+    fields
+        .field_bool_values(field, component)
+        .map_err(crate::grid_series::external)?
+        .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+        .ok_or_else(missing_payload_component)
+}
+
+fn missing_payload_component() -> DataFusionError {
+    DataFusionError::Execution("present aggregate state has a missing component".into())
+}
+
 /// One present field's state at one position, read from the row's component arrays.
 ///
 /// The components come from the row's own declaration; the native aggregate caller checks
@@ -510,6 +867,22 @@ fn state_at(
                         )
                     })?;
             }
+            // A histogram state's payload is not numeric components, so this merge cannot read one:
+            // [`FloatMerger::merge_row`] sends a histogram row to `merge_histogram_row`, so a
+            // histogram component reaching here is a row whose kind says numeric and whose payload
+            // says otherwise. Refusing is what keeps a histogram from being folded as the numeric
+            // state it is not.
+            StateComponent::HistogramValue
+            | StateComponent::HistogramCompensation
+            | StateComponent::Poisoned
+            | StateComponent::IncompatibleLayout
+            | StateComponent::CustomBoundsReconciled
+            | StateComponent::CounterResetSeen
+            | StateComponent::NotCounterResetSeen => {
+                return Err(DataFusionError::Execution(
+                    "histogram aggregate state reached the numeric merge".into(),
+                ));
+            }
             _ => {
                 let value = fields
                     .field_values(field, component)
@@ -525,7 +898,7 @@ fn state_at(
                     StateComponent::Mean => state.mean = value,
                     StateComponent::Compensation => state.compensation = value,
                     StateComponent::Count => state.count = value,
-                    StateComponent::IncrementalMean => unreachable!(),
+                    _ => unreachable!("every other component is handled above"),
                 }
             }
         }

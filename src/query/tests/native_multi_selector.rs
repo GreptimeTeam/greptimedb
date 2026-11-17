@@ -38,6 +38,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use promql::evaluated::EvaluatedChunk;
+use promql::extension_plan::FieldKind;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql::native::plan::NativeExpr;
 use query::promql::native_compile::SelectorRequirement;
@@ -83,8 +84,13 @@ fn compile(query: &str) -> CompiledTree {
             }))
         }
     };
-    compile_selectors(&eval_stmt(query), &bindings, SeriesOrdering::KeyThenTime)
-        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
+    compile_selectors(
+        &eval_stmt(query),
+        &bindings,
+        SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
+    )
+    .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
 }
 
 /// The metric `name` with `labels`, as a source series of the samples a scan would read.
@@ -697,6 +703,7 @@ fn requirements_drive_scans_for_repeated_metric_nested_windows_and_fields() {
             }))
         },
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap();
     assert_eq!(compiled.inputs.len(), 2);
@@ -914,8 +921,13 @@ fn historical_range_sources_are_not_clipped_to_the_statement_start() {
         interval: Duration::from_secs(1),
         lookback_delta: Duration::from_secs(5),
     };
-    let compiled =
-        compile_selectors(&stmt, &|_| Ok(raw_schema()), SeriesOrdering::KeyThenTime).unwrap();
+    let compiled = compile_selectors(
+        &stmt,
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
+    )
+    .unwrap();
     assert_eq!(compiled.inputs.len(), 2);
     let rows = [(-2_500, 10.0), (-1_500, 20.0), (-500, 30.0)];
     let short = scan_push(&compiled, 0, "a-short", "a", &[], &rows).unwrap();

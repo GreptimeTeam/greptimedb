@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
+use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -46,6 +47,7 @@ use datafusion::logical_expr::{EmptyRelation, Extension, LogicalPlan, TableScanB
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
+use datatypes::data_type::DataType as _;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
@@ -55,8 +57,9 @@ use promql::extension_plan::{
     RawSeriesSource, input_locality, matching_operands_drop_key,
 };
 use promql::native::plan::{
-    AggregateKind, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree, NativeType,
-    binary_output_field_kind, fused_output_tags, native_tree_supported, uniform_field_kind,
+    AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree,
+    NativeType, aggregate_state_binding, binary_output_field_kind, fused_output_tags,
+    native_tree_supported, uniform_field_kind,
 };
 use promql::native::segment::{
     self, NATIVE_ORDERING, canonical_boundary_stages, canonical_local_prefix,
@@ -1186,6 +1189,11 @@ impl PromPlanner {
             },
             NATIVE_ORDERING,
             Arc::clone(&grid),
+            // The kind the prepared scans report for the statement's fields. An aggregate binds the
+            // state its input's kind implies, so a `sum` over a native-histogram column has to be
+            // compiled with that kind: bound as a float it would fold the payload as numbers. A
+            // statement that reads no table reports `None` here, which is the data-free case.
+            statement_kind,
         ) {
             Ok(v) => v,
             // The compiler refusing a shape is this route declining it.
@@ -1448,7 +1456,7 @@ impl PromPlanner {
                 if merge_answers_histogram(root, FieldKind::Histogram) {
                     return Ok(None);
                 }
-                match root.output_field_kind(FieldKind::Histogram) {
+                match root.output_field_kind(Some(FieldKind::Histogram)) {
                     Some(root_kind) => root_kind,
                     None => return Ok(None),
                 }
@@ -1541,12 +1549,17 @@ impl PromPlanner {
                 None
             };
             if let Some((partial, final_tree)) = split {
-                // The split's output is the suffix's, and the state it exports is float: the gate
-                // above already declines a histogram entering an aggregate, and this declines a
-                // histogram answer whose aggregate sits elsewhere, because the merge folds float
-                // state. The partial stage may introduce labels before aggregation, so the columns
-                // come from the complete tree rather than from the suffix alone.
-                if root_kind != FieldKind::Float {
+                // The split's output is the suffix's, so a histogram answer is only carried when the
+                // cut aggregate's exported state is a histogram's too: `sum`/`avg` over native
+                // histograms merge their own state across the boundary. A histogram answer whose
+                // aggregate sits elsewhere - above the cut, or built by a function of a float -
+                // still keeps the existing plan, because no state of this route carries it. The
+                // partial stage may introduce labels before aggregation, so the columns come from
+                // the complete tree rather than from the suffix alone.
+                let histogram_state = split_exports_histogram_state(&partial);
+                if root_kind != FieldKind::Float
+                    && !(root_kind == FieldKind::Histogram && histogram_state)
+                {
                     return Ok(None);
                 }
                 // The row-value layout is what the split is validated against whichever format the
@@ -1591,6 +1604,17 @@ impl PromPlanner {
                     time,
                     grid,
                 )));
+            }
+            // A tree that folds native histograms anywhere and whose split declined keeps the
+            // existing plan instead of being segmented. Segmentation cuts the tree into segments
+            // that each fold their own samples and appends the pieces above them, so a group whose
+            // contributions are spread over partitions would be folded once per segment - which for
+            // a histogram sum means merging histograms that never met, and for a histogram average
+            // means a mean of means. `cut_as_segment` returning false only declines to cut that
+            // subtree and the collectors recurse into its children, so the refusal is here, at the
+            // point the segment decision is made.
+            if binds_histogram_state_anywhere(root) {
+                return Ok(None);
             }
         }
         // A segment of a plan split over regions keeps the raw source as its input rather than a
@@ -1960,8 +1984,18 @@ fn plan_split_aggregate(
     value_schema: DFSchemaRef,
     format: FusedOutputFormat,
 ) -> Result<FusedSeries> {
-    let state_accumulators = match &partial.root().output {
-        NativeType::AggregateState(state) => state.accumulators.len(),
+    // The kind a value column carries is the state's own: a numeric fold publishes `Float64`, a
+    // native-histogram fold publishes the histogram value type. Reading it here keeps the layout and
+    // the schema it is checked against in one place.
+    let (state_accumulators, value_type) = match &partial.root().output {
+        NativeType::AggregateState(state) => (
+            state.accumulators.len(),
+            if state.kind.is_histogram() {
+                native_histogram_value_type().as_arrow_type()
+            } else {
+                ArrowDataType::Float64
+            },
+        ),
         _ => {
             return Err(DataFusionError::Plan(format!(
                 "the partial tree for `{promql}` does not produce aggregate state"
@@ -1972,7 +2006,7 @@ fn plan_split_aggregate(
     let values = value_schema
         .fields()
         .iter()
-        .filter(|field| field.data_type() == &ArrowDataType::Float64)
+        .filter(|field| field.data_type() == &value_type)
         .count();
     if values != state_accumulators {
         return Err(DataFusionError::Plan(format!(
@@ -2048,26 +2082,67 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
 /// such as `count_over_time` over a histogram stays eligible, and so does an aggregate that skips the
 /// sample instead of folding it.
 fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
-    // `sum` and `avg` fold the payload and this route has no histogram aggregate state yet, so they
-    // are the two that keep the existing plan. Every other kind answers a float without folding a
-    // histogram's payload: `count` and `group` count a histogram as one present sample, and
+    // `count` and `group` count a histogram as one present sample, and
     // `min`/`max`/`stddev`/`stdvar`/`quantile` skip it the way Prometheus does -- the legacy
     // planner maps all five through one branch (`create_native_histogram_aggregate_expr`), which
     // drops the samples and answers a Float NULL plus an info annotation, and the native fold does
-    // the same thing at run time.
+    // the same thing at run time. Only `sum` and `avg` fold the payload, and an aggregate that
+    // folds it runs here over a histogram when it binds the histogram state the kernel folds and
+    // merges. `binds_histogram_state` is that binding, read from the same table the compiler and
+    // the split bind from, so the gate and the runtime cannot disagree about which kinds fold.
     //
-    // The kind entering them has to be provably a float. "Cannot name it" is not "not a
-    // histogram": a canonical merge and a set operation hand on the samples they were given
-    // without the walk describing them, and reading that silence as float is what admitted
-    // `sum(label_replace(h, ...))` to a native fold over histograms.
+    // Everything else that is not provably a float entering it is still refused: "cannot name it"
+    // is not "not a histogram", and a fold that read such a payload as a float would answer
+    // something else. A canonical merge (`label_replace` collapsing a label) and a set operation
+    // both hand on the samples they were given without the walk describing them, so they are what
+    // this check still catches.
     node.any(&|node| {
         matches!(
             &node.expr,
             NativeExpr::Aggregate { input, op }
                 if matches!(op.kind, AggregateKind::Sum | AggregateKind::Avg)
-                    && !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float))
+                    && !matches!(
+                        input.output_field_kind(Some(input_kind)),
+                        Some(FieldKind::Float)
+                    )
+                    && !binds_histogram_state(op)
         )
     })
+}
+
+/// Whether this aggregate's state carries a native histogram.
+///
+/// It is the same table the compiler and the split bind from, so the gates and the runtime agree on
+/// which aggregates fold a payload: `sum` and `avg` over histograms do, and every other aggregate
+/// answers a float whatever it reads.
+fn binds_histogram_state(op: &BoundAggregate) -> bool {
+    aggregate_state_binding(op.kind, op.field_kind).is_some_and(|(kind, _)| kind.is_histogram())
+}
+
+/// Whether any aggregate in `node` binds a state that carries a native histogram.
+///
+/// Unlike [`aggregate_reads_histogram`] this asks what each aggregate *keeps*, not what enters it:
+/// a tree that folds a histogram anywhere in it needs the split (or nothing at all), because only
+/// the split's state carries that fold across a partition boundary.
+fn binds_histogram_state_anywhere(node: &NativeNode) -> bool {
+    node.any(&|node| {
+        matches!(
+            &node.expr,
+            NativeExpr::Aggregate { op, .. } if binds_histogram_state(op)
+        )
+    })
+}
+
+/// Whether the state a split tree exports is a native histogram's.
+///
+/// The partial tree's root is the cut aggregate bound as `Partial`, so its own binding is what says
+/// which state crosses the boundary; reading it there is what keeps the gate and the runtime from
+/// disagreeing about the layout the suffix will merge.
+fn split_exports_histogram_state(partial: &NativeTree) -> bool {
+    match &partial.root().expr {
+        NativeExpr::Aggregate { op, .. } => binds_histogram_state(op),
+        _ => false,
+    }
 }
 
 /// Whether every plan is a scan of one table. Filters, projections and bounds are
@@ -2542,6 +2617,7 @@ mod tests {
             &statement,
             &|_| Ok(Arc::clone(&schema)),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap()
         .tree
@@ -2609,6 +2685,7 @@ mod tests {
                 Ok(Arc::clone(&schema))
             },
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .expect("the compiler binds every selector of this query");
         bound.into_inner()

@@ -50,6 +50,7 @@ use super::{
     vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
+use crate::extension_plan::FieldKind;
 use crate::grid_series::{merge_same_labelset, series_bytes};
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::info::InfoSelector;
@@ -10325,6 +10326,7 @@ fn sum_grouping(group: Grouping) -> BoundAggregate {
         kind: AggregateKind::Sum,
         group,
         stage: AggregateStage::Complete,
+        field_kind: FieldKind::Float,
     }
 }
 
@@ -10342,8 +10344,9 @@ fn partial_sum(inner: NativeNode) -> NativeNode {
         .grid()
         .expect("a partial aggregate reads an evaluated vector")
         .clone();
-    let (kind, components) = crate::native::plan::aggregate_state_binding(AggregateKind::Sum)
-        .expect("sum keeps a mergeable state");
+    let (kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum, FieldKind::Float)
+            .expect("sum keeps a mergeable state");
     let state = Arc::new(AggregateStateSchema {
         group: Grouping::By(Arc::new([])),
         kind,
@@ -10358,6 +10361,7 @@ fn partial_sum(inner: NativeNode) -> NativeNode {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new([])),
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::AggregateState(state),
@@ -11078,6 +11082,7 @@ fn complete_aggregate_kinds_fold_two_values() {
                 kind,
                 group: Grouping::By(Arc::new([])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         ))
         .unwrap();
@@ -12324,6 +12329,7 @@ fn quantile_answers_what_the_kernel_answers() {
                 kind: AggregateKind::Quantile { quantile: 0.9 },
                 group: grouping.clone(),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         ))
         .unwrap();
@@ -12394,6 +12400,7 @@ fn quantile_parameter_costs_the_points_held_not_the_span_between_them() {
             kind: AggregateKind::Quantile { quantile: 0.5 },
             group: Grouping::By(Arc::new([])),
             stage: AggregateStage::Complete,
+            field_kind: FieldKind::Float,
         },
     ))
     .unwrap();
@@ -12440,6 +12447,7 @@ fn a_quantile_over_no_input_answers_nothing() {
             kind: AggregateKind::Quantile { quantile: 0.5 },
             group: Grouping::By(Arc::new([])),
             stage: AggregateStage::Complete,
+            field_kind: FieldKind::Float,
         },
     ))
     .unwrap();
@@ -12505,6 +12513,7 @@ fn a_quantile_bills_a_shared_buffer_once() {
                 kind,
                 group: Grouping::By(Arc::new([])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         ))
         .unwrap();
@@ -12563,6 +12572,7 @@ fn a_quantile_bills_the_allocation_its_slices_point_into_once() {
             kind: AggregateKind::Quantile { quantile: 0.5 },
             group: Grouping::By(Arc::new([])),
             stage: AggregateStage::Complete,
+            field_kind: FieldKind::Float,
         },
     ))
     .unwrap();
@@ -12648,6 +12658,7 @@ fn a_quantile_skips_histogram_samples_and_reports_it_like_min() {
                 kind,
                 group: Grouping::By(Arc::new([])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         ))
         .unwrap();
@@ -12732,7 +12743,7 @@ fn a_quantile_stage_the_runtime_does_not_compute_is_named() {
     // The state layout a `Sum` exports is enough to build the stage's tree: what this test asks is
     // which stages the runtime starts, and a `quantile` state is refused before it is read.
     let (state_kind, components) =
-        crate::native::plan::aggregate_state_binding(AggregateKind::Sum).unwrap();
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum, FieldKind::Float).unwrap();
     let state_schema = || {
         Arc::new(AggregateStateSchema {
             group: Grouping::By(Arc::new([])),
@@ -12765,6 +12776,7 @@ fn a_quantile_stage_the_runtime_does_not_compute_is_named() {
                 kind: AggregateKind::Quantile { quantile: 0.5 },
                 group: Grouping::By(Arc::new([])),
                 stage,
+                field_kind: FieldKind::Float,
             },
             output,
         )
@@ -12812,6 +12824,7 @@ fn a_quantile_stage_the_runtime_does_not_compute_is_named() {
                 kind: AggregateKind::Sum,
                 group,
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::AggregateState(state),
@@ -15289,8 +15302,9 @@ fn aggregate_with_output(input: NativeNode, op: BoundAggregate, output: NativeTy
 fn a_handed_over_state_chunk_keeps_its_charge_until_it_is_dropped() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let (state_kind, components) = crate::native::plan::aggregate_state_binding(AggregateKind::Sum)
-        .expect("sum keeps a mergeable state");
+    let (state_kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum, FieldKind::Float)
+            .expect("sum keeps a mergeable state");
     let state_schema = Arc::new(AggregateStateSchema {
         group: Grouping::By(Arc::new([])),
         kind: state_kind,
@@ -15305,6 +15319,7 @@ fn a_handed_over_state_chunk_keeps_its_charge_until_it_is_dropped() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new([])),
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::AggregateState(Arc::clone(&state_schema)),
@@ -15377,7 +15392,8 @@ fn partial_final_matches_complete_over_concatenated_input() {
     ] {
         let grid = grid(0, 60_000, 2);
         let schema = evaluated_schema(Arc::clone(&grid));
-        let (state_kind, components) = crate::native::plan::aggregate_state_binding(kind).unwrap();
+        let (state_kind, components) =
+            crate::native::plan::aggregate_state_binding(kind, FieldKind::Float).unwrap();
         let state_schema = Arc::new(AggregateStateSchema {
             group: Grouping::By(Arc::new([])),
             kind: state_kind,
@@ -15409,6 +15425,7 @@ fn partial_final_matches_complete_over_concatenated_input() {
                     kind,
                     group: Grouping::By(Arc::new([])),
                     stage,
+                    field_kind: FieldKind::Float,
                 },
                 output,
             ))
@@ -15692,7 +15709,7 @@ fn exporting_a_partial_charges_the_fold_and_the_groups_it_builds() {
 
     // The groups it built, measured as the chunk that carries them is measured.
     let (kind, components) =
-        crate::native::plan::aggregate_state_binding(AggregateKind::Sum).unwrap();
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum, FieldKind::Float).unwrap();
     let chunk_bytes =
         crate::native::state::state_bytes(&crate::native::state::StateChunk::Series {
             series: partial.groups,
