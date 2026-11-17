@@ -227,8 +227,11 @@ impl UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::sync::Arc;
 
+    use common_meta::key::TableMetadataManager;
     use common_meta::key::test_utils::new_test_table_info;
+    use common_meta::kv_backend::test_util::MockKvBackendBuilder;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
@@ -412,6 +415,35 @@ mod tests {
             .await;
         let mut rx = env.frontend_receiver().await;
 
+        let err = state
+            .next(&mut ctx, &new_procedure_context())
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, Error::TableRouteNotFound { .. });
+        assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
+    }
+
+    #[tokio::test]
+    async fn test_retried_upgrade_broadcasts_invalidation() {
+        let mut state = Box::new(UpdateMetadata::Upgrade);
+        let mut env = TestingEnv::new();
+        // The table route cannot be read.
+        let kv_backend = MockKvBackendBuilder::default()
+            .range_fn(Arc::new(|_| {
+                common_meta::error::UnexpectedSnafu {
+                    err_msg: "mock range failed",
+                }
+                .fail()
+            }))
+            .build()
+            .unwrap();
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(kv_backend)));
+        let mut ctx = env
+            .context_factory_with_metadata(table_metadata_manager)
+            .new_context(new_persistent_context());
+        let mut rx = env.frontend_receiver().await;
+
         // Every failed attempt broadcasts.
         for _ in 0..2 {
             let err = state
@@ -419,8 +451,9 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            assert_matches!(err, Error::TableRouteNotFound { .. });
-            assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
+            assert_matches!(err, Error::RetryLaterWithSource { .. });
+            assert!(err.is_retryable());
+            assert_table_cache_invalidated(&mut rx, &[1024]);
         }
     }
 
