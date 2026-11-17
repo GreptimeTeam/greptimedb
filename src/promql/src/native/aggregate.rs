@@ -240,8 +240,11 @@ impl AggregateRuntime {
             AggregateKind::Stddev => AggregateOp::Stddev,
             AggregateKind::Stdvar => AggregateOp::Stdvar,
             // The one kind with no accumulator: it keeps its input instead, which is a state of its
-            // own and is built by [`Self::new_quantile`].
-            AggregateKind::Quantile { .. } => return Self::new_quantile(op, schema, buffer),
+            // own and is built by [`Self::new_quantile`]. The φ is the only parameter an aggregate
+            // carries, and the arm that names the kind is the one place it is read.
+            AggregateKind::Quantile { quantile } => {
+                return Self::new_quantile(op, quantile, schema, buffer);
+            }
         };
         let (state_kind, state_components) = aggregate_state_binding(op.kind).ok_or_else(|| {
             DataFusionError::NotImplemented("aggregate kind has no mergeable state".into())
@@ -303,40 +306,26 @@ impl AggregateRuntime {
         })
     }
 
-    /// The states of a `Complete` `quantile` aggregate over `schema`.
+    /// The states of a `Complete` `quantile` aggregate over `schema`, whose φ is `quantile`.
     ///
-    /// A `quantile` is answered from its group's whole sample set, so a stage that saw only part of a
-    /// group would answer the quantile of a subset of it: `Partial` and `Final` are refused here
-    /// rather than approximated, because the quantile of two partitions' quantiles is not the
-    /// quantile of their union. That is a property of the operation and not of this runtime, so a
-    /// plan that has to fold by partition keeps the previous route -- [`crate::native::split`]
-    /// declines a `quantile` for the same reason.
+    /// A `quantile` is answered from its group's whole sample set, so a stage that saw only part of
+    /// a group would answer the quantile of a subset of it: the quantile of two partitions'
+    /// quantiles is not the quantile of their union, and there is no state to export or merge
+    /// either. That is a property of the operation and not of this runtime, so what refuses a
+    /// `Partial` or a `Final` one is the tree's own check -- [`aggregate_state_binding`] has no
+    /// binding for a `quantile`, which [`crate::native::plan::NativeNode::validate`] reports, and
+    /// [`crate::native::split`] declines a `quantile` for the same reason -- and this starts the one
+    /// stage that is left.
     ///
-    /// The input is evaluated on a grid because the kernel reads its parameter per point from a
-    /// scalar on that grid, so a node without one is refused before it starts.
+    /// The same check is what puts the input on a grid: a `Complete` aggregate is validated to
+    /// answer its input's values on its input's grid, and `schema` is the layout the node reports,
+    /// so the grid the kernel reads its parameter on is there before this runs.
     fn new_quantile(
         op: BoundAggregate,
+        quantile: f64,
         schema: Arc<SeriesSchema>,
         buffer: &mut NodeBuffer,
     ) -> Result<Self> {
-        if op.stage != AggregateStage::Complete {
-            return Err(DataFusionError::NotImplemented(format!(
-                "the native runtime executes `quantile` only as `Complete`, and this node is `{:?}`: \
-                 a quantile is answered from the whole of its group, and the quantile of a union of \
-                 partial groups cannot be computed from their quantiles",
-                op.stage
-            )));
-        }
-        let AggregateKind::Quantile { quantile } = op.kind else {
-            return Err(DataFusionError::Internal(
-                "a quantile runtime was built for another aggregate kind".into(),
-            ));
-        };
-        if schema.eval_grid.is_none() {
-            return Err(DataFusionError::NotImplemented(
-                "a `quantile` aggregate whose input is not evaluated on a grid".into(),
-            ));
-        }
         let retained = QuantileInput {
             quantile,
             series: Vec::new(),

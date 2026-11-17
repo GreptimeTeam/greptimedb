@@ -12419,6 +12419,43 @@ fn quantile_parameter_costs_the_points_held_not_the_span_between_them() {
     assert_eq!(pool.reserved(), 0);
 }
 
+/// A `quantile` whose input holds no sample at all answers nothing, rather than failing on the
+/// parameter it has no point to write the φ at.
+///
+/// The node hands the empty input to [`crate::aggregate::aggregate_quantile`] with the φ as an
+/// unlabelled single-field scalar, and that scalar is built over exactly the points the retained
+/// members sit at. An input with no member sits at none of them, so the builder it is written
+/// through finishes with no series at all -- and there is no point the kernel could ask for a φ it
+/// has no value at. The statement is still a legal one whose answer is the empty vector:
+/// `quantile(0.5, m)` over a range `m` holds no sample in is exactly this case, and Prometheus
+/// answers it with no series rather than with an error. The parameter is therefore an empty scalar
+/// over the grid instead -- the same thing said in the form the kernel reads -- which is what keeps
+/// "no sample in range" an answer of no samples rather than a failure to build a parameter.
+#[test]
+fn a_quantile_over_no_input_answers_nothing() {
+    let grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        BoundAggregate {
+            kind: AggregateKind::Quantile { quantile: 0.5 },
+            group: Grouping::By(Arc::new([])),
+            stage: AggregateStage::Complete,
+        },
+    ))
+    .unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // Nothing is pushed: the selection under this aggregate held no sample in the range it was
+    // asked for, so its leaf hands over no chunk at all and the fold keeps no member.
+    let output = run(&mut execution);
+    assert!(
+        output.is_empty(),
+        "a quantile over no input answered {:?}",
+        groups_of(&output)
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
 /// A `quantile` bills the buffer its chunks are slices of once, not once per chunk.
 ///
 /// One 2000-sample Arrow allocation is handed over as 2000 one-row chunks, which is what a source
@@ -12427,9 +12464,11 @@ fn quantile_parameter_costs_the_points_held_not_the_span_between_them() {
 /// its slice points into -- `series_bytes`, which reads the capacity of the buffer a slice keeps
 /// alive -- bills 2000 x ~16.3 KB ≈ 32 MB, and the 4 MiB pool below refuses this input at about the
 /// 260th chunk (4 MiB / 16.3 KB), while `min` over the same chunks answers, because a point-wise fold
-/// holds one chunk at a time and never the input. Retained the way a binary operand retains its
-/// operands (`operand_chunk_bytes` plus the tables `unbilled_tables` reports), the input costs its
-/// rows and its descriptors -- under a megabyte -- so the fold answers and leaves the pool empty.
+/// holds one chunk at a time and never the input. Retained the way this node bills its input --
+/// `chunk_bytes_beside_samples` per chunk, plus the allocations the chunks' samples are slices of,
+/// each billed once by the first chunk that references one (`unbilled_sample_buffers`) -- the input
+/// costs its rows, its descriptors and one charge for the buffer they slice: under a megabyte, so
+/// the fold answers and leaves the pool empty.
 #[test]
 fn a_quantile_bills_a_shared_buffer_once() {
     const ROWS: usize = 2_000;
@@ -12684,8 +12723,8 @@ fn aggregate_fold_state_is_released_after_input() {
 /// would answer the quantile of a subset of it, and the quantile of two partial groups is not a
 /// function of their quantiles. There is no state layout to export or merge, which is what the tree's
 /// own validation refuses while it is built: a `Partial` or `Final` node has nowhere to put its
-/// state. The runtime refuses the same stage again in [`crate::native::aggregate`] as a guard for a
-/// node built some other way, but the refusal a caller can reach is this one.
+/// state. That refusal is the only one there is -- the runtime starts from a validated tree and so
+/// starts the `Complete` stage alone, without a second check of its own.
 #[test]
 fn a_quantile_stage_the_runtime_does_not_compute_is_named() {
     let grid = || grid(0, 60_000, 4);
