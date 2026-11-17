@@ -686,6 +686,56 @@ mod test {
 +---------------+-------+";
         test(query, expected);
 
+        // Named variables and query options reach the query handler; MySQL
+        // filter syntax keeps the legacy compatibility result instead of
+        // failing on the regular parser.
+        for query in [
+            "show variables where Variable_name = 'sql_mode'",
+            "show global variables where Variable_name='sql_mode'",
+            "show variables\nlike 'sql_mode'",
+            "show variables like sql_mode",
+            "show variables LIKE 'event_scheduler'",
+            "show variables where(Variable_name='sql_mode')",
+            "show variables where/* probe */ Variable_name='sql_mode'",
+            "show variables WHERE--comment\nVariable_name='sql_mode'",
+        ] {
+            test(query, expected);
+        }
+
+        // Named variables and query options still reach the query handler for real values.
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        for query in [
+            "SHOW VARIABLES query.parallelism",
+            "SHOW GLOBAL VARIABLES datafusion.optimizer.prefer_hash_join",
+            "SHOW SESSION VARIABLES query.allow_query_fallback",
+            "SHOW VARIABLES query_parallelism",
+            "SHOW VARIABLES MAX_EXECUTION_TIME",
+            "SHOW VARIABLES TIME_ZONE",
+            "SHOW VARIABLES; SELECT 1",
+            "SHOW VARIABLES; /* comment */; SELECT 1",
+            "SHOW VARIABLES WHERE_FOO",
+            "SELECT 1",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_none(),
+                "{query} should reach the query handler"
+            );
+        }
+        for query in [
+            "SHOW VARIABLES",
+            "SHOW VARIABLES;",
+            "SHOW VARIABLES /* comment */",
+            "SHOW VARIABLES # comment",
+            "SHOW VARIABLES -- comment",
+            "SHOW GLOBAL VARIABLES",
+            "SHOW GLOBAL VARIABLES LIKE 'event_scheduler'",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_some(),
+                "{query} should retain federated compatibility handling"
+            );
+        }
+
         let query = "show variables like 'lower_case_table_names'";
         let expected = "\
 +------------------------+-------+
@@ -703,6 +753,66 @@ mod test {
 | 00:00:00                         |
 +----------------------------------+";
         test(query, expected);
+    }
+
+    #[test]
+    fn test_show_named_variables_reach_query_handler() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+
+        for query in [
+            "SHOW VARIABLES query.parallelism",
+            "SHOW VARIABLES datafusion.optimizer.prefer_hash_join",
+            "SHOW VARIABLES query.allow_query_fallback",
+            "SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown",
+            "SHOW VARIABLES WHERE_FOO",
+            "SHOW VARIABLES WHERE$foo",
+            "SHOW VARIABLES WHERE1",
+            "SHOW VARIABLES LIKE_FOO",
+            "SHOW VARIABLES `WHERE`",
+            "SHOW VARIABLES \"WHERE\"",
+            "SHOW VARIABLES MAX_EXECUTION_TIME",
+            "SHOW VARIABLES query.*",
+            "SHOW VARIABLES datafusion.*",
+            "SHOW GLOBAL VARIABLES datafusion.optimizer.prefer_hash_join",
+            "SHOW SESSION VARIABLES query.parallelism",
+            "SHOW LOCAL VARIABLES query.allow_query_fallback",
+            "  SHOW VARIABLES query.parallelism  ",
+            "SHOW VARIABLES query.parallelism;",
+            "SHOW VARIABLES /* comment */ query.parallelism",
+            "SHOW VARIABLES; SELECT 1",
+            "SHOW VARIABLES; /* comment */; SELECT 1",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_none(),
+                "{query} should reach the query handler"
+            );
+        }
+
+        for query in [
+            "SHOW VARIABLES",
+            "SHOW VARIABLES;",
+            "SHOW VARIABLES;;",
+            "SHOW VARIABLES; /* comment */;",
+            "SHOW VARIABLES /* comment */",
+            "SHOW VARIABLES /* comment */;",
+            "SHOW VARIABLES # comment",
+            "SHOW VARIABLES # comment;",
+            "SHOW VARIABLES -- comment",
+            "SHOW VARIABLES -- comment;",
+            "SHOW VARIABLES; -- comment",
+            "SHOW VARIABLES; -- comment\n",
+            "SHOW GLOBAL VARIABLES",
+            "SHOW SESSION VARIABLES",
+            "SHOW LOCAL VARIABLES",
+            "SHOW GLOBAL VARIABLES LIKE 'event_scheduler'",
+            "SHOW SESSION VARIABLES LIKE 'event_scheduler'",
+            "SHOW LOCAL VARIABLES LIKE 'event_scheduler'",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_some(),
+                "{query} should retain federated compatibility handling"
+            );
+        }
     }
 
     #[test]

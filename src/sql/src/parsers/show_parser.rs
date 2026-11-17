@@ -632,7 +632,7 @@ mod tests {
     use sqlparser::ast::{Ident, ObjectName};
 
     use super::*;
-    use crate::dialect::GreptimeDbDialect;
+    use crate::dialect::{GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
     use crate::parser::ParseOptions;
     use crate::statements::show::ShowDatabases;
     #[cfg(feature = "enterprise")]
@@ -897,6 +897,34 @@ mod tests {
                 full: true
             })
         );
+    }
+
+    #[test]
+    fn test_show_dotted_query_options() {
+        for (sql, dialect, expected) in [
+            (
+                "SHOW VARIABLES query.parallelism",
+                &MySqlDialect {} as &dyn sqlparser::dialect::Dialect,
+                "query.parallelism",
+            ),
+            (
+                "SHOW QUERY.ALLOW_QUERY_FALLBACK",
+                &PostgreSqlDialect {},
+                "QUERY.ALLOW_QUERY_FALLBACK",
+            ),
+            (
+                "SHOW VARIABLES datafusion.optimizer.repartition_joins",
+                &GenericDialect {},
+                "datafusion.optimizer.repartition_joins",
+            ),
+        ] {
+            let statements =
+                ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).unwrap();
+            let [Statement::ShowVariables(show)] = statements.as_slice() else {
+                panic!("unexpected SHOW parse result for {sql}");
+            };
+            assert_eq!(show.variable.to_string(), expected);
+        }
     }
 
     #[test]
