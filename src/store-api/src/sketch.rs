@@ -110,6 +110,108 @@ impl SketchRequest {
     }
 }
 
+/// Proposes and validates split points within one pinned SST snapshot.
+/// File limits count unique files across the proposal and validation samples together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchSplitRequest {
+    pub time_range: SketchTimeRange,
+    pub column: String,
+    /// Desired number of partitions, including both outermost partitions.
+    pub parts: u32,
+    /// Total files selected for the first sampling round.
+    pub initial_files: u32,
+    /// Minimum total files before a sampled result may be accepted.
+    pub min_files: u32,
+    /// Maximum total unique files read across all sampling rounds.
+    pub max_files: u32,
+    pub seed: u64,
+    /// Maximum allowed CDF disagreement; this is not a statistical confidence bound.
+    pub max_cdf_delta: f64,
+    /// Minimum partition mass relative to the ideal mass of `1 / parts`.
+    pub min_partition_ratio: f64,
+    /// Maximum partition mass relative to the ideal mass of `1 / parts`.
+    pub max_partition_ratio: f64,
+}
+
+impl SketchSplitRequest {
+    /// Validates controls before taking a snapshot or reading index files.
+    pub fn validate(&self) -> Result<(), BoxedError> {
+        let reason = if self.time_range.start >= self.time_range.end {
+            Some("sketch time range must have start before end")
+        } else if self.column.trim().is_empty() {
+            Some("sketch split request must select a column")
+        } else if !(2..=64).contains(&self.parts) {
+            Some("sketch split partition count must be in 2..=64")
+        } else if self.initial_files == 0
+            || self.initial_files > self.min_files
+            || self.min_files > self.max_files
+        {
+            Some("sketch split file limits must satisfy 0 < initial <= min <= max")
+        } else if !self.max_cdf_delta.is_finite() || !(0.0..=1.0).contains(&self.max_cdf_delta) {
+            Some("sketch split CDF delta must be finite and in [0, 1]")
+        } else if !self.min_partition_ratio.is_finite()
+            || self.min_partition_ratio <= 0.0
+            || self.min_partition_ratio > 1.0
+        {
+            Some("sketch split minimum partition ratio must be finite and in (0, 1]")
+        } else if !self.max_partition_ratio.is_finite() || self.max_partition_ratio < 1.0 {
+            Some("sketch split maximum partition ratio must be finite and at least 1")
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => Err(BoxedError::new(PlainError::new(
+                reason.to_string(),
+                StatusCode::InvalidArguments,
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A split boundary and its strict-less-than ranks in the two samples.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchSplitPoint {
+    pub value: Value,
+    pub candidate_rank: f64,
+    /// Absent for a census, which does not manufacture an independent validation sample.
+    pub validation_rank: Option<f64>,
+}
+
+/// Outcome of a bounded split-point search; only validated or census points are actionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SketchSplitStatus {
+    /// Both samples satisfy the requested stability and partition-mass controls.
+    Validated,
+    /// Every candidate file was read and the requested partition-mass controls hold.
+    Census,
+    /// Sampling exhausted its file budget without satisfying the controls.
+    Unstable,
+    /// The available distribution cannot produce the requested partition masses.
+    Infeasible,
+    /// Missing or incompatible summaries prevent validation.
+    MissingCoverage,
+    /// No represented rows are available in the requested window.
+    EmptyWindow,
+}
+
+/// Split-point result and the actual file work performed in one snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchSplitResponse {
+    pub status: SketchSplitStatus,
+    pub points: Vec<SketchSplitPoint>,
+    /// Number of unique files eligible before sampling.
+    pub candidate_files: u64,
+    /// Total unique files read, equal to proposal_files plus validation_files.
+    pub sampled_files: u64,
+    /// Files used to propose boundaries; includes all files for a census.
+    pub proposal_files: u64,
+    /// Disjoint files used to evaluate boundaries; zero for a census.
+    pub validation_files: u64,
+    pub rounds: u32,
+    pub gaps: Vec<SketchGap>,
+}
+
 /// Coverage of one whole time bucket and one query across the selected physical files.
 /// Whole means contained in the requested range, not that every file has statistics.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +317,18 @@ pub trait SketchReader: Send + Sync {
         region_id: RegionId,
         request: SketchRequest,
     ) -> Result<SketchResponse, BoxedError>;
+
+    /// Proposes and validates split points without changing snapshots between rounds.
+    async fn split(
+        &self,
+        _region_id: RegionId,
+        _request: SketchSplitRequest,
+    ) -> Result<SketchSplitResponse, BoxedError> {
+        Err(BoxedError::new(PlainError::new(
+            "sketch split search is unsupported".to_string(),
+            StatusCode::Unsupported,
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -232,6 +346,122 @@ mod tests {
             columns: vec!["value".to_string()],
             queries: vec![SketchQuery::DistinctCount],
             sampling: None,
+        }
+    }
+
+    fn split_request() -> SketchSplitRequest {
+        SketchSplitRequest {
+            time_range: request().time_range,
+            column: "value".to_string(),
+            parts: 2,
+            initial_files: 128,
+            min_files: 512,
+            max_files: 2048,
+            seed: 42,
+            max_cdf_delta: 0.05,
+            min_partition_ratio: 0.7,
+            max_partition_ratio: 1.3,
+        }
+    }
+
+    #[test]
+    fn test_validate_split_request() {
+        let valid = split_request();
+        assert!(valid.validate().is_ok());
+        for (initial_files, min_files, max_files, accepted) in [
+            (1, 1, 1, true),
+            (100_000, 100_000, 100_000, true),
+            (0, 512, 2048, false),
+            (513, 512, 2048, false),
+            (128, 2049, 2048, false),
+            (128, 512, u32::MAX, true),
+        ] {
+            let request = SketchSplitRequest {
+                initial_files,
+                min_files,
+                max_files,
+                ..valid.clone()
+            };
+            assert_eq!(request.validate().is_ok(), accepted, "{request:?}");
+        }
+        for (parts, accepted) in [(1, false), (2, true), (64, true), (65, false)] {
+            let request = SketchSplitRequest {
+                parts,
+                ..valid.clone()
+            };
+            assert_eq!(request.validate().is_ok(), accepted, "{request:?}");
+        }
+        for value in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -0.1, 1.1] {
+            let request = SketchSplitRequest {
+                max_cdf_delta: value,
+                ..valid.clone()
+            };
+            assert_eq!(
+                request.validate().unwrap_err().status_code(),
+                StatusCode::InvalidArguments
+            );
+        }
+        for value in [0.0, 1.0] {
+            assert!(
+                SketchSplitRequest {
+                    max_cdf_delta: value,
+                    ..valid.clone()
+                }
+                .validate()
+                .is_ok()
+            );
+        }
+        for value in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, 0.0, -0.1, 1.1] {
+            assert!(
+                SketchSplitRequest {
+                    min_partition_ratio: value,
+                    ..valid.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        for value in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, 0.9] {
+            assert!(
+                SketchSplitRequest {
+                    max_partition_ratio: value,
+                    ..valid.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            SketchSplitRequest {
+                min_partition_ratio: 1.0,
+                max_partition_ratio: 1.0,
+                ..valid.clone()
+            }
+            .validate()
+            .is_ok()
+        );
+        for column in ["", " "] {
+            assert!(
+                SketchSplitRequest {
+                    column: column.to_string(),
+                    ..valid.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        for end in [valid.time_range.start, Timestamp::new_nanosecond(1_000_999)] {
+            assert!(
+                SketchSplitRequest {
+                    time_range: SketchTimeRange {
+                        end,
+                        ..valid.time_range
+                    },
+                    ..valid.clone()
+                }
+                .validate()
+                .is_err()
+            );
         }
     }
 

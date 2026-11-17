@@ -24,7 +24,8 @@ use datatypes::value::Value;
 
 use crate::sketch::{
     ColumnSketchResult, SketchBucket, SketchGap, SketchGapReason, SketchQuery, SketchRequest,
-    SketchResponse, SketchSample, SketchSampling, SketchTimeRange, SketchValue,
+    SketchResponse, SketchSample, SketchSampling, SketchSplitPoint, SketchSplitRequest,
+    SketchSplitResponse, SketchSplitStatus, SketchTimeRange, SketchValue,
 };
 use crate::storage::{FileId, RegionId};
 
@@ -263,32 +264,7 @@ impl TryFrom<SketchResponse> for pb::SketchResponse {
                         })
                     })
                     .collect::<Result<_, BoxedError>>()?;
-                let gaps = result
-                    .gaps
-                    .into_iter()
-                    .map(|gap| pb::SketchGap {
-                        source_region_id: gap.source_region_id.as_u64(),
-                        file_id: gap.file_id.as_bytes().to_vec(),
-                        index_version: gap.index_version,
-                        reason: match gap.reason {
-                            SketchGapReason::NotConfigured => {
-                                pb::SketchGapReason::NotConfigured as i32
-                            }
-                            SketchGapReason::MissingIndex => {
-                                pb::SketchGapReason::MissingIndex as i32
-                            }
-                            SketchGapReason::LegacyFormat => {
-                                pb::SketchGapReason::LegacyFormat as i32
-                            }
-                            SketchGapReason::ScopeMismatch => {
-                                pb::SketchGapReason::ScopeMismatch as i32
-                            }
-                            SketchGapReason::Incompatible => {
-                                pb::SketchGapReason::Incompatible as i32
-                            }
-                        },
-                    })
-                    .collect();
+                let gaps = result.gaps.into_iter().map(Into::into).collect();
                 Ok(pb::ColumnSketchResult {
                     column_name: result.column_name,
                     column_id: result.column_id,
@@ -338,30 +314,7 @@ impl TryFrom<pb::SketchResponse> for SketchResponse {
                 let gaps = result
                     .gaps
                     .into_iter()
-                    .map(|gap| {
-                        let reason = match pb::SketchGapReason::try_from(gap.reason)
-                            .map_err(|_| invalid("unknown gap reason"))?
-                        {
-                            pb::SketchGapReason::NotConfigured => SketchGapReason::NotConfigured,
-                            pb::SketchGapReason::MissingIndex => SketchGapReason::MissingIndex,
-                            pb::SketchGapReason::LegacyFormat => SketchGapReason::LegacyFormat,
-                            pb::SketchGapReason::ScopeMismatch => SketchGapReason::ScopeMismatch,
-                            pb::SketchGapReason::Incompatible => SketchGapReason::Incompatible,
-                            pb::SketchGapReason::Unspecified => {
-                                return Err(invalid("unspecified gap reason"));
-                            }
-                        };
-                        Ok(SketchGap {
-                            source_region_id: RegionId::from_u64(gap.source_region_id),
-                            file_id: FileId::from_bytes(
-                                gap.file_id
-                                    .try_into()
-                                    .map_err(|_| invalid("file UUID must be 16 bytes"))?,
-                            ),
-                            index_version: gap.index_version,
-                            reason,
-                        })
-                    })
+                    .map(TryInto::try_into)
                     .collect::<Result<_, BoxedError>>()?;
                 Ok(ColumnSketchResult {
                     column_name: result.column_name,
@@ -399,6 +352,225 @@ impl TryFrom<pb::SketchResponse> for SketchResponse {
     }
 }
 
+impl TryFrom<pb::SketchSplitRequest> for SketchSplitRequest {
+    type Error = BoxedError;
+
+    fn try_from(request: pb::SketchSplitRequest) -> Result<Self, Self::Error> {
+        let request = Self {
+            time_range: request
+                .time_range
+                .ok_or_else(|| invalid("missing sketch split time range"))?
+                .try_into()?,
+            column: request.column,
+            parts: request.parts,
+            initial_files: request.initial_files,
+            min_files: request.min_files,
+            max_files: request.max_files,
+            seed: request.seed,
+            max_cdf_delta: request.max_cdf_delta,
+            min_partition_ratio: request.min_partition_ratio,
+            max_partition_ratio: request.max_partition_ratio,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+impl SketchSplitRequest {
+    /// Converts a validated split request to the region wire representation.
+    pub fn into_proto(self, region_id: RegionId) -> Result<pb::SketchSplitRequest, BoxedError> {
+        self.validate()?;
+        Ok(pb::SketchSplitRequest {
+            region_id: region_id.as_u64(),
+            time_range: Some(self.time_range.try_into()?),
+            column: self.column,
+            parts: self.parts,
+            initial_files: self.initial_files,
+            min_files: self.min_files,
+            max_files: self.max_files,
+            seed: self.seed,
+            max_cdf_delta: self.max_cdf_delta,
+            min_partition_ratio: self.min_partition_ratio,
+            max_partition_ratio: self.max_partition_ratio,
+        })
+    }
+}
+
+impl From<SketchGap> for pb::SketchGap {
+    fn from(gap: SketchGap) -> Self {
+        Self {
+            source_region_id: gap.source_region_id.as_u64(),
+            file_id: gap.file_id.as_bytes().to_vec(),
+            index_version: gap.index_version,
+            reason: match gap.reason {
+                SketchGapReason::NotConfigured => pb::SketchGapReason::NotConfigured,
+                SketchGapReason::MissingIndex => pb::SketchGapReason::MissingIndex,
+                SketchGapReason::LegacyFormat => pb::SketchGapReason::LegacyFormat,
+                SketchGapReason::ScopeMismatch => pb::SketchGapReason::ScopeMismatch,
+                SketchGapReason::Incompatible => pb::SketchGapReason::Incompatible,
+            } as i32,
+        }
+    }
+}
+
+impl TryFrom<pb::SketchGap> for SketchGap {
+    type Error = BoxedError;
+
+    fn try_from(gap: pb::SketchGap) -> Result<Self, Self::Error> {
+        let reason = match pb::SketchGapReason::try_from(gap.reason)
+            .map_err(|_| invalid("unknown gap reason"))?
+        {
+            pb::SketchGapReason::NotConfigured => SketchGapReason::NotConfigured,
+            pb::SketchGapReason::MissingIndex => SketchGapReason::MissingIndex,
+            pb::SketchGapReason::LegacyFormat => SketchGapReason::LegacyFormat,
+            pb::SketchGapReason::ScopeMismatch => SketchGapReason::ScopeMismatch,
+            pb::SketchGapReason::Incompatible => SketchGapReason::Incompatible,
+            pb::SketchGapReason::Unspecified => return Err(invalid("unspecified gap reason")),
+        };
+        Ok(Self {
+            source_region_id: RegionId::from_u64(gap.source_region_id),
+            file_id: FileId::from_bytes(
+                gap.file_id
+                    .try_into()
+                    .map_err(|_| invalid("file UUID must be 16 bytes"))?,
+            ),
+            index_version: gap.index_version,
+            reason,
+        })
+    }
+}
+
+impl TryFrom<pb::SketchSplitResponse> for SketchSplitResponse {
+    type Error = BoxedError;
+
+    fn try_from(response: pb::SketchSplitResponse) -> Result<Self, Self::Error> {
+        let status = match pb::SketchSplitStatus::try_from(response.status)
+            .map_err(|_| invalid("unknown sketch split status"))?
+        {
+            pb::SketchSplitStatus::Unspecified => {
+                return Err(invalid("unspecified sketch split status"));
+            }
+            pb::SketchSplitStatus::Validated => SketchSplitStatus::Validated,
+            pb::SketchSplitStatus::Census => SketchSplitStatus::Census,
+            pb::SketchSplitStatus::Unstable => SketchSplitStatus::Unstable,
+            pb::SketchSplitStatus::Infeasible => SketchSplitStatus::Infeasible,
+            pb::SketchSplitStatus::MissingCoverage => SketchSplitStatus::MissingCoverage,
+            pb::SketchSplitStatus::EmptyWindow => SketchSplitStatus::EmptyWindow,
+        };
+        let response = Self {
+            status,
+            points: response
+                .points
+                .into_iter()
+                .map(|point| {
+                    Ok(SketchSplitPoint {
+                        value: decode_value(point.value)?,
+                        candidate_rank: point.candidate_rank,
+                        validation_rank: point.validation_rank,
+                    })
+                })
+                .collect::<Result<_, BoxedError>>()?,
+            candidate_files: response.candidate_files,
+            sampled_files: response.sampled_files,
+            proposal_files: response.proposal_files,
+            validation_files: response.validation_files,
+            rounds: response.rounds,
+            gaps: response
+                .gaps
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        };
+        validate_split_response(&response)?;
+        Ok(response)
+    }
+}
+
+impl TryFrom<SketchSplitResponse> for pb::SketchSplitResponse {
+    type Error = BoxedError;
+
+    fn try_from(response: SketchSplitResponse) -> Result<Self, Self::Error> {
+        validate_split_response(&response)?;
+        Ok(Self {
+            status: match response.status {
+                SketchSplitStatus::Validated => pb::SketchSplitStatus::Validated,
+                SketchSplitStatus::Census => pb::SketchSplitStatus::Census,
+                SketchSplitStatus::Unstable => pb::SketchSplitStatus::Unstable,
+                SketchSplitStatus::Infeasible => pb::SketchSplitStatus::Infeasible,
+                SketchSplitStatus::MissingCoverage => pb::SketchSplitStatus::MissingCoverage,
+                SketchSplitStatus::EmptyWindow => pb::SketchSplitStatus::EmptyWindow,
+            } as i32,
+            points: response
+                .points
+                .into_iter()
+                .map(|point| pb::SketchSplitPoint {
+                    value: Some(helper::to_grpc_value(point.value)),
+                    candidate_rank: point.candidate_rank,
+                    validation_rank: point.validation_rank,
+                })
+                .collect(),
+            candidate_files: response.candidate_files,
+            sampled_files: response.sampled_files,
+            proposal_files: response.proposal_files,
+            validation_files: response.validation_files,
+            rounds: response.rounds,
+            gaps: response.gaps.into_iter().map(Into::into).collect(),
+        })
+    }
+}
+
+fn validate_split_response(response: &SketchSplitResponse) -> Result<(), BoxedError> {
+    let actionable = matches!(
+        response.status,
+        SketchSplitStatus::Validated | SketchSplitStatus::Census
+    );
+    if response
+        .proposal_files
+        .checked_add(response.validation_files)
+        != Some(response.sampled_files)
+        || response.sampled_files > response.candidate_files
+        || (response.sampled_files > 0 && response.rounds == 0)
+        || response.points.len() > 63
+        || (actionable
+            && (response.points.is_empty()
+                || !response.gaps.is_empty()
+                || response.proposal_files == 0))
+        || (!actionable && !response.points.is_empty())
+        || (response.status == SketchSplitStatus::Validated && response.validation_files == 0)
+        || (response.status == SketchSplitStatus::Census
+            && (response.validation_files != 0
+                || response.sampled_files != response.candidate_files))
+    {
+        return Err(invalid("inconsistent sketch split outcome or file counts"));
+    }
+    for point in &response.points {
+        if point.value.is_null()
+            || !point.candidate_rank.is_finite()
+            || !(0.0..1.0).contains(&point.candidate_rank)
+            || point.candidate_rank == 0.0
+            || point
+                .validation_rank
+                .is_some_and(|rank| !rank.is_finite() || rank <= 0.0 || rank >= 1.0)
+            || point.validation_rank.is_some() != (response.status == SketchSplitStatus::Validated)
+        {
+            return Err(invalid("invalid sketch split point"));
+        }
+    }
+    for pair in response.points.windows(2) {
+        // Value ordering requires matching variants; check the type first to avoid a panic.
+        if pair[0].value.data_type() != pair[1].value.data_type()
+            || pair[0].value >= pair[1].value
+            || pair[0].candidate_rank >= pair[1].candidate_rank
+            || matches!((pair[0].validation_rank, pair[1].validation_rank), (Some(a), Some(b)) if a >= b)
+        {
+            return Err(invalid(
+                "sketch split points must have increasing values and ranks",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn decode_value(value: Option<v1::Value>) -> Result<Value, BoxedError> {
     use v1::value::ValueData;
     let value = value.ok_or_else(|| invalid("missing query value"))?;
@@ -434,6 +606,127 @@ fn invalid(reason: &str) -> BoxedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn split_request() -> SketchSplitRequest {
+        SketchSplitRequest {
+            time_range: SketchTimeRange {
+                start: Timestamp::new_microsecond(1001),
+                end: Timestamp::new_microsecond(2001),
+            },
+            column: "__table_id".into(),
+            parts: 2,
+            initial_files: 128,
+            min_files: 512,
+            max_files: 2048,
+            seed: 42,
+            max_cdf_delta: 0.05,
+            min_partition_ratio: 0.7,
+            max_partition_ratio: 1.3,
+        }
+    }
+
+    fn split_response() -> SketchSplitResponse {
+        SketchSplitResponse {
+            status: SketchSplitStatus::Validated,
+            points: vec![SketchSplitPoint {
+                value: Value::UInt32(100_000),
+                candidate_rank: 0.48,
+                validation_rank: Some(0.51),
+            }],
+            candidate_files: 10_000,
+            sampled_files: 512,
+            proposal_files: 256,
+            validation_files: 256,
+            rounds: 3,
+            gaps: vec![],
+        }
+    }
+
+    #[test]
+    fn split_wire_request_roundtrip_and_validation() {
+        let request = split_request();
+        let wire = request.clone().into_proto(RegionId::new(42, 3)).unwrap();
+        assert_eq!(wire.region_id, RegionId::new(42, 3).as_u64());
+        assert_eq!(SketchSplitRequest::try_from(wire.clone()).unwrap(), request);
+        let mut missing = wire.clone();
+        missing.time_range = None;
+        assert!(SketchSplitRequest::try_from(missing).is_err());
+        let mut invalid_delta = wire.clone();
+        invalid_delta.max_cdf_delta = f64::NAN;
+        assert!(SketchSplitRequest::try_from(invalid_delta).is_err());
+        let mut invalid_limits = wire;
+        invalid_limits.max_files = 128;
+        assert!(SketchSplitRequest::try_from(invalid_limits).is_err());
+    }
+
+    #[test]
+    fn split_wire_response_rejects_inconsistent_outcomes() {
+        let response = split_response();
+        let wire = pb::SketchSplitResponse::try_from(response.clone()).unwrap();
+        assert_eq!(
+            SketchSplitResponse::try_from(wire.clone()).unwrap(),
+            response
+        );
+        for status in [0, 100] {
+            let mut invalid = wire.clone();
+            invalid.status = status;
+            assert!(SketchSplitResponse::try_from(invalid).is_err());
+        }
+        let mut invalid = wire.clone();
+        invalid.sampled_files += 1;
+        assert!(SketchSplitResponse::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.points[0].candidate_rank = f64::NAN;
+        assert!(SketchSplitResponse::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.points[0].validation_rank = None;
+        assert!(SketchSplitResponse::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.status = pb::SketchSplitStatus::Unstable as i32;
+        assert!(SketchSplitResponse::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.points[0].value = None;
+        assert!(SketchSplitResponse::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.points.push(pb::SketchSplitPoint {
+            value: Some(helper::to_grpc_value(Value::Int64(200_000))),
+            candidate_rank: 0.7,
+            validation_rank: Some(0.7),
+        });
+        assert!(
+            SketchSplitResponse::try_from(invalid).is_err(),
+            "different value variants must not panic"
+        );
+        let mut census = response.clone();
+        census.status = SketchSplitStatus::Census;
+        census.candidate_files = census.sampled_files;
+        census.proposal_files = census.sampled_files;
+        census.validation_files = 0;
+        census.points[0].validation_rank = None;
+        assert_eq!(
+            SketchSplitResponse::try_from(
+                pb::SketchSplitResponse::try_from(census.clone()).unwrap()
+            )
+            .unwrap(),
+            census
+        );
+        let mut missing = response;
+        missing.status = SketchSplitStatus::MissingCoverage;
+        missing.points.clear();
+        missing.gaps.push(SketchGap {
+            source_region_id: RegionId::new(1, 1),
+            file_id: FileId::random(),
+            index_version: 2,
+            reason: SketchGapReason::ScopeMismatch,
+        });
+        assert_eq!(
+            SketchSplitResponse::try_from(
+                pb::SketchSplitResponse::try_from(missing.clone()).unwrap()
+            )
+            .unwrap(),
+            missing
+        );
+    }
 
     #[test]
     fn timestamp_precision_and_invalid_units() {

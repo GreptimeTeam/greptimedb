@@ -1176,6 +1176,7 @@ pub trait RegionEngine: Send + Sync {
             extensions,
             metadata: Vec::new(),
             sketch: None,
+            sketch_split: None,
         })
     }
 

@@ -181,6 +181,7 @@ impl RegionEngine for MetricEngine {
                     extensions: extension_return_value,
                     metadata: Vec::new(),
                     sketch: None,
+                    sketch_split: None,
                 })
             }
             BatchRegionDdlRequest::Alter(requests) => {
@@ -196,6 +197,7 @@ impl RegionEngine for MetricEngine {
                     extensions: extension_return_value,
                     metadata: Vec::new(),
                     sketch: None,
+                    sketch_split: None,
                 })
             }
             BatchRegionDdlRequest::Drop(requests) => {
@@ -326,6 +328,7 @@ impl RegionEngine for MetricEngine {
             extensions: extension_return_value,
             metadata: Vec::new(),
             sketch: None,
+            sketch_split: None,
         })
     }
 
@@ -639,6 +642,7 @@ impl MetricEngine {
             extensions,
             metadata: Vec::new(),
             sketch: None,
+            sketch_split: None,
         })
     }
 }

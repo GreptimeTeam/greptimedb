@@ -37,6 +37,8 @@ pub struct RegionResponse {
     pub metadata: Vec<u8>,
     /// Structured response for persisted sketch operations.
     pub sketch: Option<greptime_proto::v1::region::SketchResponse>,
+    /// Validated split points from one pinned statistics snapshot.
+    pub sketch_split: Option<greptime_proto::v1::region::SketchSplitResponse>,
 }
 
 /// Successful entries and failed-entry errors indexed by input order.
@@ -61,6 +63,7 @@ impl RegionResponse {
             extensions: region_response.extensions,
             metadata: region_response.metadata,
             sketch: region_response.sketch,
+            sketch_split: region_response.sketch_split,
         }
     }
 
@@ -71,6 +74,7 @@ impl RegionResponse {
             extensions: Default::default(),
             metadata: Vec::new(),
             sketch: None,
+            sketch_split: None,
         }
     }
 
@@ -81,6 +85,7 @@ impl RegionResponse {
             extensions: Default::default(),
             metadata,
             sketch: None,
+            sketch_split: None,
         }
     }
 }
