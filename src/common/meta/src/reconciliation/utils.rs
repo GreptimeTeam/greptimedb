@@ -365,9 +365,10 @@ pub(crate) fn check_column_metadata_invariants(
 /// - Columns present in `table_meta` but missing from `column_metadata` are dropped.
 /// - Columns present in both retain the column order from `table_meta.schema`.
 /// - Columns present only in `column_metadata` are appended.
-/// - Primary key order follows the tag columns in `column_metadata`, which the reconcile paths
-///   feed in the regions' key order. `table_meta.primary_key_indices` only determines which
-///   columns must remain tags.
+/// - Primary key order follows the tag columns in `column_metadata`, which the physical-table
+///   reconcile paths feed in the regions' key order (`table_meta.primary_key_indices` only
+///   determines which columns must remain tags). The logical-table reconcile path feeds columns
+///   in column-position order and relies on a subsequent `sort_columns()` call.
 ///
 /// Returns an error if:
 /// - Any column is missing in the `name_to_ids`(if `name_to_ids` is provided).
@@ -475,11 +476,8 @@ pub(crate) fn build_table_meta_from_column_metadatas(
     partition_key_indices.clear();
 
     for (idx, col) in ordered_column_metadatas.iter().enumerate() {
-        match col.semantic_type {
-            SemanticType::Tag => {}
-            SemanticType::Field | SemanticType::Timestamp => {
-                value_indices.push(idx);
-            }
+        if col.semantic_type != SemanticType::Tag {
+            value_indices.push(idx);
         }
 
         columns.push(col.column_schema.clone());
@@ -493,10 +491,7 @@ pub(crate) fn build_table_meta_from_column_metadatas(
         .iter()
         .filter(|c| c.semantic_type == SemanticType::Tag)
     {
-        let Some(&new_idx) = column_name_to_index.get(col.column_schema.name.as_str()) else {
-            continue;
-        };
-        primary_key_indices.push(new_idx);
+        primary_key_indices.push(column_name_to_index[col.column_schema.name.as_str()]);
     }
 
     // Ensures every stored primary key column is still a tag in the region metadata.
@@ -1322,8 +1317,7 @@ mod tests {
         assert_matches!(err, Error::MissingColumnInColumnMetadata { .. });
     }
 
-    #[test]
-    fn test_build_table_meta_preserves_column_order_and_primary_key_indices() {
+    fn new_test_q8_raw_table_info() -> (TableMeta, HashMap<String, u32>) {
         let column_schemas = vec![
             ColumnSchema::new(
                 "ts",
@@ -1341,22 +1335,28 @@ mod tests {
             .unwrap();
 
         let mut table_meta_builder = TableMetaBuilder::empty();
-        let table_meta = table_meta_builder
+        let mut table_meta = table_meta_builder
             .schema(Arc::new(schema))
             .primary_key_indices(vec![2, 1])
             .next_column_id(4)
             .build()
             .unwrap();
-        let mut table_meta = table_meta;
         table_meta.column_ids = vec![1, 2, 3];
 
-        let table_id = 100;
-        let table_ref = TableReference::full("test_catalog", "test_schema", "test_table");
         let name_to_ids = HashMap::from([
             ("ts".to_string(), 1),
             ("a".to_string(), 2),
             ("b".to_string(), 3),
         ]);
+
+        (table_meta, name_to_ids)
+    }
+
+    #[test]
+    fn test_build_table_meta_preserves_column_order_and_primary_key_indices() {
+        let (table_meta, name_to_ids) = new_test_q8_raw_table_info();
+        let table_id = 100;
+        let table_ref = TableReference::full("test_catalog", "test_schema", "test_table");
 
         let region_column_metadatas = vec![
             ColumnMetadata {
@@ -1452,39 +1452,9 @@ mod tests {
 
     #[test]
     fn test_build_table_meta_rejects_non_tag_primary_key() {
-        let column_schemas = vec![
-            ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
-            ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
-        ];
-        let schema = SchemaBuilder::try_from(column_schemas)
-            .unwrap()
-            .version(1)
-            .build()
-            .unwrap();
-
-        let mut table_meta_builder = TableMetaBuilder::empty();
-        let table_meta = table_meta_builder
-            .schema(Arc::new(schema))
-            .primary_key_indices(vec![2, 1])
-            .next_column_id(4)
-            .build()
-            .unwrap();
-        let mut table_meta = table_meta;
-        table_meta.column_ids = vec![1, 2, 3];
-
+        let (table_meta, name_to_ids) = new_test_q8_raw_table_info();
         let table_id = 100;
         let table_ref = TableReference::full("test_catalog", "test_schema", "test_table");
-        let name_to_ids = HashMap::from([
-            ("ts".to_string(), 1),
-            ("a".to_string(), 2),
-            ("b".to_string(), 3),
-        ]);
 
         // Input column metadata erroneously reports primary key column 'b' as Field instead of Tag
         let invalid_column_metadatas = vec![
