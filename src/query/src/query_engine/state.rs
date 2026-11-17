@@ -69,6 +69,7 @@ use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::expr_depth;
+use crate::optimizer::factorized_join_agg::FactorizedJoinAggRule;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
 use crate::optimizer::infer_aggregate_input_bounds::InferAggregateInputBoundsRule;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
@@ -85,7 +86,9 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
-use crate::options::{QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew};
+use crate::options::{
+    FactorizedJoinAggOptions, QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew,
+};
 use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::runtime::{
@@ -161,6 +164,12 @@ impl QueryEngineState {
         let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);
+        }
+        if options.experimental_enable_factorized_join_agg {
+            session_config
+                .options_mut()
+                .extensions
+                .insert(FactorizedJoinAggOptions { enabled: true });
         }
         if options.allow_query_fallback {
             session_config
@@ -252,6 +261,7 @@ impl QueryEngineState {
         }
         optimizer.rules.push(Arc::new(ScanHintRule));
         optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
+        optimizer.rules.push(Arc::new(FactorizedJoinAggRule));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
@@ -382,6 +392,15 @@ impl QueryEngineState {
                 .extensions
                 .insert(DistPlannerOptions {
                     allow_query_fallback: fallback == "true",
+                });
+        }
+        if let Some(enabled) = options.get("query.experimental_enable_factorized_join_agg") {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(FactorizedJoinAggOptions {
+                    enabled: enabled == "true",
                 });
         }
         Ok(query_ctx)
@@ -778,6 +797,7 @@ impl MemoryPool for MetricsMemoryPool {
 
 #[cfg(test)]
 mod tests {
+    mod factorized_join_agg_tests;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use common_base::Plugins;
