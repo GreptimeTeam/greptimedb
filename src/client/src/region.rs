@@ -169,6 +169,25 @@ impl RegionRequester {
             .await
     }
 
+    /// Generates and validates split points within one pinned SST snapshot.
+    pub async fn sketch_split(
+        &self,
+        request: api::v1::region::SketchSplitRequest,
+    ) -> Result<api::v1::region::SketchSplitResponse> {
+        self.handle_inner(RegionRequest {
+            header: Some(RegionRequestHeader {
+                tracing_context: TracingContext::from_current_span().to_w3c(),
+                ..Default::default()
+            }),
+            body: Some(region_request::Body::SketchSplit(request)),
+        })
+        .await?
+        .sketch_split
+        .context(MissingFieldSnafu {
+            field: "sketch_split",
+        })
+    }
+
     async fn handle_sketch(
         &self,
         body: region_request::Body,
@@ -766,6 +785,64 @@ mod tests {
         assert_eq!(
             requests[1].0.body,
             Some(region_request::Body::SketchQuery(request))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sketch_split_rpc_preserves_request_and_response() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        let request = api::v1::region::SketchSplitRequest {
+            region_id: 42,
+            time_range: Some(api::v1::region::SketchTimeRange {
+                start: 1001,
+                end: 2001,
+                time_unit: api::v1::TimeUnit::Microsecond as i32,
+            }),
+            column: "__table_id".into(),
+            parts: 2,
+            initial_files: 128,
+            min_files: 512,
+            max_files: 2048,
+            seed: 42,
+            max_cdf_delta: 0.05,
+            min_partition_ratio: 0.7,
+            max_partition_ratio: 1.3,
+        };
+        let expected = api::v1::region::SketchSplitResponse {
+            status: api::v1::region::SketchSplitStatus::Unstable as i32,
+            candidate_files: 10_000,
+            sampled_files: 2048,
+            proposal_files: 1024,
+            validation_files: 1024,
+            rounds: 5,
+            ..Default::default()
+        };
+        let mut response = build_response(StatusCode::Success);
+        response.sketch_split = Some(expected.clone());
+        server
+            .service
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Ok(response));
+        assert_eq!(
+            requester.sketch_split(request.clone()).await.unwrap(),
+            expected
+        );
+        assert_eq!(
+            server.service.requests.lock().unwrap()[0].0.body,
+            Some(region_request::Body::SketchSplit(request.clone()))
+        );
+        server
+            .service
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Ok(build_response(StatusCode::Success)));
+        assert!(
+            requester.sketch_split(request).await.is_err(),
+            "missing dedicated response must not silently succeed"
         );
     }
 

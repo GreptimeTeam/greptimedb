@@ -24,7 +24,9 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::region_engine::{RegionEngine, RegionScannerRef};
-use store_api::sketch::{SketchReader, SketchRequest, SketchResponse};
+use store_api::sketch::{
+    SketchReader, SketchRequest, SketchResponse, SketchSplitRequest, SketchSplitResponse,
+};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::engine::{MetricEngine, MetricEngineInner};
@@ -54,6 +56,17 @@ impl SketchReader for MetricEngine {
     ) -> std::result::Result<SketchResponse, BoxedError> {
         self.physical_sketch_reader(region_id)?
             .query(utils::to_data_region_id(region_id), request)
+            .await
+    }
+
+    async fn split(
+        &self,
+        region_id: RegionId,
+        request: SketchSplitRequest,
+    ) -> std::result::Result<SketchSplitResponse, BoxedError> {
+        request.validate()?;
+        self.physical_sketch_reader(region_id)?
+            .split(utils::to_data_region_id(region_id), request)
             .await
     }
 }
@@ -398,6 +411,104 @@ mod test {
     use crate::test_util::{
         self, TestEnv, alter_logical_region_add_tag_columns, create_logical_region_request,
     };
+
+    #[tokio::test]
+    async fn test_split_sketch_forwarding() {
+        use common_base::Plugins;
+        use common_time::Timestamp;
+        use mito2::sst::index::sketch_reader::{
+            SketchReadContext, SketchReadHandler, SketchReadHandlerRef,
+        };
+        use store_api::sketch::{SketchSplitStatus, SketchTimeRange};
+
+        #[derive(Debug)]
+        struct SplitHandler {
+            region_id: RegionId,
+            request: SketchSplitRequest,
+        }
+
+        #[async_trait::async_trait]
+        impl SketchReadHandler for SplitHandler {
+            async fn stat(
+                &self,
+                _: &SketchReadContext<'_>,
+                _: &SketchRequest,
+            ) -> std::result::Result<SketchResponse, BoxedError> {
+                panic!("split must not issue a stat request")
+            }
+
+            async fn query(
+                &self,
+                _: &SketchReadContext<'_>,
+                _: &SketchRequest,
+            ) -> std::result::Result<SketchResponse, BoxedError> {
+                panic!("split must not issue a generic query")
+            }
+
+            async fn split(
+                &self,
+                context: &SketchReadContext<'_>,
+                request: &SketchSplitRequest,
+            ) -> std::result::Result<SketchSplitResponse, BoxedError> {
+                assert_eq!(context.metadata.region_id, self.region_id);
+                assert_eq!(request, &self.request);
+                assert_eq!(context.files.iter().count(), 0);
+                Ok(SketchSplitResponse {
+                    status: SketchSplitStatus::EmptyWindow,
+                    points: vec![],
+                    candidate_files: 0,
+                    sampled_files: 0,
+                    proposal_files: 0,
+                    validation_files: 0,
+                    rounds: 0,
+                    gaps: vec![],
+                })
+            }
+        }
+
+        let physical_region = RegionId::new(1, 2);
+        let request = SketchSplitRequest {
+            time_range: SketchTimeRange {
+                start: Timestamp::new_millisecond(0),
+                end: Timestamp::new_millisecond(300_000),
+            },
+            column: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            parts: 8,
+            initial_files: 128,
+            min_files: 512,
+            max_files: 2048,
+            seed: 42,
+            max_cdf_delta: 0.05,
+            min_partition_ratio: 0.7,
+            max_partition_ratio: 1.3,
+        };
+        let plugins = Plugins::new();
+        plugins.insert::<SketchReadHandlerRef>(Arc::new(SplitHandler {
+            region_id: utils::to_data_region_id(physical_region),
+            request: request.clone(),
+        }));
+        let mut mito_env = mito2::test_util::TestEnv::new().await;
+        let mito = mito_env
+            .create_engine_with_plugins(Default::default(), plugins)
+            .await;
+        let env = TestEnv::with_mito_engine(mito_env, mito);
+        env.create_physical_region(physical_region, &TestEnv::default_table_dir(), vec![])
+            .await;
+        let response = SketchReader::split(&env.metric(), physical_region, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(response.status, SketchSplitStatus::EmptyWindow);
+        let logical_region = env.default_logical_region_id();
+        env.create_logical_region(physical_region, logical_region)
+            .await;
+        assert_eq!(
+            SketchReader::split(&env.metric(), logical_region, request)
+                .await
+                .unwrap_err()
+                .status_code(),
+            StatusCode::Unsupported
+        );
+    }
 
     struct ScannerDisplay<'a>(&'a dyn store_api::region_engine::RegionScanner);
 

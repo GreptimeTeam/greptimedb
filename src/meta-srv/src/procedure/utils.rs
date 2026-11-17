@@ -363,6 +363,7 @@ pub mod mock {
                 extensions: Default::default(),
                 metadata: Vec::new(),
                 sketch: None,
+                sketch_split: None,
                 failures: Vec::new(),
             })
         }
