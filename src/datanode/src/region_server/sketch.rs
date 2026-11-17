@@ -17,7 +17,9 @@
 use common_error::ext::BoxedError;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::RegionEngineRef;
-use store_api::sketch::{SketchReader, SketchRequest, SketchResponse};
+use store_api::sketch::{
+    SketchReader, SketchRequest, SketchResponse, SketchSplitRequest, SketchSplitResponse,
+};
 use store_api::storage::RegionId;
 
 use crate::error::SketchReaderUnavailableSnafu;
@@ -50,6 +52,15 @@ impl RegionSketchReader {
         self.reader()?.query(self.region_id, request).await
     }
 
+    /// Searches for split points and validates them within one engine snapshot.
+    pub async fn split(
+        &self,
+        request: SketchSplitRequest,
+    ) -> std::result::Result<SketchSplitResponse, BoxedError> {
+        request.validate()?;
+        self.reader()?.split(self.region_id, request).await
+    }
+
     fn reader(&self) -> std::result::Result<&dyn SketchReader, BoxedError> {
         self.engine
             .sketch_reader()
@@ -61,6 +72,35 @@ impl RegionSketchReader {
 }
 
 impl crate::region_server::RegionServer {
+    pub(crate) async fn handle_sketch_split_rpc(
+        &self,
+        request: api::v1::region::SketchSplitRequest,
+    ) -> servers::error::Result<api::v1::region::RegionResponse> {
+        let response = async {
+            let region_id = RegionId::from_u64(request.region_id);
+            let request = SketchSplitRequest::try_from(request)?;
+            let reader = self
+                .sketch_reader(region_id)
+                .map_err(BoxedError::new)?
+                .context(SketchReaderUnavailableSnafu { region_id })
+                .map_err(BoxedError::new)?;
+            let response = reader.split(request).await?;
+            api::v1::region::SketchSplitResponse::try_from(response)
+        }
+        .await
+        .context(servers::error::ExecuteGrpcRequestSnafu)?;
+        Ok(api::v1::region::RegionResponse {
+            header: Some(api::v1::ResponseHeader {
+                status: Some(api::v1::Status {
+                    status_code: common_error::status_code::StatusCode::Success as _,
+                    ..Default::default()
+                }),
+            }),
+            sketch_split: Some(response),
+            ..Default::default()
+        })
+    }
+
     pub(crate) async fn handle_sketch_rpc(
         &self,
         request: api::v1::region::SketchRequest,

@@ -685,6 +685,7 @@ impl RegionServer {
             extensions,
             metadata: Vec::new(),
             sketch: None,
+            sketch_split: None,
         })
     }
 
@@ -1152,6 +1153,12 @@ impl RegionServer {
         let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
             .with_label_values(&[request.as_ref()]);
         let request = match request {
+            region_request::Body::SketchSplit(request) => {
+                return self
+                    .handle_sketch_split_rpc(request)
+                    .await
+                    .inspect_err(|_| failed_requests_cnt.inc());
+            }
             region_request::Body::SketchStat(request) => {
                 return self
                     .handle_sketch_rpc(request, false)
@@ -1197,6 +1204,7 @@ impl RegionServer {
             extensions: response.extensions,
             metadata: response.metadata,
             sketch: None,
+            sketch_split: None,
             failures: Vec::new(),
         })
     }
@@ -1347,6 +1355,7 @@ fn encode_batch_write_response(result: BatchRegionResponse<error::Error>) -> Reg
         }),
         metadata: Vec::new(),
         sketch: None,
+        sketch_split: None,
         affected_rows: result.affected_rows as _,
         extensions: result.extensions,
         failures: result
@@ -1967,6 +1976,7 @@ impl RegionServerInner {
                     extensions: result.extensions,
                     metadata: Vec::new(),
                     sketch: None,
+                    sketch_split: None,
                 })
             }
             Err(err) => {
@@ -2076,6 +2086,7 @@ impl RegionServerInner {
                     extensions: result.extensions,
                     metadata: Vec::new(),
                     sketch: None,
+                    sketch_split: None,
                 })
             }
             Err(err) => {

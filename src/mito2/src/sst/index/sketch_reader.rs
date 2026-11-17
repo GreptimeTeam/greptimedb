@@ -18,9 +18,12 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use store_api::metadata::RegionMetadataRef;
-use store_api::sketch::{SketchRequest, SketchResponse, SketchTimeRange};
+use store_api::sketch::{
+    SketchRequest, SketchResponse, SketchSplitRequest, SketchSplitResponse, SketchTimeRange,
+};
 
 use crate::sst::file::FileHandle;
 use crate::sst::index::puffin_manager::SstPuffinManager;
@@ -83,6 +86,18 @@ pub trait SketchReadHandler: Send + Sync + Debug {
         context: &SketchReadContext<'_>,
         request: &SketchRequest,
     ) -> Result<SketchResponse, BoxedError>;
+
+    /// Proposes and validates split points using this call's pinned file snapshot.
+    async fn split(
+        &self,
+        _context: &SketchReadContext<'_>,
+        _request: &SketchSplitRequest,
+    ) -> Result<SketchSplitResponse, BoxedError> {
+        Err(BoxedError::new(PlainError::new(
+            "sketch split search is unsupported".to_string(),
+            StatusCode::Unsupported,
+        )))
+    }
 }
 
 /// Plugin registration type shared by engine bootstrap and the read entry point.

@@ -18,7 +18,10 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::sketch::{SketchReader, SketchRequest, SketchResponse};
+use store_api::sketch::{
+    SketchReader, SketchRequest, SketchResponse, SketchSplitRequest, SketchSplitResponse,
+    SketchTimeRange,
+};
 use store_api::storage::RegionId;
 
 use crate::engine::MitoEngine;
@@ -33,7 +36,8 @@ impl SketchReader for MitoEngine {
         region_id: RegionId,
         request: SketchRequest,
     ) -> Result<SketchResponse, BoxedError> {
-        let prepared = self.build_sketch_read(region_id, &request)?;
+        request.validate()?;
+        let prepared = self.build_sketch_read(region_id, request.time_range)?;
         prepared.handler.stat(&prepared.context(), &request).await
     }
 
@@ -42,8 +46,19 @@ impl SketchReader for MitoEngine {
         region_id: RegionId,
         request: SketchRequest,
     ) -> Result<SketchResponse, BoxedError> {
-        let prepared = self.build_sketch_read(region_id, &request)?;
+        request.validate()?;
+        let prepared = self.build_sketch_read(region_id, request.time_range)?;
         prepared.handler.query(&prepared.context(), &request).await
+    }
+
+    async fn split(
+        &self,
+        region_id: RegionId,
+        request: SketchSplitRequest,
+    ) -> Result<SketchSplitResponse, BoxedError> {
+        request.validate()?;
+        let prepared = self.build_sketch_read(region_id, request.time_range)?;
+        prepared.handler.split(&prepared.context(), &request).await
     }
 }
 
@@ -51,9 +66,8 @@ impl MitoEngine {
     fn build_sketch_read(
         &self,
         region_id: RegionId,
-        request: &SketchRequest,
+        time_range: SketchTimeRange,
     ) -> Result<PreparedSketchRead<'_>, BoxedError> {
-        request.validate()?;
         let region = self
             .find_region(region_id)
             .context(RegionNotFoundSnafu { region_id })
@@ -67,7 +81,7 @@ impl MitoEngine {
             })
             .map_err(BoxedError::new)?;
         let version = region.version();
-        let files = SketchReadFiles::new(version.ssts.clone(), request.time_range);
+        let files = SketchReadFiles::new(version.ssts.clone(), time_range);
         let manager = region
             .access_layer
             .build_puffin_manager()
@@ -114,6 +128,34 @@ mod tests {
 
     use super::*;
     use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_invalid_split_request_precedes_region_lookup() {
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let request = SketchSplitRequest {
+            time_range: SketchTimeRange {
+                start: Timestamp::new_millisecond(0),
+                end: Timestamp::new_millisecond(300_000),
+            },
+            column: "value".to_string(),
+            parts: 2,
+            initial_files: 128,
+            min_files: 512,
+            max_files: 2048,
+            seed: 42,
+            max_cdf_delta: f64::NAN,
+            min_partition_ratio: 0.7,
+            max_partition_ratio: 1.3,
+        };
+        assert_eq!(
+            SketchReader::split(&engine, RegionId::new(1, 1), request)
+                .await
+                .unwrap_err()
+                .status_code(),
+            StatusCode::InvalidArguments
+        );
+    }
 
     #[tokio::test]
     async fn test_invalid_request_precedes_region_lookup() {

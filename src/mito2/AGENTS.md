@@ -81,7 +81,8 @@ Task-specific cancellation preserves other pending manual work when no DDL is
 pending. DDL cancellation retains its existing scheduling fence and priority.
 
 Sketch reads use the optional `SketchReader` capability (`engine/sketch.rs`).
-`stat` and `query` independently prepare a fresh SST snapshot via `build_sketch_read`;
+`stat`, `query`, and `split` independently prepare a fresh SST snapshot via
+`build_sketch_read`; split proposal and validation rounds retain that one snapshot.
 `sst/index/sketch_reader.rs` defines the injected `SketchReadHandler` contract.
 The Region-bound application handle does not retain a snapshot between calls.
 

@@ -204,12 +204,12 @@ impl RegionRequest {
                 reason: "ListMetadata request should be handled separately by RegionServer",
             }
             .fail(),
-            region_request::Body::SketchStat(_) | region_request::Body::SketchQuery(_) => {
-                UnexpectedSnafu {
-                    reason: "Sketch requests must be handled separately by RegionServer",
-                }
-                .fail()
+            region_request::Body::SketchStat(_)
+            | region_request::Body::SketchQuery(_)
+            | region_request::Body::SketchSplit(_) => UnexpectedSnafu {
+                reason: "Sketch requests must be handled separately by RegionServer",
             }
+            .fail(),
             region_request::Body::RemoteDynFilter(_) => UnexpectedSnafu {
                 reason: "RemoteDynFilter request should be handled separately by RegionServer",
             }
