@@ -5450,16 +5450,16 @@ pub async fn test_prometheus_remote_write_with_ttl_hint(store_type: StorageType)
         "expected ttl = '7d' in SHOW CREATE TABLE output for physical table, got: {resp}"
     );
 
-    // The logical table must not inherit the retention TTL.
+    // The logical table must not inherit the retention TTL in create_options.
     let res = client
-        .get("/v1/sql?sql=show create table ttl_hint_metric")
+        .get("/v1/sql?sql=select create_options from information_schema.tables where table_name = 'ttl_hint_metric'")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let resp = res.text().await;
     assert!(
-        !resp.contains("ttl = '7d'") && !resp.contains("ttl = '7days'"),
-        "did not expect retention ttl in SHOW CREATE TABLE output for logical table, got: {resp}"
+        !resp.contains("ttl"),
+        "did not expect retention ttl in create_options for logical table, got: {resp}"
     );
 
     // When the physical table already exists, the retention hint applies only on creation
