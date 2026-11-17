@@ -554,20 +554,14 @@ impl ActiveWriter {
     fn open_packed(
         table: &LogicalTableProjection,
         id: u32,
-        store: &ObjectStore,
         limits: LogicalTableExportLimits,
         shared: PackedWriterRef,
     ) -> Result<Self> {
         let path = format!("table-{id}.parquet");
         let packed = PackedTableWriter::new(shared, table.name.clone(), id, false);
-        let writer = ParquetFileWriter::open_packed(
-            table.schema.clone(),
-            store.clone(),
-            &path,
-            Some(limits.writer),
-            packed,
-        )
-        .map_err(|e| map_writer_error(e, &path))?;
+        let writer =
+            ParquetFileWriter::open_packed(table.schema.clone(), Some(limits.writer), packed)
+                .map_err(|e| map_writer_error(e, &path))?;
         Ok(Self { path, writer })
     }
 

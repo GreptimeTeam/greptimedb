@@ -154,7 +154,7 @@ impl TableWriters {
         let permit = self.budget.writer(token).await?;
         self.reap_for_admission(token).await?;
         let writer = if let Some(packed) = &self.packed {
-            ActiveWriter::open_packed(table, id, store, limits, packed.clone())?
+            ActiveWriter::open_packed(table, id, limits, packed.clone())?
         } else {
             ActiveWriter::open(table, store, limits).await?
         };
