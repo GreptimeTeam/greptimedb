@@ -260,10 +260,14 @@ impl DowngradeLeaderRegion {
                     .fail();
                 };
 
+                // Handles every reply, so that a failed region does not drop the
+                // last entry ids of the other regions.
+                let mut result = Ok(());
                 for reply in replies {
-                    self.handle_downgrade_region_reply(ctx, &reply, &now)?;
+                    let handled = self.handle_downgrade_region_reply(ctx, &reply, &now);
+                    result = result.and(handled);
                 }
-                Ok(())
+                result
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
@@ -388,6 +392,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use api::v1::meta::mailbox_message::Payload;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -755,9 +760,32 @@ mod tests {
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_moved = attempts.clone();
+        let missing_region_id = RegionId::new(1024, 1);
+        let downgraded_region_id = RegionId::new(1024, 2);
         send_mock_reply(mailbox, rx, move |id| {
             attempts_moved.fetch_add(1, Ordering::Relaxed);
-            Ok(new_downgrade_region_reply(id, None, false, None))
+            let replies = vec![
+                DowngradeRegionReply {
+                    region_id: missing_region_id,
+                    last_entry_id: None,
+                    metadata_last_entry_id: None,
+                    exists: false,
+                    error: None,
+                },
+                DowngradeRegionReply {
+                    region_id: downgraded_region_id,
+                    last_entry_id: Some(1),
+                    metadata_last_entry_id: Some(2),
+                    exists: true,
+                    error: None,
+                },
+            ];
+            let reply = InstructionReply::DowngradeRegions(DowngradeRegionsReply::new(replies));
+            Ok(MailboxMessage {
+                id,
+                payload: Some(Payload::Json(serde_json::to_string(&reply).unwrap())),
+                ..Default::default()
+            })
         });
 
         ctx.volatile_ctx
@@ -771,6 +799,14 @@ mod tests {
         assert_eq!(
             ctx.volatile_ctx.leader_region_lease_deadline,
             Some(expected_deadline)
+        );
+        assert_eq!(
+            ctx.volatile_ctx.leader_region_last_entry_ids,
+            HashMap::from([(downgraded_region_id, 1)])
+        );
+        assert_eq!(
+            ctx.volatile_ctx.leader_region_metadata_last_entry_ids,
+            HashMap::from([(downgraded_region_id, 2)])
         );
         let _ = next
             .as_any()
