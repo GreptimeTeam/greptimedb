@@ -1,0 +1,36 @@
+src/operator/src/req_convert/common/partitioner.rs
+  s_8b40584f3081c3::t_574750c4450f9b 783-811,813-815,817-819,821-824,826-832,834-839,841-869
+  s_8b40584f3081c3::t_56eaad18d7f7f5 650,812,816,820,825,833,840,1227
+src/metric-engine/src/engine/bulk_insert.rs
+  s_8b40584f3081c3::t_574750c4450f9b 522-534
+src/partition/src/manager.rs
+  s_8b40584f3081c3::t_a3bc610a8936e5 259,263
+src/partition/src/multi_dim.rs
+  s_8b40584f3081c3::t_99be9b96fe8075 83-84,112,142,311,649
+src/partition/src/partition.rs
+  s_8b40584f3081c3::t_c85b9545bd2027 29-30,33-35,37-43,53,59
+src/partition/src/splitter.rs
+  s_8b40584f3081c3::t_e38a7da612ae6b 123,380
+src/servers/src/batcher/logical_table/batch.rs
+  s_8b40584f3081c3::t_c6193be7a213fc 309-311
+src/servers/src/batcher/logical_table/batch_convert.rs
+  s_8b40584f3081c3::t_eb49d4acc49869 19,21,27,265-268,271,277-294
+src/servers/src/batcher/logical_table/region_write.rs
+  s_8b40584f3081c3::t_8a2917bfe96943 389-448,482-483,500,503
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "750ab3dff295173f031c294c507e254279e25ff8",
+  "prompts": {},
+  "sessions": {
+    "s_8b40584f3081c3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e458-dc8c-79a1-af2d-f222c3933c62",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

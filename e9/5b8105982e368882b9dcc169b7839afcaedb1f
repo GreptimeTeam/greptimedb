@@ -1,0 +1,49 @@
+src/metric-engine/src/engine/bulk_insert.rs
+  s_8b40584f3081c3::t_def5c798ce9559 249-250,527-529,531
+  s_4b1fbc048e2731::t_efa66a3552fc51 530
+src/operator/src/req_convert/common/partitioner.rs
+  s_8b40584f3081c3::t_e3bd8dc8fe0526 864,1003,1425-1446,1544,1560-1561,1601-1607,1817,1978
+  s_8b40584f3081c3::t_def5c798ce9559 788-790,792,810,813-816,1225
+  s_8b40584f3081c3::t_b4b4956effd502 32,648,689,791,1263-1288,1291
+src/partition/src/manager.rs
+  s_8b40584f3081c3::t_2a95263dd40269 277
+  s_8b40584f3081c3::t_4ac9ca47609d52 226-227,278-320
+src/partition/src/multi_dim.rs
+  s_8b40584f3081c3::t_def5c798ce9559 142-144
+  s_8b40584f3081c3::t_7fb6caef6771c4 385-426,440,454-455,457,468-469,473
+  s_8b40584f3081c3::t_d3dea96b28b7e0 274-275,427-439,441-453,456,458-467,470-472,474
+tests-integration/tests/repartition.rs
+  s_8b40584f3081c3::t_6ce121e4089058 52
+  s_8b40584f3081c3::t_def5c798ce9559 43,1686,1725
+  s_8b40584f3081c3::t_e2ae8e40397d10 1542
+src/partition/src/splitter.rs
+  s_8b40584f3081c3::t_def5c798ce9559 122,124,126-128,142-143,145-152,214
+  s_8b40584f3081c3::t_7fb6caef6771c4 123,129
+  s_8b40584f3081c3::t_4aa85c2d2ffa0c 20,144,153,155,170,182-213,215,383
+src/servers/src/batcher/logical_table/region_write.rs
+  s_8b40584f3081c3::t_def5c798ce9559 396-398,415,418-419,442
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e95b8105982e368882b9dcc169b7839afcaedb1f",
+  "prompts": {},
+  "sessions": {
+    "s_4b1fbc048e2731": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e9f4-5a61-7992-99d3-b1532b10f960",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_8b40584f3081c3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e458-dc8c-79a1-af2d-f222c3933c62",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

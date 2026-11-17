@@ -1,0 +1,353 @@
+src/mito2/src/engine/index_build_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 18-19,25,27,34,36-37,54,56-63,70,1193-1195,1197-1199,1205-1209,1223-1235,1237,1241-1273,1276,1304,1326-1330,2642-3322
+src/mito2/src/sst/index/handler/builtin/inverted.rs
+  s_b7d7dd5280bd00::t_667c912236a858 30-33,137-139
+  s_b7d7dd5280bd00::t_df4fc4cf1c7159 140
+src/plugins/src/frontend.rs
+  s_b7d7dd5280bd00::t_667c912236a858 21,91-94
+src/mito2/src/sst/parquet/parallel_writer.rs
+  s_b7d7dd5280bd00::t_667c912236a858 22,35,95,143,147-151,156,178-182,191,194,210,229,231,322-328,334,341,352,357,566-571
+src/mito2/src/worker.rs
+  s_b7d7dd5280bd00::t_667c912236a858 71,74,80-81,95,98-99,172,224,272,304,308,325,434-438,440,448-452,520,570,601,605,622,691-707,737-738,744,848,853,1308-1309,1317,1781,1810-1812,1828-1829,1907,1911-1919,1922-1924,1992-1999,2211-2216
+  s_b7d7dd5280bd00::t_a91e0ed82fd01b 2217
+src/servers/src/batcher/logical_table/tables.rs
+  s_b7d7dd5280bd00::t_667c912236a858 97-98
+src/servers/src/batcher/logical_table.rs
+  s_b7d7dd5280bd00::t_667c912236a858 111-114,130,171,193-194,202
+src/mito2/src/compaction/compactor.rs
+  s_b7d7dd5280bd00::t_667c912236a858 33,64,559-560,566,625-655,690-695,701,726-730,794,803,810,816-819,822,827-828,833,852,855-856,876,885,944,947,965,980-981,992,1016,1056-1058,1061,1085-1183,1572-1577,1638,1871,1924,1932,1951,2014
+src/mito2/src/sst/index/build.rs
+  s_b7d7dd5280bd00::t_667c912236a858 24-25,30
+src/store-api/src/region_engine.rs
+  s_b7d7dd5280bd00::t_667c912236a858 182-185,194,205,216-217,797-839,1223-1224,1231
+src/meta-srv/src/procedure/region_migration/update_metadata.rs
+  s_b7d7dd5280bd00::t_667c912236a858 72-73
+src/common/meta/src/ddl/alter_logical_tables.rs
+  s_b7d7dd5280bd00::t_667c912236a858 27,43,70
+src/common/meta/src/kv_backend/test_util.rs
+  s_b7d7dd5280bd00::t_667c912236a858 25-26,136-192
+src/mito2/src/compaction/multi_region/source.rs
+  s_b7d7dd5280bd00::t_667c912236a858 112
+src/operator/src/req_convert/insert.rs
+  s_b7d7dd5280bd00::t_667c912236a858 28
+tests-integration/src/instance.rs
+  s_b7d7dd5280bd00::t_667c912236a858 757
+tests-integration/src/prom_store.rs
+  s_b7d7dd5280bd00::t_667c912236a858 48-356,481-675
+  s_b7d7dd5280bd00::t_bd7588b7097d11 676
+src/mito2/src/engine/create_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 52-208
+src/mito2/src/request.rs
+  s_b7d7dd5280bd00::t_667c912236a858 1162-1168,1214
+src/common/meta/src/rpc/ddl.rs
+  s_b7d7dd5280bd00::t_667c912236a858 71-72,1712-1729,1914-1938
+  s_b7d7dd5280bd00::t_dda271962b0ab0 1939
+src/session/src/write_progress.rs
+  s_b7d7dd5280bd00::t_667c912236a858 28,73-74,76,81-85,134-138,140-141,145-148,152-154
+src/cmd/tests/load_config_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 28,253,435
+src/common/query/src/prelude.rs
+  s_b7d7dd5280bd00::t_667c912236a858 33-35,52,59,69,96-103,111,132,141,151,160
+src/meta-srv/src/procedure/region_migration/update_metadata/rollback_downgraded_region.rs
+  s_b7d7dd5280bd00::t_667c912236a858 88-90,178-192
+  s_b7d7dd5280bd00::t_62d7edbeccc9b2 193
+src/meta-srv/src/procedure/region_migration/manager.rs
+  s_b7d7dd5280bd00::t_667c912236a858 675,1327-1368
+  s_b7d7dd5280bd00::t_55fae1c12ec152 1369
+src/mito2/src/compaction/multi_region/writer.rs
+  s_b7d7dd5280bd00::t_667c912236a858 19,31,76,80-83,213
+src/metric-engine/src/engine/put.rs
+  s_b7d7dd5280bd00::t_667c912236a858 2382-2388
+src/mito2/AGENTS.md
+  s_b7d7dd5280bd00::t_667c912236a858 125-127,151-154,198-202
+src/mito2/src/engine/lease_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 31-32,42,76,80-87,89-95,99-103,339-340,343,376,404-498
+src/mito2/src/schedule.rs
+  s_b7d7dd5280bd00::t_667c912236a858 18,26,34,50-51,55,68,81,85
+src/mito2/src/compaction/scheduler_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 2522
+src/servers/src/postgres/copy_in/mod.rs
+  s_b7d7dd5280bd00::t_667c912236a858 254,433-435,437-440,549,556-560,581,588,590-594,802,806-818,830,840,874,910,1132
+tests-integration/src/test_util.rs
+  s_b7d7dd5280bd00::t_667c912236a858 916
+src/mito2/src/worker/handle_create.rs
+  s_b7d7dd5280bd00::t_667c912236a858 25,28,61,81-82
+src/common/meta/src/instruction.rs
+  s_b7d7dd5280bd00::t_667c912236a858 391-393,414-416,1568,1666,1671-1684
+  s_b7d7dd5280bd00::t_ca55b37bb6575c 1685-1686
+src/frontend/src/frontend.rs
+  s_b7d7dd5280bd00::t_667c912236a858 26,57-64,69-70,118
+src/metric-engine/src/engine/state.rs
+  s_b7d7dd5280bd00::t_667c912236a858 281
+src/file-engine/src/engine.rs
+  s_b7d7dd5280bd00::t_667c912236a858 142
+src/query/src/optimizer/test_util.rs
+  s_b7d7dd5280bd00::t_667c912236a858 112
+src/mito2/src/compaction/task.rs
+  s_b7d7dd5280bd00::t_667c912236a858 93,95-103,109-110
+src/frontend/src/instance.rs
+  s_b7d7dd5280bd00::t_667c912236a858 67,93,121,137-139,148-152,4359-4409
+  s_b7d7dd5280bd00::t_5f9e2652947b56 4410
+src/datanode/src/alive_keeper.rs
+  s_b7d7dd5280bd00::t_667c912236a858 19,29,140,145-146,149-155,311,317-327,339,399-400,452,454,485,543-546,556,595,598,607-628,673,676,748,751,806-812,855,858,905,908,949,952
+src/operator/src/insert/otlp.rs
+  s_b7d7dd5280bd00::t_667c912236a858 121-123,176-178,380,386,700,741,807
+src/common/meta/src/cache_invalidator.rs
+  s_b7d7dd5280bd00::t_667c912236a858 176-179
+src/servers/src/prom_remote_write/README.md
+  s_b7d7dd5280bd00::t_667c912236a858 18-25,32-34,37-53,69-72
+src/frontend/src/instance/exemplar.rs
+  s_b7d7dd5280bd00::t_667c912236a858 19,25,47-48,105-118,122,125,163-164,173-174,188,197,230-284,388-422,425,444-449,461-463,468,474-484,505-517,573-578,582,586-712,728
+src/mito2/src/sst/index/handler/builtin/bloom.rs
+  s_b7d7dd5280bd00::t_667c912236a858 27,29-31,111-113
+  s_b7d7dd5280bd00::t_ac2b2d850d6450 114
+src/datatypes/src/json/value.rs
+  s_b7d7dd5280bd00::t_667c912236a858 382-386
+src/mito2/src/region.rs
+  s_b7d7dd5280bd00::t_667c912236a858 129-142,463-464,466,496-499,1539-1592,2143-2150,2162,2175-2181,2189,2206,2219-2225,2245,2254,2269,2275-2281,2289,3456,3458-3461,3464-3466,3468-3471,3478-3481,3488-3491,3498-3501,3505-3508,3512-3519,3525-3529,3531-3564
+src/metric-engine/src/engine.rs
+  s_b7d7dd5280bd00::t_667c912236a858 393,397-406,408-420,584-597,725,988-1017,1019-1023,1031,1035,1045-1046,1052-1057,1063-1082
+  s_b7d7dd5280bd00::t_29e03cc5eb3552 1083
+src/mito2/src/manifest/manager.rs
+  s_b7d7dd5280bd00::t_667c912236a858 23,30,38,441-446,853-859,890-892,894
+src/mito2/src/sst/index.rs
+  s_b7d7dd5280bd00::t_667c912236a858 66-67,515-528,547,803-804,965-967,971-978,1004,1007,1010,1023,1029-1046,1048-1052,1058,1060,1063,1065-1087,1089,1092,1098,1100-1112,1126,1128-1130,1134-1147,1150,1153,1155,1160-1168,1171-1254,1338,1352-1354,1618-1636,1650-1651,1823,1853,2270-2276,2315-2317,2383-2386,2410-2416,2446-2462,2469-2471,2487-2489,2534-2536,2550,2554-2561,2719-2753,3433-3437,3494-3505,3639-4047,4050-4121,4135,4145-4154,4159,4161-4185,4198-4202,4205,4215-4282
+src/common/base/src/cancellation.rs
+  s_b7d7dd5280bd00::t_667c912236a858 107-108
+src/servers/src/batcher/table.rs
+  s_b7d7dd5280bd00::t_667c912236a858 34,36,40,42,49,77,88,96,121,163-166,169-170,175-199,209,299,330,376-377,385-386,401-406,414,423-447,462,489-496,498,512,621,639,824,841-842
+src/meta-srv/src/procedure/region_migration.rs
+  s_b7d7dd5280bd00::t_667c912236a858 333-337,817-819,885-886,1129-1147
+  s_b7d7dd5280bd00::t_440f957a39b55b 1148-1149
+src/frontend/src/instance/builder.rs
+  s_b7d7dd5280bd00::t_667c912236a858 56,256-258,263-266,284,429,445-447
+src/meta-srv/src/procedure/repartition.rs
+  s_b7d7dd5280bd00::t_667c912236a858 1373-1378,1381-1384,1387-1390,1393-1396
+src/mito2/src/sst/parquet/index_writer.rs
+  s_b7d7dd5280bd00::t_667c912236a858 17,28,30,65-70
+src/operator/src/batcher.rs
+  s_b7d7dd5280bd00::t_667c912236a858 25-27,32-41,52
+src/meta-srv/src/handler/region_lease_handler.rs
+  s_b7d7dd5280bd00::t_667c912236a858 43-47,102-109,113-121,125-126,310-313,323,340-343,353-451
+  s_b7d7dd5280bd00::t_b0d0a47b13e21e 452
+src/mito2/src/manifest/tests/checkpoint.rs
+  s_b7d7dd5280bd00::t_667c912236a858 17,28,832-956
+  s_b7d7dd5280bd00::t_7e785c309d7b7a 957
+src/operator/src/insert.rs
+  s_b7d7dd5280bd00::t_667c912236a858 19,58,108,123-127,350,356-361,426,428-429,446,449,469,515-524,532-608,759,771-798,829,840-841,1883-1885,2327-2415,2492,2496,2525,4324,4333
+src/operator/src/statement/ddl.rs
+  s_b7d7dd5280bd00::t_667c912236a858 58-59,1561,1584-1605,1612-1615,1620-1626,2353-2354,2358-2388,2390-2391,2394-2400
+src/mito2/src/cache/write_cache.rs
+  s_b7d7dd5280bd00::t_667c912236a858 23,26,30,42,44,181,190-191,279,287-288,294,333-335,364-371,378,386,403,411,484-495,508,511-512,515,528,530-552,554,558,560-571,688,702-948,1078-1084,1198-1204,1297-1303
+src/mito2/src/manifest/checkpointer.rs
+  s_b7d7dd5280bd00::t_667c912236a858 25,38,43-50,154,199-202,204-228,236,243,257-266
+tests-integration/tests/http.rs
+  s_b7d7dd5280bd00::t_667c912236a858 3421
+src/mito2/src/worker/handle_tail_replay.rs
+  s_b7d7dd5280bd00::t_667c912236a858 26,45,48,53-55,113-121,132,142-156
+  s_b7d7dd5280bd00::t_538083e7a7a9d8 157-158
+src/common/meta/src/region_keeper.rs
+  s_b7d7dd5280bd00::t_667c912236a858 24-35,41-42,57-61,73,88-96,98-113,122-123,127,134,155-186,196,219,231,235-248,260-297
+src/servers/src/prom_remote_write/v2.rs
+  s_b7d7dd5280bd00::t_667c912236a858 1785-1788,1821-1824
+src/servers/src/batcher/logical_table/test_util.rs
+  s_b7d7dd5280bd00::t_667c912236a858 35,114
+src/mito2/src/error.rs
+  s_b7d7dd5280bd00::t_667c912236a858 1401-1403,1824-1827
+src/common/meta/src/ddl/drop_database/executor.rs
+  s_b7d7dd5280bd00::t_667c912236a858 24,31,145,162-209,501,503-507
+src/servers/src/http.rs
+  s_b7d7dd5280bd00::t_667c912236a858 243-246,250-252
+src/frontend/src/instance/prom_store.rs
+  s_b7d7dd5280bd00::t_667c912236a858 791-793
+src/common/meta/src/ddl/alter_logical_tables/validator.rs
+  s_b7d7dd5280bd00::t_667c912236a858 29,39,43-47,51,196-203
+src/cmd/src/frontend.rs
+  s_b7d7dd5280bd00::t_667c912236a858 467-469
+src/common/meta/src/ddl/tests/create_table.rs
+  s_b7d7dd5280bd00::t_667c912236a858 385,387-391
+src/frontend/AGENTS.md
+  s_b7d7dd5280bd00::t_667c912236a858 51-56,97-98,112-115
+src/mito2/src/engine/object_store_wal_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 452-458,998,1137-1179,1398
+tests-integration/src/tests/postgres_copy_in_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 1955-2058
+src/mito2/src/engine/tail_replay_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 24,47,54,73,76-77,96-98,114-117,126-129,163-170,190,199-213,234,301,384-405,1296-1301,1304,1315-1324,1340,1370,1381,1384-1386,1570-1950
+src/frontend/src/server.rs
+  s_b7d7dd5280bd00::t_667c912236a858 76
+src/meta-srv/src/procedure/region_migration/upgrade_candidate_region.rs
+  s_b7d7dd5280bd00::t_667c912236a858 157-162,171,476-513
+  s_b7d7dd5280bd00::t_d8ea295f0a4eb0 514-515
+src/mito2/src/worker/handle_close.rs
+  s_b7d7dd5280bd00::t_667c912236a858 129
+src/frontend/src/instance/logical_batcher.rs
+  s_b7d7dd5280bd00::t_667c912236a858 56
+src/mito2/src/flush.rs
+  s_b7d7dd5280bd00::t_667c912236a858 27,43,56,63,276-292,295-297,301-320,415-416,485,493-497,557-743,756,833,882,889,891,894,899,908,910,912,925-926,934,938,950-956,960,1046-1050,1052,1056-1069,1867-1878,2013-2022,2384-2391,2684-2691
+src/operator/src/req_convert/insert/row_to_batch/memory.rs
+  s_b7d7dd5280bd00::t_667c912236a858 1-345
+src/mito2/src/sst/index/handler.rs
+  s_b7d7dd5280bd00::t_667c912236a858 31,107-111,132-134
+  s_b7d7dd5280bd00::t_492facd66c1efc 135
+src/mito2/src/sst/upload.rs
+  s_b7d7dd5280bd00::t_667c912236a858 1-243
+src/datanode/src/region_server.rs
+  s_b7d7dd5280bd00::t_667c912236a858 501,509,1869-1882,2003-2008,2021-2028,2040-2042,2178-2197,3780-3973
+  s_b7d7dd5280bd00::t_1c4b3fe3a925de 3974-3975
+src/mito2/src/worker/handle_rebuild_index.rs
+  s_b7d7dd5280bd00::t_667c912236a858 22,30-31,39-40,45,61-62,66,82,85,111-129,188-196,200,256-257,277-314,354-355,359-367,404-405,408,518-861
+src/mito2/src/worker/handle_reload.rs
+  s_b7d7dd5280bd00::t_667c912236a858 15-16,32-33,71-73
+src/servers/src/exemplar.rs
+  s_b7d7dd5280bd00::t_667c912236a858 27,123,228,279,283-290
+src/servers/src/http/prom_store/exemplar.rs
+  s_b7d7dd5280bd00::t_667c912236a858 20,41-58,78,106,115,135-139,169-170,172-195,199,201,203,301-308,312-315,322-379,401,441-442,444,482-509,519,529,559,569,597,605,607-608,610-616,621-744,809-816,819,853-861,903,910-913,926,929-931,934,942-943,946
+src/mito2/src/sst.rs
+  s_b7d7dd5280bd00::t_667c912236a858 53
+src/servers/src/http/prom_store.rs
+  s_b7d7dd5280bd00::t_667c912236a858 350-353,509-513,530-534
+src/mito2/src/sst/index/registry.rs
+  s_b7d7dd5280bd00::t_667c912236a858 75-84,102-109,244-247,294-298,330-374,389-393,419-422,510-512
+  s_b7d7dd5280bd00::t_f49fd173179830 513
+src/mito2/src/compaction/multi_region.rs
+  s_b7d7dd5280bd00::t_667c912236a858 36,85,140-144
+src/session/src/context.rs
+  s_b7d7dd5280bd00::t_667c912236a858 19-20,103-105,311-327,821
+src/mito2/src/sst/parquet/writer.rs
+  s_b7d7dd5280bd00::t_667c912236a858 18,26,37-38,42,46,49,54,69,184,186-187,191-194,254,258,264-265,267-273,277-279,284,286-352,361,363-368,374,377-380,453,457-472,518,520,546-567,646,672,689-699,763,765,771,774,808-811,819,829,867-871,888-889,894,915-927,1041-1048,1051-1052,1058,1062,1064-1068,1083-1301,1306-1310,1319,1323-1526,1589-1593,1611-1614,1622-1628
+src/servers/src/batcher/table/pending_batch.rs
+  s_b7d7dd5280bd00::t_667c912236a858 20,25,33
+src/common/meta/src/ddl_manager.rs
+  s_b7d7dd5280bd00::t_667c912236a858 628,635-643,1055-1061,1615,1634,1637-1642,2084-2135
+  s_b7d7dd5280bd00::t_ed70d84e1bd40d 2136
+src/mito2/src/manifest/storage.rs
+  s_b7d7dd5280bd00::t_667c912236a858 35,41-42,265-291
+  s_b7d7dd5280bd00::t_faa4708cd94720 292-293
+src/mito2/src/region/opener.rs
+  s_b7d7dd5280bd00::t_667c912236a858 81-82,85,155,199,225-230,398-415
+tests-integration/src/standalone.rs
+  s_b7d7dd5280bd00::t_667c912236a858 25,94,97,118,121,148-154,168-177,435-437,439
+src/mito2/src/sst/index/handler/builtin.rs
+  s_b7d7dd5280bd00::t_667c912236a858 27,51-56,93-97,105-142
+  s_b7d7dd5280bd00::t_d1f41f5a377bfc 143
+src/operator/src/req_convert/insert/row_to_batch.rs
+  s_b7d7dd5280bd00::t_667c912236a858 15-16,34-35,205,209-210,212,271-493
+  s_b7d7dd5280bd00::t_8c153d0873ccc7 494
+config/datanode.example.toml
+  s_b7d7dd5280bd00::t_667c912236a858 5
+src/servers/src/exemplar/query.rs
+  s_b7d7dd5280bd00::t_667c912236a858 140
+src/mito2/src/compaction/multi_region/tests.rs
+  s_b7d7dd5280bd00::t_667c912236a858 280,2005
+src/standalone/src/options.rs
+  s_b7d7dd5280bd00::t_667c912236a858 24,51-58,63-64,120,191-192
+tests-integration/src/tests/instance_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 3938-3946,4570,4584,4774,4799,4881,4885,4887-4910,4923,4939,5347-5538,5622,5742,5744-5750,5756,5772-5827,5916-5921,6048,6118-6119,6194,6199-6200,6215,6225,6235,6239-6243,6266-6267,6322,6428-6436,6438-6445
+src/mito2/src/engine/close_test.rs
+  s_b7d7dd5280bd00::t_667c912236a858 17,23,31-32,416-487
+  s_b7d7dd5280bd00::t_76c7a8056eae17 488
+src/common/meta/AGENTS.md
+  s_b7d7dd5280bd00::t_667c912236a858 30-33
+src/mito2/src/lease.rs
+  s_b7d7dd5280bd00::t_667c912236a858 15,17,21,97-148,178-193
+src/mito2/src/sst/file.rs
+  s_b7d7dd5280bd00::t_667c912236a858 48,1046,1058-1064
+  s_b7d7dd5280bd00::t_a90c5ac6fb1b13 1065-1066
+src/mito2/src/sst/index/handler/builtin/fulltext.rs
+  s_b7d7dd5280bd00::t_667c912236a858 27,30-32,124-126
+  s_b7d7dd5280bd00::t_c6b1b59b7b03cd 127
+config/standalone.example.toml
+  s_b7d7dd5280bd00::t_667c912236a858 5,14-20,37-39,46-47
+src/mito2/src/worker/handle_drop.rs
+  s_b7d7dd5280bd00::t_667c912236a858 117
+src/common/meta/src/key.rs
+  s_b7d7dd5280bd00::t_667c912236a858 997-1016,1032,1332-1355,3129-3200
+  s_b7d7dd5280bd00::t_9e855a9f0402de 3201
+src/mito2/src/engine.rs
+  s_b7d7dd5280bd00::t_667c912236a858 178,359-376,383-392,1364,1369,1374-1387,1390,1734,1736-1737,1751-1752
+src/common/meta/src/ddl/tests/drop_database.rs
+  s_b7d7dd5280bd00::t_667c912236a858 25,154,156,162,191-491
+src/mito2/src/metrics.rs
+  s_b7d7dd5280bd00::t_667c912236a858 725-753
+tests-integration/src/otlp.rs
+  s_b7d7dd5280bd00::t_667c912236a858 1926,1928,2056-2071,2077-2081,2095,2134-2145,2173,2175,2214,2216,4002-4087
+  s_b7d7dd5280bd00::t_2f798feedf96f2 4088-4089
+src/mito2/src/engine/listener.rs
+  s_b7d7dd5280bd00::t_667c912236a858 47-51,148-150
+  s_b7d7dd5280bd00::t_e6b5145ac70656 151
+tests/cases/standalone/common/drop/drop_database_logical_tables.result
+  s_b7d7dd5280bd00::t_667c912236a858 1-126
+src/datanode/src/tests.rs
+  s_b7d7dd5280bd00::t_667c912236a858 16,138-139,157,180,203,227,304,306-309
+tests/cases/standalone/common/drop/drop_database_logical_tables.sql
+  s_b7d7dd5280bd00::t_667c912236a858 1-37
+tests/compatibility/README.md
+  s_b7d7dd5280bd00::t_667c912236a858 18-29,38-44
+  s_b7d7dd5280bd00::t_ffe08c8df8bfb8 45
+src/meta-srv/src/region/lease_keeper.rs
+  s_b7d7dd5280bd00::t_667c912236a858 21,25,84,88,92-99,121-123,133,144-153,188,193,195,208,225,229,296,302,440-446,849-939
+src/mito2/src/access_layer.rs
+  s_b7d7dd5280bd00::t_667c912236a858 29,36,45,56,65,71-72,111-114,116-132,364-365,370,381,383-386,398,402,413,417-418,456,462,541,550-551,570,608,962,1095-1190
+  s_b7d7dd5280bd00::t_949add9cb571c0 1191-1192
+src/metric-engine/Cargo.toml
+  s_b7d7dd5280bd00::t_667c912236a858 56
+src/common/meta/src/ddl/drop_database.rs
+  s_b7d7dd5280bd00::t_667c912236a858 29,57-58,64
+src/mito2/src/worker/handle_flush.rs
+  s_b7d7dd5280bd00::t_667c912236a858 30,286-293
+tests/compatibility/wire/candidate_lease_id/README.md
+  s_b7d7dd5280bd00::t_667c912236a858 1-36
+Cargo.toml
+  s_b7d7dd5280bd00::t_667c912236a858 167
+src/relational-engine/src/engine.rs
+  s_b7d7dd5280bd00::t_667c912236a858 119
+src/servers/src/http/memory_limit.rs
+  s_b7d7dd5280bd00::t_667c912236a858 34-35,185,194-199,203-204,540-611
+  s_b7d7dd5280bd00::t_8945a540434fd1 612
+src/common/meta/src/ddl/tests/alter_logical_tables.rs
+  s_b7d7dd5280bd00::t_667c912236a858 719-738
+src/common/meta/src/ddl/tests/drop_table.rs
+  s_b7d7dd5280bd00::t_667c912236a858 2785,2787-2791
+src/meta-srv/src/procedure/region_migration/test_util.rs
+  s_b7d7dd5280bd00::t_667c912236a858 18,25,29,31-32,597-667
+src/servers/src/http/prometheus.rs
+  s_b7d7dd5280bd00::t_667c912236a858 33,969,994,1462-1464,2230,2421,4046-4163
+  s_b7d7dd5280bd00::t_e02be6e1f849dd 4164-4165
+src/common/meta/src/ddl/drop_database/cursor.rs
+  s_b7d7dd5280bd00::t_667c912236a858 16-17,19,22,24,30,33,48-164,250,255,257-264,266-273,275-277,279-293,296,299-304,319,325-475,531,533-534
+config/frontend.example.toml
+  s_b7d7dd5280bd00::t_667c912236a858 5,14-20,37-39,46-47
+config/config.md
+  s_b7d7dd5280bd00::t_667c912236a858 16,18,20-21,295,297,299-300,560
+src/mito2/src/series_index/task.rs
+  s_b7d7dd5280bd00::t_667c912236a858 597-599
+src/mito2/src/tail_replay.rs
+  s_b7d7dd5280bd00::t_667c912236a858 19,27,30-33,39,47,49,51-55,74-82,88-95,103,113-125,138-161,164-180,188,190,192-194,285,293-294,297,341,381,401,426,491-496,501-506,541-708
+src/metric-engine/AGENTS.md
+  s_b7d7dd5280bd00::t_667c912236a858 86-88
+src/frontend/src/instance/otlp.rs
+  s_b7d7dd5280bd00::t_667c912236a858 229-232,303-304,306-310,313-330,345-349
+src/meta-srv/src/procedure/region_migration/open_candidate_region.rs
+  s_b7d7dd5280bd00::t_667c912236a858 149,238,249,626-643
+Cargo.lock
+  s_b7d7dd5280bd00::t_bbe8792d5bf308 6163,8714
+tests/compatibility/wire/candidate_lease_id/legacy_granted_region.pb
+  s_b7d7dd5280bd00::t_30f7a17c3c5269 1-2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8eb47383c56ba66a3dfbde8dff983df31ab68fbb",
+  "prompts": {},
+  "sessions": {
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
