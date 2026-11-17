@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::Rows;
@@ -22,6 +22,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
 use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
@@ -29,6 +30,7 @@ use crate::cache::{CachedPartitionInfo, PartitionInfoCacheRef, PhysicalPartition
 use crate::error::{FindLeaderSnafu, Result};
 use crate::expr::PartitionExpr;
 use crate::multi_dim::MultiDimPartitionRule;
+use crate::partition::PartitionEvalContext;
 use crate::splitter::RowSplitter;
 use crate::{PartitionRuleRef, error};
 
@@ -192,7 +194,7 @@ impl PartitionRuleManager {
         &self,
         table_info: &TableInfo,
     ) -> Result<(PartitionRuleRef, HashMap<RegionNumber, Option<u64>>)> {
-        let partition_columns = table_info
+        let mut partition_columns = table_info
             .meta
             .partition_column_names()
             .cloned()
@@ -225,12 +227,31 @@ impl PartitionRuleManager {
                 .filter(|partition| partition.partition_expr.is_none())
                 .map(|partition| partition.id.region_number()),
         );
-        let partition_rule = Arc::new(MultiDimPartitionRule::try_new(
-            partition_columns,
-            regions,
-            exprs,
-            false,
-        )?) as _;
+        let eval_context = if table_info.meta.engine == METRIC_ENGINE_NAME
+            && table_info
+                .meta
+                .options
+                .extra_options
+                .contains_key(LOGICAL_TABLE_METADATA_KEY)
+        {
+            // Catalog maps physical partition columns into the logical schema, omitting
+            // internal columns such as __table_id. Routing still needs the complete inputs.
+            let mut columns = HashSet::new();
+            for expr in &exprs {
+                expr.collect_column_names(&mut columns);
+            }
+            partition_columns = columns.into_iter().collect();
+            partition_columns.sort_unstable();
+            PartitionEvalContext::LogicalTable {
+                table_id: table_info.table_id(),
+            }
+        } else {
+            PartitionEvalContext::Normal
+        };
+        let partition_rule = Arc::new(
+            MultiDimPartitionRule::try_new(partition_columns, regions, exprs, false)?
+                .with_eval_context(eval_context),
+        ) as _;
         Ok((partition_rule, partition_versions))
     }
 

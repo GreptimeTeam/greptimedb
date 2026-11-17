@@ -20,16 +20,31 @@ use std::sync::Arc;
 use datatypes::arrow::array::{BooleanArray, RecordBatch};
 use datatypes::prelude::Value;
 use serde::{Deserialize, Serialize};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, TableId};
 
 use crate::error::Result;
 
 pub type PartitionRuleRef = Arc<dyn PartitionRule>;
 
+/// Table identity available while evaluating a write's physical partition expressions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PartitionEvalContext {
+    /// Partition values come from the write payload.
+    #[default]
+    Normal,
+    /// The internal table-id column comes from the logical table's identity.
+    LogicalTable { table_id: TableId },
+}
+
 pub trait PartitionRule: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
     fn partition_columns(&self) -> &[String];
+
+    /// Context for this table's write routing; it is not shared physical-route metadata.
+    fn eval_context(&self) -> PartitionEvalContext {
+        PartitionEvalContext::Normal
+    }
 
     /// Finds the target region by the partition values.
     ///

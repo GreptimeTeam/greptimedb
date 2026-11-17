@@ -645,7 +645,12 @@ impl TablePartitioner {
         region_id: RegionId,
         version: Option<PartitionExprVersion>,
     ) -> bool {
-        region_id.table_id() == self.table_id
+        // Logical writes must be evaluated again with their table identity after a
+        // route refresh, even if the old physical region still has the same version.
+        matches!(
+            self.rule.eval_context(),
+            partition::partition::PartitionEvalContext::Normal
+        ) && region_id.table_id() == self.table_id
             && self.versions.get(&region_id.region_number()) == Some(&version)
     }
 
@@ -1020,6 +1025,389 @@ mod tests {
             for error in [insert_error, delete_error] {
                 assert_eq!(error.status_code(), expected_status);
                 assert_eq!(error.retry_hint(), expected_hint);
+            }
+        }
+    }
+
+    const CONTEXT_PHYSICAL_ID: TableId = 1025;
+
+    /// Physical routes of a table repartitioned by the internal table id.
+    fn context_regions() -> Vec<(RegionNumber, Option<expr::PartitionExpr>)> {
+        let column = || expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        vec![
+            (0, Some(column().lt(DataValue::Int64(1029)))),
+            (
+                1,
+                Some(
+                    column()
+                        .gt_eq(DataValue::Int64(1029))
+                        .and(column().lt(DataValue::UInt64(1031))),
+                ),
+            ),
+            (2, Some(column().gt_eq(DataValue::UInt64(1031)))),
+        ]
+    }
+
+    /// A logical table created before its physical table was repartitioned: its own
+    /// schema and partition metadata know nothing about the internal table id.
+    fn logical_metric_table_info(table_id: TableId) -> TableInfo {
+        let mut table_info = test_util::new_test_table_info(
+            table_id,
+            &format!("logical_{table_id}"),
+            [0].into_iter(),
+        );
+        table_info.meta.engine = metric_engine_consts::METRIC_ENGINE_NAME.to_string();
+        table_info.meta.partition_key_indices.clear();
+        table_info.meta.options.extra_options.insert(
+            metric_engine_consts::LOGICAL_TABLE_METADATA_KEY.to_string(),
+            CONTEXT_PHYSICAL_ID.to_string(),
+        );
+        table_info
+    }
+
+    async fn create_context_fixture(
+        regions: Vec<(RegionNumber, Option<expr::PartitionExpr>)>,
+        logical_table_ids: &[TableId],
+    ) -> PartitionRuleManagerRef {
+        let backend = Arc::new(MemoryKvBackend::new());
+        let routes = test_new_table_route_cache(backend.clone());
+        let partitions = test_new_partition_info_cache(routes.clone());
+        let manager = Arc::new(PartitionRuleManager::new(
+            backend.clone(),
+            routes,
+            partitions,
+        ));
+        let metadata = TableMetadataManager::new(backend);
+
+        let routes = regions
+            .into_iter()
+            .map(|(region, expression)| RegionRoute {
+                region: Region {
+                    id: RegionId::new(CONTEXT_PHYSICAL_ID, region),
+                    partition_expr: expression
+                        .map(|expr| expr.as_json_str().unwrap())
+                        .unwrap_or_default(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        metadata
+            .create_table_metadata(
+                test_util::new_test_table_info(
+                    CONTEXT_PHYSICAL_ID,
+                    "physical_context",
+                    [0].into_iter(),
+                ),
+                TableRouteValue::physical(routes),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        for table_id in logical_table_ids {
+            metadata
+                .create_table_metadata(
+                    logical_metric_table_info(*table_id),
+                    TableRouteValue::logical(CONTEXT_PHYSICAL_ID),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+        }
+
+        manager
+    }
+
+    #[tokio::test]
+    async fn test_logical_context_routes_rows_deletes_and_retries() {
+        let logical_ids = [1028u32, 1029, 1030, 1031, 4_000_000_000];
+        let manager = create_context_fixture(context_regions(), &logical_ids).await;
+        for (table_id, expected_region) in [
+            (1028, 0u32),
+            (1029, 1),
+            (1030, 1),
+            (1031, 2),
+            (4_000_000_000, 2),
+        ] {
+            let table_info = logical_metric_table_info(table_id);
+            let partitioner = TablePartitioner::try_new(&manager, &table_info)
+                .await
+                .unwrap();
+            assert_eq!(
+                partitioner.rule.partition_columns(),
+                &[metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME]
+            );
+            assert_eq!(
+                partitioner.rule.eval_context(),
+                partition::partition::PartitionEvalContext::LogicalTable { table_id }
+            );
+            assert_eq!(partitioner.versions.len(), 3);
+            let version = partitioner.version(expected_region);
+
+            let rows = build_rows(&[1, 20, 70]);
+            let expected_rows = rows.clone();
+            let pointer = rows.rows.as_ptr();
+            let inserts = partitioner.partition_insert_requests(rows, true).unwrap();
+            assert_eq!(inserts.len(), 1);
+            assert_eq!(
+                inserts[0].region_id,
+                RegionId::new(table_id, expected_region).as_u64()
+            );
+            assert_eq!(inserts[0].partition_expr_version, version);
+            let inserted = inserts[0].rows.as_ref().unwrap();
+            assert_eq!(inserted, &expected_rows);
+            assert_eq!(inserted.rows.as_ptr(), pointer);
+
+            let deletes = partitioner
+                .partition_delete_requests(expected_rows.clone())
+                .unwrap();
+            assert_eq!(deletes.len(), 1);
+            assert_eq!(deletes[0].region_id, inserts[0].region_id);
+            assert_eq!(deletes[0].partition_expr_version, version);
+            assert_eq!(deletes[0].rows.as_ref().unwrap(), &expected_rows);
+
+            // The manager route and the operator route come from the same snapshot.
+            let split_input = expected_rows.clone();
+            let split_pointer = split_input.rows.as_ptr();
+            let splits = manager.split_rows(&table_info, split_input).await.unwrap();
+            assert_eq!(splits.len(), 1);
+            let (region, (split_rows, split_version)) = splits.iter().next().unwrap();
+            assert_eq!(*region, expected_region);
+            assert_eq!(split_rows.rows.as_ptr(), split_pointer);
+            assert_eq!(split_version, &version.map(|version| version.value));
+
+            // A stale target is rerouted even though its region still exists.
+            for insert in [true, false] {
+                for stale_version in [
+                    None,
+                    Some(common_base::hash::partition_expr_version(Some(
+                        &context_regions()[0]
+                            .1
+                            .as_ref()
+                            .unwrap()
+                            .as_json_str()
+                            .unwrap(),
+                    ))),
+                ] {
+                    let mut stale =
+                        build_row_request(expected_rows.clone(), insert, 0, stale_version);
+                    let stale_rows = match stale.body.as_ref().unwrap() {
+                        Body::Inserts(inserts) => inserts.requests[0].rows.as_ref().unwrap(),
+                        Body::Deletes(deletes) => deletes.requests[0].rows.as_ref().unwrap(),
+                        _ => unreachable!(),
+                    };
+                    let stale_pointer = stale_rows.rows.as_ptr();
+                    match stale.body.as_mut().unwrap() {
+                        Body::Inserts(inserts) => {
+                            inserts.requests[0].region_id = RegionId::new(table_id, 0).as_u64()
+                        }
+                        Body::Deletes(deletes) => {
+                            deletes.requests[0].region_id = RegionId::new(table_id, 0).as_u64()
+                        }
+                        _ => unreachable!(),
+                    }
+                    let rebuilt = partitioner
+                        .rebuild_write_requests(stale, &table_info)
+                        .unwrap();
+                    assert_eq!(rebuilt.len(), 1);
+                    let (region_id, rebuilt_version, rebuilt_rows) = row_request_parts(&rebuilt[0]);
+                    assert_eq!(region_id, RegionId::new(table_id, expected_region).as_u64());
+                    assert_eq!(rebuilt_version, version.map(|version| version.value));
+                    assert_eq!(rebuilt_rows, &expected_rows);
+                    if expected_region == 0 && stale_version == version.map(|v| v.value) {
+                        // The target was already correct, so the payload is kept as is.
+                        assert_eq!(rebuilt_rows.rows.as_ptr(), stale_pointer);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_logical_context_routes_whole_batch() {
+        let manager = create_context_fixture(context_regions(), &[1029]).await;
+        let table_info = logical_metric_table_info(1029);
+        let partitioner = TablePartitioner::try_new(&manager, &table_info)
+            .await
+            .unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)])),
+            vec![Arc::new(Int32Array::from(vec![1, 20, 70]))],
+        )
+        .unwrap();
+        let (schema, data_header, payload) = flight::record_batch_to_ipc(batch.clone()).unwrap();
+        let original = ArrowIpc {
+            schema,
+            data_header,
+            payload,
+        };
+
+        let requests = partitioner
+            .partition_bulk_insert_requests(batch.clone(), Some(original.clone()), true)
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].region_id, RegionId::new(1029, 1).as_u64());
+        assert_eq!(requests[0].partition_expr_version, partitioner.version(1));
+        // The whole batch belongs to one region, so the caller's IPC is reused.
+        let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = requests[0].body.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(ipc.schema, original.schema);
+        assert_eq!(ipc.data_header, original.data_header);
+        assert_eq!(ipc.payload, original.payload);
+
+        for version in [
+            None,
+            Some(PartitionExprVersion {
+                value: common_base::hash::partition_expr_version(Some(
+                    &context_regions()[0]
+                        .1
+                        .as_ref()
+                        .unwrap()
+                        .as_json_str()
+                        .unwrap(),
+                )),
+            }),
+        ] {
+            let mut stale = requests[0].clone();
+            stale.region_id = RegionId::new(1029, 0).as_u64();
+            stale.partition_expr_version = version;
+            let stale = build_request(Body::BulkInsert(stale));
+            let rebuilt = partitioner
+                .rebuild_write_requests(stale.clone(), &table_info)
+                .unwrap();
+            assert_eq!(rebuilt.len(), 1);
+            assert_eq!(rebuilt[0].body, Some(Body::BulkInsert(requests[0].clone())));
+            let tracked = partitioner
+                .rebuild_tracked_write_requests(stale, &table_info, Some(vec![0, 1, 2]))
+                .unwrap();
+            assert_eq!(tracked.len(), 1);
+            assert_eq!(tracked[0].0.body, rebuilt[0].body);
+            assert_eq!(tracked[0].1, Some(vec![0, 1, 2]));
+        }
+
+        let tracked = partitioner
+            .partition_tracked_bulk_insert_requests(batch, vec![0, 1, 2], true)
+            .unwrap();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].0.region_id, RegionId::new(1029, 1).as_u64());
+        assert_eq!(tracked[0].1, vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_logical_context_routes_mixed_partition_columns() {
+        let column = || expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        let manager = create_context_fixture(
+            vec![
+                (0, Some(column().lt(DataValue::Int64(1029)))),
+                (
+                    1,
+                    Some(
+                        column()
+                            .gt_eq(DataValue::Int64(1029))
+                            .and(expr::col("a").lt(DataValue::Int32(10))),
+                    ),
+                ),
+                (
+                    2,
+                    Some(
+                        column()
+                            .gt_eq(DataValue::Int64(1029))
+                            .and(expr::col("a").gt_eq(DataValue::Int32(10))),
+                    ),
+                ),
+            ],
+            &[1028, 1029],
+        )
+        .await;
+        for (table_id, expected) in [
+            (1028, vec![(0, vec![1, 20])]),
+            (1029, vec![(1, vec![1]), (2, vec![20])]),
+        ] {
+            let table_info = logical_metric_table_info(table_id);
+            let partitioner = TablePartitioner::try_new(&manager, &table_info)
+                .await
+                .unwrap();
+            let rows = build_rows(&[1, 20]);
+            let inserts = partitioner
+                .partition_insert_requests(rows.clone(), false)
+                .unwrap();
+            assert_eq!(inserts.len(), expected.len());
+            let deletes = partitioner.partition_delete_requests(rows).unwrap();
+            for (region, values) in &expected {
+                let region_id = RegionId::new(table_id, *region).as_u64();
+                let inserted = inserts.iter().find(|r| r.region_id == region_id).unwrap();
+                assert_eq!(inserted.rows.as_ref().unwrap(), &build_rows(values));
+                assert_eq!(
+                    deletes
+                        .iter()
+                        .find(|r| r.region_id == region_id)
+                        .unwrap()
+                        .rows,
+                    inserted.rows
+                );
+            }
+            let batch = RecordBatch::try_from_iter([(
+                "a",
+                Arc::new(Int32Array::from(vec![1, 20])) as datatypes::arrow::array::ArrayRef,
+            )])
+            .unwrap();
+            let requests = partitioner
+                .partition_tracked_bulk_insert_requests(batch, vec![0, 1], false)
+                .unwrap();
+            assert_eq!(requests.len(), expected.len());
+            for (request, owners) in requests {
+                let region = RegionId::from_u64(request.region_id).region_number();
+                let values = &expected
+                    .iter()
+                    .find(|(number, _)| *number == region)
+                    .unwrap()
+                    .1;
+                let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
+                    unreachable!()
+                };
+                let decoded = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                    .unwrap()
+                    .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                    .unwrap();
+                assert_eq!(decoded.num_columns(), 1);
+                let actual = decoded
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap();
+                assert_eq!(actual.values().as_ref(), values.as_slice());
+                assert_eq!(
+                    owners,
+                    values
+                        .iter()
+                        .map(|value| if *value == 1 { 0 } else { 1 })
+                        .collect::<Vec<_>>()
+                );
+            }
+            // All physical regions and versions remain available, but retries re-evaluate ctx.
+            let mut stale = build_row_request(
+                build_rows(&[1, 20]),
+                true,
+                0,
+                partitioner.version(0).map(|v| v.value),
+            );
+            let Some(Body::Inserts(inserts)) = stale.body.as_mut() else {
+                unreachable!()
+            };
+            inserts.requests[0].region_id = RegionId::new(table_id, 0).as_u64();
+            let rebuilt = partitioner
+                .rebuild_write_requests(stale, &table_info)
+                .unwrap();
+            assert_eq!(rebuilt.len(), expected.len());
+            for request in rebuilt {
+                let (id, _, rows) = row_request_parts(&request);
+                let values = &expected
+                    .iter()
+                    .find(|(region, _)| RegionId::new(table_id, *region).as_u64() == id)
+                    .unwrap()
+                    .1;
+                assert_eq!(rows, &build_rows(values));
             }
         }
     }

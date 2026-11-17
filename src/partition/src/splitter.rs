@@ -13,14 +13,22 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use api::helper;
 use api::v1::{ColumnSchema, Row, Rows};
+use datatypes::arrow::array::NullArray;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+use datatypes::arrow::record_batch::{RecordBatch, RecordBatchOptions};
+use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::value::Value;
+use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::RegionNumber;
 
 use crate::PartitionRuleRef;
-use crate::error::Result;
+use crate::error::{self, Result};
+use crate::partition::PartitionEvalContext;
 
 pub struct RowSplitter {
     partition_rule: PartitionRuleRef,
@@ -80,6 +88,18 @@ impl<'a> SplitReadRowHelper<'a> {
 
     fn split_rows(mut self) -> Result<HashMap<RegionNumber, Rows>> {
         let regions = self.split_to_regions()?;
+        if regions.len() == 1
+            && let Some((&region, indices)) = regions.iter().next()
+            && indices.len() == self.rows.len()
+        {
+            return Ok(HashMap::from([(
+                region,
+                Rows {
+                    schema: self.schema,
+                    rows: self.rows,
+                },
+            )]));
+        }
         let request_splits = regions
             .into_iter()
             .map(|(region_number, row_indexes)| {
@@ -99,6 +119,19 @@ impl<'a> SplitReadRowHelper<'a> {
     }
 
     fn split_to_regions(&self) -> Result<HashMap<RegionNumber, Vec<usize>>> {
+        if matches!(
+            self.partition_rule.eval_context(),
+            PartitionEvalContext::LogicalTable { .. }
+        ) {
+            let batch = self.routing_batch()?;
+            return Ok(self
+                .partition_rule
+                .split_record_batch(&batch)?
+                .into_iter()
+                .filter(|(_, mask)| !mask.select_none())
+                .map(|(region, mask)| (region, mask.array().values().set_indices().collect()))
+                .collect());
+        }
         let mut regions_row_indexes: HashMap<RegionNumber, Vec<usize>> = HashMap::new();
         for (row_idx, values) in self.iter_partition_values().enumerate() {
             let region_number = self.partition_rule.find_region(&values)?;
@@ -109,6 +142,64 @@ impl<'a> SplitReadRowHelper<'a> {
         }
 
         Ok(regions_row_indexes)
+    }
+
+    // Convert only payload partition columns; the evaluator supplies internal columns from ctx.
+    fn routing_batch(&self) -> Result<RecordBatch> {
+        let mut fields = Vec::new();
+        let mut arrays = Vec::new();
+        for (name, index) in self
+            .partition_rule
+            .partition_columns()
+            .iter()
+            .zip(&self.partition_cols_indexes)
+        {
+            if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                continue;
+            }
+            let Some(index) = *index else {
+                // Missing payload values retain the row splitter's NULL semantics.
+                fields.push(Field::new(name, ArrowDataType::Null, true));
+                arrays.push(Arc::new(NullArray::new(self.rows.len())) as _);
+                continue;
+            };
+            let column = &self.schema[index];
+            let data_type = helper::ColumnDataTypeWrapper::try_new(
+                column.datatype,
+                column.datatype_extension.clone(),
+            )
+            .map_err(|err| {
+                error::InvalidInsertRequestSnafu {
+                    reason: err.to_string(),
+                }
+                .build()
+            })?;
+            let mut builder =
+                ConcreteDataType::from(data_type).create_mutable_vector(self.rows.len());
+            for row in &self.rows {
+                let value =
+                    row.values
+                        .get(index)
+                        .with_context(|| error::InvalidInsertRequestSnafu {
+                            reason: format!("Missing value for partition column {name}"),
+                        })?;
+                builder
+                    .try_push_value_ref(&helper::pb_value_to_value_ref(
+                        value,
+                        column.datatype_extension.as_ref(),
+                    ))
+                    .context(error::ConvertToVectorSnafu)?;
+            }
+            let array = builder.to_vector().to_arrow_array();
+            fields.push(Field::new(name, array.data_type().clone(), true));
+            arrays.push(array);
+        }
+        RecordBatch::try_new_with_options(
+            Arc::new(Schema::new(fields)),
+            arrays,
+            &RecordBatchOptions::new().with_row_count(Some(self.rows.len())),
+        )
+        .context(error::ComputeArrowKernelSnafu)
     }
 
     fn iter_partition_values(&'a self) -> impl Iterator<Item = Vec<Value>> + 'a {
