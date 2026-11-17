@@ -54,7 +54,7 @@ use common_telemetry::{info, warn};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
 use common_wal::config::DatanodeWalConfig;
-use common_wal::config::object_store::STANDALONE_GENERATION;
+use common_wal::config::object_store::FIXED_DIRECTORY_GENERATION;
 use datanode::config::{DatanodeOptions, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
@@ -98,7 +98,7 @@ pub async fn build_standalone_wal_provider(
 ) -> Result<WalProvider> {
     match wal {
         DatanodeWalConfig::ObjectStore(config) => Ok(WalProvider::ObjectStore {
-            prefix: config.node_prefix(node_id.unwrap_or(0), STANDALONE_GENERATION),
+            prefix: config.node_prefix(node_id.unwrap_or(0), FIXED_DIRECTORY_GENERATION),
         }),
         DatanodeWalConfig::RaftEngine(_)
         | DatanodeWalConfig::Kafka(_)
@@ -1220,7 +1220,7 @@ mod tests {
             ..Default::default()
         };
         // The regions persist the node prefix the datanode runs its store under.
-        let node_prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        let node_prefix = config.node_prefix(0, FIXED_DIRECTORY_GENERATION);
         assert_eq!(node_prefix, "cluster-a/wal/datanodes/0/epochs/0");
         let provider = build_standalone_wal_provider(
             &DatanodeWalConfig::ObjectStore(config),

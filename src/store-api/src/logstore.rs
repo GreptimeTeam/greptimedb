@@ -30,6 +30,15 @@ pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::provider::Provider;
 use crate::storage::RegionId;
 
+/// Allows a log store to initiate object-store I/O.
+///
+/// A metasrv-controlled datanode supplies this from its node lease. The log
+/// store deliberately does not know how the permission is renewed.
+pub trait ObjectStoreWalIoPermit: Send + Sync + 'static {
+    /// Returns whether a new object-store create or delete may start now.
+    fn allows_object_store_io(&self) -> bool;
+}
+
 /// `LogStore` serves as a Write-Ahead-Log for storage engine.
 #[async_trait::async_trait]
 pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {

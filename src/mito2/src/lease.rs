@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
+use store_api::logstore::ObjectStoreWalIoPermit;
 use store_api::storage::RegionId;
 
 /// The instant lease deadlines count from, so that a deadline fits in an [AtomicU64].
@@ -145,9 +146,35 @@ impl GrantedLeases {
     }
 }
 
+impl ObjectStoreWalIoPermit for NodeLease {
+    fn allows_object_store_io(&self) -> bool {
+        !self.is_enabled() || self.now() < self.deadline.get()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+
+    #[test]
+    fn test_object_store_permission_follows_node_lease() {
+        let lease = NodeLease::default();
+        assert!(lease.allows_object_store_io());
+        lease.enable();
+        assert!(!lease.allows_object_store_io());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        lease.renew(deadline);
+        lease.freeze_clock(deadline - Duration::from_secs(1));
+        assert!(lease.allows_object_store_io());
+        lease.freeze_clock(deadline);
+        assert!(!lease.allows_object_store_io());
+        lease.renew(deadline + Duration::from_secs(1));
+        assert!(lease.allows_object_store_io());
+        lease.renew(deadline - Duration::from_secs(1));
+        assert!(lease.allows_object_store_io());
+    }
 
     #[test]
     fn test_record_checks_region_under_removal_lock() {
