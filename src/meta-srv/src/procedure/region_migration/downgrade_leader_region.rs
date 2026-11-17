@@ -205,7 +205,7 @@ impl DowngradeLeaderRegion {
     /// Retry:
     /// - [MailboxTimeout](error::Error::MailboxTimeout), Timeout.
     /// - The Datanode replies with a retryable error.
-    /// - The Datanode replies that the region doesn't exist.
+    /// - The Datanode replies without an error that the region doesn't exist.
     ///
     /// Abort:
     /// - The Datanode replies with a non-retryable error.
