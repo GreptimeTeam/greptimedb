@@ -1000,6 +1000,37 @@ fn a_name_dropping_kernel_over_a_metadata_tag_is_collected() {
     }
 }
 
+/// A name-dropping kernel above another one asks for no collection of its own, and neither does a
+/// broadcast above a window that drops the name: `rate(x[5m]) * 2` plans one window and one
+/// broadcast, and `abs(abs(rate(x[5m])))` one window and two maps, with no merge in either.
+///
+/// The pass asks the labels alone here, so the answer does not depend on the scan's key columns:
+/// `rate(x[5m]) * 2` over a binding whose keys can hold `NULL` in one series and `''` in the other -
+/// the pair the labels cannot see - plans no merge rather than one per drop. Each of those merges
+/// would buffer its whole input to collect a pair the drop above it cannot fold, since only
+/// `__name__`, `__type__` and `__unit__` can be what two of a merge's series still differ in.
+#[test]
+fn a_drop_above_a_name_dropping_kernel_needs_no_collection() {
+    let out = grid(0, 1000, 2);
+    // What the planner states for a scan of one metric: its tag columns and the name the binding
+    // gives every series it hands over.
+    let scan = [tags(&["host", "zone", "__name__"])];
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let rate = || window_over(raw_input(0), None, Arc::clone(&out));
+    // `rate(x[5m]) * 2`: the broadcast drops the metadata labels the window dropped already.
+    let broadcast = binary_over(rate(), scalar(2.0, Arc::clone(&out)), Arc::clone(&out));
+    // `abs(abs(rate(x[5m])))`: two math kernels above the window, neither of which can fold a pair
+    // the window left distinct.
+    let nested = abs_map(abs_map(rate()));
+    for (query, root) in [
+        ("rate(x[5m]) * 2", broadcast),
+        ("abs(abs(rate(x[5m])))", nested),
+    ] {
+        let tree = passed_over(root, &scan, &single);
+        assert_eq!(0, merges(&tree), "`{query}` plans a merge: {tree}");
+    }
+}
+
 /// A `Merge` hands over one series per canonical label set - the one that treats an empty label
 /// value as no label - so what is above it is unique under that comparison and no later drop can
 /// fold two of its series. The kernels above a merge therefore need no collection of their own, one
