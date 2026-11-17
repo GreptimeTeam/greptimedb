@@ -1,0 +1,25 @@
+src/mito2/src/sst/index.rs
+  h_623774b620da8e 1078,1081-1089,3509-3595
+  s_c06578f466c2ea::t_a48c5569f1be4f 1072,1090-1092,1114-1126,3596-3614
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a05b894286951bfe53ab220611c004f1ac7f4451",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_c06578f466c2ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c374-3547-7b31-9c5c-4ab96c5f5115",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

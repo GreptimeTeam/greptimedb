@@ -1,0 +1,49 @@
+src/client/src/database.rs
+  s_17057bba187655::t_437d2497c8f463 1310-1335
+src/common/meta/src/rpc/router.rs
+  s_17057bba187655::t_4a4578c3dd5583 231,235-236,241
+src/meta-srv/src/procedure/repartition/group/update_metadata.rs
+  s_17057bba187655::t_5027ea46760ac4 144
+src/meta-srv/src/procedure/repartition/group/update_metadata/apply_staging_region.rs
+  s_17057bba187655::t_bbf56ac6b1643a 190
+src/meta-srv/src/procedure/repartition/group/update_metadata/exit_staging_region.rs
+  s_17057bba187655::t_51d06d43d540f5 48-49,158,171
+src/metric-engine/src/engine/read.rs
+  s_17057bba187655::t_1203b3d1e4cc9d 591,609
+src/mito2/src/engine.rs
+  s_17057bba187655::t_5ae6e6445dfdbe 1188-1209
+src/mito2/src/engine/scan_test.rs
+  s_17057bba187655::t_06a151120c4f4b 5391-5518
+src/mito2/src/error.rs
+  s_17057bba187655::t_982582bf1bd17a 813-820,1755,1807
+src/partition/src/manager.rs
+  s_17057bba187655::t_2d62dbf3ffa830 125,134
+src/query/src/dist_plan/merge_scan.rs
+  s_17057bba187655::t_779f99b1e6b907 491,581,597-602,632,721-726,2095,2112-2115,2139-2142,2537-2549,2667-2689
+src/query/src/dist_plan/planner.rs
+  s_17057bba187655::t_f02aaf74c44cf8 23,154-158,210-212,231,239-240,253,257,259-268,296,298,300-330,334,350,365,370,383,396,400,415,427,627-629,631-632,837,846-855,857-858,863-864,866,898-965
+src/query/src/dummy_catalog.rs
+  s_17057bba187655::t_2fe6d351c05473 340-343,349-363,705-729
+src/query/src/error.rs
+  s_17057bba187655::t_1ff8c098b40b2d 364-370,453,472,506-520,522,525
+src/store-api/src/storage/requests.rs
+  s_17057bba187655::t_808985d867fe6c 50-52,123-130
+tests/compatibility/metadata/repartition_readiness/README.md
+  s_17057bba187655::t_64793468815292 4-5,9,13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "61d655427f21fa86c697395e70e9dc1683b5dbc9",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

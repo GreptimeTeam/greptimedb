@@ -1,0 +1,27 @@
+src/common/meta/src/kv_backend/rds/mysql.rs
+  h_623774b620da8e 36,640-641,644,649
+src/common/meta/src/kv_backend/rds.rs
+  h_623774b620da8e 29,588-603
+src/meta-srv/src/utils/postgres.rs
+  h_623774b620da8e 120,138
+  h_623774b620da8e 21
+src/cli/src/common/store.rs
+  h_623774b620da8e 170-182,188,195-196
+src/meta-srv/src/utils/mysql.rs
+  h_623774b620da8e 17,91,102
+src/common/meta/src/kv_backend/rds/postgres.rs
+  h_623774b620da8e 45,853-855,863,870
+src/meta-srv/src/bootstrap.rs
+  h_623774b620da8e 346,367
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c5bd6b5164d9dabda1dd2f116f0ff4c84268443a",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
