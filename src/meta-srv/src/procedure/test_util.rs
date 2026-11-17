@@ -238,6 +238,19 @@ pub fn new_upgrade_region_reply(
     exists: bool,
     error: Option<String>,
 ) -> MailboxMessage {
+    new_upgrade_regions_reply(
+        id,
+        vec![UpgradeRegionReply {
+            region_id: RegionId::new(0, 0),
+            ready,
+            exists,
+            error: legacy_instruction_error(error),
+        }],
+    )
+}
+
+/// Generates a [InstructionReply::UpgradeRegions] reply with a reply for each region.
+pub fn new_upgrade_regions_reply(id: u64, replies: Vec<UpgradeRegionReply>) -> MailboxMessage {
     MailboxMessage {
         id,
         subject: "mock".to_string(),
@@ -245,14 +258,9 @@ pub fn new_upgrade_region_reply(
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::UpgradeRegions(
-                UpgradeRegionsReply::single(UpgradeRegionReply {
-                    region_id: RegionId::new(0, 0),
-                    ready,
-                    exists,
-                    error: legacy_instruction_error(error),
-                }),
-            ))
+            serde_json::to_string(&InstructionReply::UpgradeRegions(UpgradeRegionsReply::new(
+                replies,
+            )))
             .unwrap(),
         )),
         header: None,

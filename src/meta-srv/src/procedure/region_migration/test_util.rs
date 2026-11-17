@@ -21,6 +21,7 @@ use std::time::Duration;
 use api::v1::meta::MailboxMessage;
 use common_meta::DatanodeId;
 use common_meta::ddl::NoopRegionFailureDetectorControl;
+use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::test_utils::new_test_table_info;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -38,11 +39,12 @@ use common_procedure::{Context as ProcedureContext, ProcedureId, ProcedureManage
 use common_procedure_test::MockContextProvider;
 use common_telemetry::debug;
 use futures::future::BoxFuture;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::error::{self, Error, Result};
+use crate::handler::HeartbeatMailbox;
 use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
@@ -57,7 +59,7 @@ use crate::procedure::region_migration::{
     Context, ContextFactory, DefaultContextFactory, PersistentContext,
     RegionMigrationTriggerReason, State, VolatileContext,
 };
-use crate::procedure::test_util::{MailboxContext, send_mock_reply};
+use crate::procedure::test_util::{MailboxContext, MockHeartbeatReceiver, send_mock_reply};
 use crate::service::mailbox::Channel;
 
 /// `TestingEnv` provides components during the tests.
@@ -153,6 +155,15 @@ impl TestingEnv {
     /// Returns the mutable [MailboxContext].
     pub fn mailbox_context(&mut self) -> &mut MailboxContext {
         &mut self.mailbox_ctx
+    }
+
+    /// Returns the receiver of the messages broadcast to a frontend.
+    pub(crate) async fn frontend_receiver(&mut self) -> MockHeartbeatReceiver {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        self.mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Frontend(1), tx)
+            .await;
+        rx
     }
 
     /// Returns the [TableMetadataManagerRef]
@@ -584,6 +595,28 @@ fn test_merge_mailbox_messages() {
     } else {
         unreachable!()
     }
+}
+
+/// Asserts that the next message of `rx` invalidates the table caches of `table_ids`.
+pub(crate) fn assert_table_cache_invalidated(
+    rx: &mut MockHeartbeatReceiver,
+    table_ids: &[TableId],
+) {
+    let msg = rx.try_recv().unwrap().unwrap().mailbox_message.unwrap();
+    let Instruction::InvalidateCaches(mut cache_idents) =
+        HeartbeatMailbox::json_instruction(&msg).unwrap()
+    else {
+        unreachable!()
+    };
+    cache_idents.sort_by_key(|ident| match ident {
+        CacheIdent::TableId(table_id) => *table_id,
+        _ => unreachable!(),
+    });
+    let expected = table_ids
+        .iter()
+        .map(|table_id| CacheIdent::TableId(*table_id))
+        .collect::<Vec<_>>();
+    assert_eq!(cache_idents, expected);
 }
 
 /// Returns a new [ProcedureContext].

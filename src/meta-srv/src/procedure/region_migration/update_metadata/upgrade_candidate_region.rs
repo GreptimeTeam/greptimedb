@@ -17,7 +17,7 @@ use common_meta::key::datanode_table::RegionInfo;
 use common_meta::lock_key::TableLock;
 use common_meta::rpc::router::{RegionRoute, region_distribution};
 use common_procedure::ContextProviderRef;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
 
@@ -61,21 +61,21 @@ impl UpdateMetadata {
                 }
             );
 
+            // A follower replica on the new leader must not become the leader.
+            ensure!(
+                region_route
+                    .follower_peers
+                    .iter()
+                    .all(|peer| peer.id != new_leader_peer.id),
+                error::UnexpectedSnafu {
+                    violated: format!(
+                        "The new leader {new_leader_peer:?} already holds a follower replica of region {region_id} during the candidate-to-leader upgrade"
+                    ),
+                }
+            );
+
             // Set new leader.
             region_route.leader_peer = Some(new_leader_peer.clone());
-
-            // Remove new leader from followers (avoids duplicate leader/follower).
-            let removed = region_route
-                .follower_peers
-                .extract_if(.., |peer| peer.id == new_leader_peer.id)
-                .collect::<Vec<_>>();
-
-            // Warn if more than one follower with the new leader id was present.
-            if removed.len() > 1 {
-                warn!(
-                    "Removed duplicate followers: {removed:?} during candidate-to-leader upgrade for region: {region_id}"
-                );
-            }
         }
 
         info!(
@@ -238,7 +238,9 @@ mod tests {
 
     use crate::error::Error;
     use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
-    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
+    use crate::procedure::region_migration::test_util::{
+        self, TestingEnv, assert_table_cache_invalidated, new_procedure_context,
+    };
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
 
@@ -337,7 +339,7 @@ mod tests {
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(Peer::empty(1)),
-            follower_peers: vec![Peer::empty(2), Peer::empty(3)],
+            follower_peers: vec![Peer::empty(3)],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: Some(current_time_millis()),
             write_route_policy: None,
@@ -363,6 +365,60 @@ mod tests {
         assert!(new_region_routes[0].leader_down_since.is_none());
         assert_eq!(new_region_routes[0].follower_peers, vec![Peer::empty(3)]);
         assert_eq!(new_region_routes[0].leader_peer.as_ref().unwrap().id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_new_leader_holds_follower_replica() {
+        let state = UpdateMetadata::Upgrade;
+        let env = TestingEnv::new();
+        let persistent_context = new_persistent_context();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(RegionId::new(1024, 1)),
+            leader_peer: Some(Peer::empty(1)),
+            follower_peers: vec![Peer::empty(2), Peer::empty(3)],
+            ..Default::default()
+        }];
+
+        let err = state
+            .build_upgrade_candidate_region_metadata(
+                &mut ctx,
+                &[RegionId::new(1024, 1)],
+                region_routes,
+            )
+            .unwrap_err();
+
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(!err.is_retryable());
+        assert!(err.to_string().contains("follower replica"));
+    }
+
+    #[tokio::test]
+    async fn test_failed_upgrade_broadcasts_invalidation() {
+        let mut state = Box::new(UpdateMetadata::Upgrade);
+        let mut env = TestingEnv::new();
+        // The table of the second region has been dropped.
+        let mut persistent_context = new_persistent_context();
+        persistent_context.region_ids = vec![RegionId::new(1024, 1), RegionId::new(1025, 1)];
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(RegionId::new(1024, 1)),
+            leader_peer: Some(Peer::empty(1)),
+            leader_state: Some(LeaderState::Downgrading),
+            ..Default::default()
+        }];
+        env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+            .await;
+        let mut rx = env.frontend_receiver().await;
+
+        let err = state
+            .next(&mut ctx, &new_procedure_context())
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, Error::TableRouteNotFound { .. });
+        assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
     }
 
     #[tokio::test]

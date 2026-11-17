@@ -344,6 +344,9 @@ pub struct VolatileContext {
     leader_region_last_entry_ids: HashMap<RegionId, u64>,
     /// The last_entry_ids of leader metadata regions (Only used for metric engine).
     leader_region_metadata_last_entry_ids: HashMap<RegionId, u64>,
+    /// The regions whose upgrade the candidate has replied to without an error. A retry of the
+    /// upgrade does not send them again.
+    upgraded_regions: HashSet<RegionId>,
     /// Metrics of region migration.
     metrics: Metrics,
 }
@@ -851,9 +854,11 @@ impl RegionMigrationProcedure {
         context_factory: impl ContextFactory,
         tracker: RegionMigrationProcedureTracker,
     ) -> ProcedureResult<Self> {
+        // The routes may have changed since the state was persisted, so the procedure checks
+        // them again from the start.
         let RegionMigrationDataOwned {
             persistent_ctx,
-            state,
+            state: _,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
         let guards = persistent_ctx
             .region_ids
@@ -872,7 +877,7 @@ impl RegionMigrationProcedure {
         let context = context_factory.new_context(persistent_ctx);
 
         Ok(Self {
-            state,
+            state: Box::new(RegionMigrationStart),
             context,
             _guards: guards,
         })
@@ -1318,64 +1323,101 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Serialize, Deserialize, Default)]
-    pub struct MockState;
-
-    #[async_trait::async_trait]
-    #[typetag::serde]
-    impl State for MockState {
-        async fn next(
-            &mut self,
-            _ctx: &mut Context,
-            _procedure_ctx: &ProcedureContext,
-        ) -> Result<(Box<dyn State>, Status)> {
-            Ok((Box::new(MockState), Status::done()))
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
+    /// Returns the procedure recovered from the dump of a migration that was persisted at
+    /// [OpenCandidateRegion].
+    fn recover_procedure(
+        env: &TestingEnv,
+        persistent_ctx: PersistentContext,
+    ) -> RegionMigrationProcedure {
+        let persisted = RegionMigrationProcedure::new_inner(
+            Box::new(OpenCandidateRegion),
+            persistent_ctx,
+            env.context_factory(),
+            vec![],
+        )
+        .dump()
+        .unwrap();
+        RegionMigrationProcedure::from_json(&persisted, env.context_factory(), env.tracker())
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn test_execution_after_deserialized() {
+    async fn test_recovered_procedure_ends_if_regions_migrated() {
+        let mut env = TestingEnv::new();
+        let persistent_ctx = new_persistent_context();
+        let region_id = persistent_ctx.region_ids[0];
+        // The procedure stopped after it switched the route to the target.
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(persistent_ctx.to_peer.clone()),
+            ..Default::default()
+        }];
+        env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+            .await;
+        let mut frontend_rx = env.frontend_receiver().await;
+        let (datanode_tx, mut datanode_rx) = tokio::sync::mpsc::channel(1);
+        env.mailbox_context()
+            .insert_heartbeat_response_receiver(Channel::Datanode(2), datanode_tx)
+            .await;
+
+        let mut procedure = recover_procedure(&env, persistent_ctx);
+        assert!(env.tracker().contains(region_id));
+        let status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        assert!(status.is_done());
+        assert_table_cache_invalidated(&mut frontend_rx, &[1024]);
+        // The target receives the broadcast and is not instructed again.
+        assert_table_cache_invalidated(&mut datanode_rx, &[1024]);
+        assert!(datanode_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_recovered_procedure_rolls_back_if_leader_moved() {
         let env = TestingEnv::new();
+        let mut persistent_ctx = new_persistent_context();
+        let moved = RegionId::new(1024, 1);
+        let downgraded = RegionId::new(1024, 2);
+        persistent_ctx.region_ids = vec![moved, downgraded];
+        // The procedure stopped after it downgraded the leaders, then the leader of `moved`
+        // changed to neither the source nor the target.
+        let region_routes = vec![
+            RegionRoute {
+                region: Region::new_test(moved),
+                leader_peer: Some(Peer::empty(3)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region::new_test(downgraded),
+                leader_peer: Some(persistent_ctx.from_peer.clone()),
+                leader_state: Some(LeaderState::Downgrading),
+                ..Default::default()
+            },
+        ];
+        env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+            .await;
 
-        fn new_mock_procedure(env: &TestingEnv) -> RegionMigrationProcedure {
-            let persistent_context = new_persistent_context();
-            let context_factory = env.context_factory();
-            let state = Box::<MockState>::default();
-            RegionMigrationProcedure::new_inner(state, persistent_context, context_factory, vec![])
-        }
-
+        let mut procedure = recover_procedure(&env, persistent_ctx);
         let ctx = TestingEnv::procedure_context();
-        let mut procedure = new_mock_procedure(&env);
-        let mut status = None;
-        for _ in 0..3 {
-            status = Some(procedure.execute(&ctx).await.unwrap());
+        let status = procedure.execute(&ctx).await.unwrap();
+        assert!(!status.is_done());
+        let err = procedure.execute(&ctx).await.unwrap_err();
+        assert!(!err.is_retry_later());
+        procedure.rollback(&ctx).await.unwrap();
+
+        let table_route = env
+            .table_metadata_manager()
+            .table_route_manager()
+            .table_route_storage()
+            .get(1024)
+            .await
+            .unwrap()
+            .unwrap();
+        for region_route in table_route.region_routes().unwrap() {
+            assert_eq!(region_route.leader_state, None);
         }
-        assert!(status.unwrap().is_done());
-
-        let ctx = TestingEnv::procedure_context();
-        let mut procedure = new_mock_procedure(&env);
-
-        status = Some(procedure.execute(&ctx).await.unwrap());
-
-        let serialized = procedure.dump().unwrap();
-
-        let context_factory = env.context_factory();
-        let tracker = env.tracker();
-        let mut procedure =
-            RegionMigrationProcedure::from_json(&serialized, context_factory, tracker.clone())
-                .unwrap();
-        for region_id in &procedure.context.persistent_ctx.region_ids {
-            assert!(tracker.contains(*region_id));
-        }
-
-        for _ in 1..3 {
-            status = Some(procedure.execute(&ctx).await.unwrap());
-        }
-        assert!(status.unwrap().is_done());
     }
 
     #[tokio::test]
@@ -1495,13 +1537,12 @@ mod tests {
         let from_peer_id = persistent_context.from_peer.id;
         let to_peer_id = persistent_context.to_peer.id;
         let from_peer = persistent_context.from_peer.clone();
-        let to_peer = persistent_context.to_peer.clone();
         let region_id = persistent_context.region_ids[0];
         let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),
-            follower_peers: vec![to_peer],
+            follower_peers: vec![],
             ..Default::default()
         }];
 

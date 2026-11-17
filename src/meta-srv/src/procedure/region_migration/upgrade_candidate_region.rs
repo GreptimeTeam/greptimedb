@@ -29,6 +29,7 @@ use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+use store_api::storage::RegionId;
 use tokio::time::{Instant, sleep};
 
 use crate::error::{self, Result};
@@ -114,13 +115,23 @@ impl UpgradeCandidateRegion {
         Ok(topics)
     }
 
-    /// Builds upgrade region instruction.
+    /// Returns the regions that the candidate has not upgraded yet.
+    fn pending_regions(ctx: &Context) -> Vec<RegionId> {
+        ctx.persistent_ctx
+            .region_ids
+            .iter()
+            .filter(|region_id| !ctx.volatile_ctx.upgraded_regions.contains(region_id))
+            .copied()
+            .collect()
+    }
+
+    /// Builds upgrade region instruction for the regions that are not upgraded yet.
     async fn build_upgrade_region_instruction(
         &self,
         ctx: &mut Context,
         replay_timeout: Duration,
     ) -> Result<Instruction> {
-        let region_ids = ctx.persistent_ctx.region_ids.clone();
+        let region_ids = Self::pending_regions(ctx);
         let datanode_table_values = ctx.get_from_peer_datanode_table_values().await?;
         let mut region_topic = Vec::with_capacity(region_ids.len());
         for region_id in region_ids.iter() {
@@ -225,7 +236,7 @@ impl UpgradeCandidateRegion {
         Ok(())
     }
 
-    /// Tries to upgrade a candidate region.
+    /// Tries to upgrade the candidate regions that are not upgraded yet.
     ///
     /// Retry:
     /// - If `require_ready` is true, but the candidate region returns `ready` is false.
@@ -249,9 +260,8 @@ impl UpgradeCandidateRegion {
             .build_upgrade_region_instruction(ctx, operation_timeout)
             .await?;
 
-        let pc = &ctx.persistent_ctx;
-        let region_ids = &pc.region_ids;
-        let candidate = &pc.to_peer;
+        let region_ids = &Self::pending_regions(ctx);
+        let candidate = &ctx.persistent_ctx.to_peer;
 
         let tracing_ctx = TracingContext::from_current_span();
         let msg = MailboxMessage::json_message(
@@ -287,10 +297,18 @@ impl UpgradeCandidateRegion {
                     }
                     .fail();
                 };
+                let mut result = Ok(());
                 for reply in replies {
-                    self.handle_upgrade_region_reply(ctx, &reply, &now)?;
+                    match self.handle_upgrade_region_reply(ctx, &reply, &now) {
+                        Ok(()) => {
+                            ctx.volatile_ctx.upgraded_regions.insert(reply.region_id);
+                        }
+                        // An error that cannot be retried takes precedence.
+                        Err(err) if result.is_ok() || !err.is_retryable() => result = Err(err),
+                        Err(_) => {}
+                    }
                 }
-                Ok(())
+                result
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
@@ -377,7 +395,8 @@ mod tests {
         ContextFactory, PersistentContext, RegionMigrationTriggerReason,
     };
     use crate::procedure::test_util::{
-        new_close_region_reply, new_upgrade_region_reply, send_mock_reply,
+        new_close_region_reply, new_upgrade_region_reply, new_upgrade_regions_reply,
+        send_mock_reply,
     };
 
     fn new_persistent_context() -> PersistentContext {
@@ -815,6 +834,113 @@ mod tests {
         let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
 
         assert_matches!(update_metadata, UpdateMetadata::Upgrade);
+    }
+
+    fn new_region_reply(region_id: RegionId, ready: bool, exists: bool) -> UpgradeRegionReply {
+        UpgradeRegionReply {
+            region_id,
+            ready,
+            exists,
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_region_retry_skips_upgraded_regions() {
+        let mut state = Box::<UpgradeCandidateRegion>::default();
+        state.retry_initial_interval = Duration::from_millis(100);
+        let mut persistent_context = new_persistent_context();
+        let upgraded = RegionId::new(1024, 1);
+        let replaying = RegionId::new(1024, 2);
+        persistent_context.region_ids = vec![upgraded, replaying];
+        let to_peer_id = persistent_context.to_peer.id;
+
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
+            .await;
+
+        let instructed = common_runtime::spawn_global(async move {
+            let mut instructed = Vec::new();
+            for ready in [false, true] {
+                let msg = rx.recv().await.unwrap().unwrap().mailbox_message.unwrap();
+                let Instruction::UpgradeRegions(upgrade_regions) =
+                    HeartbeatMailbox::json_instruction(&msg).unwrap()
+                else {
+                    unreachable!()
+                };
+                let region_ids = upgrade_regions
+                    .iter()
+                    .map(|upgrade_region| upgrade_region.region_id)
+                    .collect::<Vec<_>>();
+                let replies = region_ids
+                    .iter()
+                    .map(|region_id| {
+                        new_region_reply(*region_id, *region_id == upgraded || ready, true)
+                    })
+                    .collect();
+                instructed.push(region_ids);
+                mailbox
+                    .on_recv(msg.id, Ok(new_upgrade_regions_reply(msg.id, replies)))
+                    .await
+                    .unwrap();
+            }
+            instructed
+        });
+
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
+
+        let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+        assert_matches!(update_metadata, UpdateMetadata::Upgrade);
+        assert_eq!(
+            instructed.await.unwrap(),
+            vec![vec![upgraded, replaying], vec![replaying]]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_region_non_retryable_reply_takes_precedence() {
+        let state = UpgradeCandidateRegion::default();
+        let mut persistent_context = new_persistent_context();
+        let upgraded = RegionId::new(1024, 1);
+        let replaying = RegionId::new(1024, 2);
+        let missing = RegionId::new(1024, 3);
+        persistent_context.region_ids = vec![upgraded, replaying, missing];
+        let to_peer_id = persistent_context.to_peer.id;
+
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
+            .await;
+        send_mock_reply(mailbox, rx, move |id| {
+            Ok(new_upgrade_regions_reply(
+                id,
+                vec![
+                    new_region_reply(replaying, false, true),
+                    new_region_reply(missing, false, false),
+                    new_region_reply(upgraded, true, true),
+                ],
+            ))
+        });
+
+        let err = state.upgrade_region(&mut ctx).await.unwrap_err();
+
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(!err.is_retryable());
+        assert_eq!(ctx.volatile_ctx.upgraded_regions, HashSet::from([upgraded]));
     }
 
     #[tokio::test]

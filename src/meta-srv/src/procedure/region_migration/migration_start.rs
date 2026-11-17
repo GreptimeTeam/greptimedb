@@ -17,7 +17,7 @@ use std::any::Any;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
@@ -32,6 +32,8 @@ use crate::procedure::region_migration::{Context, State};
 /// - If all regions have been migrated, transitions to [RegionMigrationEnd].
 /// - If any of the region leaders is not the `from_peer`, transitions to [RegionMigrationAbort].
 /// - Otherwise, continues with [OpenCandidateRegion] to initiate the candidate region.
+///
+/// A recovered procedure starts here again, whatever state it was persisted in.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegionMigrationStart;
 
@@ -56,6 +58,15 @@ impl State for RegionMigrationStart {
         let region_ids = &ctx.persistent_ctx.region_ids;
 
         self.filter_unmigrated_regions(&mut region_routes, to_peer);
+
+        // A procedure that stopped right after it switched the routes has not broadcast them.
+        if region_routes.len() != region_ids.len()
+            && let Err(err) = ctx.invalidate_table_cache().await
+        {
+            warn!(
+                "Failed to broadcast the invalidate table cache message for the migrated regions, error: {err:?}"
+            );
+        }
 
         // No region to migrate, skip the migration.
         if region_routes.is_empty() {
@@ -83,13 +94,23 @@ impl State for RegionMigrationStart {
                     "Abort region migration, region:{}, unexpected leader peer: {:?}, expected: {:?}",
                     region_route.region.id, region_route.leader_peer, from_peer,
                 );
+                // A recovered procedure may have downgraded the leaders of other regions. The
+                // abort fails the procedure, and its rollback restores them.
+                let status = if region_routes
+                    .iter()
+                    .any(|route| route.is_leader_downgrading())
+                {
+                    Status::executing(false)
+                } else {
+                    Status::done()
+                };
                 return Ok((
                     Box::new(RegionMigrationAbort::new(&format!(
                         "Invalid region leader peer: {:?}, expected: {:?}",
                         region_route.leader_peer.as_ref().unwrap(),
                         from_peer,
                     ))),
-                    Status::done(),
+                    status,
                 ));
             }
         }
@@ -191,12 +212,15 @@ mod tests {
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
+    use crate::procedure::region_migration::test_util::{
+        self, TestingEnv, assert_done, assert_need_persist, assert_table_cache_invalidated,
+        new_procedure_context,
+    };
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
     fn new_persistent_context() -> PersistentContext {
@@ -247,8 +271,9 @@ mod tests {
         let from_peer = persistent_context.from_peer.clone();
         let region_id = persistent_context.region_ids[0];
 
-        let env = TestingEnv::new();
+        let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        let mut rx = env.frontend_receiver().await;
 
         let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
@@ -261,9 +286,42 @@ mod tests {
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
         let procedure_ctx = new_procedure_context();
-        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
+        let (next, status) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
+        assert_done(status);
+        assert_table_cache_invalidated(&mut rx, &[1024]);
+    }
+
+    #[tokio::test]
+    async fn test_next_migrates_remaining_regions() {
+        let mut state = Box::new(RegionMigrationStart);
+        // from_peer: 1
+        // to_peer: 2
+        let mut persistent_context = new_persistent_context();
+        let migrated = RegionId::new(1024, 1);
+        let remaining = RegionId::new(1024, 2);
+        persistent_context.region_ids = vec![migrated, remaining];
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mut rx = env.frontend_receiver().await;
+
+        let region_routes = [(migrated, 2), (remaining, 1)]
+            .map(|(region_id, leader)| RegionRoute {
+                region: Region::new_test(region_id),
+                leader_peer: Some(Peer::empty(leader)),
+                ..Default::default()
+            })
+            .to_vec();
+        env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+            .await;
+        let procedure_ctx = new_procedure_context();
+        let (next, status) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
+
+        let _ = next.as_any().downcast_ref::<OpenCandidateRegion>().unwrap();
+        assert_need_persist(status);
+        assert_eq!(ctx.persistent_ctx.region_ids, vec![remaining]);
+        assert_table_cache_invalidated(&mut rx, &[1024]);
     }
 
     #[tokio::test]
@@ -274,8 +332,9 @@ mod tests {
         let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
         let region_id = persistent_context.region_ids[0];
-        let env = TestingEnv::new();
+        let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        let mut rx = env.frontend_receiver().await;
 
         let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
@@ -290,6 +349,8 @@ mod tests {
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<OpenCandidateRegion>().unwrap();
+        // No route has been switched.
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -312,11 +373,50 @@ mod tests {
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
         let procedure_ctx = new_procedure_context();
-        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
+        let (next, status) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let _ = next
             .as_any()
             .downcast_ref::<RegionMigrationAbort>()
             .unwrap();
+        assert_done(status);
+    }
+
+    #[tokio::test]
+    async fn test_next_migration_abort_with_downgraded_leader() {
+        let mut state = Box::new(RegionMigrationStart);
+        // from_peer: 1
+        // to_peer: 2
+        let mut persistent_context = new_persistent_context();
+        let moved = RegionId::new(1024, 1);
+        let downgraded = RegionId::new(1024, 2);
+        persistent_context.region_ids = vec![moved, downgraded];
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+
+        let region_routes = vec![
+            RegionRoute {
+                region: Region::new_test(moved),
+                leader_peer: Some(Peer::empty(1024)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region::new_test(downgraded),
+                leader_peer: Some(Peer::empty(1)),
+                leader_state: Some(LeaderState::Downgrading),
+                ..Default::default()
+            },
+        ];
+        env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+            .await;
+        let procedure_ctx = new_procedure_context();
+        let (next, status) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
+
+        let _ = next
+            .as_any()
+            .downcast_ref::<RegionMigrationAbort>()
+            .unwrap();
+        // The abort runs, so the procedure fails and rolls back.
+        assert!(!status.is_done());
     }
 }
