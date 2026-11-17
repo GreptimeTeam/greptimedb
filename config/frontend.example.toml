@@ -372,8 +372,10 @@ metadata_cache_tti = "5m"
 [query]
 
 ## Enable experimental native PromQL execution for compatible standalone queries.
-## Requires in-process region transport and the per-request
-## query.experimental_native_promql=true extension. Default: false
+## Requires in-process region transport. This is the engine-wide default: a
+## session SET query.experimental_native_promql = true or a per-request
+## query.experimental_native_promql option overrides it, in that order.
+## Default: false
 #+ experimental_native_promql = false
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
