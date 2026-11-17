@@ -399,29 +399,42 @@ mod tests {
 
     #[tokio::test]
     async fn test_failed_upgrade_broadcasts_invalidation() {
-        let mut state = Box::new(UpdateMetadata::Upgrade);
-        let mut env = TestingEnv::new();
-        // The table of the second region has been dropped.
-        let mut persistent_context = new_persistent_context();
-        persistent_context.region_ids = vec![RegionId::new(1024, 1), RegionId::new(1025, 1)];
-        let mut ctx = env.context_factory().new_context(persistent_context);
-        let region_routes = vec![RegionRoute {
-            region: Region::new_test(RegionId::new(1024, 1)),
-            leader_peer: Some(Peer::empty(1)),
-            leader_state: Some(LeaderState::Downgrading),
-            ..Default::default()
-        }];
-        env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
-            .await;
-        let mut rx = env.frontend_receiver().await;
+        // The procedure iterates the tables of a batch in hash order, so the attempt is repeated
+        // until the table that fails comes after the one that is switched.
+        for _ in 0..64 {
+            let mut state = Box::new(UpdateMetadata::Upgrade);
+            let mut env = TestingEnv::new();
+            // The table of the second region has been dropped.
+            let mut persistent_context = new_persistent_context();
+            persistent_context.region_ids = vec![RegionId::new(1024, 1), RegionId::new(1025, 1)];
+            let mut ctx = env.context_factory().new_context(persistent_context);
+            let region_routes = vec![RegionRoute {
+                region: Region::new_test(RegionId::new(1024, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                leader_state: Some(LeaderState::Downgrading),
+                ..Default::default()
+            }];
+            env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+                .await;
+            let mut rx = env.frontend_receiver().await;
 
-        let err = state
-            .next(&mut ctx, &new_procedure_context())
-            .await
-            .unwrap_err();
+            let err = state
+                .next(&mut ctx, &new_procedure_context())
+                .await
+                .unwrap_err();
 
-        assert_matches!(err, Error::TableRouteNotFound { .. });
-        assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
+            assert_matches!(err, Error::TableRouteNotFound { .. });
+            assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
+            let table_route = ctx.get_table_route_value(1024).await.unwrap();
+            let switched = table_route.region_routes().unwrap()[0]
+                .leader_peer
+                .as_ref()
+                .is_some_and(|leader| leader.id == 2);
+            if switched {
+                return;
+            }
+        }
+        panic!("In 64 attempts the failing table never came after the switched one");
     }
 
     #[tokio::test]

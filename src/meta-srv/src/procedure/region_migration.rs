@@ -801,11 +801,11 @@ pub(crate) trait State: Sync + Send + Debug {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// Persistent data of [RegionMigrationProcedure].
-#[derive(Debug, Serialize, Deserialize)]
+/// Persistent data of a recovered [RegionMigrationProcedure]. The persisted state is not read:
+/// the procedure starts from the route check again.
+#[derive(Debug, Deserialize)]
 pub struct RegionMigrationDataOwned {
     persistent_ctx: PersistentContext,
-    state: Box<dyn State>,
 }
 
 /// Persistent data of [RegionMigrationProcedure].
@@ -856,10 +856,8 @@ impl RegionMigrationProcedure {
     ) -> ProcedureResult<Self> {
         // The routes may have changed since the state was persisted, so the procedure checks
         // them again from the start.
-        let RegionMigrationDataOwned {
-            persistent_ctx,
-            state: _,
-        } = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let RegionMigrationDataOwned { persistent_ctx } =
+            serde_json::from_str(json).context(FromJsonSnafu)?;
         let guards = persistent_ctx
             .region_ids
             .iter()
@@ -1377,8 +1375,8 @@ mod tests {
     #[tokio::test]
     async fn test_recovered_procedure_rolls_back_if_leader_moved() {
         // The procedure stopped after it downgraded the leaders, then the leader of `moved`
-        // changed to neither the source nor the target. The other region is still led by the
-        // source or was already switched to the target.
+        // changed to neither the source nor the target. The other region keeps the downgrading
+        // mark, on the source or, in a state the route switch does not produce, on the target.
         for downgraded_leader in [1, 2] {
             let env = TestingEnv::new();
             let mut persistent_ctx = new_persistent_context();
@@ -1407,39 +1405,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recovered_procedure_keeps_no_volatile_state() {
+    async fn test_recovered_procedure_ignores_persisted_state() {
         let env = TestingEnv::new();
-        let persistent_ctx = new_persistent_context();
-        let region_id = persistent_ctx.region_ids[0];
-        let mut procedure = RegionMigrationProcedure::new_inner(
+        let persisted = RegionMigrationProcedure::new_inner(
             Box::new(OpenCandidateRegion),
-            persistent_ctx,
+            new_persistent_context(),
             env.context_factory(),
             vec![],
-        );
-        procedure
-            .context
-            .volatile_ctx
-            .upgraded_regions
-            .insert(region_id);
-        let persisted = procedure.dump().unwrap();
-
-        let recovered =
-            RegionMigrationProcedure::from_json(&persisted, env.context_factory(), env.tracker())
-                .unwrap();
-        assert!(recovered.context.volatile_ctx.upgraded_regions.is_empty());
-
-        // The persisted state is still parsed.
+        )
+        .dump()
+        .unwrap();
+        // A state this version cannot parse.
         let unknown_state = persisted.replace("OpenCandidateRegion", "UnknownState");
         assert_ne!(unknown_state, persisted);
-        assert!(
-            RegionMigrationProcedure::from_json(
-                &unknown_state,
-                env.context_factory(),
-                env.tracker()
-            )
-            .is_err()
-        );
+
+        let procedure = RegionMigrationProcedure::from_json(
+            &unknown_state,
+            env.context_factory(),
+            env.tracker(),
+        )
+        .unwrap();
+
+        assert!(procedure.state.as_any().is::<RegionMigrationStart>());
     }
 
     #[tokio::test]

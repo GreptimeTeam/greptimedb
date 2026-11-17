@@ -17,7 +17,7 @@ use std::any::Any;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
@@ -57,7 +57,8 @@ impl State for RegionMigrationStart {
         let from_peer = &ctx.persistent_ctx.from_peer;
         let region_ids = &ctx.persistent_ctx.region_ids;
 
-        // A recovered procedure may have downgraded the leaders of the regions.
+        // A recovered procedure may have downgraded the leaders of the regions. All the routes of
+        // the batch are checked, including those of the regions already led by the target.
         let downgraded = region_routes
             .iter()
             .any(|route| route.is_leader_downgrading());
@@ -65,8 +66,12 @@ impl State for RegionMigrationStart {
         self.filter_unmigrated_regions(&mut region_routes, to_peer);
 
         // A procedure that stopped right after it switched the routes has not broadcast them.
-        if region_routes.len() != region_ids.len() {
-            ctx.invalidate_table_cache().await?;
+        if region_routes.len() != region_ids.len()
+            && let Err(err) = ctx.invalidate_table_cache().await
+        {
+            warn!(
+                "Failed to broadcast the invalidate table cache message for the migrated regions, error: {err:?}"
+            );
         }
 
         // No region to migrate, skip the migration.

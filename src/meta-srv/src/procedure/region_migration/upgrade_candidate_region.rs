@@ -125,13 +125,13 @@ impl UpgradeCandidateRegion {
             .collect()
     }
 
-    /// Builds upgrade region instruction for the regions that are not upgraded yet.
+    /// Builds upgrade region instruction for `region_ids`.
     async fn build_upgrade_region_instruction(
         &self,
         ctx: &mut Context,
+        region_ids: &[RegionId],
         replay_timeout: Duration,
     ) -> Result<Instruction> {
-        let region_ids = Self::pending_regions(ctx);
         let datanode_table_values = ctx.get_from_peer_datanode_table_values().await?;
         let mut region_topic = Vec::with_capacity(region_ids.len());
         for region_id in region_ids.iter() {
@@ -153,7 +153,7 @@ impl UpgradeCandidateRegion {
             .await?;
         // Build upgrade regions instruction.
         let mut upgrade_regions = Vec::with_capacity(region_ids.len());
-        for region_id in region_ids {
+        for &region_id in region_ids {
             let last_entry_id = ctx
                 .volatile_ctx
                 .leader_region_last_entry_ids
@@ -256,11 +256,11 @@ impl UpgradeCandidateRegion {
                 .context(error::ExceededDeadlineSnafu {
                     operation: "Upgrade region",
                 })?;
+        let region_ids = &Self::pending_regions(ctx);
         let upgrade_instruction = self
-            .build_upgrade_region_instruction(ctx, operation_timeout)
+            .build_upgrade_region_instruction(ctx, region_ids, operation_timeout)
             .await?;
 
-        let region_ids = &Self::pending_regions(ctx);
         let candidate = &ctx.persistent_ctx.to_peer;
 
         let tracing_ctx = TracingContext::from_current_span();
@@ -480,8 +480,9 @@ mod tests {
             .await
             .unwrap();
 
+        let pending_region_ids = ctx.persistent_ctx.region_ids.clone();
         let instruction = state
-            .build_upgrade_region_instruction(&mut ctx, Duration::from_secs(1))
+            .build_upgrade_region_instruction(&mut ctx, &pending_region_ids, Duration::from_secs(1))
             .await
             .unwrap();
         let Instruction::UpgradeRegions(upgrade_regions) = instruction else {
@@ -516,8 +517,13 @@ mod tests {
 
         // Retries send the same ids.
         for _ in 0..2 {
+            let pending_region_ids = ctx.persistent_ctx.region_ids.clone();
             let instruction = state
-                .build_upgrade_region_instruction(&mut ctx, Duration::from_secs(1))
+                .build_upgrade_region_instruction(
+                    &mut ctx,
+                    &pending_region_ids,
+                    Duration::from_secs(1),
+                )
                 .await
                 .unwrap();
             let Instruction::UpgradeRegions(upgrade_regions) = instruction else {
@@ -571,8 +577,9 @@ mod tests {
             .await
             .unwrap();
 
+        let pending_region_ids = ctx.persistent_ctx.region_ids.clone();
         let instruction = state
-            .build_upgrade_region_instruction(&mut ctx, Duration::from_secs(1))
+            .build_upgrade_region_instruction(&mut ctx, &pending_region_ids, Duration::from_secs(1))
             .await
             .unwrap();
         let Instruction::UpgradeRegions(upgrade_regions) = instruction else {
