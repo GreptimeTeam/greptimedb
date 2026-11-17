@@ -1189,7 +1189,11 @@ impl PromPlanner {
             },
             NATIVE_ORDERING,
             Arc::clone(&grid),
-            Some(FieldKind::Float),
+            // The kind the prepared scans report for the statement's fields. An aggregate binds the
+            // state its input's kind implies, so a `sum` over a native-histogram column has to be
+            // compiled with that kind: bound as a float it would fold the payload as numbers. A
+            // statement that reads no table reports `None` here, which is the data-free case.
+            statement_kind,
         ) {
             Ok(v) => v,
             // The compiler refusing a shape is this route declining it.
@@ -1618,17 +1622,6 @@ impl PromPlanner {
         // source is what each of them reads.
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
-            // A tree that folds native histograms anywhere and whose split declined keeps the
-            // existing plan instead of being segmented. Segmentation cuts the tree into segments
-            // that each fold their own samples and appends the pieces above them, so a group whose
-            // contributions are spread over partitions would be folded once per segment - which for
-            // a histogram sum means merging histograms that never met, and for a histogram average
-            // means a mean of means. `cut_as_segment` returning false only declines to cut that
-            // subtree and the collectors recurse into its children, so the refusal is here, at the
-            // point the segment decision is made.
-            if binds_histogram_state_anywhere(root) {
-                return Ok(None);
-            }
             let plan = segment_tree(
                 Arc::from(expression.as_str()),
                 &tree,
