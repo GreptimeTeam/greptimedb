@@ -1,0 +1,41 @@
+src/meta-srv/src/procedure/repartition/repartition_start.rs
+  s_80d1f1953e9115::t_dee399df27f5ef 226
+  s_80d1f1953e9115::t_75c2824f7930a6 182-194,224-225,227
+src/meta-srv/src/procedure/repartition/update_partition_metadata.rs
+  s_80d1f1953e9115::t_75c2824f7930a6 80-92,123-127
+src/query/src/dist_plan/analyzer.rs
+  s_80d1f1953e9115::t_75c2824f7930a6 508-509,512-519
+src/query/src/dist_plan/analyzer/fallback.rs
+  s_80d1f1953e9115::t_75c2824f7930a6 63-64,68-73
+src/query/src/dist_plan/planner.rs
+  s_80d1f1953e9115::t_75c2824f7930a6 23,228-236
+.github/actions/setup-greptimedb-cluster/with-minio-repartition-gc.yaml
+  s_80d1f1953e9115::t_75c2824f7930a6 6-9
+src/meta-srv/src/procedure/repartition.rs
+  s_80d1f1953e9115::t_75c2824f7930a6 52,434-438,450-453,455-464
+  s_80d1f1953e9115::t_dee399df27f5ef 439-442,454
+tests-fuzz/src/validator/row.rs
+  s_80d1f1953e9115::t_75c2824f7930a6 164-170
+src/operator/src/statement/ddl.rs
+  s_80d1f1953e9115::t_01860cb08ef11b 1712-1713
+  s_80d1f1953e9115::t_75c2824f7930a6 1520-1531,1711,1714,1729-1732
+tests-fuzz/targets/ddl/fuzz_repartition_table_chaos.rs
+  s_80d1f1953e9115::t_75c2824f7930a6 63,233,235-236,243-252
+  s_80d1f1953e9115::t_dee399df27f5ef 234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "a252df1df55754ac076d561cc67eb087f52d9362",
+  "prompts": {},
+  "sessions": {
+    "s_80d1f1953e9115": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_16f3e57feffe1Cy8zA6EA6gHXT",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

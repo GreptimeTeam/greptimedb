@@ -1,0 +1,29 @@
+src/common/batcher/src/worker_registry.rs
+  s_2432582dedaf5f::t_7bb32731126bcc 19,55-71,205-248
+src/servers/src/pending_rows_batcher.rs
+  s_cd17afc428d85a::t_4a647ff71263ed 844,846
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "b6ba0ac98aef8d390e8c6906d75e82a9c7d1b589",
+  "prompts": {},
+  "sessions": {
+    "s_2432582dedaf5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e51-436e-7e22-8f81-250159664969",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_cd17afc428d85a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e5e-c225-7e83-b498-f3fe753a8217",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

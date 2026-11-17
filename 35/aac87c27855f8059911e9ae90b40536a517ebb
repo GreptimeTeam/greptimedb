@@ -1,0 +1,25 @@
+.github/actions/aliyun-ecs-create/action.yml
+  s_6d34f78fa90b16::t_3df9e6e42493cf 41-44,85
+.github/scripts/aliyun-ecs-runner-provision.py
+  s_6d34f78fa90b16::t_494d0922450089 107,132,145-161,202,457,521-524,558
+.github/workflows/vmbench-long-range.yml
+  s_6d34f78fa90b16::t_98c971f6bf7124 40,103,141-153,157,186,226,236,242-246,248-257,259-264,268-270,273-276,284-287
+tests/perf/test_aliyun_ecs_runner_scripts.py
+  s_6d34f78fa90b16::t_feceb1dd116126 24,261-290
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "35aac87c27855f8059911e9ae90b40536a517ebb",
+  "prompts": {},
+  "sessions": {
+    "s_6d34f78fa90b16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef3-09f3-7a80-8f06-aaef49cd7108",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

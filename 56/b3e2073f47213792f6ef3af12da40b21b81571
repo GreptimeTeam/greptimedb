@@ -1,0 +1,47 @@
+src/operator/src/insert.rs
+  s_cbf051d9e59a54::t_57a8537bccd8bb 268-269,302,316-317,350,361,372,1751-1765
+src/operator/src/req_convert/common/partitioner.rs
+  s_cbf051d9e59a54::t_cbb54f8631a28e 37,48
+src/operator/src/req_convert/insert/row_to_region.rs
+  s_cbf051d9e59a54::t_48973e3040cded 48,59,85-157
+src/operator/src/req_convert/insert/stmt_to_region.rs
+  s_cbf051d9e59a54::t_120412945ddcc6 157
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_cbf051d9e59a54::t_5d475a46d8798c 42,50,104-153,169,172
+src/servers/src/grpc/context_auth.rs
+  s_cbf051d9e59a54::t_c15abebbee90ec 24,32,50-68,178-222
+src/servers/src/grpc/greptime_handler.rs
+  s_cbf051d9e59a54::t_aa8a2c789f6fff 41,258-267,335-383
+src/servers/src/hint_headers.rs
+  s_cbf051d9e59a54::t_787f9a147b1009 62-77
+src/servers/src/http.rs
+  s_cbf051d9e59a54::t_0f7876a2985ef3 120,1063-1064
+src/servers/src/http/header.rs
+  s_cbf051d9e59a54::t_50383f875731a9 47,98-101
+src/servers/src/http/skip_wal.rs
+  s_cbf051d9e59a54::t_8a7c044d700c42 1-56
+src/servers/tests/http/http_handler_test.rs
+  s_cbf051d9e59a54::t_d7de591f2a1a16 983-1081
+src/session/src/context.rs
+  s_cbf051d9e59a54::t_588e5af70b0977 156-164,360-368,760-790
+src/session/src/hints.rs
+  s_cbf051d9e59a54::t_1ec8c80317eaf5 26-28
+src/session/src/lib.rs
+  s_cbf051d9e59a54::t_8ba8ec83678b62 63-64,79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "56b3e2073f47213792f6ef3af12da40b21b81571",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+src/frontend/src/instance.rs
+  s_c8f343c7af25c4::t_2da0b86d0cff92 1859
+src/frontend/src/instance/builder.rs
+  s_c8f343c7af25c4::t_532bc3ed9ad3a7 27,35,53-54,64,222-227,229-264
+src/frontend/src/instance/influxdb.rs
+  s_c8f343c7af25c4::t_22144ca5f96045 211
+src/frontend/src/instance/opentsdb.rs
+  s_c8f343c7af25c4::t_6adc35a762c8e0 24,47,58-77,81,117
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_20be692a4fc107 39,54,112,134-136,142,144-149,434-449,456-470,472,493,511-601
+src/frontend/src/service_config/prom_store.rs
+  s_c8f343c7af25c4::t_391e3ceeb01a7d 69
+src/servers/src/http/opentsdb.rs
+  s_c8f343c7af25c4::t_cd3d90eac5a928 100,175-255
+src/servers/src/query_handler.rs
+  s_c8f343c7af25c4::t_7634d95190c3d5 97-103
+src/servers/tests/http/prom_store_test.rs
+  s_c8f343c7af25c4::t_8354b5702aedc9 43,65,84-89,101,161-166,252-262,821-895
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "fd5e6f404cbb3a59aaa25ea5204ec72ecd174b83",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

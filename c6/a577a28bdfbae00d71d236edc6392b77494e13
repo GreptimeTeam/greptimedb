@@ -1,0 +1,19 @@
+docs/rfcs/2026-09-06-object-store-wal.md
+  s_b7d7dd5280bd00::t_78f3225de1b9d3 146,157,161
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c6a577a28bdfbae00d71d236edc6392b77494e13",
+  "prompts": {},
+  "sessions": {
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

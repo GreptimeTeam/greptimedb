@@ -1,0 +1,111 @@
+src/meta-srv/src/procedure/repartition.rs
+  s_b2c1f5f63bb6a4::t_f29a3c94def91a 57
+  s_b2c1f5f63bb6a4::t_0834f4d674b86f 47,382
+src/meta-srv/src/procedure/test_util.rs
+  s_b2c1f5f63bb6a4::t_5e023563d5ceac 34,324
+src/common/meta/src/ddl/table_meta.rs
+  s_b2c1f5f63bb6a4::t_81177e2a1847b5 29,101
+src/common/meta/src/key/topic_region.rs
+  s_b2c1f5f63bb6a4::t_84eb771293e5a9 21
+  s_b2c1f5f63bb6a4::t_e9b6a9f4e24b04 369
+  s_b2c1f5f63bb6a4::t_7abb007a692209 32,268,270,286-287,289-290
+  s_b2c1f5f63bb6a4::t_b73071b31e4327 522
+src/common/meta/src/ddl/create_table.rs
+  s_b2c1f5f63bb6a4::t_8986523cf5e4b2 47,121,295,377
+src/common/meta/src/ddl/create_table/executor.rs
+  s_b2c1f5f63bb6a4::t_626f2ec478b305 25,41,105,128,182
+src/common/meta/src/ddl/utils.rs
+  s_b2c1f5f63bb6a4::t_f59bcc57bf8c27 190
+  s_b2c1f5f63bb6a4::t_8843e36c626922 207
+  s_b2c1f5f63bb6a4::t_01f9a3d73e81ee 208,210
+  s_b2c1f5f63bb6a4::t_8137003c3a4e72 56
+  s_b2c1f5f63bb6a4::t_84eb771293e5a9 40
+  s_b2c1f5f63bb6a4::t_ad8633c13116b9 46-47
+src/common/meta/src/instruction.rs
+  s_b2c1f5f63bb6a4::t_8137003c3a4e72 31
+  s_b2c1f5f63bb6a4::t_29ca7878868105 208-209,223
+  s_b2c1f5f63bb6a4::t_bc66ec87fbdb0c 1133,1403-1412
+src/meta-srv/src/procedure/repartition/utils.rs
+  s_b2c1f5f63bb6a4::t_ad8633c13116b9 299-304
+  s_b2c1f5f63bb6a4::t_75ab30c1f20137 21,79-80,83
+  s_b2c1f5f63bb6a4::t_b925a0bb54d70a 200-202,204,263,269,318,346
+src/cli/src/bench/metadata.rs
+  s_b2c1f5f63bb6a4::t_5e653d175fb418 52
+src/operator/src/tests/partition_manager.rs
+  s_b2c1f5f63bb6a4::t_d52d19dbe0511e 25,73
+src/datanode/src/heartbeat/handler/open_region.rs
+  s_b2c1f5f63bb6a4::t_ad8633c13116b9 52-54
+  s_b2c1f5f63bb6a4::t_627f630cdaa494 55-56,66,68-77
+src/meta-srv/src/procedure/region_migration/downgrade_leader_region.rs
+  s_b2c1f5f63bb6a4::t_f6becbbad7be3f 406
+  s_b2c1f5f63bb6a4::t_26be740f903799 382
+src/common/meta/src/ddl/create_logical_tables/region_request.rs
+  s_b2c1f5f63bb6a4::t_9d8c4dfd835a03 69
+src/meta-srv/src/procedure/repartition/test_util.rs
+  s_b2c1f5f63bb6a4::t_eed4c12610f298 30,125,141,167-168,170
+src/common/meta/src/wal_provider.rs
+  s_b2c1f5f63bb6a4::t_d1013d4a1bd24c 26,38-58,63-95
+  s_b2c1f5f63bb6a4::t_7ef66f365eee3e 114,117,202-203,205-208,210,216,220-222
+  s_b2c1f5f63bb6a4::t_4c55386ee19716 386
+  s_b2c1f5f63bb6a4::t_ad8633c13116b9 59-62
+  s_b2c1f5f63bb6a4::t_71560dd889d32d 255,308,314-373
+src/common/meta/src/reconciliation/reconcile_logical_tables/reconcile_regions.rs
+  s_b2c1f5f63bb6a4::t_9d8c4dfd835a03 131
+src/common/meta/src/ddl/allocator/wal_options.rs
+  s_b2c1f5f63bb6a4::t_8137003c3a4e72 20
+  s_b2c1f5f63bb6a4::t_63f7e61af0eaa1 30
+src/meta-srv/src/procedure/repartition/allocate_region.rs
+  s_b2c1f5f63bb6a4::t_82d3f4a8df44dd 499
+  s_b2c1f5f63bb6a4::t_9ab1316d5c7347 26,369
+src/common/meta/src/key.rs
+  s_b2c1f5f63bb6a4::t_7dc2a07a67a8c6 2556,2559,2561,2565,2567,2614,2617,2619,2623,2625,2629,2631,2675,2678,2680,2684,2686
+  s_b2c1f5f63bb6a4::t_64ec0a7b9f623f 1738
+  s_b2c1f5f63bb6a4::t_c81835fbd6e156 2081
+  s_b2c1f5f63bb6a4::t_92299def7441b6 782,1436
+  s_b2c1f5f63bb6a4::t_ad8633c13116b9 1665
+  s_b2c1f5f63bb6a4::t_bfc2a1969944de 1179
+  s_b2c1f5f63bb6a4::t_f12eb27d2ec13c 1820
+  s_b2c1f5f63bb6a4::t_61a77aa5175a3a 2756,2813,2886,2983,3086
+  s_b2c1f5f63bb6a4::t_8137003c3a4e72 170
+src/common/meta/src/key/datanode_table.rs
+  s_b2c1f5f63bb6a4::t_37826e3da76151 390-391,493-495,515-524
+  s_b2c1f5f63bb6a4::t_8137003c3a4e72 37
+  s_b2c1f5f63bb6a4::t_66f2f1da80a4db 54,56-57,232,317
+src/datanode/src/utils.rs
+  s_b2c1f5f63bb6a4::t_9f17d7d0678af0 25-27,65,145-146,170-171
+  s_b2c1f5f63bb6a4::t_fd0275a680ab11 33
+src/meta-srv/src/procedure/region_migration/upgrade_candidate_region.rs
+  s_b2c1f5f63bb6a4::t_658fbb3444161f 99
+  s_b2c1f5f63bb6a4::t_23304d2c1b02c3 359,383-384,386,388,392,398
+src/common/meta/src/ddl.rs
+  s_b2c1f5f63bb6a4::t_8137003c3a4e72 29
+  s_b2c1f5f63bb6a4::t_38a7e84fcd1413 62,64
+  s_b2c1f5f63bb6a4::t_84eb771293e5a9 17
+src/cli/src/metadata/repair/create_table.rs
+  s_b2c1f5f63bb6a4::t_ad8633c13116b9 85-92
+  s_b2c1f5f63bb6a4::t_3736741c949527 28
+src/common/meta/src/ddl/create_table/template.rs
+  s_b2c1f5f63bb6a4::t_83607f791bf436 29,219,221,227,242
+  s_b2c1f5f63bb6a4::t_ad8633c13116b9 289-296
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "da050a521501db0a101ae1768be4fa900db6c0d7",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_b2c1f5f63bb6a4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a06f7a3ffetYZYY9HX7UMRL2",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

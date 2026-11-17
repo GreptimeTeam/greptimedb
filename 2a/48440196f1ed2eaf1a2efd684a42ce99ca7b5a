@@ -1,0 +1,23 @@
+src/mito2/src/compaction/task.rs
+  529f9f74d95ff60d 389,437-438
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "2a48440196f1ed2eaf1a2efd684a42ce99ca7b5a",
+  "prompts": {
+    "529f9f74d95ff60d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_279e7252bffeQkJfvLe0MbiD6j",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 3,
+      "total_deletions": 3,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    }
+  }
+}

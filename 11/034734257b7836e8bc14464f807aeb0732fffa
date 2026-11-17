@@ -1,0 +1,59 @@
+.github/actions/setup-benchmark/action.yml
+  s_62f38cee14872e::t_0822363d3f0e19 1-38
+.github/scripts/aliyun-ecs-runner-provision.py
+  s_6da34b8ed41ba2::t_d98a8a3871ace0 54-55
+.github/scripts/aliyun-ecs-runner-teardown.py
+  s_6da34b8ed41ba2::t_8a37e643aa1a8a 50-51
+.github/scripts/aws-ec2-runner-provision.py
+  s_62f38cee14872e::t_e06bcce81818df 1-265
+.github/scripts/aws-ec2-runner-teardown.py
+  s_62f38cee14872e::t_69767ec9cfb4cd 1-160
+.github/scripts/ci-runner-config.py
+  s_62f38cee14872e::t_a9609c96f14f2a 1-47
+.github/scripts/ci-runners.md
+  s_62f38cee14872e::t_79df03a59177ab 1-71
+.github/workflows/agent-observability.yml
+  s_62f38cee14872e::t_413cc377406189 53-60,62,65,67,98-99,110,121-124,127,140,143,172-174,181,192,199-220,228,245-246,290,292,381,390,399-415
+.github/workflows/aws-ec2-runner-janitor.yml
+  s_62f38cee14872e::t_4efa9a678e62d3 1-29
+.github/workflows/checks.yml
+  s_62f38cee14872e::t_6f0ae09bbdd1c9 100
+.github/workflows/vmbench-long-range.yml
+  s_62f38cee14872e::t_bd30d8d4a64c49 38-45,47,55,57,87-88,99,110-116,174-176,183,194,201-222,240-245,327,336,345-361
+tests/perf/test_aliyun_ecs_runner_scripts.py
+  s_14072bd9a2d480::t_6757e416d2314c 33-35,64,72,76-91
+tests/perf/test_ci_runner_scripts.py
+  s_62f38cee14872e::t_c83d381acd10ec 1-406
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "11034734257b7836e8bc14464f807aeb0732fffa",
+  "prompts": {},
+  "sessions": {
+    "s_14072bd9a2d480": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cd2f-9b27-7293-b99c-95c7618a51c2",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_62f38cee14872e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cd0b-228f-78c3-a865-38daec4f0de4",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_6da34b8ed41ba2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cd2f-5eea-7ee2-9846-c8d7bbeecb7b",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

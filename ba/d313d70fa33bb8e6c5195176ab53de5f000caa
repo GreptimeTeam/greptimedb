@@ -1,0 +1,28 @@
+src/standalone/src/procedure.rs
+  s_0484a52900cd30::t_77557ab3f77e10 20,69
+src/common/meta/src/ddl_manager.rs
+  s_0484a52900cd30::t_58b090d17713ce 302-304
+  s_0484a52900cd30::t_75655308094d52 19,155-159,166,298-300,308-310,320,1171
+  s_0484a52900cd30::t_0c15df65d58e1f 52
+tests-integration/tests/repartition.rs
+  s_0484a52900cd30::t_e414d29cdfa753 59-67,99-219,361-364
+  s_0484a52900cd30::t_0c15df65d58e1f 68-75,220-360
+src/meta-srv/src/procedure/repartition.rs
+  s_0484a52900cd30::t_828cc46bd2c25f 36,808,813-829,841
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "bad313d70fa33bb8e6c5195176ab53de5f000caa",
+  "prompts": {},
+  "sessions": {
+    "s_0484a52900cd30": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1987b7969ffe9Php3dBmfqR9z1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

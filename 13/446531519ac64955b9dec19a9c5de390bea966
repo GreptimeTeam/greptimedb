@@ -1,0 +1,19 @@
+.github/workflows/agent-observability.yml
+  s_6d34f78fa90b16::t_de286033e39518 51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "13446531519ac64955b9dec19a9c5de390bea966",
+  "prompts": {},
+  "sessions": {
+    "s_6d34f78fa90b16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef3-09f3-7a80-8f06-aaef49cd7108",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

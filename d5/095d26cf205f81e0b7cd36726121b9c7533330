@@ -1,0 +1,152 @@
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/status.sh.tmpl
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-5
+  s_08854f879d9af0::t_cf25b614fb95c6 6-7
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/operator-install.sh.tmpl
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-3
+  s_08854f879d9af0::t_cf25b614fb95c6 4
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/chaos-mesh-install.sh.tmpl
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-3
+  s_08854f879d9af0::t_cf25b614fb95c6 4
+.agents/skills/greptimedb-k8s-e2e/scripts/configure.sh
+  s_d0ca041c74f9fc::t_d0057288e1f689 24
+  s_d0ca041c74f9fc::t_4e7487b4df5bea 1-23,25-67
+.agents/skills/greptimedb-k8s-e2e/tests/validate-skill.sh
+  s_d0ca041c74f9fc::t_9d87ae4c77edcb 1-13
+.agents/skills/greptimedb-k8s-e2e/scripts/lib/common.sh
+  s_432d2e5c0ca2b4::t_c960daa0034ad1 1-33,35-50
+  s_432d2e5c0ca2b4::t_46ce20de20c373 34
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/values/greptimedb.yaml.tmpl
+  s_6e019b6a12d4c0::t_71d6e216c50f24 20
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-12,14-19,21,23-25
+  s_6e019b6a12d4c0::t_fbad56eafeb34e 13,22
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/deploy.sh.tmpl
+  s_08854f879d9af0::t_cf25b614fb95c6 6-7
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-5
+.agents/skills/greptimedb-k8s-e2e/scripts/generate-workspace.sh
+  s_d0ca041c74f9fc::t_d0057288e1f689 48-52
+  s_d0ca041c74f9fc::t_4e7487b4df5bea 1-47,53-62
+.agents/skills/greptimedb-k8s-e2e/scripts/discover.sh
+  s_d0ca041c74f9fc::t_4e7487b4df5bea 1-45
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/component-lifecycle.sh.tmpl
+  s_08854f879d9af0::t_a385400b167d72 1-108
+.agents/skills/greptimedb-k8s-e2e/tests/test-discovery-read-only.sh
+  s_d0ca041c74f9fc::t_9d87ae4c77edcb 1-12
+.agents/skills/greptimedb-k8s-e2e/SKILL.md
+  s_390d50887ca3f0::t_836049b8266a22 1-141
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/Makefile.tmpl
+  s_08854f879d9af0::t_5b277a8e272f39 9-12
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-4,25,30,33,36,38-39,41-42,44-45
+  s_08854f879d9af0::t_a385400b167d72 5-8,13-24,26-29,31-32,34-35,37,40,43,46-100
+.agents/skills/greptimedb-k8s-e2e/tests/test-generate-workspace.sh
+  s_d0ca041c74f9fc::t_9d87ae4c77edcb 1-17
+.agents/skills/greptimedb-k8s-e2e/tests/README.md
+  s_d0ca041c74f9fc::t_9d87ae4c77edcb 1-4
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/common.sh.tmpl
+  s_08854f879d9af0::t_a385400b167d72 72,76
+  s_6e019b6a12d4c0::t_371c7d0f15414a 114-115
+  s_6e019b6a12d4c0::t_b232370816e556 64-68
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-35,37-62,71,73-75,77-78,88-89,93,103-113,116-132
+  s_6e019b6a12d4c0::t_1600282f56fc23 36
+  s_6e019b6a12d4c0::t_513d06f440b61e 63,69-70,79-87,90-92,94-102
+.agents/skills/greptimedb-k8s-e2e/scripts/lib/safety.sh
+  s_432d2e5c0ca2b4::t_46ce20de20c373 13,15-20,49-52
+  s_432d2e5c0ca2b4::t_b6051bc19902bf 33,35-40
+  s_432d2e5c0ca2b4::t_c960daa0034ad1 1-5,10-12,14,21-32,34,42-48,53-72
+  s_7081e146b7276b::t_73a239192a0c15 6-9,41
+.agents/skills/greptimedb-k8s-e2e/tests/fixtures/default-config.txt
+  s_d0ca041c74f9fc::t_9d87ae4c77edcb 1-24
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/verify.sh.tmpl
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-7,9-16
+  s_6e019b6a12d4c0::t_b232370816e556 8
+.agents/skills/greptimedb-k8s-e2e/scripts/lib/config.sh
+  s_7081e146b7276b::t_73a239192a0c15 25-30,54,69-73
+  s_432d2e5c0ca2b4::t_c960daa0034ad1 1-24,31-53,55-68,74-84
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/README.md.tmpl
+  s_08854f879d9af0::t_cf25b614fb95c6 17,40,55-56,60-63,69-81
+  s_6e019b6a12d4c0::t_513d06f440b61e 23-26,44-48
+  s_6e019b6a12d4c0::t_fbad56eafeb34e 28
+  s_08854f879d9af0::t_5b277a8e272f39 54
+  s_6e019b6a12d4c0::t_b232370816e556 18-21,29-31
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-16,22,27,32-39,41-43,49-53,57-59,64-68,82-87
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/values/minio.yaml.tmpl
+  s_6e019b6a12d4c0::t_b232370816e556 2
+  s_6e019b6a12d4c0::t_371c7d0f15414a 3-4
+  s_6e019b6a12d4c0::t_dcb306e463e645 1,5-10
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/reset-metadata.sh.tmpl
+  s_6e019b6a12d4c0::t_513d06f440b61e 10
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-9,11-18
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/values/postgres.yaml.tmpl
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-2,6,9-13
+  s_6e019b6a12d4c0::t_371c7d0f15414a 7
+  s_6e019b6a12d4c0::t_b232370816e556 3-5,8
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/cleanup.sh.tmpl
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-9,11
+  s_6e019b6a12d4c0::t_513d06f440b61e 10
+.agents/skills/greptimedb-k8s-e2e/tests/test-config-and-safety.sh
+  s_432d2e5c0ca2b4::t_c960daa0034ad1 1-3,26
+  s_d0ca041c74f9fc::t_9d87ae4c77edcb 4-25
+.agents/skills/greptimedb-k8s-e2e/templates/workspace/scripts/chaos-mesh-status.sh.tmpl
+  s_6e019b6a12d4c0::t_dcb306e463e645 1-3
+  s_08854f879d9af0::t_cf25b614fb95c6 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "d5095d26cf205f81e0b7cd36726121b9c7533330",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_08854f879d9af0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0af0aa0a7ffeAiROeI75nHgSRK",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_390d50887ca3f0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0af3fa75effedPkBW6CIbI3vzJ",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_432d2e5c0ca2b4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0af38f41affeZ8b3Z6rBydvIql",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_6e019b6a12d4c0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0af38f3d5ffeXFXqsd1yW76NTx",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_7081e146b7276b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0af0aa0c1ffeXRyn5eYpXCOI9x",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_d0ca041c74f9fc": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0af6e0a2dffe7w6G67b6Vmi5ti",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

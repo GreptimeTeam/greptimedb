@@ -1,0 +1,57 @@
+src/mito2/src/compaction/compactor.rs
+  s_c06578f466c2ea::t_d2c2512dc9c5c6 1157,1264-1265,1267
+  s_c06578f466c2ea::t_68182f05eeb170 428,455,1170,1172-1173
+  s_c06578f466c2ea::t_c05766e4ff3be3 453,1231-1263,1268-1277,1867
+  s_c06578f466c2ea::t_e242bd45a31e38 425-427
+  s_c06578f466c2ea::t_b21274c52f5f8c 429-431,450-452
+  s_c06578f466c2ea::t_37aa7084c385e2 454
+  s_c06578f466c2ea::t_93312a6804e5f9 456-458
+  s_c06578f466c2ea::t_4f3ff775b73d81 1155-1156
+  s_c06578f466c2ea::t_fb8030218be25e 1171
+  s_c06578f466c2ea::t_f9cf94bad13f4e 1266
+  s_c06578f466c2ea::t_c99125b8e7f88b 1278
+  s_c06578f466c2ea::t_1a0c160b4ae492 1864-1866
+  s_c06578f466c2ea::t_e43f9ee23ebc3c 1868-1870
+  s_c06578f466c2ea::t_7a770b3ca37aab 30,156-163,170,183,410-416,420-424,432-449,459-468,518-524,679-693,756,930-935,1007,1014-1019,1143,1192-1194,1200,1206-1208,1211,1221-1222,1226,1285,1459-1462,1802,1861-1863,1871-1873,1897,1909,1918-1919,1940,1951-1952,1956
+src/mito2/AGENTS.md
+  s_c06578f466c2ea::t_c5420565c3a159 88-90
+src/mito2/src/access_layer.rs
+  s_c06578f466c2ea::t_ad0813b6d660f8 398,403-404
+src/mito2/src/compaction/scheduler/local.rs
+  s_c06578f466c2ea::t_e3b8678d7ee018 34,263,289,323
+src/mito2/src/compaction/scheduler/planning.rs
+  s_c06578f466c2ea::t_b08f4ca05624ec 632
+src/mito2/src/compaction/task.rs
+  s_c06578f466c2ea::t_5577eca00d9cd9 245
+src/mito2/src/sst/index.rs
+  s_c06578f466c2ea::t_7c8ef851fe83b9 2674
+src/mito2/src/sst/index/indexer/abort.rs
+  s_c06578f466c2ea::t_bdc4393a2873d2 22-23
+src/mito2/src/sst/index/registry.rs
+  s_c06578f466c2ea::t_132204daa6dff4 22,26,62-77
+src/mito2/src/sst/parquet/writer.rs
+  s_c06578f466c2ea::t_8d3d9f46ce245e 746-747
+src/mito2/src/worker.rs
+  s_c06578f466c2ea::t_4373508149c1a2 67,658
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "13fdeb130643141aebc66d9c733dabaf4d90311f",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_c06578f466c2ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c374-3547-7b31-9c5c-4ab96c5f5115",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

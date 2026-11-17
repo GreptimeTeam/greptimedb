@@ -1,0 +1,19 @@
+src/mito2/src/compaction/compactor.rs
+  s_16f5771c538409::t_c4fd93ebead29f 26,492,495-509,682-693,760-769,771,1286-1315
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e0554d4a668a549be9e7aa9ed55383f4b24c4088",
+  "prompts": {},
+  "sessions": {
+    "s_16f5771c538409": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e28f-8688-73c1-bf53-e5396f3b3127",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

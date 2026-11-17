@@ -1,0 +1,14 @@
+src/mito2/src/region.rs
+  h_623774b620da8e 269,278,288,298,305,327,332,1110,1221,1279,1996,2001,2008,2015,2021,2025,2031,2038
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "f0271948c98a34ff0a2da012944067e0a9aadaf8",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

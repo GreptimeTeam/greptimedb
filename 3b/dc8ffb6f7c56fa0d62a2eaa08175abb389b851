@@ -1,0 +1,39 @@
+Cargo.lock
+  s_c8f343c7af25c4::t_d1453bc4a5a7e5 5706,14435
+Cargo.toml
+  s_c8f343c7af25c4::t_2a291870c82fd8 255
+config/config.md
+  s_c8f343c7af25c4::t_ee48e2fa8d795d 36,282
+config/frontend.example.toml
+  s_c8f343c7af25c4::t_dd02ead35549bb 55-57
+config/standalone.example.toml
+  s_c8f343c7af25c4::t_fd65f51bda8a67 80-82
+src/frontend/AGENTS.md
+  s_c8f343c7af25c4::t_f1bd9d6a12f2af 47-52
+src/frontend/Cargo.toml
+  s_c8f343c7af25c4::t_732ee503b489d0 92
+src/frontend/src/frontend.rs
+  s_c8f343c7af25c4::t_cb433999f79f20 130,225-245
+src/servers/src/http.rs
+  s_c8f343c7af25c4::t_339a38d0c24a19 279-280
+src/standalone/Cargo.toml
+  s_c8f343c7af25c4::t_3ddcc1ecabbfcf 49
+src/standalone/src/options.rs
+  s_c8f343c7af25c4::t_0b68eb1fdcc6a5 136,218-239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "3bdc8ffb6f7c56fa0d62a2eaa08175abb389b851",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

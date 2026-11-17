@@ -1,0 +1,19 @@
+.github/workflows/slash-command-dispatch.yml
+  s_d4896e4c642f16::t_b4a0a6c3f7ff72 3-4,10,33-38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "eb5638c53cfc5e6846f75bf82a2ccd9258647aa7",
+  "prompts": {},
+  "sessions": {
+    "s_d4896e4c642f16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c2b4-6796-7cd1-8617-ab49903c2216",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

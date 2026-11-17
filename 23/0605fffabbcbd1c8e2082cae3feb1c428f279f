@@ -1,0 +1,19 @@
+src/mito2/src/manifest/checkpointer.rs
+  s_ef53d951009ef1::t_c8c4163533e62b 37,110,140,187,197,207,216
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "230605fffabbcbd1c8e2082cae3feb1c428f279f",
+  "prompts": {},
+  "sessions": {
+    "s_ef53d951009ef1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a014dc-66ea-7221-8bb1-4cef6c38147c",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

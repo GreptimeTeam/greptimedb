@@ -1,0 +1,19 @@
+.github/actions/setup-greptimedb-cluster/with-remote-wal.yaml
+  s_b29eade529c17c::t_3bc0b30e313719 14-15,32-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a86f652a4b7ba78bd10df0de7ffc22c375e1ca41",
+  "prompts": {},
+  "sessions": {
+    "s_b29eade529c17c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0c496e63bffeJ4TedA4WyXYZVR",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+.github/workflows/develop.yml
+  s_e4e66bd843b347::t_2396a82234fb0e 170
+  s_e4e66bd843b347::t_ea53f72b0cc9a5 228,339,567
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "3c69d86b4405b46c006257296892642ddb78f032",
+  "prompts": {},
+  "sessions": {
+    "s_e4e66bd843b347": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb0e9-ed83-7de2-ad1c-0f15598496cd",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": null
+    }
+  }
+}

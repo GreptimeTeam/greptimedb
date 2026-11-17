@@ -1,0 +1,23 @@
+src/mito2/src/compaction/compactor.rs
+  529f9f74d95ff60d 20,22,521,529-531,535,537,542,551-552,556-561,564-565,567-568,664,667,903-905,908-917,920,922-971,973-982
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "49caf812bb8e65a6d1fb86e1c5f1b84909bcb518",
+  "prompts": {
+    "529f9f74d95ff60d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_279e7252bffeQkJfvLe0MbiD6j",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 163,
+      "total_deletions": 74,
+      "accepted_lines": 112,
+      "overriden_lines": 4
+    }
+  }
+}

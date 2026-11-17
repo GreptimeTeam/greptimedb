@@ -1,0 +1,23 @@
+src/common/batcher/src/worker_registry.rs
+  s_c8f343c7af25c4::t_8db970bc060476 80-83,121-141
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_f847249364d5f8 572-588
+src/frontend/src/service_config/prom_store.rs
+  s_c8f343c7af25c4::t_1169ca94ebf3f0 69,76-78,114-149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "26700b69406f69de5be3f86386f23dae6c00adc6",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

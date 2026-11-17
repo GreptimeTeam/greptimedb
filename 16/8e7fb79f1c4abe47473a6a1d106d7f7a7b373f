@@ -1,0 +1,23 @@
+.github/scripts/ci-runners.md
+  s_62f38cee14872e::t_d11e1174091443 20-23
+.github/workflows/agent-observability.yml
+  s_62f38cee14872e::t_ac1f889a318710 65-67,140-142,145-147
+.github/workflows/vmbench-long-range.yml
+  s_62f38cee14872e::t_dbe5d0c7c3cb95 55-57,128-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "168e7fb79f1c4abe47473a6a1d106d7f7a7b373f",
+  "prompts": {},
+  "sessions": {
+    "s_62f38cee14872e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cd0b-228f-78c3-a865-38daec4f0de4",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

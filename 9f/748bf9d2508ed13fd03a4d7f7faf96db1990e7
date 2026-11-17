@@ -1,0 +1,16 @@
+src/client/src/database.rs
+  h_623774b620da8e 1312-1315
+src/mito2/src/engine/index_build_test.rs
+  h_623774b620da8e 3035,3103-3104,3110-3115,3117-3122
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9f748bf9d2508ed13fd03a4d7f7faf96db1990e7",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

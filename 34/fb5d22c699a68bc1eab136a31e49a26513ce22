@@ -1,0 +1,25 @@
+config/standalone.example.toml
+  s_2a9e18b5bc423a::t_ab4dbd24f376a9 910
+src/common/event-recorder/src/event_table.rs
+  s_2a9e18b5bc423a::t_ab4dbd24f376a9 130-131
+src/meta-srv/src/procedure/wal_prune.rs
+  s_2a9e18b5bc423a::t_ab4dbd24f376a9 123-125,229-231
+config/config.md
+  s_2a9e18b5bc423a::t_5fd209768d07d1 234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "34fb5d22c699a68bc1eab136a31e49a26513ce22",
+  "prompts": {},
+  "sessions": {
+    "s_2a9e18b5bc423a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fabec-71ad-7f72-95c4-75227a000213",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

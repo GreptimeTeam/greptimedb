@@ -1,0 +1,37 @@
+src/cmd/src/bin/query_perf_fixture/inspect_footer.rs
+  s_02f3035243c944::t_240f2dd337ff24 159,165
+src/cmd/src/bin/query_regression_runner/materialize.rs
+  s_02f3035243c944::t_78f96390cd65a6 69-71
+src/cmd/src/datanode/parquetbench.rs
+  s_02f3035243c944::t_56458937658a8c 625
+src/mito2/src/cache/write_cache.rs
+  s_02f3035243c944::t_75fe73a50a889c 590-592
+src/mito2/src/manifest/tests/checkpoint.rs
+  s_02f3035243c944::t_09661d836457b0 24-25,93-94,107
+src/mito2/src/series_index/searcher.rs
+  s_02f3035243c944::t_dd216102c4eb32 262
+src/mito2/src/series_index/writer.rs
+  s_02f3035243c944::t_750f67bc7d9664 653
+src/mito2/src/sst/range_index/searcher.rs
+  s_02f3035243c944::t_2b9430142830fe 326
+src/mito2/src/sst/range_index/writer.rs
+  s_02f3035243c944::t_d301fc6ec3d3c5 540
+src/object-store/src/layers/mock.rs
+  s_02f3035243c944::t_399482a8c5dfdc 20-23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "ec2a1d29da16b7a5ea379d647574a660ae96a6c9",
+  "prompts": {},
+  "sessions": {
+    "s_02f3035243c944": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07a98-64e7-7a81-8f52-3e5330bfb94a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

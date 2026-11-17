@@ -1,0 +1,34 @@
+.agents/skills/greptimedb-development-docker-image/SKILL.md
+  s_f1b3d84fa42890::t_b960ac00ddc46b 33-39
+  s_f1b3d84fa42890::t_6912d55375c8cb 63-96
+  s_f1b3d84fa42890::t_ffd8791bff146e 129-152
+  s_f1b3d84fa42890::t_a0aac589643994 30-32
+  s_f1b3d84fa42890::t_9ba1c923783319 40-42,60-62
+  s_f1b3d84fa42890::t_1b287ef327c8c1 97-99,126-128
+  s_f1b3d84fa42890::t_2f3a62ca873ec9 153-155
+.agents/skills/greptimedb-development-docker-image/scripts/build_binary.sh
+  s_f1b3d84fa42890::t_4b3b8ad54d9939 1-55
+.agents/skills/greptimedb-development-docker-image/scripts/next_image_tag.py
+  s_f1b3d84fa42890::t_fce1efe8778ba1 1-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.11",
+  "base_commit_sha": "611e5877554e088d0936baf40f6249a021617474",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_f1b3d84fa42890": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0b3587d84ffeVh2NFPCSRn451X",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

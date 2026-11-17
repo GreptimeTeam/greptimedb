@@ -1,0 +1,309 @@
+src/common/batcher/src/worker_registry.rs
+  s_2432582dedaf5f::t_7bb32731126bcc 19,53-69,221-241,243-264
+  s_c8f343c7af25c4::t_f482768e55d08a 17-18,27,30,33,50,72,84-91,97-99,104,108,187,242
+  s_c8f343c7af25c4::t_8db970bc060476 80-83,121-141
+src/servers/src/batcher/logical_table.rs
+  s_cd17afc428d85a::t_4a647ff71263ed 282,284
+  s_c8f343c7af25c4::t_8ee806119d625e 129-130,132
+  s_abcb81dd1a0af3::t_d57b83b449b268 17,20,29,42,45,55-57,99,133-136,331,339-340,434-437,439-444
+  s_c8f343c7af25c4::t_d952b6b5019035 172-173,177-179,180-184,189,191,193,273,275
+  s_c8f343c7af25c4::t_774250b299a0ff 24
+  s_c8f343c7af25c4::t_a42afb498a5bf8 58,169-171,174-176,262
+src/datatypes/src/timestamp.rs
+  s_c8f343c7af25c4::t_2ea09224a4c292 16,182-194,197-199,232-273
+src/operator/src/bulk_insert.rs
+  s_c8f343c7af25c4::t_a3b89c7a40d82f 36,43
+  s_c8f343c7af25c4::t_8494489344441c 48-50
+src/operator/src/req_convert/insert.rs
+  s_c8f343c7af25c4::t_28a3ec80cc9ff6 21,33
+  s_5bcaf68390e7c4::t_5a2760646c0db0 25
+src/operator/src/req_convert/insert/timestamps.rs
+  s_c8f343c7af25c4::t_91cebee6e5601b 1-38
+Cargo.lock
+  s_c8f343c7af25c4::t_5526f603b78bdf 2326
+  s_c8f343c7af25c4::t_91426d07207299 5647
+  s_c8f343c7af25c4::t_d1453bc4a5a7e5 5704,14442
+src/common/batcher/Cargo.toml
+  s_c8f343c7af25c4::t_cc0df8dd713657 14
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_f847249364d5f8 840-856
+  s_c8f343c7af25c4::t_b1a14c3be2b15b 697
+  s_5bcaf68390e7c4::t_dd1f8a2954fdd7 75,112-113,137-142,445-446,453-454,466,479,482-491,536-581,584-585,587-588,593-610,628,695-696,797-799,801-803,805,811,813,815-820
+  s_c8f343c7af25c4::t_e1e89503e70527 467-468,480-481,582-583,586,589-592,665,675,682
+  s_c8f343c7af25c4::t_9b318fd8ba8252 27,37,372-380,396-405,422-433,470-474,676-679
+src/frontend/src/service_config/prom_store.rs
+  s_c8f343c7af25c4::t_1169ca94ebf3f0 69,73,75-82,114-149
+  s_c8f343c7af25c4::t_30077e55edb8fd 18,21
+  s_c8f343c7af25c4::t_88c498232537eb 57
+src/common/batcher/src/flush_policy/timing.rs
+  s_c8f343c7af25c4::t_bc903bb0517551 44-48,84-88,90-93
+  s_d1140b6a37d6d5::t_0d4717694cf152 29,33-35,51,89,96,136,152-153
+src/frontend/Cargo.toml
+  s_c8f343c7af25c4::t_010eabe52d67b7 32
+  s_5bcaf68390e7c4::t_a4e6fb0cc3ce67 101
+src/common/batcher/src/pending_worker.rs
+  s_d1140b6a37d6d5::t_c83f1fc9999aef 127
+src/common/batcher/src/flush_limiter.rs
+  s_d1140b6a37d6d5::t_3f264769d0df3d 26-29,48-53,58
+src/common/batcher/src/request_limiter.rs
+  s_d1140b6a37d6d5::t_7e47cda6b27149 29-32,64,66-67,73,91,106
+src/common/batcher/src/notifier.rs
+  s_d1140b6a37d6d5::t_ad91f070097f4e 39-41,44,95-97,111
+src/operator/src/batcher.rs
+  s_c8f343c7af25c4::t_ade92f6552fc22 1-31,34-42
+  s_c8f343c7af25c4::t_abc19478eceed6 32-33
+src/operator/src/lib.rs
+  s_c8f343c7af25c4::t_b5bbf0d50d7730 15
+src/api/src/helper.rs
+  s_c8f343c7af25c4::t_6844ea0e610f95 1036-1046,2099-2112
+src/mito2/src/request.rs
+  s_c8f343c7af25c4::t_9227b3a7cb2b7b 23
+src/operator/src/req_convert/insert/row_to_batch.rs
+  s_c8f343c7af25c4::t_e7b0eac3f0a668 17-22,37-40,42,119-128,153-195,502-590
+  s_abcb81dd1a0af3::t_e3d28a6d0ab0a5 26,149-150,350-408
+src/datatypes/src/extension/json.rs
+  s_abcb81dd1a0af3::t_f228e6a97e4ae0 18,22,32-52
+src/mito2/src/memtable/bulk/part.rs
+  s_abcb81dd1a0af3::t_7cf0a1916896be 42
+tests/compatibility/ci.toml
+  s_c8f343c7af25c4::t_79b76ae02fa4d4 9
+src/servers/Cargo.toml
+  s_c8f343c7af25c4::t_adaa4a0cbd5561 158,166
+src/servers/src/batcher.rs
+  s_c8f343c7af25c4::t_02d8a15714a89c 1-14,16-18,20-23
+  s_c8f343c7af25c4::t_f7b823a0afc482 24-41
+  s_c8f343c7af25c4::t_bda24e9d2added 42-80
+src/servers/src/batcher/flow_notifier.rs
+  s_c8f343c7af25c4::t_581f9ab8f426e9 1-172
+src/servers/src/batcher/flow_sender.rs
+  s_c8f343c7af25c4::t_9800abbc388495 1-212
+src/servers/src/batcher/table.rs
+  s_c8f343c7af25c4::t_dc8cca251e2892 1-40,42-73,75-114,116-165,168-215,219-233,235,237-244,246-247,249-252,254-257,259-263,265-267,269-274,276,278-291,293-298,299,300-328,434-471,478-481,483-484,488-491,494-520,531-532,533,582-591,593-630,632-730,732-739,741-973
+  s_c8f343c7af25c4::t_b4616a9877a312 236,268,475-477,482,492,528-530,592
+  s_c8f343c7af25c4::t_8ac04aa5f2dc10 292,472-474,731
+  s_c8f343c7af25c4::t_5c6737c1008807 41,74,115,166-167,216-218,245,329-433
+src/servers/src/batcher/table/batch.rs
+  s_c8f343c7af25c4::t_42bbdf3e387efb 1-19,21-22,24-50,54-58,60-156
+  s_c8f343c7af25c4::t_ca081e0a39dfc4 23,51-53
+  s_c8f343c7af25c4::t_e68788dfebbe10 20,59
+src/servers/src/batcher/table/flow_notifier.rs
+  s_c8f343c7af25c4::t_45f2f7cad6be87 1-167
+src/servers/src/batcher/table/metrics.rs
+  s_c8f343c7af25c4::t_7b14b8411ae652 1-64
+src/servers/src/batcher/table/pending_batch.rs
+  s_c8f343c7af25c4::t_18fc8ef6a28dfb 1-96
+src/servers/src/batcher/table/pending_worker.rs
+  s_c8f343c7af25c4::t_ae22e04f5e0a54 1-185
+src/servers/src/batcher/test_util.rs
+  s_c8f343c7af25c4::t_fb6097d7af7691 1-46
+src/servers/src/lib.rs
+  s_c8f343c7af25c4::t_01677756619444 25
+src/operator/src/error.rs
+  s_c8f343c7af25c4::t_bb73472c74ceeb 16,114-120,1079,1190
+config/frontend.example.toml
+  s_5bcaf68390e7c4::t_7f741e3470e78c 242-250,253-261,263-267
+  s_c8f343c7af25c4::t_dd02ead35549bb 60
+  s_abcb81dd1a0af3::t_2271dc1398c5c9 241
+  s_5bcaf68390e7c4::t_0467bc4123a2d2 59,61,237-238,268-269,274-282,284-288,320
+  s_c8f343c7af25c4::t_a5dad4c5b20a64 235-236
+  s_c8f343c7af25c4::t_d7efaf728b82a3 270-273
+  s_c8f343c7af25c4::t_ed9264d1c33085 262,283
+  s_c8f343c7af25c4::t_7c1ac9792b97fc 234,239-240,251-252
+config/standalone.example.toml
+  s_5bcaf68390e7c4::t_b648acd91e1c2b 221-229,232-240,242-246
+  s_c8f343c7af25c4::t_fd65f51bda8a67 85
+  s_abcb81dd1a0af3::t_0a612cc3791fd4 220
+  s_5bcaf68390e7c4::t_a285e6e366ed58 84,86,216-217,247-248,253-261,263-267,299
+  s_c8f343c7af25c4::t_3429c3a425d005 214-215
+  s_c8f343c7af25c4::t_068e4a53898689 249-252
+  s_c8f343c7af25c4::t_d7048040ad7789 241,262
+  s_c8f343c7af25c4::t_299e26d56d7b87 213,218-219,230-231
+src/frontend/src/frontend.rs
+  s_5bcaf68390e7c4::t_c0713623c8ef24 38-39,220,277-281,284-287,289-294,303-306,308-309,320-321
+  s_c8f343c7af25c4::t_cb433999f79f20 259-262,264-269,272-276
+  s_c8f343c7af25c4::t_b6db6b328216c6 71,108,133,263,282,288,307
+  s_c8f343c7af25c4::t_77b35bf3414a1e 70,134,230-252,254-258,270,283,295-302
+  s_c8f343c7af25c4::t_52b96971035ea6 209,253,271
+src/frontend/src/instance.rs
+  s_5bcaf68390e7c4::t_a3a3937bb1302a 1903
+  s_c8f343c7af25c4::t_e7fd06d8d2379d 24,35,82,135
+src/frontend/src/instance/builder.rs
+  s_5bcaf68390e7c4::t_05d1b48997481f 27,35,54,222-227,229-239
+  s_c8f343c7af25c4::t_e6791add4f9ba3 261-262,264
+  s_5bcaf68390e7c4::t_d10816f7eb49ab 64,240-260,263,389
+  s_c8f343c7af25c4::t_683096dc64b30f 53
+src/frontend/src/instance/influxdb.rs
+  s_5bcaf68390e7c4::t_26d720080d8caf 211
+src/frontend/src/instance/opentsdb.rs
+  s_5bcaf68390e7c4::t_7abfa3fcec3f40 24,47,58-77,81,117
+src/frontend/src/service_config.rs
+  s_5bcaf68390e7c4::t_30c1f44fd340a2 20
+  s_5bcaf68390e7c4::t_dafa4c2b11bb96 29
+src/frontend/src/service_config/influxdb.rs
+  s_5bcaf68390e7c4::t_f42bc71fcc5f04 52
+src/frontend/src/service_config/pending_rows_batcher.rs
+  s_5bcaf68390e7c4::t_d9ad5f08493b9e 1-19,21-22,27-28,46-61,63-78,80-85,87-92,144-147,253-254,257,261,263-264,266-271,273,275-276,278-281,284-286,288-291,293-297,299-304,306-314,316-322
+  s_c8f343c7af25c4::t_373b6f939bc0fd 23-26,29-40,42-44,62,79,93-143,148-240,243-252,255,262,265,272,274,277,282-283,292,298,305,315
+  s_c8f343c7af25c4::t_ddd76553892069 86,287
+  s_c8f343c7af25c4::t_12f437f8ed1c37 20,41,45,241-242,256,258-260
+src/operator/src/insert.rs
+  s_5bcaf68390e7c4::t_efbfb3111e579f 27,69,78,88-89,102,293,297-305,407-411,435-447,463-469,478-511,516,519,521,525-531,533-541,542-547,596-625,640-646,658-666,1927
+  s_5bcaf68390e7c4::t_68193ecf9c3f5f 470-477,2707-2741,2878-2930
+  s_c8f343c7af25c4::t_39d2f152589730 159-279,2437-2478,2480,2483,2485,2490-2497,2742-2877
+src/operator/src/req_convert/insert/stmt_to_region.rs
+  s_5bcaf68390e7c4::t_8bb3ea73775e30 67-101,191
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_5bcaf68390e7c4::t_24e885bbd45179 15,40-47,52-55,57-62,64,90,94,96,101-112
+src/servers/src/http.rs
+  s_425c029c259ad0::t_7ed47877131caf 24,30,43,202,227-236,241-242,244-247,646,657,672-676,898,933,952,1111,1201-1204,1240-1243,1320-1323,1348-1351,1379-1382,1394-1402,1458-1466,1469,1483-1486,1493-1496,1513-1516,1690,2457-2465,2467-2468,2470-2473,2512-2597
+  s_c8f343c7af25c4::t_339a38d0c24a19 273-274
+  s_598820b5736fbc::t_f19fc48ac13956 203,224-226,237-240,243,647,658,665-671,899,934,953,1112-1114,2474-2511
+  s_c8f343c7af25c4::t_f6b73f70b0df36 56,2466,2469
+src/servers/src/http/opentsdb.rs
+  s_5bcaf68390e7c4::t_08eb3429003381 175-255
+src/servers/src/query_handler.rs
+  s_5bcaf68390e7c4::t_ad2494159bd9a4 97-103
+src/servers/tests/http/prom_store_test.rs
+  s_5bcaf68390e7c4::t_2b6cd254d25891 66,85-90,102,162-167,253-263,822-896
+  s_c8f343c7af25c4::t_f6593f8fc5b48f 39,44
+src/session/src/context.rs
+  s_5bcaf68390e7c4::t_1b48d1d2befe0e 82-84,475-483,648,767,936-939,944-947,951-955
+  s_5bcaf68390e7c4::t_2ec1d591c5faa8 85-87,464-473,650,940-943,948-950
+  s_c8f343c7af25c4::t_9d7677000c428c 474
+src/standalone/src/options.rs
+  s_5bcaf68390e7c4::t_10c7f532e2d113 27-28,222-223,295-299,302-305,307-313,316-317,320-323,330-333,335-337,339
+  s_c8f343c7af25c4::t_0b68eb1fdcc6a5 276-279,281-287,290-294
+  s_c8f343c7af25c4::t_0a99213844e391 62,105,139,170,280,300,306,318,334,338
+  s_c8f343c7af25c4::t_105b52751383d0 61,140,224-269,271-275,288,301,314-315,319,324-329
+  s_c8f343c7af25c4::t_3732e39dd40a36 220,270,289
+Cargo.toml
+  s_c8f343c7af25c4::t_2a291870c82fd8 263
+src/frontend/AGENTS.md
+  s_c8f343c7af25c4::t_f1bd9d6a12f2af 59-64
+  s_598820b5736fbc::t_8d9b3267804b7b 54-58
+src/standalone/Cargo.toml
+  s_c8f343c7af25c4::t_3ddcc1ecabbfcf 49
+config/config.md
+  s_c8f343c7af25c4::t_25b4c104ac1cf7 79-81,83-84,347-349,351-352
+  s_c8f343c7af25c4::t_aae4925f353786 37,86-88,90-91,293,354-356,358-359
+  s_c8f343c7af25c4::t_1936a062d3ed0b 85,353
+  s_c8f343c7af25c4::t_21f38173be410b 82,89,350,357
+  s_c8f343c7af25c4::t_96bf85161484d7 78,346
+src/servers/src/batcher/logical_table/batch.rs
+  s_abcb81dd1a0af3::t_7cca7ee7ca074a 28-29,33,61,97,119,296,309,312,321,382,586-742
+src/servers/src/batcher/logical_table/batch_convert.rs
+  s_abcb81dd1a0af3::t_e301a7f5961bc9 293,296
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_abcb81dd1a0af3::t_4629889ca274b1 1-326
+src/servers/src/batcher/logical_table/pending_worker.rs
+  s_abcb81dd1a0af3::t_e0b5a2aaffe782 32-33,105,294,305,506-507,598-657
+src/servers/src/batcher/logical_table/region_write.rs
+  s_abcb81dd1a0af3::t_84fec4ef6aa6d2 487-560
+src/servers/src/batcher/logical_table/tables.rs
+  s_abcb81dd1a0af3::t_91d4b698c6dadf 1-77,79-115,119-120,123-129,131-139,143-146,149-235,237-300,302-310,312-314,316-323,325-329,331-399,401-405,407-417,419-533,535-551
+  s_598820b5736fbc::t_21e8aaadbf39e1 78,116-118,121-122,130,140-142,147-148,236,301,311,315,324,330,400,406,418,534
+src/frontend/src/instance/logical_batcher.rs
+  s_5bcaf68390e7c4::t_81a91af1a2aa59 1-18,20-21,22-102
+  s_c8f343c7af25c4::t_eeaa53fe6a8014 19
+tests-integration/src/standalone.rs
+  s_c8f343c7af25c4::t_3184270bff4b62 55,92,114,134-139,399-400,402
+  s_c8f343c7af25c4::t_ae63d22d3b5005 133
+  s_c8f343c7af25c4::t_51e31288ba1ace 93,115,126-132,401
+tests-integration/src/otlp.rs
+  s_598820b5736fbc::t_5c0b87fa75eba2 506-516,518-521,523-580,587-589,608-731
+  s_c8f343c7af25c4::t_a7c9903ab5c6e4 522,581-586,590-607
+  s_c8f343c7af25c4::t_d5db37572cf343 517
+src/frontend/src/instance/otlp.rs
+  s_c8f343c7af25c4::t_19bfe021b73b2c 30,34,169-188,190-191,193-206,210,215-216
+  s_c8f343c7af25c4::t_95e1efbbe40767 192,219-221
+src/cmd/tests/load_config_test.rs
+  s_c8f343c7af25c4::t_d30b89481af7d3 33,210-213,397-400
+src/cmd/src/bin/query_perf_fixture/case.rs
+  s_c8f343c7af25c4::t_2e3b6e16e3ee9d 188
+tests-integration/tests/http.rs
+  s_c8f343c7af25c4::t_5b0424511c23a0 2486,2507
+src/servers/src/mysql/handler.rs
+  s_c8f343c7af25c4::t_27644325f58598 88,126,130-141,512,542,586,1056-1066
+src/servers/src/mysql/server.rs
+  s_c8f343c7af25c4::t_6e781ac1d655a7 89,106,110-115,224-225
+src/servers/src/postgres.rs
+  s_c8f343c7af25c4::t_8e41d1dee41f5c 83,118-123,136
+src/servers/src/postgres/handler.rs
+  s_c8f343c7af25c4::t_577c60ad7ffd7f 62-69,79,436
+src/servers/src/postgres/server.rs
+  s_c8f343c7af25c4::t_1e823284ce907b 41,70,76-81,88,114-115
+tests-integration/tests/sql.rs
+  s_c8f343c7af25c4::t_45a1741f5809d8 2675-2855
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "79ef3621f6e8333c851575073a2e3f860c94d7c3",
+  "prompts": {},
+  "sessions": {
+    "s_2432582dedaf5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e51-436e-7e22-8f81-250159664969",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_425c029c259ad0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a831-a1ad-7b62-96ed-c7393ceb8431",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_598820b5736fbc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0af32-906b-7902-aab3-3efdd5da92a7",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_5bcaf68390e7c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ee4-560d-7e31-838b-8d023b84ada5",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_abcb81dd1a0af3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a902-af21-7a91-91e8-dcfb869d9c59",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_cd17afc428d85a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e5e-c225-7e83-b498-f3fe753a8217",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_d1140b6a37d6d5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a085df-416d-7100-9b16-05c8a5e7279d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

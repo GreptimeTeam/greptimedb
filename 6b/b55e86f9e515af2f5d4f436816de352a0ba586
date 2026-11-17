@@ -1,0 +1,14 @@
+src/mito2/src/tail_replay.rs
+  h_623774b620da8e 418-423,428-433
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6bb55e86f9e515af2f5d4f436816de352a0ba586",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

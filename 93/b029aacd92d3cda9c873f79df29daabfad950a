@@ -1,0 +1,19 @@
+src/common/meta/src/instruction.rs
+  s_9f6bec49930da4::t_53e78c9f369176 40,45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.4",
+  "base_commit_sha": "93b029aacd92d3cda9c873f79df29daabfad950a",
+  "prompts": {},
+  "sessions": {
+    "s_9f6bec49930da4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0ee866756ffeaOTbCZQ1Mj0hU7",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

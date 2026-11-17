@@ -1,0 +1,19 @@
+src/common/meta/src/key/table_route.rs
+  s_edbf0e7737746a::t_00e6808f27e4a2 720,1088-1142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "3b58b2ab5506662d0c8f8666eea900976aebbecd",
+  "prompts": {},
+  "sessions": {
+    "s_edbf0e7737746a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1dfb40e0fffeig4jqBRioy28P4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

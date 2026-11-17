@@ -1,0 +1,30 @@
+.github/actions/aliyun-ecs-create/action.yml
+  s_6d34f78fa90b16::t_e0caa4ffe1b9d1 29-36,78-79
+.github/scripts/aliyun-ecs-runner-provision.py
+  s_6d34f78fa90b16::t_de6bf2e3dc0743 61,104-105,107-112,397,401-403,405-414,487-494,510,529-530
+.github/scripts/aliyun-ecs-runner-teardown.py
+  s_6d34f78fa90b16::t_89146940c574e7 35-36,76,80,83-98,100,176-178,181,188-189,197-209,221-224
+.github/workflows/agent-observability.yml
+  s_6d34f78fa90b16::t_bab977406816d6 30,32,35,37,39,41-42,44,47-60,81,83-85,101-102,105-132,157,159-160,169,195-240,246
+  s_6d34f78fa90b16::t_856317daf5b94e 43,45-46,82
+.github/workflows/query-regression.yml
+  s_6d34f78fa90b16::t_aea27b7fd5a974 162-177,899-906
+tests/perf/test_aliyun_ecs_runner_scripts.py
+  s_6d34f78fa90b16::t_7466f1ee769497 20-21,25,28-29,43-48,57-143,145-149,151-156,158,163,165-173,175-177,275-277,284-368
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "4ecec69beed6a12b77459634d4441adba65fa40d",
+  "prompts": {},
+  "sessions": {
+    "s_6d34f78fa90b16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef3-09f3-7a80-8f06-aaef49cd7108",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

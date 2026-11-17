@@ -1,0 +1,40 @@
+src/log-store/src/kafka/worker.rs
+  s_1739a91ccdcdcf::t_cbe413fb563e40 41
+  s_1739a91ccdcdcf::t_9b9e53ec66b678 45
+src/log-store/src/kafka/periodic_offset_fetcher.rs
+  s_1739a91ccdcdcf::t_60d60ef1b3ee53 115
+src/common/meta/src/instruction.rs
+  s_1739a91ccdcdcf::t_532b5bb8df6abc 1421
+src/log-store/src/kafka/test_util.rs
+  s_1739a91ccdcdcf::t_532b5bb8df6abc 72
+  s_1739a91ccdcdcf::t_0deda38364d094 73
+src/log-store/src/kafka/offset/iterator.rs
+  s_1739a91ccdcdcf::t_532b5bb8df6abc 71
+  s_1739a91ccdcdcf::t_0deda38364d094 140-143
+src/log-store/src/kafka/log_store.rs
+  s_1739a91ccdcdcf::t_9b9e53ec66b678 287
+  s_1739a91ccdcdcf::t_532b5bb8df6abc 470
+src/log-store/src/kafka/producer.rs
+  s_1739a91ccdcdcf::t_9b9e53ec66b678 80,259,298,332
+  s_1739a91ccdcdcf::t_cbe413fb563e40 81
+  s_1739a91ccdcdcf::t_2f0f490d4b9030 244,286,326
+  s_1739a91ccdcdcf::t_60d60ef1b3ee53 252,293
+src/log-store/src/kafka/worker/produce.rs
+  s_1739a91ccdcdcf::t_9b9e53ec66b678 36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "f6afa19c056b3bc1f533332613251a22ed216fd9",
+  "prompts": {},
+  "sessions": {
+    "s_1739a91ccdcdcf": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a68ab1fdffe2EumGR4RfuYt14",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

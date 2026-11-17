@@ -1,0 +1,25 @@
+.github/scripts/agent-observability-summary.py
+  s_6d34f78fa90b16::t_522b32f96cbf0e 1-220
+.github/workflows/agent-observability.yml
+  s_6d34f78fa90b16::t_da20a262a3a87d 114-116,272,280,289,298,318,321-330
+.github/workflows/checks.yml
+  s_6d34f78fa90b16::t_9556aa3b9c02c7 92
+tests/perf/test_agent_observability_summary.py
+  s_6d34f78fa90b16::t_9c937caeaf8766 1-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "7b540e086d51c84a9f0c5f3dcf4636b9f2ec18ec",
+  "prompts": {},
+  "sessions": {
+    "s_6d34f78fa90b16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef3-09f3-7a80-8f06-aaef49cd7108",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

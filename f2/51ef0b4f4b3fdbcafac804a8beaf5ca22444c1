@@ -1,0 +1,28 @@
+src/log-store/src/kafka/util/record.rs
+  s_103b6c71bbf9f5::t_5587adf2e9620a 301-303
+  s_103b6c71bbf9f5::t_9be81867b233ba 241,294-300,389,455-458,461,467-468,477,486-491,518,523-536,538-539
+  h_623774b620da8e 475
+src/log-store/src/kafka/log_store.rs
+  s_103b6c71bbf9f5::t_9be81867b233ba 448-452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "f251ef0b4f4b3fdbcafac804a8beaf5ca22444c1",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_103b6c71bbf9f5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a02600c7ffeSwRw8ixkE59Xuk",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

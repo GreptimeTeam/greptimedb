@@ -1,0 +1,20 @@
+src/mito2/src/worker/utils.rs
+  h_623774b620da8e 53-56
+src/mito2/src/worker/handle_enter_staging.rs
+  h_623774b620da8e 22,25,29,34,47-52,199-207,246,297
+src/mito2/src/worker.rs
+  h_623774b620da8e 58,782,797,817
+src/mito2/src/request.rs
+  h_623774b620da8e 1096-1097
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "18b229b6a2fa9efb8ca8e5a7fa68b7258c94c7b4",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

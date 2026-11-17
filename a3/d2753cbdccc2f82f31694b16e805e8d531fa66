@@ -1,0 +1,66 @@
+.agents/skills/greptimedb-development-docker-image/SKILL.md
+  s_ff3fc17ec86f31::t_3350ec426f41b6 35,161-162,238-240,286-288,292,294-295,335-336,343-345
+  s_ff3fc17ec86f31::t_26d99c0e01f78d 81,130-133,140-143,248,256
+  s_ff3fc17ec86f31::t_e68a9dc7978501 346
+.agents/skills/greptimedb-development-docker-image/assets/Dockerfile
+  s_ff3fc17ec86f31::t_da2496b4570918 3,7-8,10
+.agents/skills/greptimedb-development-docker-image/scripts/update_image_env.py
+  s_ff3fc17ec86f31::t_78e951d194ac5d 2-15,22,26,30,34-35,40-41,43-48
+.agents/skills/greptimedb-development-docker-image/scripts/build_image.sh
+  s_ff3fc17ec86f31::t_8a5421df7c13b8 6,14-15,19,30,34-37,55-59,79-95,97,99,110,114-117,119,127
+.agents/skills/greptimedb-development-docker-image/scripts/collect_context.py
+  s_ff3fc17ec86f31::t_d58ca33754d168 26,29,79,91,161,169
+  s_ff3fc17ec86f31::t_eb3e94e1463117 2-15,24,30,49-54,68-76,80,111-115,123,127-131,135,137,143,158-160,162-168,170-171,174-175,177,179-180
+  s_ff3fc17ec86f31::t_90e25888baa829 77-78
+.agents/skills/greptimedb-development-docker-image/scripts/image_config.py
+  s_4302e6637290e2::t_65a0f35b9adb51 58-60,128-129
+  s_4302e6637290e2::t_7f35fd59596cb7 25,91-93
+  s_ff3fc17ec86f31::t_3c99d6d6e58005 77-84,86,108,117,143
+  s_4302e6637290e2::t_9016e2fa44411e 1-24,26-57,61-76,85,88-89,99-107,109,111-116,118-127,130-137,139-142,144-148,151-155
+  s_ff3fc17ec86f31::t_55e2f3ca3da81d 87,90,94-98,110,138,149-150
+.agents/skills/greptimedb-development-docker-image/tests/test_image_config.py
+  s_4302e6637290e2::t_7f35fd59596cb7 1-20,22-48,50,53-72,94-97
+  s_ff3fc17ec86f31::t_55e2f3ca3da81d 49,51-52
+  s_ff3fc17ec86f31::t_3c99d6d6e58005 21,73-93
+.agents/skills/greptimedb-development-docker-image/scripts/build_binary.sh
+  s_ff3fc17ec86f31::t_78e951d194ac5d 13-14,18,28-29,50-56
+.agents/skills/greptimedb-development-docker-image/scripts/binary_platform.py
+  s_ff3fc17ec86f31::t_3c99d6d6e58005 23,41,44,46,48-54,64
+  s_4302e6637290e2::t_9016e2fa44411e 1-18,20-22,24-35,38-40,42-43,45,47,55-63,65-78
+  s_4302e6637290e2::t_65a0f35b9adb51 19,36-37
+.agents/skills/greptimedb-development-docker-image/scripts/prepare_context.sh
+  s_ff3fc17ec86f31::t_da2496b4570918 6,12,28-31,39,44-45,52-55,57-59,61-63
+.agents/skills/greptimedb-development-docker-image/tests/test_binary_platform.py
+  s_4302e6637290e2::t_7f35fd59596cb7 1-28,30-31,34,37-67,74-87,89-99
+  s_ff3fc17ec86f31::t_3c99d6d6e58005 29,32-33,35-36,68-73
+  s_4302e6637290e2::t_39e4bc3ace52d1 88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "a3d2753cbdccc2f82f31694b16e805e8d531fa66",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_4302e6637290e2": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a4b66391ffeTFOMM1fdVcldoU",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_ff3fc17ec86f31": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a4d9c44bffewL5DHk7M1BKPcZ",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

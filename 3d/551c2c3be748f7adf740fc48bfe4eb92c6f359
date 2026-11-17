@@ -1,0 +1,20 @@
+src/common/meta/src/ddl_manager.rs
+  s_3f02b45448515f::t_9ec4c91c9e40a0 386-387,502-503,519-520,538-539,557-558,574-575,700-701,719-720,732-733,748-749,763-764,778-779,795-796,816-817
+  s_3f02b45448515f::t_ca70195dbea27d 614,642,672
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "3d551c2c3be748f7adf740fc48bfe4eb92c6f359",
+  "prompts": {},
+  "sessions": {
+    "s_3f02b45448515f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019feb04-12f9-7d33-93fd-394a212a696d",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

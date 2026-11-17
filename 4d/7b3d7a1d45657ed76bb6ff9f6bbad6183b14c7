@@ -1,0 +1,27 @@
+src/meta-srv/src/procedure/repartition.rs
+  s_027f911962eaae::t_6b1f627db8d9a3 811-854,966,1097-1125
+  s_027f911962eaae::t_707e2e209e9479 1126
+src/meta-srv/src/metasrv/builder.rs
+  s_027f911962eaae::t_6b1f627db8d9a3 31-33,75-77,435-445
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "4d7b3d7a1d45657ed76bb6ff9f6bbad6183b14c7",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_027f911962eaae": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a54aa514ffeePOz0Hgw2J35tU",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

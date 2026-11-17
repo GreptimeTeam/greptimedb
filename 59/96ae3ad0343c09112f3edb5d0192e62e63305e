@@ -1,0 +1,40 @@
+src/datanode/src/alive_keeper.rs
+  36153f7efba44e98 672-673,723-755,757-758,760-761
+src/meta-srv/src/region/lease_keeper.rs
+  36153f7efba44e98 592-635,679-705
+src/meta-srv/src/handler/region_lease_handler.rs
+  36153f7efba44e98 401-455,457-459
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "5996ae3ad0343c09112f3edb5d0192e62e63305e",
+  "prompts": {
+    "36153f7efba44e98": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_292fc2caeffeCcI5PZCmCzXp3A",
+        "model": "github-copilot/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 211,
+      "total_deletions": 3,
+      "accepted_lines": 614,
+      "overriden_lines": 2
+    },
+    "f1bfc1bf415ea1ad": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_28e81583dffes9EBl85vuBOy6u",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 31,
+      "overriden_lines": 0
+    }
+  }
+}

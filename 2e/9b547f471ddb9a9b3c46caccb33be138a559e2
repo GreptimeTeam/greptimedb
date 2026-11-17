@@ -1,0 +1,19 @@
+METASRV_TROUBLESHOOTING_SOP_DRAFT.md
+  s_ad8e72422cb46a::t_50e40fd043f158 1-396
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "2e9b547f471ddb9a9b3c46caccb33be138a559e2",
+  "prompts": {},
+  "sessions": {
+    "s_ad8e72422cb46a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1db73154effeca4JEQa0xaasI1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

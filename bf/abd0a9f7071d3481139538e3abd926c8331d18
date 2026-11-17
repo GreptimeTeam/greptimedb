@@ -1,0 +1,41 @@
+config/frontend.example.toml
+  s_c8f343c7af25c4::t_a5dad4c5b20a64 235-236
+config/standalone.example.toml
+  s_c8f343c7af25c4::t_3429c3a425d005 214-215
+src/frontend/src/instance/otlp.rs
+  s_c8f343c7af25c4::t_95e1efbbe40767 192,219-221
+src/operator/src/batcher.rs
+  s_c8f343c7af25c4::t_abc19478eceed6 32-33
+src/servers/src/batcher/logical_table.rs
+  s_c8f343c7af25c4::t_a42afb498a5bf8 58,169-171,174-176,262
+src/servers/src/batcher/table.rs
+  s_c8f343c7af25c4::t_5c6737c1008807 41,74,115,166-167,216-218,245,329-433
+tests-integration/src/standalone.rs
+  s_c8f343c7af25c4::t_ae63d22d3b5005 124
+config/config.md
+  s_c8f343c7af25c4::t_66439857428e80 78,346
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_e1e89503e70527 27,452-453,462-463,564-565,568,571-574,647,657,660
+src/servers/src/batcher.rs
+  s_c8f343c7af25c4::t_f7b823a0afc482 24-41
+src/servers/src/batcher/table/batch.rs
+  s_c8f343c7af25c4::t_e68788dfebbe10 20,59
+tests-integration/src/otlp.rs
+  s_c8f343c7af25c4::t_a7c9903ab5c6e4 517,523,582-587,591-608
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "bfabd0a9f7071d3481139538e3abd926c8331d18",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+src/mito2/src/engine/flush_test.rs
+  s_c9a37f2d9d2643::t_13742e44bf6af2 17,426,463-599,606,608-622
+  s_c9a37f2d9d2643::t_81e26777cf9862 25,29-32,399-424,427-431,445-462,600-605,607
+  s_c9a37f2d9d2643::t_1a12f19effa918 425,432-440
+  s_c9a37f2d9d2643::t_8b7f254c8c01e2 441-444
+src/meta-srv/src/region/flush_trigger.rs
+  s_c9a37f2d9d2643::t_d9008b9657eec5 337
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "28f69bccb72a31b241fec477279a86ec8761edd4",
+  "prompts": {},
+  "sessions": {
+    "s_c9a37f2d9d2643": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_178d298adffeGIJEg6GiJ7jt01",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

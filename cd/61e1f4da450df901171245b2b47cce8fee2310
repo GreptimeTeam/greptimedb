@@ -1,0 +1,18 @@
+src/standalone/src/procedure.rs
+  s_0484a52900cd30::t_77557ab3f77e10 20,69
+tests-integration/tests/repartition.rs
+  s_0484a52900cd30::t_0c15df65d58e1f 68-75,220-360
+  s_0484a52900cd30::t_e414d29cdfa753 59-67,99-219,361-364
+src/common/meta/src/ddl_manager.rs
+  s_0484a52900cd30::t_0c15df65d58e1f 52
+  s_0484a52900cd30::t_58b090d17713ce 302-304
+  s_0484a52900cd30::t_75655308094d52 19,155-159,166,298-300,308-310,320,1171
+src/meta-srv/src/procedure/repartition.rs
+  s_0484a52900cd30::t_828cc46bd2c25f 36,811,816-832,844
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "cd61e1f4da450df901171245b2b47cce8fee2310",
+  "prompts": {}
+}

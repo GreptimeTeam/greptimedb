@@ -1,0 +1,27 @@
+src/mito2/benches/bench_wal_encode.rs
+  s_cbf051d9e59a54::t_566bb5c22b863d 29,109
+src/mito2/src/engine/basic_test.rs
+  s_cbf051d9e59a54::t_9edf811df02fcf 1538-1541,1548-1559,1579-1586,1634-1635,1637-1643,1646-1647,1670,1672-1673,1677-1678,1685,1688-1689,1693-1699,1703,1706-1707
+src/mito2/src/region_write_ctx.rs
+  s_cbf051d9e59a54::t_656196e4789e7c 92-93,98,138,172-180,198,221,227-231,273,275-282,284,290,294,297-298,301-304,568-571,577,585-592,598-601,612-616,650-652,686-687
+src/mito2/src/wal.rs
+  s_cbf051d9e59a54::t_f3a8ce30b7f3b1 29,213
+src/mito2/src/wal/encoder.rs
+  s_cbf051d9e59a54::t_ad24bbfd0442b4 93-94,96,99,124,133,237,243,372,454
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "0062dbed3d3c2e0fe472b8c9f7bdc0d1245f674f",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

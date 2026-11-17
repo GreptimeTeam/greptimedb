@@ -1,0 +1,21 @@
+.github/scripts/create-kafka-wal-topics.sh
+  s_c230139cef7d3f::t_2ac9b56ab0d302 116-147,174
+  s_c230139cef7d3f::t_971dfbacbd001b 1-14,16-90,93-94,96-97,99-103,105-115,148-151,153-159,161-172,175-178
+  s_c230139cef7d3f::t_5cf4849f094ce9 15,91-92,95,98,104,152,160,173
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "9f6c88a5c9f150f1b953e4b828d666a62ce7a9f0",
+  "prompts": {},
+  "sessions": {
+    "s_c230139cef7d3f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_16e375a80ffeqVm4ShzIwI76v7",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

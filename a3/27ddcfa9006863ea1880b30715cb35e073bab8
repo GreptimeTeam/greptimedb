@@ -1,0 +1,44 @@
+src/meta-srv/src/discovery/utils.rs
+  s_8c3246ec32a3db::t_2fd4c2add115e9 66
+  s_8c3246ec32a3db::t_bf1c477e45efb7 122-125
+  s_8c3246ec32a3db::t_494877586b681d 121
+  s_8c3246ec32a3db::t_ce506f6c2d432b 19,72,76-83
+src/meta-srv/src/handler/collect_cluster_info_handler.rs
+  s_8c3246ec32a3db::t_185805c093281d 22,53-54,58-60
+src/meta-client/src/client/util.rs
+  s_8c3246ec32a3db::t_6a08a905d45218 145
+src/frontend/src/heartbeat.rs
+  s_8c3246ec32a3db::t_3110b3c21ca9e9 20-21,218
+src/common/meta/src/heartbeat/utils.rs
+  s_8c3246ec32a3db::t_0814c0481b7b24 17,93-102,137-139,143-146
+  s_8c3246ec32a3db::t_8b5a40e7866b67 140-142
+src/meta-srv/src/discovery/lease.rs
+  s_8c3246ec32a3db::t_e653d2e6c332f7 143,195,197
+  s_8c3246ec32a3db::t_8b5a40e7866b67 101
+  s_8c3246ec32a3db::t_6a6186954704f9 330-367
+  s_8c3246ec32a3db::t_01c5b38bad68e8 302-304
+src/common/meta/src/cluster.rs
+  s_8c3246ec32a3db::t_0ac92c5df24bfc 189
+  s_8c3246ec32a3db::t_4758933b368483 20,190-194
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "a327ddcfa9006863ea1880b30715cb35e073bab8",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_8c3246ec32a3db": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1d5251141ffeT7uUPgiWZLtxRc",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

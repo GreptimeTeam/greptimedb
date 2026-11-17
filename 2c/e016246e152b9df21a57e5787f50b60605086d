@@ -1,0 +1,73 @@
+config/config.md
+  s_c8f343c7af25c4::t_aae4925f353786 36,77,84-90,290,343,350-356
+config/frontend.example.toml
+  s_5bcaf68390e7c4::t_0467bc4123a2d2 55,57,230-232,258-275,307
+config/standalone.example.toml
+  s_5bcaf68390e7c4::t_a285e6e366ed58 80,82,209-211,237-254,286
+src/frontend/src/frontend.rs
+  s_c8f343c7af25c4::t_77b35bf3414a1e 68,131,226-257,269,285,297-304
+src/frontend/src/instance.rs
+  s_c8f343c7af25c4::t_e7fd06d8d2379d 22,33,80,132
+src/frontend/src/instance/builder.rs
+  s_5bcaf68390e7c4::t_d10816f7eb49ab 64,240-260,263,388
+src/frontend/src/instance/logical_batcher.rs
+  s_5bcaf68390e7c4::t_81a91af1a2aa59 1-102
+src/frontend/src/server.rs
+  s_5bcaf68390e7c4::t_dd1f8a2954fdd7 27,74,111-112,136-141,425-426,433-434,446,457-468,513-583,601,664-665,758-760,762-764,766,772,774,776-781
+src/frontend/src/service_config.rs
+  s_5bcaf68390e7c4::t_dafa4c2b11bb96 29
+src/frontend/src/service_config/pending_rows_batcher.rs
+  s_c8f343c7af25c4::t_373b6f939bc0fd 23-26,29-44,62,79,93-143,148-250,253,258,261,268,270,273,278-279,288,294,301,311
+src/operator/src/insert.rs
+  s_c8f343c7af25c4::t_39d2f152589730 157-267,2265-2398
+src/session/src/context.rs
+  s_5bcaf68390e7c4::t_2ec1d591c5faa8 85-87,439-448,623,893-896,901-903
+src/standalone/src/options.rs
+  s_c8f343c7af25c4::t_105b52751383d0 59,137,219-273,286,302,315-316,320,325-330
+tests-integration/src/standalone.rs
+  s_c8f343c7af25c4::t_3184270bff4b62 55,91,111,115-120,379-382
+src/frontend/AGENTS.md
+  s_598820b5736fbc::t_8d9b3267804b7b 47-51
+src/frontend/src/instance/otlp.rs
+  s_c8f343c7af25c4::t_19bfe021b73b2c 30,34,165-184,186-196,200,205-206
+src/servers/src/batcher/logical_table.rs
+  s_c8f343c7af25c4::t_d952b6b5019035 183-205,210,212-213,215,269,280,282
+src/servers/src/batcher/logical_table/tables.rs
+  s_598820b5736fbc::t_21e8aaadbf39e1 78,116-118,121-122,130,140-142,147-148,236,301,311,315,324,330,400,406,418,534
+src/servers/src/http.rs
+  s_598820b5736fbc::t_f19fc48ac13956 218,239-241,252-255,258,662,673,680-686,914,949,968,1127-1129,2450-2487
+tests-integration/src/otlp.rs
+  s_598820b5736fbc::t_5c0b87fa75eba2 455-663
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2ce016246e152b9df21a57e5787f50b60605086d",
+  "prompts": {},
+  "sessions": {
+    "s_598820b5736fbc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0af32-906b-7902-aab3-3efdd5da92a7",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_5bcaf68390e7c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ee4-560d-7e31-838b-8d023b84ada5",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

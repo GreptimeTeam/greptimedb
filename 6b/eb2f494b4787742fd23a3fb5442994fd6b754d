@@ -1,0 +1,19 @@
+tests-integration/tests/grpc.rs
+  s_cbf051d9e59a54::t_8393180a124a22 1279-1284,1291,1293
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "6beb2f494b4787742fd23a3fb5442994fd6b754d",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

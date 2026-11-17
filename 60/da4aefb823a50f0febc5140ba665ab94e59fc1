@@ -1,0 +1,28 @@
+src/mito2/src/worker/handle_enter_staging.rs
+  h_623774b620da8e 298-299
+src/mito2/src/compaction.rs
+  h_623774b620da8e 1719
+src/mito2/src/worker/handle_truncate.rs
+  h_623774b620da8e 143,169,180
+src/mito2/src/worker/handle_manifest.rs
+  h_623774b620da8e 98,296
+src/mito2/src/worker/handle_write.rs
+  h_623774b620da8e 166-188
+src/mito2/src/region.rs
+  h_623774b620da8e 1822,2073,2141
+src/mito2/src/test_util/scheduler_util.rs
+  h_623774b620da8e 148
+src/mito2/src/worker/handle_drop.rs
+  h_623774b620da8e 101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "60da4aefb823a50f0febc5140ba665ab94e59fc1",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

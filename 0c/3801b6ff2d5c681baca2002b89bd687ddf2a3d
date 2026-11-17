@@ -1,0 +1,16 @@
+src/common/meta/src/error.rs
+  h_623774b620da8e 1281
+src/meta-srv/src/error.rs
+  h_623774b620da8e 1307
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "0c3801b6ff2d5c681baca2002b89bd687ddf2a3d",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+src/client/src/region.rs
+  h_623774b620da8e 28,215-216,224-225,332-338,424-461
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "0bd254f27096179f8a58aac393265404e256d359",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

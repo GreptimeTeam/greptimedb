@@ -1,0 +1,31 @@
+src/servers/src/batcher/logical_table.rs
+  s_abcb81dd1a0af3::t_d57b83b449b268 17,20,28,39,42,52-54,113,147-150,313,321-322,416-419,421-426
+src/servers/src/batcher/logical_table/batch.rs
+  s_abcb81dd1a0af3::t_7cca7ee7ca074a 28-29,33,61,97,119,296,309,312,321,382,586-742
+src/servers/src/batcher/logical_table/batch_convert.rs
+  s_abcb81dd1a0af3::t_e301a7f5961bc9 293,296
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_abcb81dd1a0af3::t_4629889ca274b1 1-326
+src/servers/src/batcher/logical_table/pending_worker.rs
+  s_abcb81dd1a0af3::t_e0b5a2aaffe782 32-33,105,294,305,506-507,598-657
+src/servers/src/batcher/logical_table/region_write.rs
+  s_abcb81dd1a0af3::t_84fec4ef6aa6d2 487-560
+src/servers/src/batcher/logical_table/tables.rs
+  s_abcb81dd1a0af3::t_91d4b698c6dadf 1-551
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "262c6264735df3b118a60fb7f4de6f5d8243cd7d",
+  "prompts": {},
+  "sessions": {
+    "s_abcb81dd1a0af3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a902-af21-7a91-91e8-dcfb869d9c59",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

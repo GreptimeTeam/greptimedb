@@ -1,0 +1,14 @@
+src/common/procedure/src/local/runner.rs
+  h_623774b620da8e 36-37,145-146,758-759
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "62fb16c85b35906f772ced7f9f7a8b9594d4c765",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

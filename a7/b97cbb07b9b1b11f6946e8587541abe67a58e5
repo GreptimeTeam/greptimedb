@@ -1,0 +1,33 @@
+.github/actions/aliyun-ecs-create/README.md
+  s_6d34f78fa90b16::t_1c4566a93984b6 1-16
+.github/actions/aliyun-ecs-create/action.yml
+  s_6d34f78fa90b16::t_417559d31c22ec 1-70
+.github/actions/aliyun-ecs-delete/action.yml
+  s_6d34f78fa90b16::t_de0fca991f6b21 1-37
+.github/scripts/o11ybench-ci.py
+  s_6d34f78fa90b16::t_5f3a6b3a03967c 1-221
+.github/workflows/agent-observability.yml
+  s_6d34f78fa90b16::t_705b71a1004812 1-240
+.github/workflows/checks.yml
+  s_6d34f78fa90b16::t_b6d486ab9a879b 92
+docs/how-to/agent-observability-ci.md
+  s_6d34f78fa90b16::t_68b3e58c80fc57 1-75
+tests/perf/test_o11ybench_ci.py
+  s_6d34f78fa90b16::t_735490dbf012c1 1-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "a7b97cbb07b9b1b11f6946e8587541abe67a58e5",
+  "prompts": {},
+  "sessions": {
+    "s_6d34f78fa90b16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef3-09f3-7a80-8f06-aaef49cd7108",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

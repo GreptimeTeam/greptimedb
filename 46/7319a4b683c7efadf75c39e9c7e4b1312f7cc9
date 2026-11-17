@@ -1,0 +1,14 @@
+grafana/dashboards/metrics/cluster/dashboard.json
+  h_623774b620da8e 9707,9769,9791,9799,9807,9859,9869,9891,9894,9912,9920,9972,9982,10004,10007,10012,10835
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "467319a4b683c7efadf75c39e9c7e4b1312f7cc9",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+src/meta-srv/src/event/gc.rs
+  s_bab36d2c764e36::t_58b3ec82c4c430 225,377-387,389-392,398,406
+  s_bab36d2c764e36::t_5a24738ce9a672 234,244,250,283,346-354,397,399-404,411,420
+  s_bab36d2c764e36::t_2ec5e825f3c3b3 238
+  s_bab36d2c764e36::t_29b810b0c48806 70
+  s_bab36d2c764e36::t_efd1b07f24b031 20,39,71,75,83,87,108,137-141,167-172,176,184
+  s_bab36d2c764e36::t_ae18fb83d2b7b0 37,69,81
+tests-integration/tests/event_recorder_test_util.rs
+  s_bab36d2c764e36::t_4cbc46f0eaf64e 21,89-110
+tests-integration/tests/gc_event.rs
+  s_bab36d2c764e36::t_9fb57e44f49527 85
+  s_bab36d2c764e36::t_07d2d37dac3311 27,154-168
+src/meta-srv/src/gc/procedure.rs
+  s_bab36d2c764e36::t_58b3ec82c4c430 1035-1037,1048
+  s_bab36d2c764e36::t_efd1b07f24b031 1049-1055
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6a310c03d1951489c66fa68356a1e34cdd8acf6a",
+  "prompts": {},
+  "sessions": {
+    "s_bab36d2c764e36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa8b5-aa96-72a0-b7fd-65f77a728723",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

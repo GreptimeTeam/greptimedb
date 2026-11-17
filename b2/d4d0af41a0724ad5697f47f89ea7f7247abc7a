@@ -1,0 +1,65 @@
+tests-integration/tests/database_ddl_events.rs
+  s_b6df70616bf082::t_5ffd3bd883b717 1-155
+src/common/meta/src/ddl/tests/database_event.rs
+  s_d1e0274b314cd4::t_cde862b59965ca 264
+  s_b6df70616bf082::t_a1c62300beeb36 1-14,265-273,275-286,289-308,310-335,338-341,352-355
+  s_d1e0274b314cd4::t_0d06f558a5c02c 15-263,274,287-288,309,336-337
+  s_b6df70616bf082::t_e9ce1a5ce79065 342-351
+  s_b6df70616bf082::t_d8a4e8cd08a7d1 356-365
+tests-integration/tests/main.rs
+  s_b6df70616bf082::t_d429e6aa368953 17
+Cargo.lock
+  s_b6df70616bf082::t_29027d37e9432f 2596
+src/common/meta/src/ddl/create_database.rs
+  h_623774b620da8e 22-23,280-281,286-296
+  s_b6df70616bf082::t_0c5b2e4ddd0b8f 31
+  s_b6df70616bf082::t_cb050c380d252e 21,24,282-285
+  s_b6df70616bf082::t_07716ca89c1c6a 297
+src/common/meta/src/ddl/event.rs
+  h_623774b620da8e 1-241
+src/common/meta/src/ddl.rs
+  s_b6df70616bf082::t_902305d788a996 47
+src/common/meta/src/ddl/drop_database.rs
+  s_b6df70616bf082::t_0363cebd4a81f4 26-27,176-177,182-191
+  s_b6df70616bf082::t_9e8f7ed9e9b295 192
+  s_b6df70616bf082::t_0c5b2e4ddd0b8f 36
+  s_d1e0274b314cd4::t_0d06f558a5c02c 178-181
+src/common/meta/src/ddl/alter_database.rs
+  s_b6df70616bf082::t_0c5b2e4ddd0b8f 27
+  s_b6df70616bf082::t_2c6f13042c5483 194
+  s_d1e0274b314cd4::t_0d06f558a5c02c 180-183
+  s_b6df70616bf082::t_d5d3929ccc81de 17-19,178-179,184-193
+src/common/meta/Cargo.toml
+  s_b6df70616bf082::t_f500156a8718f9 37
+src/common/meta/src/ddl/tests.rs
+  s_b6df70616bf082::t_739ef51f941f85 21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "b2d4d0af41a0724ad5697f47f89ea7f7247abc7a",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_b6df70616bf082": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa19c-ed21-7f23-a85f-c4ca1333776f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": null
+    },
+    "s_d1e0274b314cd4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_067e5a3d3ffevs2pdvT4yUAPEy",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

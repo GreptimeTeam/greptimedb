@@ -1,0 +1,19 @@
+src/common/telemetry/src/logging/file_retention.rs
+  s_60b64c7401857d::t_872b19fe3bbfd3 17,92-94,99-111,128-130,367-369,458-459,464,494-502
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "ce82cbcd0134b036555c3a0678df0d3af878c0b1",
+  "prompts": {},
+  "sessions": {
+    "s_60b64c7401857d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a060ff-196a-7a21-b2f8-10c725cd9db6",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

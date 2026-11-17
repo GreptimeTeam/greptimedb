@@ -1,0 +1,37 @@
+src/mito2/src/region/opener.rs
+  s_c06578f466c2ea::t_1101381762072a 80-81,84,154,198,224-229,397-413
+src/mito2/src/sst/index/handler/builtin.rs
+  s_17057bba187655::t_21f0d9337df9e3 50-55,99-137
+src/mito2/src/engine/create_test.rs
+  s_17057bba187655::t_69a4ddfc981cf9 52-139
+src/mito2/src/sst/index/registry.rs
+  s_17057bba187655::t_4c9062a5dbbbc1 75-82
+src/mito2/src/worker/handle_create.rs
+  s_17057bba187655::t_9df9c8145d9c2e 17-18,25,27-28,64-75,95-96
+src/mito2/src/sst/index/handler.rs
+  s_17057bba187655::t_0f18f2c82dc380 107-112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cc6c0ff32f27625c24b869ecb7787ebd92c873a5",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c06578f466c2ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c374-3547-7b31-9c5c-4ab96c5f5115",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

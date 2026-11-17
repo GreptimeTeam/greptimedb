@@ -1,0 +1,88 @@
+tests-integration/tests/event_recorder_test_util.rs
+  s_d0d43704cb1be1::t_0ac4ce03a9177d 36,40,43,45-50
+  s_d0d43704cb1be1::t_2ee03a0fedb4b6 37
+  s_d0d43704cb1be1::t_9da1b7178b8d4c 29-35,38-39,41-42,44,51-55
+tests-integration/tests/gc_event.rs
+  s_d0d43704cb1be1::t_d1c9fe287b8d5c 19,24,26,28,31-32
+  s_d0d43704cb1be1::t_59f1fcb7afe5d6 132-133,138-146
+  s_d0d43704cb1be1::t_35c0d7a4997a64 25,126-131
+  s_d0d43704cb1be1::t_40e1d16fec202f 157
+  s_d0d43704cb1be1::t_cb0b51e28144ad 147
+src/meta-srv/src/event/repartition.rs
+  s_d0d43704cb1be1::t_e069e4d3b26146 367-368,671
+  s_d0d43704cb1be1::t_148229b30abe9c 689
+src/common/procedure/src/event.rs
+  s_d0d43704cb1be1::t_e069e4d3b26146 22-23,104
+  s_d0d43704cb1be1::t_0ebacdceb57c1c 24
+  s_d0d43704cb1be1::t_72a5149a847eeb 129,132,140,162,230,241,252,323,330-331,334,345,348-349,351-381
+tests-integration/src/test_util.rs
+  s_d0d43704cb1be1::t_aad2f3358740af 21-24,27,755-763,768-775
+  s_d0d43704cb1be1::t_0e017c5eef7c72 739-754,776-783,819
+  s_d0d43704cb1be1::t_20b9424edfdf16 764-767
+tests-integration/tests/database_ddl_event.rs
+  s_d0d43704cb1be1::t_76db4927e5b004 17,21-23,25-27,30-31,51-56,58,70-75,77,82,88,126-141,146,157,168
+  s_d0d43704cb1be1::t_40e1d16fec202f 162
+src/meta-srv/src/service/procedure.rs
+  s_d0d43704cb1be1::t_ecb33c92e6214e 582,589
+  s_d0d43704cb1be1::t_aa732ab71c90fb 58-59,61-63,65,128,180,318,350
+tests-integration/tests/repartition_event.rs
+  s_d0d43704cb1be1::t_03e2c5ff7d54e9 18,23-25,27-29,32-33,64-69,71,74,84,88,98,102,104,117,176,244
+tests-integration/tests/table_ddl_event.rs
+  s_d0d43704cb1be1::t_35c0d7a4997a64 44,208-211
+  s_d0d43704cb1be1::t_1782c764631b0f 157
+  s_d0d43704cb1be1::t_fccc14d4a9d7eb 47-48,58-59
+  s_d0d43704cb1be1::t_12684613634577 214-219,228
+  s_d0d43704cb1be1::t_8c4dc583fbafc4 222
+tests-integration/tests/wal_prune_event.rs
+  s_d0d43704cb1be1::t_48a616e71b0b77 103
+src/common/meta/src/ddl/tests/event/view.rs
+  s_d0d43704cb1be1::t_e069e4d3b26146 20,338
+  s_d0d43704cb1be1::t_7c79d168f06ec7 349
+tests-integration/tests/view_ddl_event.rs
+  s_d0d43704cb1be1::t_20b9424edfdf16 101
+  s_d0d43704cb1be1::t_2519fec5a64626 21-23,26-28,32-33,79-89,93-96,107,167
+  s_d0d43704cb1be1::t_40e1d16fec202f 162
+tests-integration/tests/flow_ddl_event.rs
+  s_d0d43704cb1be1::t_bdc00f6a84baef 18,21-23,27-28,41-46,48-51,55-59,64-65,73,131
+  s_d0d43704cb1be1::t_40e1d16fec202f 126
+tests-integration/tests/region_migration.rs
+  s_d0d43704cb1be1::t_8c4dc583fbafc4 1319-1323
+  s_d0d43704cb1be1::t_4e39e7c66f35a6 718,872
+  s_d0d43704cb1be1::t_857466cef92565 535
+  s_d0d43704cb1be1::t_d9065c9cbc7c8d 21-22,61,63,67-68
+  s_d0d43704cb1be1::t_8c912d78031233 270,417
+  s_d0d43704cb1be1::t_a927c5b1805718 505
+  s_d0d43704cb1be1::t_35c0d7a4997a64 18,466-471
+  s_d0d43704cb1be1::t_20b9424edfdf16 62
+  s_d0d43704cb1be1::t_7728c936c4de37 1300-1318,1324-1325,1375,1394,1417,1433-1434,1450-1456
+src/common/meta/src/ddl/tests/event/database.rs
+  s_d0d43704cb1be1::t_d395c0fc00bec0 23,306
+  s_d0d43704cb1be1::t_ef0eb40d0163e0 330
+src/common/meta/src/ddl/tests/event/flow.rs
+  s_d0d43704cb1be1::t_e069e4d3b26146 22,244
+  s_d0d43704cb1be1::t_d0f63b122ef03d 23
+  s_d0d43704cb1be1::t_6ac9a1d5f1700d 264
+src/meta-srv/src/event/gc.rs
+  s_d0d43704cb1be1::t_d1fb98e465aa4a 558
+  s_d0d43704cb1be1::t_e069e4d3b26146 215-216,539
+src/meta-client/src/client/procedure.rs
+  s_d0d43704cb1be1::t_24a0f1312f9e7f 66-68
+  s_d0d43704cb1be1::t_39c7a27a2cfb8e 530
+  s_d0d43704cb1be1::t_ba7918a4b776a4 712,717,723
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "5b436d597f022adeb5ea458349016658979bdc98",
+  "prompts": {},
+  "sessions": {
+    "s_d0d43704cb1be1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fec6d-a6da-74a1-a7ce-5525e2a9ce84",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,97 @@
+src/common/procedure/src/procedure.rs
+  s_b6df70616bf082::t_119534984e2db1 22,253-254,682-692,775
+src/meta-srv/src/metasrv/builder.rs
+  s_72b24b4684c625::t_5ae5da704c5239 250-253
+src/frontend/src/instance/builder.rs
+  s_e8469aec8f7e8c::t_7829a0a3c8945c 307-315,328
+config/frontend.example.toml
+  s_a4e97ab3082fe1::t_14deefb769a9a9 387-389
+src/meta-srv/src/metasrv.rs
+  s_72b24b4684c625::t_5ae5da704c5239 947-948,960-963,967-971
+  s_72b24b4684c625::t_2fd27577ece0f5 945-946
+  s_72b24b4684c625::t_17007953cf66f7 972
+  s_72b24b4684c625::t_a6de37bd106964 964-966
+src/common/event-recorder/Cargo.toml
+  s_b6df70616bf082::t_119534984e2db1 29-31
+src/standalone/src/options.rs
+  s_a4e97ab3082fe1::t_14deefb769a9a9 17,75-76,115,157
+  s_a4e97ab3082fe1::t_93b4ec9aed7021 191-225
+  s_a4e97ab3082fe1::t_a25248bbfa4869 226-227
+src/cmd/src/standalone.rs
+  s_b6df70616bf082::t_119534984e2db1 617
+src/common/event-recorder/src/recorder.rs
+  s_fda2802da39e21::t_e7d1a756d965c6 80-82
+  s_fda2802da39e21::t_6519b1d592d3b4 99-103
+  s_fda2802da39e21::t_aac00de9b05380 500-502,544-603
+  s_fda2802da39e21::t_715a75214ea65a 604
+  s_fda2802da39e21::t_42796f6a1e8a0a 86-87,90-98,104-110,287-292
+  s_fda2802da39e21::t_e7c6edd21eccf8 16,22,37,43,45,47,52-79,83-85,88-89,286,293,300,310-311,320-327,333,360-363
+  s_b6df70616bf082::t_fed988b09e9d45 190-193
+src/common/procedure/src/local.rs
+  s_b6df70616bf082::t_119534984e2db1 26,636,680,716,727-728,900-911,1034,1040,1273-1337
+  s_b6df70616bf082::t_35e21f3a83f12a 1338
+src/frontend/src/instance.rs
+  s_b6df70616bf082::t_119534984e2db1 49,132,184-186
+  s_b6df70616bf082::t_9aeb56fbed5477 187-188
+src/common/procedure/src/local/runner.rs
+  s_e8469aec8f7e8c::t_7829a0a3c8945c 22,145,524,781,843
+config/standalone.example.toml
+  s_a4e97ab3082fe1::t_14deefb769a9a9 891-898
+config/metasrv.example.toml
+  s_72b24b4684c625::t_5ae5da704c5239 309-311
+Cargo.lock
+  s_b6df70616bf082::t_61ac56ac06f296 2382
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "8342cfd54db4376678e93d910d4e809998106029",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_72b24b4684c625": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_067f565e6ffegxx9AUtobRh6zX",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_a4e97ab3082fe1": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_067e59fcfffefmW7zbV485v6e4",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_b6df70616bf082": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa19c-ed21-7f23-a85f-c4ca1333776f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_e8469aec8f7e8c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_067f569feffeVibvjFKHbmXk9v",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_fda2802da39e21": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_067f9a33cffeliIn7D0Cyc3IpN",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

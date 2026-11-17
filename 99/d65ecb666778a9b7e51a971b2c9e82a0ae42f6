@@ -1,0 +1,23 @@
+config/config.md
+  s_17567755245fea::t_5249f817ef6c08 77,335
+config/frontend.example.toml
+  s_17567755245fea::t_89278973d6ff7e 231,235-246
+config/standalone.example.toml
+  s_17567755245fea::t_dc0a1ae66b5c95 210,214-225
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "99d65ecb666778a9b7e51a971b2c9e82a0ae42f6",
+  "prompts": {},
+  "sessions": {
+    "s_17567755245fea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e6f-7c57-77b3-b260-c390adeb4275",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

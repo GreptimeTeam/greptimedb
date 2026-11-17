@@ -1,0 +1,34 @@
+src/log-store/src/kafka/util/record.rs
+  s_103b6c71bbf9f5::t_05aa62828418b5 236-238
+  s_103b6c71bbf9f5::t_b664845adc985b 295-297,385,387
+  s_103b6c71bbf9f5::t_f2f5125f50ed1a 460-522
+  s_103b6c71bbf9f5::t_d0178b3d0f1643 266-268
+  s_4a29aa60bc4e9b::t_6211faf07fa589 459
+  s_103b6c71bbf9f5::t_255609e518c385 269-270,294,298,300
+  s_103b6c71bbf9f5::t_9f3bf21ab765f7 250
+  s_103b6c71bbf9f5::t_eac8b96bf71804 377,380-384
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "60fb5093f059df9d5c975fee2a3a545533cb446f",
+  "prompts": {},
+  "sessions": {
+    "s_103b6c71bbf9f5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a02600c7ffeSwRw8ixkE59Xuk",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_4a29aa60bc4e9b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a02c10aaffen8ExrR4XY5VQGg",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,33 @@
+.github/scripts/ci-slash.py
+  s_d4896e4c642f16::t_af266a86c94dac 32,49,57-58,66,73-88
+.github/scripts/tests/test_ci_slash.py
+  s_d4896e4c642f16::t_ae0e7749159f2b 114,118-184
+.github/workflows/checks.yml
+  s_d4896e4c642f16::t_7e64cca6858ad2 35,50,66,103,132
+.github/workflows/ci-slash.yml
+  s_d4896e4c642f16::t_6f2c2c634eb4f0 34,38,43-49,60,64-66,69-73
+.github/workflows/docs.yml
+  s_d4896e4c642f16::t_9ca8829764b6a7 41,51,61
+.github/workflows/integration.yml
+  s_d4896e4c642f16::t_c73aab31e97334 41,102,182,252,260
+.github/workflows/rust.yml
+  s_d4896e4c642f16::t_cea2028db606c7 35,53,79,106,132,161,172
+.github/workflows/slash-command-dispatch.yml
+  s_d4896e4c642f16::t_a14618a2e9916a 39-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "491b3875c2b23c56f1fd8025914755d1cc681bba",
+  "prompts": {},
+  "sessions": {
+    "s_d4896e4c642f16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c2b4-6796-7cd1-8617-ab49903c2216",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
