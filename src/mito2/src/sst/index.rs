@@ -23,7 +23,7 @@ mod indexer;
 pub mod intermediate;
 pub(crate) mod inverted_index;
 pub mod kind;
-mod primary_key;
+pub mod primary_key;
 pub mod puffin_manager;
 pub mod registry;
 #[cfg(test)]
@@ -290,6 +290,11 @@ impl Indexer {
     /// Returns true if no index creator is active.
     pub(crate) fn is_empty(&self) -> bool {
         self.creators.is_empty()
+    }
+
+    /// Whether this output has an active extension creator.
+    pub(crate) fn has_extension_creators(&self) -> bool {
+        self.creators.iter().any(|active| !active.is_builtin())
     }
 
     #[cfg(test)]
@@ -2800,6 +2805,9 @@ mod tests {
         );
         assert!(!first.is_empty());
         assert!(!second.is_empty());
+        // Deferring the built-in indexes must retain the sketch creator.
+        first.abort_builtin_creators().await;
+        assert!(!first.creators.is_empty());
         assert_eq!(first.creators[0].creator.memory_usage(), 17);
         first.abort().await;
         assert!(first.creators.is_empty());

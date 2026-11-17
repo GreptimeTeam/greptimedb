@@ -56,7 +56,7 @@ use crate::error::{
 };
 use crate::read::FlatSource;
 use crate::sst::file::RegionFileId;
-use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
+use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{
     FlatWriteFormat, primary_key_column_index, time_index_column_index,
 };
@@ -531,18 +531,7 @@ where
 
             // Finish indexer and writer.
             // safety: writer and index can only be both present or not.
-            let mut index_output = IndexOutput::default();
-            match self.index_config.build_mode {
-                IndexBuildMode::Sync => {
-                    index_output = self.current_indexer.as_mut().unwrap().finish().await;
-                }
-                IndexBuildMode::Async => {
-                    debug!(
-                        "Index for file {} will be built asynchronously later",
-                        self.current_file
-                    );
-                }
-            }
+            let index_output = self.current_indexer.as_mut().unwrap().finish().await;
             self.check_cancelled()?;
             self.writer
                 .as_mut()
@@ -773,16 +762,15 @@ where
 
             self.check_cancelled()?;
             stats.update_flat(batch)?;
-            if matches!(self.index_config.build_mode, IndexBuildMode::Sync) {
-                let start = Instant::now();
-                // safety: self.current_indexer must be set when first batch has been written.
-                self.current_indexer
-                    .as_mut()
-                    .unwrap()
-                    .update_flat(batch)
-                    .await;
-                self.metrics.update_index += start.elapsed();
-            }
+            let start = Instant::now();
+            // The indexer exists once the first batch has been written. Outputs
+            // with extensions build all indexes together, including in async mode.
+            self.current_indexer
+                .as_mut()
+                .unwrap()
+                .update_flat(batch)
+                .await;
+            self.metrics.update_index += start.elapsed();
             Ok(())
         }
         .await;
@@ -896,7 +884,7 @@ where
             };
             self.writer = Some(arrow_writer);
 
-            let indexer = self
+            let mut indexer = self
                 .indexer_builder
                 .build(
                     RegionFileId::new(self.metadata.region_id, self.current_file),
@@ -904,6 +892,14 @@ where
                     Some(opts.row_group_size),
                 )
                 .await;
+            if matches!(self.index_config.build_mode, IndexBuildMode::Async)
+                && !indexer.has_extension_creators()
+            {
+                indexer.abort_builtin_creators().await;
+            }
+            // Extensions share one Puffin with built-in indexes. When an extension
+            // is active, finish all creators here instead of replacing its output
+            // with a built-in-only Puffin in the background.
             self.current_indexer = Some(indexer);
 
             // safety: self.writer is assigned above
