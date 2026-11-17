@@ -10646,12 +10646,15 @@ async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
         let display = plan.display_indent_schema().to_string();
         let final_node = find_final_split(&plan)
             .unwrap_or_else(|| panic!("{query} kept the existing plan: {display}"));
-        let field = final_node
-            .schema()
-            .field_with_unqualified_name(greptime_native_histogram())
-            .unwrap_or_else(|_| panic!("{query} published no field column: {display}"));
+        // Named after the expression now, so the histogram type is what identifies the column.
+        let histogram_type = native_histogram_value_type().as_arrow_type();
+        let fields = final_node.schema().fields();
+        let field = fields
+            .iter()
+            .find(|field| field.data_type() == &histogram_type)
+            .unwrap_or_else(|| panic!("{query} published no field column: {display}"));
         assert_eq!(
-            &native_histogram_value_type().as_arrow_type(),
+            &histogram_type,
             field.data_type(),
             "{query} answered something other than the histogram it folded: {display}"
         );
@@ -15867,12 +15870,16 @@ async fn a_histogram_sum_or_avg_folds_natively() {
             partial_below(final_node).is_some(),
             "{query} lost the partial half of its split: {display}"
         );
-        let field = final_node
-            .schema()
-            .field_with_unqualified_name(greptime_native_histogram())
-            .unwrap_or_else(|_| panic!("{query} published no field column: {display}"));
+        // The value column is the one carrying the histogram type. Its name follows the
+        // expression now (`sum(some_metric)`), so the type is what identifies it.
+        let histogram_type = native_histogram_value_type().as_arrow_type();
+        let fields = final_node.schema().fields();
+        let field = fields
+            .iter()
+            .find(|field| field.data_type() == &histogram_type)
+            .unwrap_or_else(|| panic!("{query} published no field column: {display}"));
         assert_eq!(
-            &native_histogram_value_type().as_arrow_type(),
+            &histogram_type,
             field.data_type(),
             "{query} answers the histogram it folded: {display}"
         );
@@ -16053,14 +16060,17 @@ async fn histogram_state_stays_out_of_the_shapes_it_cannot_cross() {
         find_fused_series(&plan).is_some(),
         "the multi-input histogram tree kept the existing plan: {display}"
     );
-    let field = plan
-        .schema()
-        .field_with_unqualified_name(greptime_native_histogram())
-        .unwrap_or_else(|_| {
+    // The column is named after the expression now, so its type is what identifies it.
+    let histogram_type = native_histogram_value_type().as_arrow_type();
+    let fields = plan.schema().fields();
+    let field = fields
+        .iter()
+        .find(|field| field.data_type() == &histogram_type)
+        .unwrap_or_else(|| {
             panic!("the multi-input histogram tree published no histogram field: {display}")
         });
     assert_eq!(
-        &native_histogram_value_type().as_arrow_type(),
+        &histogram_type,
         field.data_type(),
         "the multi-input histogram tree answers the histograms it folded: {display}"
     );

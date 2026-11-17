@@ -24,8 +24,7 @@ use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
     NativeType, ParameterizedOp, aggregate_state_binding, duplicates_canonical_labels,
-    fused_output_tags,
-    reads_across_series, unifies_its_own_contributions,
+    fused_output_tags, reads_across_series, unifies_its_own_contributions,
 };
 use crate::extension_plan::FieldKind;
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
