@@ -273,7 +273,8 @@ impl RemoteDynFilterState {
 }
 
 /// Counted in [`REMOTE_DYN_FILTER_REGISTRY_ENTRIES`] from construction to drop;
-/// build it only through `new` and do not derive `Clone`.
+/// build it only through `new` and do not derive `Clone`. `new` and `Drop` are
+/// the only places that move the gauge.
 #[derive(Debug)]
 pub(super) struct RegisteredDynFilter {
     pub(super) filter_id: RemoteDynFilterId,
