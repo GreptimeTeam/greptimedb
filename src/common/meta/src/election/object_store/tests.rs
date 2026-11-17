@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use common_error::ext::{ErrorExt, RetryHint};
+use common_error::status_code::StatusCode;
 use object_store::layers::RetryLayer;
 use object_store::layers::mock::{
     Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, MetadataBuilder, OpCopy,
@@ -48,6 +50,7 @@ struct Data {
     max_writes_in_flight: usize,
     pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
+
 #[derive(Debug, Clone, Copy)]
 enum ConflictMutation {
     Body,
@@ -60,6 +63,7 @@ struct Backend {
     scheme: &'static str,
     capability: Capability,
 }
+
 impl Default for Backend {
     fn default() -> Self {
         Self {
@@ -77,6 +81,7 @@ impl Default for Backend {
         }
     }
 }
+
 impl Service for Backend {
     async fn create_dir(
         &self,
@@ -86,12 +91,15 @@ impl Service for Backend {
     ) -> Result<RpCreateDir> {
         unreachable!()
     }
+
     async fn stat(&self, _: &OperationContext, _: &str, _: OpStat) -> Result<RpStat> {
         unreachable!("Head must not stat")
     }
+
     fn copy(&self, _: &OperationContext, _: &str, _: &str, _: OpCopy) -> Result<()> {
         unreachable!()
     }
+
     async fn rename(
         &self,
         _: &OperationContext,
@@ -101,27 +109,33 @@ impl Service for Backend {
     ) -> Result<RpRename> {
         unreachable!()
     }
+
     async fn presign(&self, _: &OperationContext, _: &str, _: OpPresign) -> Result<RpPresign> {
         unreachable!()
     }
+
     type Reader = TestReader;
     type Writer = TestWriter;
     type Lister = TestLister;
     type Deleter = TestDeleter;
     type Copier = ();
     type Composer = ();
+
     fn info(&self) -> ServiceInfo {
         ServiceInfo::new(self.scheme, "/", "authority-test")
     }
+
     fn capability(&self) -> Capability {
         self.capability
     }
+
     fn read(&self, _: &OperationContext, path: &str, _: OpRead) -> Result<Self::Reader> {
         Ok(TestReader {
             data: self.data.clone(),
             path: path.into(),
         })
     }
+
     fn write(&self, _: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         Ok(TestWriter {
             data: self.data.clone(),
@@ -130,9 +144,11 @@ impl Service for Backend {
             body: Vec::new(),
         })
     }
+
     fn delete(&self, _: &OperationContext) -> Result<Self::Deleter> {
         Ok(TestDeleter(self.data.clone()))
     }
+
     fn list(&self, _: &OperationContext, _: &str, _: OpList) -> Result<TestLister> {
         if self.data.lock().unwrap().fail == Some("list") {
             return Err(denied());
@@ -140,19 +156,24 @@ impl Service for Backend {
         Ok(TestLister)
     }
 }
+
 struct TestLister;
+
 impl oio::List for TestLister {
     async fn next(&mut self) -> Result<Option<oio::Entry>> {
         Ok(None)
     }
 }
+
 fn denied() -> Error {
     Error::new(ErrorKind::PermissionDenied, "injected permission failure")
 }
+
 struct TestReader {
     data: Arc<Mutex<Data>>,
     path: String,
 }
+
 impl oio::Read for TestReader {
     async fn open(&self, _: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
         let data = self.data.lock().unwrap();
@@ -173,14 +194,17 @@ impl oio::Read for TestReader {
             }),
         ))
     }
+
     async fn read(&self, _: BytesRange) -> Result<(RpRead, Buffer)> {
         unreachable!("full read must use one stream")
     }
 }
+
 struct TestStream {
     body: Buffer,
     pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
+
 impl oio::ReadStream for TestStream {
     async fn read(&mut self) -> Result<Buffer> {
         if let Some((opened, release)) = self.pause.take() {
@@ -190,17 +214,20 @@ impl oio::ReadStream for TestStream {
         Ok(std::mem::take(&mut self.body))
     }
 }
+
 struct TestWriter {
     data: Arc<Mutex<Data>>,
     path: String,
     args: OpWrite,
     body: Vec<u8>,
 }
+
 impl oio::Write for TestWriter {
     async fn write(&mut self, bytes: Buffer) -> Result<()> {
         self.body.extend(bytes.to_vec());
         Ok(())
     }
+
     async fn close(&mut self) -> Result<Metadata> {
         let barrier = {
             let mut data = self.data.lock().unwrap();
@@ -273,10 +300,12 @@ impl oio::Write for TestWriter {
             .insert(self.path.clone(), (self.body.clone(), meta.clone()));
         Ok(meta)
     }
+
     async fn abort(&mut self) -> Result<()> {
         Ok(())
     }
 }
+
 fn corrupt_conflict(data: &mut Data, path: &str, mutation: Option<ConflictMutation>) {
     let Some(mutation) = mutation else {
         return;
@@ -285,7 +314,7 @@ fn corrupt_conflict(data: &mut Data, path: &str, mutation: Option<ConflictMutati
     match mutation {
         ConflictMutation::Body => {
             let mut head = AuthorityHead::decode(body).unwrap();
-            head.write_seq = 9;
+            head = head.with_next_write_seq().unwrap();
             *body = head.encode().unwrap();
         }
         ConflictMutation::Identity => {
@@ -298,6 +327,7 @@ fn corrupt_conflict(data: &mut Data, path: &str, mutation: Option<ConflictMutati
 }
 
 struct TestDeleter(Arc<Mutex<Data>>);
+
 impl oio::Delete for TestDeleter {
     async fn delete(&mut self, path: &str, _: OpDelete) -> Result<()> {
         let mut data = self.0.lock().unwrap();
@@ -308,10 +338,12 @@ impl oio::Delete for TestDeleter {
         data.objects.remove(path);
         Ok(())
     }
+
     async fn close(&mut self) -> Result<()> {
         Ok(())
     }
 }
+
 fn store(backend: &Backend) -> HeadStore {
     HeadStore::new_for_test(
         ObjectStore::from_parts(OperationContext::default(), Arc::new(backend.clone())),
@@ -330,14 +362,14 @@ async fn test_head_conditional_create() {
     assert_eq!(before.head(), after.head());
     assert!(s.same_version(before.metadata(), after.metadata()).unwrap());
 }
+
 #[tokio::test]
 async fn test_head_stale_replace() {
     let b = Backend::default();
     let s = store(&b);
     s.create_initial_head().await.unwrap();
     let old = s.read_head().await.unwrap();
-    let mut next = old.head().clone();
-    next.write_seq = 1;
+    let next = old.head().clone().with_next_write_seq().unwrap();
     s.replace_head(&old, &next).await.unwrap();
     let before = s.read_head().await.unwrap();
     assert_eq!(
@@ -353,16 +385,15 @@ async fn test_head_stale_replace() {
     assert_eq!(after.head(), &next);
     assert!(s.same_version(before.metadata(), after.metadata()).unwrap());
 }
+
 #[tokio::test]
 async fn test_head_concurrent_replace() {
     let backend = Backend::default();
     let store = store(&backend);
     store.create_initial_head().await.unwrap();
     let old = store.read_head().await.unwrap();
-    let mut first = old.head().clone();
-    first.write_seq = 1;
-    let mut second = first.clone();
-    second.write_seq = 2;
+    let first = old.head().clone().with_next_write_seq().unwrap();
+    let second = first.clone().with_next_write_seq().unwrap();
     backend.data.lock().unwrap().write_barrier = Some(Arc::new(tokio::sync::Barrier::new(2)));
     let (left, right) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         tokio::join!(
@@ -379,14 +410,14 @@ async fn test_head_concurrent_replace() {
         assert_eq!(data.writes_in_flight, 0);
     }
     let winner = match (left, right) {
-        (Ok(_), Err(error)) => {
+        (Ok(()), Err(error)) => {
             assert_eq!(
                 error.authority_storage_error().unwrap().kind(),
                 ErrorKind::ConditionNotMatch
             );
             first
         }
-        (Err(error), Ok(_)) => {
+        (Err(error), Ok(())) => {
             assert_eq!(
                 error.authority_storage_error().unwrap().kind(),
                 ErrorKind::ConditionNotMatch
@@ -397,6 +428,7 @@ async fn test_head_concurrent_replace() {
     };
     assert_eq!(store.read_head().await.unwrap().head(), &winner);
 }
+
 #[tokio::test]
 async fn test_head_missing_no_create() {
     let b = Backend::default();
@@ -408,6 +440,7 @@ async fn test_head_missing_no_create() {
     );
     assert_eq!(b.data.lock().unwrap().writes, 0);
 }
+
 #[tokio::test]
 async fn test_head_missing_metadata() {
     let b = Backend::default();
@@ -416,9 +449,9 @@ async fn test_head_missing_metadata() {
     b.data.lock().unwrap().missing_metadata = true;
     assert!(s.read_head().await.is_err());
 }
+
 #[tokio::test]
 async fn test_head_write_error_not_replayed() {
-    use common_error::ext::{ErrorExt, RetryHint};
     for replace in [false, true] {
         let backend = Backend::default();
         let store = store(&backend);
@@ -464,13 +497,13 @@ async fn failed_write(store: &HeadStore, backend: &Backend, replace: bool) -> cr
         data.fail = Some("write");
     }
     if let Some(expected) = expected {
-        let mut next = expected.head().clone();
-        next.write_seq = 1;
+        let next = expected.head().clone().with_next_write_seq().unwrap();
         store.replace_head(&expected, &next).await.unwrap_err()
     } else {
         store.create_initial_head().await.unwrap_err()
     }
 }
+
 #[test]
 fn test_head_version_selection() {
     let mut b = Backend::default();
@@ -489,6 +522,7 @@ fn test_head_version_selection() {
             .is_err()
     );
 }
+
 #[tokio::test]
 async fn test_probe_conditional_writes() {
     for exists in [false, true] {
@@ -498,6 +532,7 @@ async fn test_probe_conditional_writes() {
         assert!(b.data.lock().unwrap().objects.is_empty());
     }
 }
+
 #[tokio::test]
 async fn test_probe_rejects_ignored_conditions() {
     let b = Backend::default();
@@ -505,6 +540,7 @@ async fn test_probe_rejects_ignored_conditions() {
     assert!(store(&b).probe_conditional_writes().await.is_err());
     assert!(b.data.lock().unwrap().objects.is_empty());
 }
+
 #[tokio::test]
 async fn test_probe_permissions() {
     for fail in ["plain", "list"] {
@@ -514,6 +550,7 @@ async fn test_probe_permissions() {
         assert!(b.data.lock().unwrap().objects.is_empty());
     }
 }
+
 #[tokio::test]
 async fn test_probe_cleanup() {
     let b = Backend::default();
@@ -531,6 +568,7 @@ async fn test_probe_cleanup() {
     );
     assert_eq!(b.data.lock().unwrap().deleted.len(), 2);
 }
+
 #[tokio::test]
 async fn test_probe_path_isolation() {
     let b = Backend::default();
@@ -548,6 +586,7 @@ async fn test_probe_path_isolation() {
     );
     assert_eq!(data.objects.len(), 1);
 }
+
 #[test]
 fn test_backend_admission() {
     let mut b = Backend::default();
@@ -577,8 +616,7 @@ async fn test_head_read_coherent_metadata() {
     });
     opened.notified().await;
     b.data.lock().unwrap().pause = None;
-    let mut next = initial.head().clone();
-    next.write_seq = 1;
+    let next = initial.head().clone().with_next_write_seq().unwrap();
     s.replace_head(&initial, &next).await.unwrap();
     release.notify_one();
     let observed = task.await.unwrap().unwrap();
@@ -654,8 +692,7 @@ async fn test_head_native_version_replace() {
     let store = store(&backend);
     store.create_initial_head().await.unwrap();
     let old = store.read_head().await.unwrap();
-    let mut next = old.head().clone();
-    next.write_seq = 1;
+    let next = old.head().clone().with_next_write_seq().unwrap();
     store.replace_head(&old, &next).await.unwrap();
     let current = store.read_head().await.unwrap();
     assert!(
@@ -739,4 +776,246 @@ async fn test_probe_rejects_mutation_despite_conflict() {
             }
         }
     }
+}
+
+const INITIAL: &str =
+    r#"{"format_version":1,"owner":null,"epoch":0,"lease_deadline_ms":0,"write_seq":0}"#;
+const OWNED: &str = r#"{"format_version":1,"owner":{"addr":"127.0.0.1:3002","incarnation_id":"550e8400-e29b-41d4-a716-446655440000"},"epoch":1,"lease_deadline_ms":1794528010000,"write_seq":1}"#;
+
+#[test]
+fn test_head_v1_fixtures() {
+    assert_eq!(
+        AuthorityHead::decode(INITIAL.as_bytes()).unwrap(),
+        AuthorityHead::initial()
+    );
+    for fixture in [INITIAL, OWNED] {
+        let head = AuthorityHead::decode(fixture.as_bytes()).unwrap();
+        assert_eq!(head.encode().unwrap(), fixture.trim_end().as_bytes());
+    }
+    let owner = AuthorityHead::decode(OWNED.as_bytes())
+        .unwrap()
+        .owner
+        .unwrap();
+    assert_eq!(owner.addr, "127.0.0.1:3002");
+    assert_eq!(
+        owner.incarnation_id.to_string(),
+        "550e8400-e29b-41d4-a716-446655440000"
+    );
+    let identity = NodeIdentity::new(owner.addr.clone());
+    assert_ne!(NodeIdentity::new(owner.addr), identity);
+}
+
+#[test]
+fn test_head_v1_unknown_fields() {
+    let mut value: serde_json::Value = serde_json::from_str(OWNED).unwrap();
+    value["extra"] = true.into();
+    value["owner"]["extra"] = 42.into();
+    assert_eq!(
+        AuthorityHead::decode(&serde_json::to_vec(&value).unwrap()).unwrap(),
+        AuthorityHead::decode(OWNED.as_bytes()).unwrap()
+    );
+}
+
+#[test]
+fn test_head_required_owner() {
+    assert!(AuthorityHead::decode(INITIAL.as_bytes()).is_ok());
+    let mut value: serde_json::Value = serde_json::from_str(INITIAL).unwrap();
+    value.as_object_mut().unwrap().remove("owner");
+    assert!(AuthorityHead::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+}
+
+#[test]
+fn test_head_invalid_fields_and_version() {
+    let value: serde_json::Value = serde_json::from_str(OWNED).unwrap();
+    for field in [
+        "format_version",
+        "owner",
+        "epoch",
+        "lease_deadline_ms",
+        "write_seq",
+    ] {
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(AuthorityHead::decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+        let mut wrong = value.clone();
+        wrong[field] = true.into();
+        assert!(AuthorityHead::decode(&serde_json::to_vec(&wrong).unwrap()).is_err());
+    }
+    for field in ["addr", "incarnation_id"] {
+        let mut missing = value.clone();
+        missing["owner"].as_object_mut().unwrap().remove(field);
+        assert!(AuthorityHead::decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+    }
+    let mut invalid = value.clone();
+    invalid["owner"]["incarnation_id"] = "invalid".into();
+    assert!(AuthorityHead::decode(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    invalid = value;
+    invalid["format_version"] = 2.into();
+    assert!(AuthorityHead::decode(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    let mut head = AuthorityHead::initial();
+    head.format_version = 2;
+    assert!(head.encode().is_err());
+    assert!(AuthorityHead::decode(b"{").is_err());
+}
+
+#[test]
+fn test_head_counter_overflow() {
+    let head = AuthorityHead::initial();
+    let next = head
+        .clone()
+        .with_next_epoch()
+        .unwrap()
+        .with_next_write_seq()
+        .unwrap();
+    assert_eq!((head.epoch(), head.write_seq()), (0, 0));
+    assert_eq!((next.epoch(), next.write_seq()), (1, 1));
+    for field in ["epoch", "write_seq"] {
+        let mut value = serde_json::to_value(&head).unwrap();
+        value[field] = u64::MAX.into();
+        let max = AuthorityHead::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = if field == "epoch" {
+            max.clone().with_next_epoch().unwrap_err()
+        } else {
+            max.clone().with_next_write_seq().unwrap_err()
+        };
+        assert_eq!(error.status_code(), StatusCode::IllegalState);
+        assert_eq!(serde_json::to_value(&max).unwrap()[field], u64::MAX);
+    }
+}
+
+#[test]
+fn test_authority_error_status_codes() {
+    let mut head = AuthorityHead::initial();
+    head.format_version = 2;
+    assert_eq!(
+        head.encode().unwrap_err().status_code(),
+        StatusCode::IllegalState
+    );
+    assert_eq!(
+        AuthorityHead::decode(b"{").unwrap_err().status_code(),
+        StatusCode::IllegalState
+    );
+    assert_eq!(
+        crate::error::AuthorityProbeSnafu {
+            reason: "ignored condition"
+        }
+        .build()
+        .status_code(),
+        StatusCode::Unsupported
+    );
+    assert_eq!(
+        crate::error::AuthorityMetadataSnafu {
+            reason: "missing timestamp"
+        }
+        .build()
+        .status_code(),
+        StatusCode::StorageUnavailable
+    );
+    assert_eq!(
+        crate::error::AuthorityCapabilitySnafu {
+            scheme: "gcs",
+            reason: "pending qualification"
+        }
+        .build()
+        .status_code(),
+        StatusCode::Unsupported
+    );
+}
+
+#[tokio::test]
+async fn test_head_decode_error_context() {
+    let backend = Backend::default();
+    let store = store(&backend);
+    store.create_initial_head().await.unwrap();
+    for invalid in [b"{".as_slice(), br#"{"format_version":1}"#.as_slice()] {
+        {
+            let mut data = backend.data.lock().unwrap();
+            let (body, metadata) = data.objects.values_mut().next().unwrap();
+            *body = invalid.to_vec();
+            let mut builder = metadata.clone().into_builder();
+            builder.set_file(invalid.len() as u64);
+            *metadata = builder.build();
+        }
+        let error = store.read_head().await.unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::IllegalState);
+        assert!(error.to_string().contains("cluster/authority/head.json"));
+        let mut source = std::error::Error::source(&error);
+        let mut found = false;
+        while let Some(cause) = source {
+            if let Some(json) = cause.downcast_ref::<serde_json::Error>() {
+                assert!(json.line() > 0);
+                assert!(json.column() > 0);
+                found = true;
+            }
+            source = cause.source();
+        }
+        assert!(found, "serde_json error source must be retained");
+    }
+}
+
+#[test]
+fn test_head_prefix_normalization() {
+    let backend = Backend::default();
+    for (prefix, head, probes) in [
+        (
+            "///cluster//nested/",
+            "/cluster/nested/authority/head.json",
+            "/cluster/nested/probes/",
+        ),
+        ("", "/authority/head.json", "/probes/"),
+    ] {
+        let store = HeadStore::new_for_test(
+            ObjectStore::from_parts(OperationContext::default(), Arc::new(backend.clone())),
+            prefix,
+        );
+        assert_eq!(store.head_path, head);
+        assert_eq!(store.probe_prefix, probes);
+    }
+}
+
+#[test]
+fn test_backend_admission_diagnostics() {
+    for (scheme, text) in [
+        ("gcs", "generation"),
+        ("oss", "PutObject"),
+        ("fs", "atomic"),
+        ("memory", "atomic"),
+    ] {
+        let backend = Backend {
+            scheme,
+            ..Default::default()
+        };
+        let error = store(&backend).check_capabilities().unwrap_err();
+        match error {
+            crate::error::Error::AuthorityCapability {
+                scheme: actual,
+                reason,
+                ..
+            } => {
+                assert_eq!(actual, scheme);
+                assert!(reason.contains(text), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_head_write_success_does_not_require_readback() {
+    let backend = Backend::default();
+    let store = store(&backend);
+    backend.data.lock().unwrap().missing_metadata = true;
+    store.create_initial_head().await.unwrap();
+    assert!(store.read_head().await.is_err());
+    backend.data.lock().unwrap().missing_metadata = false;
+    let expected = store.read_head().await.unwrap();
+    backend.data.lock().unwrap().missing_metadata = true;
+    store
+        .replace_head(
+            &expected,
+            &expected.head().clone().with_next_write_seq().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(store.read_head().await.is_err());
 }

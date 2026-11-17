@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_error::ext::BoxedError;
 use object_store::config::ObjectStoreConfig;
 use object_store::factory;
 use object_store::util;
@@ -29,7 +30,7 @@ use crate::metrics::METRIC_AUTHORITY_STORAGE_EVENTS;
 pub struct AuthorityState {
     head: AuthorityHead,
     metadata: Metadata,
-    scope: Arc<()>,
+    scope: Arc<StoreScope>,
     path: String,
 }
 
@@ -49,11 +50,30 @@ pub struct HeadStore {
     pub(crate) operator: ObjectStore,
     pub(crate) head_path: String,
     pub(crate) probe_prefix: String,
-    scope: Arc<()>,
+    scope: Arc<StoreScope>,
+}
+
+// A fresh allocation identifies the store instance that produced each state.
+#[derive(Debug)]
+struct StoreScope;
+
+enum ConditionIdentity<'a> {
+    Version(&'a str),
+    Etag(&'a str),
 }
 
 impl HeadStore {
-    /// Opens and probes storage without creating or changing the official Head.
+    /// Opens storage without creating or changing the official Head.
+    ///
+    /// Every call performs remote capability probes. Initialize once at node startup
+    /// and share this instance. An `AuthorityState` is bound to the instance that read
+    /// it; conditional replacement must use that same instance.
+    ///
+    /// `prefix` is relative to the configured storage root, which is applied once by
+    /// the operator. An empty prefix is for an exclusively owned root. Clusters sharing
+    /// a root must use non-empty, unique, stable prefixes. Path joining collapses
+    /// repeated `/` separators and preserves at most one leading `/`; that leading `/`
+    /// is still resolved within the operator root, not the host filesystem root.
     pub async fn open(config: &ObjectStoreConfig, data_home: &str, prefix: &str) -> Result<Self> {
         let operator = factory::new_raw_object_store(config, data_home)
             .await
@@ -72,7 +92,7 @@ impl HeadStore {
             operator,
             head_path: util::join_path(prefix, "authority/head.json"),
             probe_prefix: util::join_dir(prefix, "probes"),
-            scope: Arc::new(()),
+            scope: Arc::new(StoreScope),
         }
     }
 
@@ -87,17 +107,19 @@ impl HeadStore {
     }
 
     /// Explicit create-only initialization. Normal reads never call this method.
-    pub async fn create_initial_head(&self) -> Result<Metadata> {
+    /// Read back with [`Self::read_head`] when payload and metadata are needed.
+    pub async fn create_initial_head(&self) -> Result<()> {
         self.create_at(&self.head_path, &AuthorityHead::initial())
             .await
     }
 
     /// Replaces the observed version. Term and owner checks belong to the authority.
+    /// Success confirms the PUT only; a subsequent [`Self::read_head`] reports its own result.
     pub async fn replace_head(
         &self,
         expected: &AuthorityState,
         next: &AuthorityHead,
-    ) -> Result<Metadata> {
+    ) -> Result<()> {
         self.replace_at(&self.head_path, expected, next).await
     }
 
@@ -105,16 +127,17 @@ impl HeadStore {
     pub fn same_version(&self, left: &Metadata, right: &Metadata) -> Result<bool> {
         let left = self.identity(left)?;
         let right = self.identity(right)?;
-        if left.0 != right.0 {
-            return error::AuthorityMetadataSnafu {
+        match (left, right) {
+            (ConditionIdentity::Version(left), ConditionIdentity::Version(right))
+            | (ConditionIdentity::Etag(left), ConditionIdentity::Etag(right)) => Ok(left == right),
+            _ => error::AuthorityMetadataSnafu {
                 reason: "incomparable condition identities",
             }
-            .fail();
+            .fail(),
         }
-        Ok(left.1 == right.1)
     }
 
-    fn identity<'a>(&self, metadata: &'a Metadata) -> Result<(bool, &'a str)> {
+    fn identity<'a>(&self, metadata: &'a Metadata) -> Result<ConditionIdentity<'a>> {
         let capability = self.operator.info().capability();
         if capability.write_with_if_version_match
             && let Some(version) = metadata.version()
@@ -125,13 +148,13 @@ impl HeadStore {
                 }
                 .fail();
             }
-            return Ok((true, version));
+            return Ok(ConditionIdentity::Version(version));
         }
         if capability.write_with_if_match
             && let Some(etag) = metadata.etag()
             && !etag.is_empty()
         {
-            return Ok((false, etag));
+            return Ok(ConditionIdentity::Etag(etag));
         }
         error::AuthorityMetadataSnafu {
             reason: "missing supported conditional identity",
@@ -163,15 +186,18 @@ impl HeadStore {
             }
             .fail();
         }
+        let head = AuthorityHead::decode(&body.to_vec()).map_err(|source| {
+            error::AuthorityReadHeadSnafu { path }.into_error(BoxedError::new(source))
+        })?;
         Ok(AuthorityState {
-            head: AuthorityHead::decode(&body.to_vec())?,
+            head,
             metadata,
             scope: self.scope.clone(),
             path: path.into(),
         })
     }
 
-    pub(crate) async fn create_at(&self, path: &str, head: &AuthorityHead) -> Result<Metadata> {
+    pub(crate) async fn create_at(&self, path: &str, head: &AuthorityHead) -> Result<()> {
         self.write_result(
             self.operator
                 .write_with(path, head.encode()?)
@@ -185,7 +211,7 @@ impl HeadStore {
         path: &str,
         expected: &AuthorityState,
         next: &AuthorityHead,
-    ) -> Result<Metadata> {
+    ) -> Result<()> {
         if !Arc::ptr_eq(&self.scope, &expected.scope) || expected.path != path {
             return error::AuthorityMetadataSnafu {
                 reason: "state belongs to another storage instance or path",
@@ -201,8 +227,8 @@ impl HeadStore {
         )
     }
 
-    fn write_result(&self, result: object_store::Result<Metadata>) -> Result<Metadata> {
-        result.map_err(|error| {
+    fn write_result(&self, result: object_store::Result<Metadata>) -> Result<()> {
+        result.map(|_| ()).map_err(|error| {
             let outcome = match error.kind() {
                 ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists | ErrorKind::Conflict => {
                     "conflict"

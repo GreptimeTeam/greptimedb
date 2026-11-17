@@ -1058,9 +1058,19 @@ pub enum Error {
         reason: String,
     },
 
-    #[snafu(display("Invalid Authority Head: {}", reason))]
+    #[snafu(display("Failed to {} Authority Head JSON", operation))]
     AuthorityFormat {
-        reason: &'static str,
+        operation: &'static str,
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode Authority Head at {}", path))]
+    AuthorityReadHead {
+        path: String,
+        source: BoxedError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1095,8 +1105,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Object store is not admitted for Authority Head: {}", reason))]
+    #[snafu(display(
+        "Object store {} is not admitted for Authority Head: {}",
+        scheme,
+        reason
+    ))]
     AuthorityCapability {
+        scheme: &'static str,
         reason: &'static str,
         #[snafu(implicit)]
         location: Location,
@@ -1304,12 +1319,12 @@ impl ErrorExt for Error {
             | ElectionLeaderLeaseChanged { .. } => StatusCode::Internal,
 
             AuthorityFormat { .. } | AuthorityVersion { .. } | AuthorityOverflow { .. } => {
-                StatusCode::InvalidArguments
+                StatusCode::IllegalState
             }
-            AuthorityCapability { .. } => StatusCode::Unsupported,
+            AuthorityReadHead { source, .. } => source.status_code(),
+            AuthorityCapability { .. } | AuthorityProbe { .. } => StatusCode::Unsupported,
             AuthorityMissing { .. }
             | AuthorityMetadata { .. }
-            | AuthorityProbe { .. }
             | AuthorityStorage { .. }
             | AuthorityOpen { .. } => StatusCode::StorageUnavailable,
             NoLeader { .. } => StatusCode::TableUnavailable,

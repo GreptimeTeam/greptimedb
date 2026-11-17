@@ -18,19 +18,29 @@ use object_store::{ErrorKind, Metadata};
 use snafu::{IntoError, ResultExt};
 use uuid::Uuid;
 
-use crate::election::object_store::{AuthorityHead, HeadStore};
+use crate::election::object_store::{AuthorityHead, AuthorityState, HeadStore};
 use crate::error::{self, Result};
 use crate::metrics::METRIC_AUTHORITY_STORAGE_EVENTS;
 
 impl HeadStore {
     pub(crate) fn check_capabilities(&self) -> Result<()> {
         let info = self.operator.info();
-        // GCS remains disabled until real generation-path qualification.
-        if !matches!(info.scheme(), "s3" | "azblob") {
-            return error::AuthorityCapabilitySnafu {
-                reason: "only S3 and Azure Blob are admitted; GCS qualification is pending",
+        let scheme = info.scheme();
+        // TODO(alorun): Replace the allow-list with capability-based admission after
+        // GCS passes real-endpoint generation-based conditional-write qualification.
+        let reason = match scheme {
+            "s3" | "azblob" => None,
+            "gcs" => {
+                Some("GCS generation-based conditional writes require real-endpoint validation")
             }
-            .fail();
+            "oss" => Some("OSS PutObject rejects If-Match and If-None-Match conditions"),
+            "fs" | "memory" => {
+                Some("backend lacks the required atomic conditional replacement semantics")
+            }
+            _ => Some("backend has not been qualified for Authority Head conditional replacement"),
+        };
+        if let Some(reason) = reason {
+            return error::AuthorityCapabilitySnafu { scheme, reason }.fail();
         }
         let c = info.capability();
         if !(c.read
@@ -41,6 +51,7 @@ impl HeadStore {
             && (c.write_with_if_version_match || c.write_with_if_match))
         {
             return error::AuthorityCapabilitySnafu {
+                scheme,
                 reason: "read/write/list/delete and atomic conditional create/replace are required",
             }
             .fail();
@@ -69,8 +80,7 @@ impl HeadStore {
         self.create_at(path, &initial).await?;
         let first = self.read_at(path).await?;
         self.require_probe(first.head() == &initial, "initial contents differ")?;
-        let mut next = initial.clone();
-        next.write_seq = 1;
+        let next = initial.clone().with_next_write_seq()?;
         match self.create_at(path, &next).await {
             Err(error)
                 if matches!(
@@ -78,7 +88,7 @@ impl HeadStore {
                     Some(ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists)
                 ) => {}
             Err(error) => return Err(error),
-            Ok(_) => {
+            Ok(()) => {
                 return error::AuthorityProbeSnafu {
                     reason: "duplicate create was accepted",
                 }
@@ -90,14 +100,13 @@ impl HeadStore {
         self.replace_at(path, &first, &next).await?;
         let current = self.read_at(path).await?;
         self.verify_probe(&current, &next, first.metadata(), false)?;
-        let mut stale = next.clone();
-        stale.write_seq = 2;
+        let stale = next.clone().with_next_write_seq()?;
         match self.replace_at(path, &first, &stale).await {
             Err(error)
                 if error.authority_storage_error().map(|e| e.kind())
                     == Some(ErrorKind::ConditionNotMatch) => {}
             Err(error) => return Err(error),
-            Ok(_) => {
+            Ok(()) => {
                 return error::AuthorityProbeSnafu {
                     reason: "stale replacement was accepted",
                 }
@@ -126,7 +135,7 @@ impl HeadStore {
 
     fn verify_probe(
         &self,
-        state: &crate::election::object_store::AuthorityState,
+        state: &AuthorityState,
         expected: &AuthorityHead,
         metadata: &Metadata,
         same: bool,

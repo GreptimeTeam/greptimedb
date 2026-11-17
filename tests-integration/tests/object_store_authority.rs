@@ -58,8 +58,7 @@ async fn test_minio_head_storage() {
         e.authority_storage_error().unwrap().kind(),
         ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists
     ));
-    let mut next = initial.head().clone();
-    next.write_seq = 1;
+    let next = initial.head().clone().with_next_write_seq().unwrap();
     store.replace_head(&initial, &next).await.unwrap();
     let current = store.read_head().await.unwrap();
     assert_eq!(current.head(), &next);
