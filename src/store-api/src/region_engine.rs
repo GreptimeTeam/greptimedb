@@ -436,6 +436,9 @@ impl ScannerProperties {
     }
 
     /// Sets whether the scanner reads one logical metric region.
+    ///
+    /// A prepared exact count is kept: Mito publishes one only after proving
+    /// every static filter, including the logical region's table-id filter.
     pub fn set_logical_region(&mut self, logical_region: bool) {
         self.logical_region = logical_region;
     }
