@@ -26,7 +26,7 @@ use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datatypes::arrow::array::Float64Array;
+use datatypes::arrow::array::{Array, ArrowPrimitiveType, Float64Array, PrimitiveArray};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
@@ -159,13 +159,43 @@ pub(super) fn evaluated_bytes(chunk: &EvaluatedChunk) -> usize {
     std::mem::size_of::<EvaluatedChunk>().saturating_add(fields_bytes(&chunk.series.fields))
 }
 
-/// The bytes one chunk of a binary operand holds on its own: [`series_bytes`] with the samples its
-/// rows occupy in place of the allocations they are slices of.
+/// The bytes one chunk holds beside its samples: its axis, the runs that axis is made of, one
+/// descriptor per segment and its labels.
 ///
-/// Histogram tables are excluded here; [`unbilled_tables`] bills them once per operand.
-pub(crate) fn operand_chunk_bytes(series: &Series) -> usize {
+/// It is what is left of [`series_bytes`] once the allocations its samples are slices of are taken
+/// out and the `Series` struct itself is left to whatever holds the chunk: the struct is one slot of
+/// the container a retainer keeps its chunks in, so a retainer that counts that container -- a
+/// `quantile` counts its vector by capacity -- has already counted it, and one that does not count
+/// it anywhere would have to add it back.
+///
+/// This is the figure of a retainer that bills the allocations its samples live in itself
+/// ([`unbilled_sample_buffers`]): what the chunk holds on its own, plus that residency, once each.
+pub(crate) fn chunk_bytes_beside_samples(series: &Series) -> usize {
     series_bytes(series)
         .saturating_sub(fields_bytes(&series.fields))
+        .saturating_sub(std::mem::size_of::<Series>())
+}
+
+/// The bytes one chunk a binary operand retains holds on its own.
+///
+/// It is [`chunk_bytes_beside_samples`] with the samples a chunk's rows occupy in place of the
+/// allocations they are slices of, and with the struct the chunk's `Series` carries: a series
+/// delivered in a thousand chunks holds a thousand slices of one buffer, so counting that buffer
+/// once per chunk would make the operand's figure grow with the number of chunks rather than with
+/// the data in them. The slices of one series add up to the allocation they share, which is the
+/// figure a deduplication across the chunks would arrive at.
+///
+/// The struct is part of this figure because an operand keeps one entry per retained chunk and
+/// counts no container of its own, so the entry and the chunk in it are one figure here. A retainer
+/// that does count its container takes [`chunk_bytes_beside_samples`] instead.
+///
+/// The histogram tables a chunk's segments reference are not part of the figure: a table is one
+/// allocation however many chunks index into it, so it is not a per-chunk cost at all. Dropping it
+/// here is therefore only half the story -- it must not become a figure the operand never charges.
+/// [`unbilled_tables`] is the other half, and the operand bills each table once through it.
+pub(crate) fn operand_chunk_bytes(series: &Series) -> usize {
+    chunk_bytes_beside_samples(series)
+        .saturating_add(std::mem::size_of::<Series>())
         .saturating_add(sample_slice_bytes(&series.fields))
 }
 
@@ -202,11 +232,122 @@ fn sample_slice_bytes(fields: &SeriesFields) -> usize {
         .fold(0usize, usize::saturating_add)
 }
 
+/// The Arrow allocations `series`' samples live in that `billed` does not hold yet, and the bytes
+/// they hold.
+///
+/// [`sample_slice_bytes`] counts the rows a chunk holds, which is the figure of a caller that bills
+/// the samples without the allocations they are slices of. That is exact only when the chunks of a
+/// series are non-overlapping slices that add up to the buffers they point into. It is wrong in both
+/// directions otherwise: a chunk holding one row of a large batch keeps the whole buffer resident
+/// while its rows are eight bytes, and two chunks whose slices overlap hold the bytes between them
+/// once while each is charged for them. What is resident is the allocation, and an allocation is one
+/// however many chunks slice it, so it is counted once, by the first chunk to reference it --
+/// exactly as [`unbilled_tables`] counts a histogram table.
+///
+/// Counting every chunk for the whole buffer it slices would need no identity at all, but it
+/// over-estimates by the number of chunks: a series handed over as a thousand slices of one buffer
+/// would be charged that buffer a thousand times, which refuses an input whose buffers do fit the
+/// pool. The identity is therefore read, and read from Arrow's own handle on the allocation
+/// ([`Buffer::data_ptr`]): every slice of one buffer reports the address of the allocation it points
+/// into, whatever its offset inside it, and the address names that allocation for as long as it is
+/// remembered -- a chunk referencing a buffer keeps it alive, so no later allocation can be given
+/// the same address. The bytes are the buffer's capacity, which is the allocation and not the slice,
+/// plus the one slot the identity takes in the set that remembers it. The caller counts the figure
+/// as it stands and adds the identities to `billed` once the chunk is retained, which is what makes
+/// the two halves agree.
+///
+/// Every array a chunk holds samples in contributes: the values of a float segment, the indices of a
+/// histogram one, both of a mixed one, and the validity bitmap beside each of them -- a bitmap is an
+/// allocation of its own, and no figure that counts rows can see it. A buffer two segments or two
+/// fields of the one chunk reference is listed once.
+pub(crate) fn unbilled_sample_buffers(
+    series: &Series,
+    billed: &HashSet<usize>,
+) -> (Vec<usize>, usize) {
+    let mut fresh: Vec<usize> = Vec::new();
+    let mut bytes = 0usize;
+    for field in series.fields.iter() {
+        for segment in field.segments() {
+            match segment.dense() {
+                Some(DenseSamplesRef::Float(values)) => {
+                    unbilled_array_buffers(values, &mut fresh, billed, &mut bytes)
+                }
+                Some(DenseSamplesRef::Histogram(histograms)) => {
+                    unbilled_array_buffers(histograms.indices(), &mut fresh, billed, &mut bytes)
+                }
+                Some(DenseSamplesRef::Mixed(mixed)) => {
+                    unbilled_array_buffers(mixed.floats(), &mut fresh, billed, &mut bytes);
+                    unbilled_array_buffers(
+                        mixed.histograms().indices(),
+                        &mut fresh,
+                        billed,
+                        &mut bytes,
+                    );
+                }
+                // `segments` hands out dense segments only, so a nested chunk never reaches here.
+                None => {}
+            }
+        }
+    }
+    (fresh, bytes)
+}
+
+/// Adds the allocation a sample array's values live in, and the one its validity bitmap lives in,
+/// to `fresh` and `bytes`, skipping the ones `billed` holds and the ones already reported.
+fn unbilled_array_buffers<T: ArrowPrimitiveType>(
+    values: &PrimitiveArray<T>,
+    fresh: &mut Vec<usize>,
+    billed: &HashSet<usize>,
+    bytes: &mut usize,
+) {
+    unbilled_buffer(values.values().inner(), fresh, billed, bytes);
+    if let Some(nulls) = values.nulls() {
+        unbilled_buffer(nulls.buffer(), fresh, billed, bytes);
+    }
+}
+
+/// Adds the allocation `buffer` is a slice of to `fresh` and `bytes`, once.
+fn unbilled_buffer(
+    buffer: &Buffer,
+    fresh: &mut Vec<usize>,
+    billed: &HashSet<usize>,
+    bytes: &mut usize,
+) {
+    let held = buffer_bytes(buffer);
+    if held == 0 {
+        // An array whose values are all valid carries an empty bitmap, which owns nothing.
+        return;
+    }
+    let identity = buffer.data_ptr().as_ptr() as usize;
+    if billed.contains(&identity) || fresh.contains(&identity) {
+        return;
+    }
+    fresh.push(identity);
+    *bytes = bytes
+        .saturating_add(held)
+        .saturating_add(std::mem::size_of::<usize>());
+}
+
 /// The histogram tables `series` is the first to reference, and the bytes they hold.
 ///
-/// The caller adds these identities to `billed` when it retains the chunk, so one allocation several
-/// chunks index into is billed once. The identity is the address of the allocation behind the `Arc`.
-fn unbilled_tables(series: &Series, billed: &HashSet<usize>) -> (Vec<usize>, usize) {
+/// A table is one allocation the chunks of a series share, so it is neither a per-chunk cost --
+/// counting it per chunk would make a series delivered in a thousand chunks cost a thousand tables
+/// -- nor no cost at all, which is what leaving it out of every chunk leaves the figure at. What it
+/// is, is a cost of the operand that first retains a chunk referencing it: the identities it returns
+/// are the tables `billed` does not hold yet, and the figure is what those tables hold
+/// ([`table_bytes`]). The caller bills the figure as it stands and adds the identities to `billed`
+/// once the chunk is retained, which is what makes the two halves of the figure agree.
+///
+/// The identity is the address of the allocation behind the `Arc`. It names one table for as long as
+/// it is remembered, because a chunk referencing a table keeps it alive and no later allocation can
+/// be given the same address. A table two segments or two fields of the one chunk reference is
+/// listed once. Each identity is also one slot in the set that remembers it, which is charged as it
+/// is written -- one entry at a time, like the boundary list's, and not from the capacity the set
+/// grows to -- so remembering a table is paid for beside the table itself.
+///
+/// Both nodes that retain chunks instead of folding them read this: a binary operand and a
+/// `quantile` input. Neither counts a table per chunk, and neither lets it go unbilled.
+pub(crate) fn unbilled_tables(series: &Series, billed: &HashSet<usize>) -> (Vec<usize>, usize) {
     let mut fresh: Vec<usize> = Vec::new();
     let mut bytes = 0usize;
     for field in series.fields.iter() {

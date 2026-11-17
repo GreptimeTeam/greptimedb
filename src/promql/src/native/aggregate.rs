@@ -28,20 +28,44 @@
 //! each missing the other partitions' contributions. The stages that exist for that shape are
 //! [`AggregateStage::Partial`] and [`AggregateStage::Final`], which carry kernel accumulator
 //! state between executions.
+//!
+//! `quantile` is the one aggregate here that is not a fold of each point's values. Its answer is the
+//! φ-quantile of the group's whole sample set at that point, so there is no fixed-width accumulator
+//! that answers it, and no state that combines two partitions' quantiles into the quantile of their
+//! union. What the node keeps instead is its input: every series it was handed, until the input
+//! ends, when [`crate::aggregate::aggregate_quantile`] answers from all of it at once. That is also
+//! why `quantile` exists only as [`AggregateStage::Complete`] here, and why a plan that would have
+//! to fold it per partition has to keep the previous route instead of splitting it.
+//!
+//! There is no spill either: a `quantile` keeps the whole input of every group, at once, until the
+//! last chunk arrives, so what it holds is not bounded by the number of groups the way a fixed-width
+//! accumulator's is -- it is bounded by the pool. Each chunk is admitted before it is kept and the
+//! reservation settles on the input retained so far ([`AggregateRuntime::accumulate`]), so a
+//! statement whose groups' samples do not fit the pool is refused rather than served from disk, and
+//! a caller that needs an answer in bounded memory needs a wider pool rather than a wider node.
+//! Everything else in this runtime trades memory for the width of a point: a fold's state per group
+//! and point, this one's whole input.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::samples::{Series, SeriesSchema};
+use datatypes::series::SeriesLabels;
+use datatypes::series::samples::{FieldSpec, Series, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridRange, TimeAxis, union_positions};
 
 use crate::aggregate::{
-    AggregateOp, FloatAggregator, FloatMerger, Grouping, HistogramSamples, histogram_samples,
-    validate_aggregate_series,
+    AggregateOp, FloatAggregator, FloatMerger, Grouping, HistogramSamples, aggregate_quantile,
+    histogram_samples, validate_aggregate_series,
 };
 use crate::evaluated::EvaluatedChunk;
-use crate::grid_series::series_bytes;
-use crate::native::execute::{NodeBuffer, evaluated_bytes};
+use crate::grid_series::{GridSeriesBuilder, series_bytes};
+use crate::map::{constant_series, validate_grid_series};
+use crate::native::execute::{
+    NodeBuffer, chunk_bytes_beside_samples, evaluated_bytes, unbilled_sample_buffers,
+    unbilled_tables,
+};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, Grouping as BoundGrouping,
     aggregate_state_binding,
@@ -54,6 +78,89 @@ pub(crate) enum AggregateOutput {
     State(StateChunk),
 }
 
+/// What a `Complete` aggregate keeps while its input arrives.
+///
+/// The eight point-wise aggregates fold each grid point's values into fixed-width state; `quantile`
+/// keeps the samples themselves, because the φ-quantile of a group is not a value its members' values
+/// fold to.
+#[derive(Clone, Copy)]
+enum Fold {
+    /// One fixed-width accumulator per point and field.
+    Pointwise(AggregateOp),
+    /// The whole input, kept until it ends.
+    Quantile,
+}
+
+/// The input a `quantile` aggregate keeps, until it has all of it.
+///
+/// The members are the series the node was handed, in the order they arrived: that order is the order
+/// [`aggregate_quantile`] folds a group's members in, and a series delivered in several chunks
+/// contributes at each position it holds, so the pieces of one series answer what the whole series
+/// would have. Nothing here is grouped: the kernel groups, and it groups the same way for a chunk as
+/// for a series of its own.
+struct QuantileInput {
+    /// The φ the query wrote. The kernel reads it as Prometheus does, so a value outside `[0, 1]`
+    /// answers `-Infinity` or `+Infinity` rather than being refused here.
+    quantile: f64,
+    /// One entry per series this node was handed.
+    series: Vec<Series>,
+    /// The histogram tables the retained chunks index into, by the address of the allocation behind
+    /// their `Arc`.
+    ///
+    /// A table is one allocation however many chunks of a series index into it, so it is billed once
+    /// -- by the first chunk that references it -- exactly as a binary operand bills the tables of
+    /// the chunks it retains. That is what keeps a series delivered in a thousand chunks from costing
+    /// a thousand tables, and what keeps a table from costing nothing: the per-chunk figure leaves
+    /// its tables out ([`chunk_bytes_beside_samples`]), so a table in neither this set nor a
+    /// reservation is a table nothing covers.
+    tables: HashSet<usize>,
+    /// The Arrow allocations the retained chunks' samples live in, by the address of the allocation
+    /// behind their `Buffer`.
+    ///
+    /// The chunks of one Arrow batch are the same story as its tables one level down, and the same
+    /// answer: what a retainer keeps is the allocation its slices point into, and one allocation is
+    /// one however many chunks slice it, so it is billed once -- by the first chunk that references
+    /// it ([`unbilled_sample_buffers`]) -- rather than once per chunk. That is what keeps a series
+    /// handed over as a thousand slices of one buffer from costing that buffer a thousand times. A
+    /// chunk that holds a small slice of a large allocation is charged the allocation, because the
+    /// allocation is what stays resident; its rows would be the smaller and wrong figure.
+    buffers: HashSet<usize>,
+    /// The bytes the retained chunks hold, folded in as they arrive.
+    ///
+    /// Each chunk is measured once, by what it holds on its own ([`chunk_bytes_beside_samples`]):
+    /// its axis, its descriptors and its labels, beside the allocations it is the first to reference
+    /// -- the Arrow buffers its samples live in and the histogram tables they index into, each
+    /// billed once as [`unbilled_sample_buffers`] and [`unbilled_tables`] report them. Neither the
+    /// allocation those samples are slices of nor the struct that carries the chunk is part of the
+    /// figure: the first is billed as the allocation it is and not as the rows a chunk holds of it,
+    /// and the second is the slot the vector holds the chunk in. [`Self::bytes`] adds that vector
+    /// from the capacity it holds, which is why the struct is not counted here as well.
+    held: usize,
+}
+
+impl QuantileInput {
+    /// The bytes this input holds: the chunks it retained and the vector that carries them.
+    ///
+    /// The retained figure is [`Self::held`], which is folded in chunk by chunk, and the vector is
+    /// counted by the capacity it really holds -- the capacity `retain_quantile` reserved before it
+    /// grew -- so this is what the node has to reserve rather than a second estimate of it.
+    ///
+    /// The two do not overlap. A chunk's `Series` is carried inside one slot of that vector, so
+    /// `held` counts what the chunk holds beside the struct ([`chunk_bytes_beside_samples`]) and the
+    /// capacity here counts every slot the vector owns, occupied or not. Counting the struct in both
+    /// would charge each occupied slot twice; counting it in neither would leave every slot the
+    /// vector holds uncovered.
+    fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(
+                self.series
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Series>()),
+            )
+            .saturating_add(self.held)
+    }
+}
+
 /// One aggregate node's states, from the first chunk it is handed to the series it finishes with.
 pub(crate) struct AggregateRuntime {
     /// What the node computes, as the tree bound it: the kind it folds by and the stage it reports.
@@ -62,15 +169,18 @@ pub(crate) struct AggregateRuntime {
     /// addressed on. A `Complete` aggregate neither adds nor drops a field, and it evaluates on its
     /// input's grid, so one schema describes both sides.
     schema: Arc<SeriesSchema>,
-    /// The kind this node folds by, as the runtime's own enum, so the chunk check can ask what the
-    /// operation accepts.
-    fold_op: AggregateOp,
+    /// What this node keeps between chunks, as the runtime's own enum, so the chunk check can ask
+    /// what the operation accepts.
+    fold: Fold,
     /// The query's annotation collector, once the driver installed it. Only an operation that skips
     /// histogram samples has anything to say, and it says it once.
     annotations: Option<PromqlAnnotationCollector>,
     /// The fold. `None` once [`Self::compute`] has taken it, which is also what says the node has
     /// nothing left to fold into.
     accumulator: Option<FloatAggregator>,
+    /// The whole input of a `quantile` aggregate. `None` for every other kind, and `None` once the
+    /// kernel has answered from it.
+    retained: Option<QuantileInput>,
     merger: Option<FloatMerger>,
     state_schema: Option<Arc<AggregateStateSchema>>,
     /// Whether the fold has been finished and its series handed over. A node computes once: a second
@@ -84,15 +194,16 @@ pub(crate) struct AggregateRuntime {
 impl AggregateRuntime {
     /// The PromQL name of the aggregate this node folds, as an annotation names it.
     fn aggregate_name(&self) -> &'static str {
-        match self.fold_op {
-            AggregateOp::Sum => "sum",
-            AggregateOp::Count => "count",
-            AggregateOp::Avg => "avg",
-            AggregateOp::Min => "min",
-            AggregateOp::Max => "max",
-            AggregateOp::Group => "group",
-            AggregateOp::Stddev => "stddev",
-            AggregateOp::Stdvar => "stdvar",
+        match self.fold {
+            Fold::Pointwise(AggregateOp::Sum) => "sum",
+            Fold::Pointwise(AggregateOp::Count) => "count",
+            Fold::Pointwise(AggregateOp::Avg) => "avg",
+            Fold::Pointwise(AggregateOp::Min) => "min",
+            Fold::Pointwise(AggregateOp::Max) => "max",
+            Fold::Pointwise(AggregateOp::Group) => "group",
+            Fold::Pointwise(AggregateOp::Stddev) => "stddev",
+            Fold::Pointwise(AggregateOp::Stdvar) => "stdvar",
+            Fold::Quantile => "quantile",
         }
     }
 
@@ -128,10 +239,11 @@ impl AggregateRuntime {
             AggregateKind::Group => AggregateOp::Group,
             AggregateKind::Stddev => AggregateOp::Stddev,
             AggregateKind::Stdvar => AggregateOp::Stdvar,
-            other => {
-                return Err(DataFusionError::NotImplemented(format!(
-                    "the native runtime does not execute the `{other:?}` aggregate yet: only the supported `Complete` aggregate kinds are computed here"
-                )));
+            // The one kind with no accumulator: it keeps its input instead, which is a state of its
+            // own and is built by [`Self::new_quantile`]. The φ is the only parameter an aggregate
+            // carries, and the arm that names the kind is the one place it is read.
+            AggregateKind::Quantile { quantile } => {
+                return Self::new_quantile(op, quantile, schema, buffer);
             }
         };
         let (state_kind, state_components) = aggregate_state_binding(op.kind).ok_or_else(|| {
@@ -151,10 +263,11 @@ impl AggregateRuntime {
             buffer.resize(merger.state_bytes())?;
             return Ok(Self {
                 op,
-                fold_op: kind,
+                fold: Fold::Pointwise(kind),
                 annotations: None,
                 schema,
                 accumulator: None,
+                retained: None,
                 merger: Some(merger),
                 state_schema,
                 computed: false,
@@ -182,26 +295,79 @@ impl AggregateRuntime {
         buffer.resize(initial.state_bytes())?;
         Ok(Self {
             op,
-            fold_op: kind,
+            fold: Fold::Pointwise(kind),
             annotations: None,
             schema,
             accumulator: Some(initial),
+            retained: None,
             merger: None,
             state_schema,
             computed: false,
         })
     }
 
-    /// What folding `chunk` reserves while it is folded.
+    /// The states of a `Complete` `quantile` aggregate over `schema`, whose φ is `quantile`.
     ///
-    /// The chunk is not retained: it is folded into the states and dropped at the end of the call,
-    /// so what this node holds afterwards is the fold and none of the input. The charge is therefore
-    /// the chunk's own bytes -- the figure [`evaluated_bytes`] reports, which is one pass over the
-    /// chunk and no state between chunks -- and not the `operand_chunk_bytes` figure a binary
-    /// operand keeps, which exists because such an operand holds a series for the whole execution
-    /// and so must count the slices of one buffer instead of the buffer once per chunk.
+    /// A `quantile` is answered from its group's whole sample set, so a stage that saw only part of
+    /// a group would answer the quantile of a subset of it: the quantile of two partitions'
+    /// quantiles is not the quantile of their union, and there is no state to export or merge
+    /// either. That is a property of the operation and not of this runtime, so what refuses a
+    /// `Partial` or a `Final` one is the tree's own check -- [`aggregate_state_binding`] has no
+    /// binding for a `quantile`, which [`crate::native::plan::NativeNode::validate`] reports, and
+    /// [`crate::native::split`] declines a `quantile` for the same reason -- and this starts the one
+    /// stage that is left.
+    ///
+    /// The same check is what puts the input on a grid: a `Complete` aggregate is validated to
+    /// answer its input's values on its input's grid, and `schema` is the layout the node reports,
+    /// so the grid the kernel reads its parameter on is there before this runs.
+    fn new_quantile(
+        op: BoundAggregate,
+        quantile: f64,
+        schema: Arc<SeriesSchema>,
+        buffer: &mut NodeBuffer,
+    ) -> Result<Self> {
+        let retained = QuantileInput {
+            quantile,
+            series: Vec::new(),
+            tables: HashSet::new(),
+            buffers: HashSet::new(),
+            held: 0,
+        };
+        buffer.resize(retained.bytes())?;
+        Ok(Self {
+            op,
+            fold: Fold::Quantile,
+            annotations: None,
+            schema,
+            accumulator: None,
+            retained: Some(retained),
+            merger: None,
+            state_schema: None,
+            computed: false,
+        })
+    }
+
+    /// What consuming `chunk` reserves while it is consumed.
+    ///
+    /// A point-wise fold drops the chunk at the end of the call and keeps only its states, so the
+    /// charge is the chunk's own bytes -- the figure [`evaluated_bytes`] reports, which is one pass
+    /// over the chunk and no state between chunks -- and not the `operand_chunk_bytes` figure a
+    /// binary operand keeps, which exists because such an operand holds a series for the whole
+    /// execution and so must count the slices of one buffer instead of the buffer once per chunk.
+    ///
+    /// A `quantile` keeps the chunk instead, and what it holds is not the chunk alone: it is the
+    /// allocations the chunk's samples live in, billed once each, beside the chunk's own descriptors
+    /// ([`Self::retain_quantile`], which is [`chunk_bytes_beside_samples`] plus
+    /// [`unbilled_sample_buffers`] plus [`unbilled_tables`]). That figure is read from the chunk by
+    /// the retainer itself, before it retains it, so nothing is held before it is reserved. Booking
+    /// the chunk again here would reserve the same backing twice -- once for the chunk being handed
+    /// over and once for the allocations it points into -- which is not a safer estimate but a
+    /// refusal of an input whose own figure the pool admits.
     pub(crate) fn pending(&self, chunk: &EvaluatedChunk) -> usize {
-        evaluated_bytes(chunk)
+        match self.fold {
+            Fold::Pointwise(_) => evaluated_bytes(chunk),
+            Fold::Quantile => 0,
+        }
     }
 
     /// Folds one chunk into its group.
@@ -209,18 +375,24 @@ impl AggregateRuntime {
     /// A chunk that closes its series closes nothing here: a group is not a series, so the last
     /// contribution of one member says nothing about the group. The fold keeps its states, which is
     /// what makes a group's answer its whole group's answer once the input ends.
+    ///
+    /// A `quantile` keeps the chunk itself, for the same reason: the answer is the group's sample set,
+    /// so the samples have to survive until the input does.
     pub(crate) fn accumulate(
         &mut self,
         chunk: EvaluatedChunk,
         buffer: &mut NodeBuffer,
         pending: usize,
     ) -> Result<()> {
+        let Fold::Pointwise(kind) = self.fold else {
+            return self.retain_quantile(chunk, buffer);
+        };
         // `Series` keeps its fields public, so a chunk can be built by struct literal against
         // another schema; the states are indexed by absolute position on this node's grid, so a
         // chunk of another field count or another grid would be folded into the wrong places.
-        validate_aggregate_series(&self.schema, &chunk.series, self.fold_op)
+        validate_aggregate_series(&self.schema, &chunk.series, kind)
             .map_err(|error| folded_chunk(&self.describe(), error))?;
-        if histogram_samples(self.fold_op) == HistogramSamples::Ignored
+        if histogram_samples(kind) == HistogramSamples::Ignored
             && !crate::map::is_float_series(&chunk.series)
             && let Some(collector) = &self.annotations
         {
@@ -242,6 +414,79 @@ impl AggregateRuntime {
         })?;
         drop(chunk);
         buffer.resize(accumulator.state_bytes())
+    }
+
+    /// Keeps one chunk of a `quantile`'s input until the input ends.
+    ///
+    /// The chunk is kept whole rather than folded: the answer is the φ-quantile of the group's sample
+    /// set, and no fixed-width state holds a sample set. What it costs is measured the way a binary
+    /// operand measures the chunks it retains, and for the same reason: what a `quantile` keeps is a
+    /// series for the rest of the execution, so the allocation one buffer its chunks are slices of is
+    /// counted once rather than once per chunk -- and counted at all when the chunk holds a small
+    /// slice of it, because the allocation is what stays resident. It is the chunk's own descriptors
+    /// ([`chunk_bytes_beside_samples`]) beside those allocations: the Arrow buffers its samples live
+    /// in, once each ([`unbilled_sample_buffers`]), and the histogram tables they index into, once
+    /// each ([`unbilled_tables`]). The figure is reserved before the push -- the push is what makes
+    /// the node hold it -- and the reservation then settles on the whole input, which is what this
+    /// node holds between chunks.
+    fn retain_quantile(&mut self, chunk: EvaluatedChunk, buffer: &mut NodeBuffer) -> Result<()> {
+        // A quantile reads float values and skips a histogram sample, so a chunk only has to fit the
+        // schema and the grid -- exactly what the kernel's own input check asks for.
+        validate_grid_series(&self.schema, &chunk.series)
+            .map_err(|error| folded_chunk(&self.describe(), error))?;
+        if !crate::map::is_float_series(&chunk.series)
+            && let Some(collector) = &self.annotations
+        {
+            // Prometheus reports once that it skipped samples it cannot order; the kernel folds the
+            // float samples it can read.
+            collector.record_info(format!(
+                "{}: ignored native histogram samples",
+                self.aggregate_name()
+            ));
+            self.annotations = None;
+        }
+        let Some(retained) = self.retained.as_mut() else {
+            return Err(no_fold(&self.describe()));
+        };
+        // What this chunk adds to what the node holds: the allocations its samples live in and the
+        // histogram tables it is the first chunk to reference -- each billed once, because one
+        // allocation is one however many chunks slice it -- plus the descriptors the chunk keeps.
+        let (buffers, buffer_bytes) = unbilled_sample_buffers(&chunk.series, &retained.buffers);
+        let (tables, table_bytes) = unbilled_tables(&chunk.series, &retained.tables);
+        let bytes = chunk_bytes_beside_samples(&chunk.series)
+            .saturating_add(buffer_bytes)
+            .saturating_add(table_bytes);
+        buffer.grow(bytes)?;
+        // The slot the chunk is about to take, and - when the vector has to grow for it - the
+        // capacity it grows to. `Vec::push` doubles, so booking one slot would let the real
+        // allocation outrun what the pool admitted; the target is booked instead, and the settle
+        // below then reads back the exact capacity the vector holds. The vector's slots are not part
+        // of `held`: [`QuantileInput::bytes`] counts them from that capacity, so booking them here
+        // and folding them there would charge them twice.
+        let needed = retained.series.len().saturating_add(1);
+        if needed > retained.series.capacity() {
+            let target = retained.series.capacity().saturating_mul(2).max(needed);
+            buffer.grow(
+                target
+                    .saturating_sub(retained.series.capacity())
+                    .saturating_mul(std::mem::size_of::<Series>()),
+            )?;
+            retained
+                .series
+                .try_reserve_exact(target.saturating_sub(retained.series.len()))
+                .map_err(|error| {
+                    DataFusionError::Execution(format!(
+                        "cannot retain the `quantile` input: {error}"
+                    ))
+                })?;
+        }
+        retained.series.push(chunk.series);
+        // From here the node keeps those tables and allocations alive itself, so a chunk arriving
+        // later that references one is charged its own descriptors and not the allocation again.
+        retained.tables.extend(tables);
+        retained.buffers.extend(buffers);
+        retained.held = retained.held.saturating_add(bytes);
+        buffer.resize(retained.bytes())
     }
 
     /// Merges one state chunk into this final aggregate.
@@ -296,7 +541,15 @@ impl AggregateRuntime {
     }
 
     /// The number of retained groups, for budgeting the output queue backing storage.
+    ///
+    /// A point-wise fold knows its groups because it keyed them. A `quantile` has not grouped
+    /// anything: the kernel does that when it answers. What it reports here is therefore the number
+    /// of members it retained, which is an upper bound -- every group has at least one member -- and
+    /// only ever sizes a reservation.
     pub(crate) fn groups(&self) -> usize {
+        if let Some(input) = self.retained.as_ref() {
+            return input.series.len();
+        }
         self.accumulator.as_ref().map_or(0, FloatAggregator::groups)
     }
 
@@ -314,6 +567,10 @@ impl AggregateRuntime {
             return Ok(None);
         }
         self.computed = true;
+        if let Some(input) = self.retained.take() {
+            let output = self.finish_quantile(input, buffer, queue_bytes)?;
+            return Ok(Some(AggregateOutput::Samples(output)));
+        }
         if let Some(accumulator) = self.accumulator.take() {
             return match self.op.stage {
                 AggregateStage::Complete => {
@@ -353,6 +610,187 @@ impl AggregateRuntime {
         }
         Err(no_fold(&self.describe()))
     }
+
+    /// Answers a `quantile` from the input it kept, and hands the series over.
+    ///
+    /// The parameter is the number the query wrote, so every point it covers carries it: the kernel
+    /// reads `q` per point from an unlabelled single-field scalar on the aggregate's own grid, and a
+    /// point that scalar has no value at is a point with no result. That case cannot arise from a
+    /// constant, but the kernel keeps the rule for the parameter it is written for.
+    ///
+    /// The parameter covers the points the input holds and not the window they sit in: the kernel
+    /// reads `q` only where a member has a sample, so a sparse input's parameter is as wide as its
+    /// rows. A parameter over the envelope would instead allocate every position between two
+    /// far-apart points -- a span sized by the statement's range rather than by the data it reads,
+    /// which the pool never admitted. The parameter is booked from the bound its rows give before it
+    /// exists, and settles on its exact figure once it is built.
+    ///
+    /// The reservation covers what is held while the kernel runs -- the input, that parameter, and
+    /// the kernel's workspace -- and then settles on the series the kernel answered, exactly as a
+    /// point-wise fold's finish does. The input is what stops being held when the kernel is done with
+    /// it, so it is dropped before the settle rather than when this call returns: a settle read
+    /// beside a live input would name a set that is never held, and the figure it left behind would
+    /// be the one the next node's admission had to fit into.
+    fn finish_quantile(
+        &self,
+        input: QuantileInput,
+        buffer: &mut NodeBuffer,
+        queue_bytes: usize,
+    ) -> Result<Vec<Series>> {
+        let grid = self.schema.eval_grid.clone().ok_or_else(|| {
+            DataFusionError::Execution(
+                "a `quantile` aggregate needs an evaluated grid to read its parameter on".into(),
+            )
+        })?;
+        let workspace = quantile_workspace_bytes(&self.schema, &input);
+        // Admitted before the parameter exists, because building it is what makes this node hold
+        // it: the bound is what a parameter over the input's points can take, and the resize below
+        // settles on what it did take.
+        buffer.resize(
+            input
+                .bytes()
+                .saturating_add(quantile_parameter_bound_bytes(&input))
+                .saturating_add(workspace)
+                .saturating_add(queue_bytes),
+        )?;
+        let positions = quantile_positions(&input);
+        let parameter = quantile_parameter(&grid, input.quantile, &positions)?;
+        // The collected positions are what the bound above covered and what this node no longer
+        // holds, so they go before the figure settles.
+        drop(positions);
+        let held = input
+            .bytes()
+            .saturating_add(series_bytes(&parameter))
+            .saturating_add(workspace);
+        buffer.resize(held.saturating_add(queue_bytes))?;
+        let names: Vec<&str> = match &self.op.group {
+            BoundGrouping::By(labels) | BoundGrouping::Without(labels) => {
+                labels.iter().map(|label| label.as_ref()).collect()
+            }
+        };
+        let grouping = match &self.op.group {
+            BoundGrouping::By(_) => Grouping::By(&names),
+            BoundGrouping::Without(_) => Grouping::Without(&names),
+        };
+        let output = aggregate_quantile(&self.schema, &input.series, &parameter, grouping)
+            .map_err(|error| folded_chunk(&self.describe(), error))?;
+        drop(names);
+        drop(parameter);
+        // The input is what this node held until the kernel answered, and it is given back before
+        // the reservation settles on the answer: the settle below is what the node holds from then
+        // on, so it must be read from the set that is really alive -- the answer and the queue --
+        // rather than from the answer beside an input this call only drops on its way out. The
+        // kernel's answer holds nothing of the input: the builder copies the samples it keeps.
+        drop(input);
+        let output_vec_bytes = output
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Series>());
+        charge_samples(buffer, &output, output_vec_bytes, queue_bytes)?;
+        Ok(output)
+    }
+}
+
+/// The field the `quantile` parameter is bound under, which the kernel reads as its scalar.
+const QUANTILE_PARAMETER_FIELD: &str = "scalar";
+
+/// The points the retained input holds, once each, in ascending order.
+///
+/// A group's answer is decided at the points at least one of its members holds a sample at, and its
+/// members are drawn from the input, so these are every point the kernel can ask its parameter for.
+/// They are the positions the input's rows sit at -- not the window they span, which two far-apart
+/// points make as wide as the grid.
+fn quantile_positions(input: &QuantileInput) -> Vec<usize> {
+    union_positions(input.series.iter().map(|series| &series.time)).collect()
+}
+
+/// The parameter a `quantile` reads at each point: the φ the query wrote, unlabelled and single
+/// field, at `positions` and nowhere else.
+///
+/// The kernel reads `q` per point and treats a point it has no value at as a point with no result,
+/// so the parameter has to cover exactly the points that can be asked for and may omit every other
+/// one. [`GridSeriesBuilder`] is what makes that cheap: the axis keeps the runs of consecutive
+/// positions rather than a row per position, so two far-apart points cost two rows and two spans
+/// instead of every position between them.
+///
+/// An input holding no point has nothing to decide, which the kernel answers with no output: an
+/// empty scalar over the grid says the same thing and costs nothing.
+fn quantile_parameter(grid: &Arc<EvalGrid>, quantile: f64, positions: &[usize]) -> Result<Series> {
+    let schema = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: QUANTILE_PARAMETER_FIELD.into(),
+        }]),
+        eval_grid: Some(Arc::clone(grid)),
+    });
+    let metric = SeriesLabels::try_new(None, Vec::new())
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    let mut builder = GridSeriesBuilder::try_new(Arc::clone(&schema))?;
+    for position in positions {
+        builder.push(*position, &[Some(quantile)])?;
+    }
+    match builder.finish(metric)? {
+        Some(parameter) => Ok(parameter),
+        None => constant_series(
+            &schema,
+            GridRange::try_new(Arc::clone(grid), 0, 0)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            quantile,
+        ),
+    }
+}
+
+/// The most a `quantile` parameter over `input` can cost, before it is built.
+///
+/// The parameter holds one value and one position per point it covers, and one span per run of
+/// them; a run is at least one point long, so the input's rows bound all of those. The figure is
+/// what the pool admits ahead of the allocation, and [`series_bytes`] is what it settles on once
+/// the parameter exists: what is admitted is what the parameter really takes, wherever its points
+/// sit on the grid.
+fn quantile_parameter_bound_bytes(input: &QuantileInput) -> usize {
+    let rows: usize = input.series.iter().map(|series| series.time.len()).sum();
+    let per_point = std::mem::size_of::<usize>() // its position, while the points are collected
+        .saturating_add(std::mem::size_of::<f64>()) // the value it carries
+        .saturating_add(2 * std::mem::size_of::<usize>()) // the span of a run of one point
+        .saturating_add(std::mem::size_of::<f64>()); // the array's validity slot for it
+    std::mem::size_of::<Series>()
+        .saturating_add(std::mem::size_of::<TimeAxis>())
+        .saturating_add(rows.saturating_mul(per_point))
+}
+
+/// The bytes the `quantile` kernel needs beside its retained input while it answers.
+///
+/// [`aggregate_quantile`] reports no workspace as it allocates, so this is an estimate reserved once
+/// before it runs, in the same spirit as the whole-vector kernels'. What it covers: the state it
+/// keeps per member (one position list, one heap entry and one cursor per field), its own copy of the
+/// parameter (one `(position, φ)` pair per point the parameter covers, which the input's rows bound
+/// because the parameter is only built over the points the input holds), the temporaries of one grid
+/// point (its members' values, the copy the kernel sorts, and one row of the width it folds), and the
+/// rows it builds -- the group being built and the groups it has already handed over. The row count is
+/// the input's own: a group's rows are the points at least one of its members holds a sample at, so
+/// the input's rows bound every group's rows and their sum.
+fn quantile_workspace_bytes(schema: &SeriesSchema, input: &QuantileInput) -> usize {
+    let width = schema.fields.len();
+    let members = input.series.len();
+    let rows: usize = input.series.iter().map(|series| series.time.len()).sum();
+    let per_member = std::mem::size_of::<(usize, usize, usize)>()
+        .saturating_add(std::mem::size_of::<usize>())
+        .saturating_add(width.saturating_mul(4 * std::mem::size_of::<usize>()));
+    let per_point = members
+        .saturating_mul(2 * std::mem::size_of::<f64>())
+        .saturating_add(width.saturating_mul(std::mem::size_of::<Option<f64>>()));
+    // One row, charged twice: the builder holds one group at a time and the series it has already
+    // handed over are held beside it.
+    let per_row = 2 * width
+        .saturating_mul(std::mem::size_of::<f64>())
+        .saturating_add(2 * std::mem::size_of::<usize>())
+        .saturating_add(1);
+    // The parameter copy, charged twice for the capacity a growing vector keeps over its length.
+    let parameter_copy = 2 * rows.saturating_mul(std::mem::size_of::<(usize, f64)>());
+    members
+        .saturating_mul(per_member)
+        .saturating_add(per_point)
+        .saturating_add(rows.saturating_mul(per_row))
+        .saturating_add(parameter_copy)
+        .saturating_add(members.saturating_mul(std::mem::size_of::<Series>()))
 }
 
 /// Charges the series a finished aggregate hands over, plus the queue they enter.

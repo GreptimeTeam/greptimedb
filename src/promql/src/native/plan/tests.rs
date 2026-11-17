@@ -3104,16 +3104,6 @@ fn native_tree_supported_declines_the_shapes_the_runtime_refuses() {
             },
         ),
         (
-            "the quantile aggregate",
-            aggregate_with(
-                one_field(),
-                Arc::clone(&out),
-                AggregateKind::Quantile { quantile: 0.9 },
-                Grouping::By(Arc::new(["job".into()])),
-                AggregateStage::Complete,
-            ),
-        ),
-        (
             "an aggregate whose `by` names a value field",
             aggregate_with(
                 one_field(),
@@ -3228,27 +3218,27 @@ fn native_tree_supported_declines_the_shapes_the_runtime_refuses() {
 
 /// A refusal below the root is still a refusal: admission reads the whole tree, not its root.
 ///
-/// Each case below holds a `quantile` — which has no kernel on this route, at any stage or depth —
-/// under a node whose own shape the runtime does build. A predicate that stopped recursing into
-/// one of these variants' inputs, or into a parameterised node's parameters, would admit a tree
-/// the runtime then refuses, and a refusal raised while the runtime is built cannot fall back: the
-/// statement loses the plan it had instead of keeping it.
+/// Each case below holds an aggregate grouping by a value field — a shape the runtime refuses, at
+/// any depth — under a node whose own shape the runtime does build. A predicate that stopped
+/// recursing into one of these variants' inputs, or into a parameterised node's parameters, would
+/// admit a tree the runtime then refuses, and a refusal raised while the runtime is built cannot
+/// fall back: the statement loses the plan it had instead of keeping it.
 #[test]
 fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
     let out = grid(0, 60_000, 4);
     let one_field = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
     // The declined shape every case nests, one level down from a node the runtime builds.
-    let quantile = || {
+    let refused = || {
         aggregate_with(
             one_field(),
             Arc::clone(&out),
-            AggregateKind::Quantile { quantile: 0.9 },
-            Grouping::By(Arc::new(["job".into()])),
+            AggregateKind::Sum,
+            Grouping::By(Arc::new(["f0".into()])),
             AggregateStage::Complete,
         )
     };
     // The info side `info` reads, which `validate` requires to be the times of an instant
-    // selection; only the base side of the node carries the quantile.
+    // selection; only the base side of the node carries the refused shape.
     let info_times = || {
         merge_over(NativeNode {
             expr: NativeExpr::Instant {
@@ -3266,10 +3256,10 @@ fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
     };
     let cases = vec![
         (
-            "a quantile under a binary operation",
+            "a refused shape under a binary operation",
             NativeNode {
                 expr: NativeExpr::Binary {
-                    left: Box::new(quantile()),
+                    left: Box::new(refused()),
                     right: Box::new(one_field()),
                     matching: add(),
                 },
@@ -3277,10 +3267,10 @@ fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
             },
         ),
         (
-            "a quantile under a set operation",
+            "a refused shape under a set operation",
             NativeNode {
                 expr: NativeExpr::Set {
-                    left: Box::new(quantile()),
+                    left: Box::new(refused()),
                     right: Box::new(one_field()),
                     op: super::BoundSetOp {
                         op: SetOp::Or,
@@ -3291,10 +3281,10 @@ fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
             },
         ),
         (
-            "a quantile under info",
+            "a refused shape under info",
             NativeNode {
                 expr: NativeExpr::Info {
-                    base: Box::new(quantile()),
+                    base: Box::new(refused()),
                     info: Box::new(info_times()),
                     selector: InfoSelector {
                         name_matchers: Vec::new(),
@@ -3306,9 +3296,9 @@ fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
             },
         ),
         (
-            "a quantile under an aggregate",
+            "a refused shape under an aggregate",
             aggregate_with(
-                quantile(),
+                refused(),
                 Arc::clone(&out),
                 AggregateKind::Sum,
                 Grouping::By(Arc::new(["job".into()])),
@@ -3316,10 +3306,10 @@ fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
             ),
         ),
         (
-            "a quantile under a parameterized topk",
+            "a refused shape under a parameterized topk",
             NativeNode {
                 expr: NativeExpr::ParameterizedTopK {
-                    input: Box::new(quantile()),
+                    input: Box::new(refused()),
                     op: BoundVectorOp::TopK {
                         k: 0.0,
                         top: true,
@@ -3413,6 +3403,18 @@ fn native_tree_supported_admits_the_shapes_the_runtime_builds() {
     };
     let cases = vec![
         ("an evaluated input leaf", input_on(Arc::clone(&out))),
+        (
+            // A quantile is one Complete fold: it keeps no state, so there is nothing to merge and
+            // nothing the runtime refuses.
+            "the quantile aggregate",
+            aggregate_with(
+                one_field(),
+                Arc::clone(&out),
+                AggregateKind::Quantile { quantile: 0.9 },
+                Grouping::By(Arc::new(["job".into()])),
+                AggregateStage::Complete,
+            ),
+        ),
         ("a constant root", scalar_on(3.0, Arc::clone(&out))),
         (
             "an evaluation-time root",

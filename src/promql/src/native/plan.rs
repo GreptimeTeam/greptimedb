@@ -671,11 +671,11 @@ impl NativeNode {
             // sample whatever their arguments are, constant or per point.
             NativeExpr::ParameterizedHistogram { .. } => Some(FieldKind::Float),
             // Every aggregate answers floats: `count`/`group` answer a count or a `1` whatever the
-            // samples they counted, `min`/`max`/`stddev`/`stdvar` fold the float samples and skip
-            // the histogram ones, and `sum`/`avg` - the only two that would fold the payload - keep
-            // a histogram out at admission. Naming it here is what lets `sum(count_over_time(h[5m]))`
-            // - a float built from histograms - declare a float column instead of keeping the
-            // existing plan.
+            // samples they counted, `min`/`max`/`stddev`/`stdvar`/`quantile` fold the float samples
+            // and skip the histogram ones, and `sum`/`avg` - the only two that would fold the
+            // payload - keep a histogram out at admission. Naming it here is what lets
+            // `sum(count_over_time(h[5m]))` - a float built from histograms - declare a float
+            // column instead of keeping the existing plan.
             NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
             _ => None,
         }
@@ -1559,7 +1559,9 @@ impl<'de> serde::Deserialize<'de> for NativeTree {
 /// - a binary node that is neither a vector–vector operation nor a broadcast the runtime performs:
 ///   two constant operands (no series to carry the result), a scalar broadcast carrying
 ///   vector-matching modifiers, or `bool` on an arithmetic operator, which has no `bool` form;
-/// - the `quantile` aggregate, which has no kernel on this route at any stage;
+/// - a `quantile` aggregate at any stage but `Complete`, which would need a partial state it does
+///   not keep (`validate` refuses one for the same reason; this arm keeps the predicate and the
+///   runtime agreeing on it);
 /// - an aggregate below `Final` whose `by` names a value field, which would fold series the
 ///   existing plan keeps apart;
 /// - `topk`, `bottomk`, `limitk`, `sort` and `sort_desc` over a vector carrying more than one
@@ -1719,7 +1721,14 @@ fn aggregate_supported(node: &NativeNode, input: &NativeNode, op: &BoundAggregat
         | AggregateKind::Group
         | AggregateKind::Stddev
         | AggregateKind::Stdvar => {}
-        AggregateKind::Quantile { .. } => return false,
+        AggregateKind::Quantile { .. } => {
+            // A quantile is one `Complete` fold over its group's whole input: it keeps no state,
+            // so `validate` refuses a `Partial` or `Final` one and there is nothing to merge. The
+            // runtime answers the `Complete` stage, which is the only shape compiled.
+            if op.stage != AggregateStage::Complete {
+                return false;
+            }
+        }
     }
     if op.stage == AggregateStage::Final {
         return true;
