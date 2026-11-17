@@ -31,6 +31,7 @@ use meta_client::MetaClientRef;
 use promql_parser::parser::EvalStmt;
 use rand::random;
 use snafu::{OptionExt, ResultExt, ensure};
+use sql::statements::statement::Statement;
 
 use crate::error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
@@ -56,18 +57,21 @@ pub struct ProcessManager {
     frontend_selector: Option<MetaClientSelector>,
 }
 
-/// The query a [SlowQueryTimer] reports.
+/// Represents a parsed query statement, functionally equivalent to [query::parser::QueryStatement].
+/// This enum is defined here to avoid cyclic dependencies with the query parser module.
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
+    Sql(Statement),
     // The optional string is the alias of the PromQL query.
     Promql(EvalStmt, Option<String>),
-    /// Query text: the rendered SQL statement, or the logical plan if there is no statement.
+    /// Logical plan with original query string
     Plan(String),
 }
 
 impl Display for QueryStatement {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            QueryStatement::Sql(stmt) => write!(f, "{}", stmt),
             QueryStatement::Promql(eval_stmt, alias) => {
                 if let Some(alias) = alias {
                     write!(f, "{} AS {}", eval_stmt, alias)
@@ -412,6 +416,9 @@ impl SlowQueryTimer {
                 slow_query_event.promql_range = Some((end - start) as u64);
                 slow_query_event.promql_start = Some(start);
                 slow_query_event.promql_end = Some(end);
+            }
+            QueryStatement::Sql(stmt) => {
+                slow_query_event.query = stmt.to_string();
             }
             QueryStatement::Plan(query) => {
                 slow_query_event.query = query.clone();
