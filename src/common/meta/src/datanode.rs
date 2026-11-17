@@ -130,6 +130,10 @@ pub struct RegionStat {
     /// The latest timestamp of the region's current data, if it holds any.
     #[serde(default)]
     pub max_timestamp: Option<Timestamp>,
+    /// Whether the region still has WAL ranges to recover. Omitted from the serialized form
+    /// when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_pending_tails: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +351,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
             min_timestamp: region_stat.min_timestamp,
             max_timestamp: region_stat.max_timestamp,
+            has_pending_tails: region_stat.has_pending_tails,
         }
     }
 }
@@ -612,6 +617,7 @@ mod tests {
                 metadata_topic_latest_entry_id: 0,
                 min_timestamp: None,
                 max_timestamp: None,
+                has_pending_tails: false,
             }],
             ..Default::default()
         };
@@ -780,6 +786,50 @@ mod tests {
             RegionStat::from(&api::v1::meta::RegionStat::default()).ingested_parquet_bytes,
             0
         );
+    }
+
+    #[test]
+    fn test_has_pending_tails_wire() {
+        // A statistic of a release without the field.
+        let legacy: RegionStatistic = serde_json::from_str(
+            r#"{"memtable_size":0,"wal_size":0,"manifest_size":0,"sst_size":0,"sst_num":0}"#,
+        )
+        .unwrap();
+        assert!(!legacy.has_pending_tails);
+        for has_pending_tails in [false, true] {
+            let statistic = RegionStatistic {
+                has_pending_tails,
+                ..Default::default()
+            };
+            // Only a true flag is written, so a false one keeps the encoding of a release
+            // without the field.
+            let encoded = serde_json::to_value(&statistic).unwrap();
+            assert_eq!(
+                encoded.get("has_pending_tails").is_some(),
+                has_pending_tails
+            );
+            let mut region = api::v1::meta::RegionStat::default();
+            region.extensions.insert(
+                REGION_STATISTIC_KEY.to_string(),
+                serde_json::to_vec(&statistic).unwrap(),
+            );
+            let stat = RegionStat::from(&region);
+            assert_eq!(stat.has_pending_tails, has_pending_tails);
+
+            let mut wire = serde_json::to_value(&stat).unwrap();
+            assert_eq!(wire.get("has_pending_tails").is_some(), has_pending_tails);
+            assert_eq!(
+                serde_json::from_value::<RegionStat>(wire.clone()).unwrap(),
+                stat
+            );
+            // A stored statistic of a release without the field.
+            wire.as_object_mut().unwrap().remove("has_pending_tails");
+            assert!(
+                !serde_json::from_value::<RegionStat>(wire)
+                    .unwrap()
+                    .has_pending_tails
+            );
+        }
     }
 
     #[test]

@@ -420,6 +420,7 @@ pub async fn update_in_memory_region_flushed_entry_id(
                 flushed_entry_id,
                 topic_latest_entry_id: 0,
             },
+            has_pending_tails: false,
         };
         key_values.push((region_id, value));
     }

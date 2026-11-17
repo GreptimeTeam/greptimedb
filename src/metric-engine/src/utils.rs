@@ -90,6 +90,7 @@ fn merge_region_statistic(
         // pin every metric region's minimum to the epoch.
         min_timestamp: data_stat.min_timestamp,
         max_timestamp: data_stat.max_timestamp,
+        has_pending_tails: metadata_stat.has_pending_tails || data_stat.has_pending_tails,
     }
 }
 
@@ -166,6 +167,24 @@ mod tests {
             merge_region_statistic(&metadata_stat, &data_stat).ingested_parquet_bytes,
             579
         );
+    }
+
+    #[test]
+    fn merge_region_statistic_has_pending_tails_of_either_region() {
+        for (metadata, data) in [(false, false), (true, false), (false, true), (true, true)] {
+            let metadata_stat = RegionStatistic {
+                has_pending_tails: metadata,
+                ..Default::default()
+            };
+            let data_stat = RegionStatistic {
+                has_pending_tails: data,
+                ..Default::default()
+            };
+            assert_eq!(
+                merge_region_statistic(&metadata_stat, &data_stat).has_pending_tails,
+                metadata || data
+            );
+        }
     }
 
     #[test]

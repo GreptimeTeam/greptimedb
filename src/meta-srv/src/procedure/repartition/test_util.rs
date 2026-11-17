@@ -24,6 +24,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
+use common_meta::region_registry::{LeaderRegion, LeaderRegionManifestInfo};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::test_util::new_ddl_context_with_kv_backend;
@@ -230,6 +231,31 @@ pub fn new_parent_context(
         env.server_addr.clone(),
         persistent_ctx,
     )
+}
+
+/// Records `region_ids` as leader regions that reported to this metasrv, with
+/// `has_pending_tails`, as their heartbeats do.
+pub fn report_leader_regions(
+    ctx: &ParentContext,
+    region_ids: &[RegionId],
+    has_pending_tails: bool,
+) {
+    let leaders = region_ids
+        .iter()
+        .map(|region_id| {
+            let leader = LeaderRegion {
+                datanode_id: 1,
+                manifest: LeaderRegionManifestInfo::Mito {
+                    manifest_version: 0,
+                    flushed_entry_id: 0,
+                    topic_latest_entry_id: 0,
+                },
+                has_pending_tails,
+            };
+            (*region_id, leader)
+        })
+        .collect();
+    ctx.leader_region_registry.batch_put(leaders);
 }
 
 pub fn assert_parent_state<T: 'static>(procedure: &RepartitionProcedure) {

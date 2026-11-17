@@ -1083,6 +1083,16 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Repartition cannot start while regions {:?} have WAL ranges to recover; wait for their replay to finish, or discard their pending tails",
+        region_ids
+    ))]
+    RepartitionPendingTails {
+        region_ids: Vec<RegionId>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Repartition group {} source region missing, region id: {}",
         group_id,
         region_id
@@ -1238,6 +1248,7 @@ impl ErrorExt for Error {
             Error::MailboxTimeout { .. } | Error::ExceededDeadline { .. } => StatusCode::Cancelled,
             Error::PruneTaskAlreadyRunning { .. }
             | Error::DrainDatanodeRunning { .. }
+            | Error::RepartitionPendingTails { .. }
             | Error::RetryLater { .. }
             | Error::MailboxChannelClosed { .. }
             | Error::IsNotLeader { .. } => StatusCode::IllegalState,

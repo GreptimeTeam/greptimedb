@@ -1058,7 +1058,8 @@ mod tests {
     use crate::procedure::repartition::repartition_end::RepartitionEnd;
     use crate::procedure::repartition::test_util::{
         TestingEnv, assert_parent_state, current_parent_region_routes, extract_subprocedure_ids,
-        new_parent_context, range_expr, test_region_route, test_region_wal_options,
+        new_parent_context, range_expr, report_leader_regions, test_region_route,
+        test_region_wal_options,
     };
     use crate::procedure::repartition::update_partition_metadata::{
         PartitionMetadataUpdate, UpdatePartitionMetadata,
@@ -2118,6 +2119,11 @@ mod tests {
         .await;
 
         let context = new_parent_context(&env, node_manager, table_id);
+        report_leader_regions(
+            &context,
+            &[RegionId::new(table_id, 1), RegionId::new(table_id, 2)],
+            false,
+        );
         let mut procedure = RepartitionProcedure::new(
             RepartitionFrom::Partitioned {
                 exprs: vec![range_expr("x", 0, 100)],
@@ -2238,6 +2244,11 @@ mod tests {
         .await;
 
         let context = new_parent_context(&env, node_manager, table_id);
+        report_leader_regions(
+            &context,
+            &[RegionId::new(table_id, 1), RegionId::new(table_id, 2)],
+            false,
+        );
         let to_exprs = vec![range_expr("col1", 0, 50), range_expr("col1", 50, 100)];
         let mut procedure = RepartitionProcedure::new(
             RepartitionFrom::Unpartitioned {
@@ -2370,6 +2381,11 @@ mod tests {
         .await;
 
         let context = new_parent_context(&env, node_manager, table_id);
+        report_leader_regions(
+            &context,
+            &[RegionId::new(table_id, 1), RegionId::new(table_id, 2)],
+            false,
+        );
         let mut procedure = RepartitionProcedure::new(
             RepartitionFrom::Unpartitioned {
                 partition_columns: vec!["col1".to_string()],
@@ -2485,6 +2501,11 @@ mod tests {
         .await;
 
         let context = new_parent_context(&env, node_manager, table_id);
+        report_leader_regions(
+            &context,
+            &[RegionId::new(table_id, 1), RegionId::new(table_id, 2)],
+            false,
+        );
         let mut procedure = RepartitionProcedure::new(
             RepartitionFrom::Partitioned {
                 exprs: vec![range_expr("x", 0, 100)],

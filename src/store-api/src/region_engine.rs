@@ -858,6 +858,10 @@ pub struct RegionStatistic {
     pub data_topic_latest_entry_id: u64,
     #[serde(default)]
     pub metadata_topic_latest_entry_id: u64,
+    /// Whether the region still has WAL ranges to recover. Omitted from the serialized form
+    /// when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_pending_tails: bool,
 }
 
 /// The manifest info of a region.

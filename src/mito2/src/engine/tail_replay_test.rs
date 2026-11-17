@@ -2566,3 +2566,19 @@ async fn test_discard_reopens_after_crash_with_history_past_bound(
         assert!(error.contains("does not hold the history"), "{error}");
     }
 }
+
+#[tokio::test]
+async fn test_region_statistic_reports_pending_tails() {
+    let region = TestRegion::new("tail-replay-statistic", false, None).await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    let statistic = region.engine.region_statistic(region.region_id).unwrap();
+    assert!(statistic.has_pending_tails);
+
+    region.promote();
+    region.wait_until_replayed().await;
+
+    let statistic = region.engine.region_statistic(region.region_id).unwrap();
+    assert!(!statistic.has_pending_tails);
+}
