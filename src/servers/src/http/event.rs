@@ -1125,6 +1125,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_check_data_valid() {
+        assert!(check_data_valid(0).is_ok());
+        assert!(check_data_valid(10).is_ok());
+        let err = check_data_valid(11).unwrap_err();
+        assert_eq!(
+            err.output_msg(),
+            "Invalid request parameter: dryrun data must not exceed 10 rows, got 11"
+        );
+    }
+
+    #[test]
     fn test_transform_ndjson() {
         let s = "{\"a\": 1}\n{\"b\": 2}";
         let a = serde_json::to_string(
