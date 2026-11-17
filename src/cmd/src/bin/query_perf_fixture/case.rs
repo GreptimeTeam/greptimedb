@@ -707,6 +707,20 @@ pub(super) enum Distribution {
         prefix: String,
         noise_prefix: String,
     },
+    /// Two fixed STRING field values split at the same row boundary as
+    /// `dense_string`: the first `matching_rows` logical rows carry
+    /// `matching_value` and every later row carries `noise_value`.
+    ///
+    /// Use it for enum-like columns that appear in the query predicate or
+    /// projection but are not the JOIN key (span status codes, log severities):
+    /// equality predicates then select exactly the rows a case already treats
+    /// as its target population, instead of selecting everything or nothing.
+    #[serde(rename = "fixed_string")]
+    FixedString {
+        matching_value: String,
+        noise_value: String,
+        matching_rows: NonZeroUsize,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]

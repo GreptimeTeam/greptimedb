@@ -134,6 +134,14 @@ Forbid patterns should match the fallback shapes precisely. A pattern such as
 contains unrelated JSON such as `"flat_format": true` after the filter, and a
 membership list itself contains `]`, so bracket-limited patterns stop early.
 
+Scan-scoped patterns work the same way. A join's dynamic filter also appears on
+the *build*-side scan, in its unsolved `DynamicFilter [ true ]` form, because
+that is the side that fills it in; a global forbid of `DynamicFilter \[ true \]`
+therefore fails on a correct plan whenever the build side is in the same
+fragment. Anchor the pattern on the scan being gated instead - its
+`"projection"` or `"filters"` entry identifies the table - as
+`tests/perf/query_cases/dyn_filter_join_target` does.
+
 All plan and scan-metric assertions gate the candidate only. The base target is
 the control and may lack the optimization; its values are reported as
 `base_actual` diagnostics. Results appear in the report `thresholds` array with
@@ -143,7 +151,8 @@ the control and may lack the optimization; its values are reported as
 
 `type = "STRING"` with `semantic = "field"` is a plain UTF-8 column, not a tag
 dictionary, so JOIN keys can carry high cardinality without sharing the primary
-key encoding. String fields must use the `dense_string` distribution:
+key encoding. String field values come from one of the two STRING field
+distributions below, `dense_string` or `fixed_string`:
 
 ```toml
 [[scenario.tables.columns]]
@@ -163,6 +172,23 @@ generation time. Use `values` equal to the build-side key count and
 `matching_rows` equal to the number of probe rows that should match; keep the
 build-side `noise_prefix` distinct from the probe-side `noise_prefix` so the two
 join sides cannot collide by accident.
+
+Enum-like STRING fields (span status codes, log severities) use `fixed_string`,
+which splits the same `matching_rows` boundary into two literal values:
+
+```toml
+[[scenario.tables.columns]]
+name = "span_status_code"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "fixed_string", matching_value = "STATUS_CODE_ERROR", noise_value = "STATUS_CODE_UNSET", matching_rows = 642 }
+```
+
+The first `matching_rows` logical rows carry `matching_value` and every later row
+carries `noise_value`. Reach for it when an equality predicate on the column
+belongs to the query shape but must select the rows the case already treats as
+its target population: `dense_string` always appends the row or key index, so it
+cannot express a literal value.
 
 ### Frontend query parallelism
 

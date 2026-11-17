@@ -1,0 +1,285 @@
+# Target-shaped dynamic-membership JOIN case (traces build x logs probe).
+#
+# `dyn_filter_join` is the synthetic shape: a probe table whose only useful
+# predicate is the JOIN membership, and an aggregate `count(*), sum(...)`
+# projection. This case repeats the same gate on the *original* slow SQL shape
+# instead: traces joined to logs by `trace_id`, a real column projection
+# (`service_name`, `span_name`, `duration_ms`, `log_time`, `severity_text`,
+# `body`), `ORDER BY duration_nano DESC LIMIT 20`, and a build-side error-span
+# predicate next to the time window.
+#
+# Query (verbatim, see [[scenario.queries]]):
+#
+#   SELECT t.service_name,t.span_name,t.duration_nano/1000000 AS duration_ms,
+#    l.timestamp AS log_time,l.severity_text,l.body
+#   FROM dyn_filter_traces_target t
+#   JOIN dyn_filter_logs_target l ON l.trace_id=t.trace_id
+#   WHERE t.timestamp >= '2024-01-01 00:00:00+0000'::TIMESTAMP
+#    AND t.timestamp < '2024-01-01 00:10:42+0000'::TIMESTAMP
+#    AND t.span_status_code='STATUS_CODE_ERROR'
+#   ORDER BY t.duration_nano DESC LIMIT 20;
+#
+# The live query uses a relative recent-window predicate (`now() - INTERVAL
+# ...`). The fixture replaces it with the fixed 2024-01-01 window above: the
+# fixture layout starts at 2024-01-01T00:00:00Z with a one-second step, so the
+# window selects exactly rows 0..641. A fixed window keeps the case
+# deterministic and independent of the wall clock while preserving the shape
+# that matters (a 642-second window over a timestamp-major SST that only one
+# row group can satisfy). It is the deterministic equivalent of the live
+# recent-window query, not a different query plan: both compile to the same
+# build-side `timestamp >= .. AND timestamp < .. AND span_status_code = ..`
+# membership filter feeding the same dynamic-filter pushdown.
+#
+# What the case gates (candidate only, base is the control):
+#
+# 1. Membership plan/store gate. The 642 build keys must reach the probe scan as
+#    a dynamic filter carrying the membership list
+#    (`trace_id@N IN (SET) (...)`), and the probe scan must actually read less:
+#    one row group's worth of pages instead of a full 1M-row scan. Plan
+#    patterns also forbid the degraded probe shapes (unresolved
+#    `DynamicFilter [ empty ]`, a probe scan left with the `DynamicFilter [ true
+#    ]` placeholder, and bounds that lost the list, `... AND true ]`), which
+#    return identical 20 rows after reading much more.
+# 2. Latency non-regression versus the base (+30%).
+#
+# Shape (one region, one SST per table, timestamp-major: one row per second):
+# - dyn_filter_traces_target (build side, aliased t): 1,000,000 rows. Rows
+#   0..641 carry the membership keys trace0..trace641, `STATUS_CODE_ERROR`, and
+#   the 2024-01-01T00:00:00Z..00:10:41Z timestamps the query window selects.
+#   Every later row is outside the window and carries a `trace_noise*` key and
+#   `STATUS_CODE_UNSET`. The status predicate therefore selects the same 642 rows
+#   the window selects - like the live query's error-span filter over its recent
+#   window, it refines the build side without being a second, independent
+#   source of selectivity for the probe scan.
+# - dyn_filter_logs_target (probe side, aliased l): 1,000,000 rows, of which
+#   1,926 (3 x 642) carry a build key and the remaining 998,074 rows are unique
+#   `noise*` values that can never match.
+# - Both `trace_id` columns are sorted and their value ranges are disjoint
+#   (`trace*` membership keys sort after the `noise*` probe population), so
+#   row-group min/max + membership pruning can drop 49 of the 50 probe row
+#   groups once the 642-key set arrives.
+# - The probe projection reads the JOIN key, the time index, and two STRING
+#   columns (`severity_text`, `body`), so dropping non-matching row groups drops
+#   real page reads instead of only row counts.
+# - `duration_nano` is a UINT64 field; the fixture generates UINT64 fields as the
+#   logical row index (0..N-1), so `duration_nano` is unique and
+#   `ORDER BY duration_nano DESC LIMIT 20` deterministically keeps the 20
+#   highest-valued joined rows. `duration_ms` keeps the live query's nanosecond
+#   to millisecond division, but the fixture's nanosecond values are row indexes
+#   (0..641), so the 20 rows all round into the same 0.0006 ms bucket - the
+#   column is exercised for shape, not for its value range.
+# - The 642-key build side is larger than
+#   `hash_join_inlist_pushdown_max_distinct_values` (150 by default), so the
+#   join produces a hash-lookup dynamic filter whose membership list can only
+#   reach the probe scan through the serialized dynamic-filter payload that
+#   #10341 adds; a build without the wire recovery degrades to bounds plus
+#   `AND true`.
+# - `query_parallelism = 3` pins the frontend query engine parallelism so the
+#   comparison is not dominated by core-autoscaled scan parallelism.
+#
+# Two fixture-format details are load-bearing:
+# - Flat-SST generation writes primary-key columns first, then field columns,
+#   then the time index, so the TOML declares `timestamp` last in both tables.
+#   The table schemas still carry the target column set; only the declaration
+#   order follows the SST layout.
+# - `span_status_code` and `severity_text` use the two-value `fixed_string`
+#   distribution (`matching_value` for the first `matching_rows` logical rows,
+#   `noise_value` afterwards). That is what makes
+#   `span_status_code='STATUS_CODE_ERROR'` select exactly the 642 target rows
+#   instead of everything-or-nothing, which `dense_string` (always numeric
+#   suffixed) cannot express.
+
+[case]
+name = "dyn_filter_join_target"
+description = "Target-shaped dynamic-membership JOIN gate: traces x logs by trace_id, projected trace/log columns, ORDER BY duration_nano DESC LIMIT 20"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 10353
+query_parallelism = 3
+
+# Build side: error spans that own the 642-key membership set.
+[[scenario.tables]]
+database = "public"
+name = "dyn_filter_traces_target"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["scope"]
+time_index = "timestamp"
+
+[[scenario.tables.columns]]
+name = "scope"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 1, prefix = "scope" }
+
+[[scenario.tables.columns]]
+name = "trace_id"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "dense_string", values = 642, matching_rows = 642, prefix = "trace", noise_prefix = "trace_noise" }
+
+[[scenario.tables.columns]]
+name = "span_status_code"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "fixed_string", matching_value = "STATUS_CODE_ERROR", noise_value = "STATUS_CODE_UNSET", matching_rows = 642 }
+
+[[scenario.tables.columns]]
+name = "duration_nano"
+type = "UINT64"
+semantic = "field"
+
+[[scenario.tables.columns]]
+name = "service_name"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "dense_string", values = 1, matching_rows = 642, prefix = "checkout", noise_prefix = "service_noise" }
+
+[[scenario.tables.columns]]
+name = "span_name"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "dense_string", values = 1, matching_rows = 642, prefix = "POST /checkout", noise_prefix = "span_noise" }
+
+[[scenario.tables.columns]]
+name = "timestamp"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+# Probe side: logs joined by trace_id.
+[[scenario.tables]]
+database = "public"
+name = "dyn_filter_logs_target"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["scope"]
+time_index = "timestamp"
+
+[[scenario.tables.columns]]
+name = "scope"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 1, prefix = "scope" }
+
+[[scenario.tables.columns]]
+name = "trace_id"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "dense_string", values = 642, matching_rows = 1926, prefix = "trace", noise_prefix = "noise" }
+
+[[scenario.tables.columns]]
+name = "severity_text"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "fixed_string", matching_value = "ERROR", noise_value = "INFO", matching_rows = 1926 }
+
+[[scenario.tables.columns]]
+name = "body"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "dense_string", values = 1926, matching_rows = 1926, prefix = "log body ", noise_prefix = "log noise " }
+
+[[scenario.tables.columns]]
+name = "timestamp"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 1
+rows_per_sst = 1000000
+row_group_size = 20000
+series_count = 1
+start_unix_nanos = 1704067200000000000 # 2024-01-01T00:00:00Z
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+[[scenario.queries]]
+name = "dyn_membership_join_target"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT t.service_name,t.span_name,t.duration_nano/1000000 AS duration_ms, l.timestamp AS log_time,l.severity_text,l.body FROM dyn_filter_traces_target t JOIN dyn_filter_logs_target l ON l.trace_id=t.trace_id WHERE t.timestamp >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.timestamp < '2024-01-01 00:10:42+0000'::TIMESTAMP AND t.span_status_code='STATUS_CODE_ERROR' ORDER BY t.duration_nano DESC LIMIT 20"
+warmup = 2
+iterations = 7
+
+# The probe (logs) scan must show the join dynamic filter with the pushed-down
+# membership list, and must not show a shape that disables membership: an
+# unresolved `DynamicFilter [ empty ]`, a degraded `DynamicFilter [ true ]` on
+# the probe scan (oversized payload or hash-lookup fallback), or bounds that lost
+# the list (`... AND true ]`).
+#
+# The two scan-scoped patterns are anchored on the probe scan's projection. The
+# build (traces) scan legitimately carries the *producer* side of the same
+# dynamic filter in its unsolved state (`"dyn_filters": ["DynamicFilter [ true
+# ]"]`, because it is the side that fills it in), so a global
+# `DynamicFilter \[ true \]` forbid would fail on the correct plan. Measured on
+# this fixture with the merged stack: the probe scan reports
+# `"dyn_filters": ["DynamicFilter [ CASE hash_repartition % 3 WHEN 0 THEN
+# trace_id@0 >= trace101 AND trace_id@0 <= trace98 AND trace_id@0 IN (SET)
+# ([trace6, trace7, ...]) AND ... ]"]` (3 hash partitions) while the build scan
+# reports the bare placeholder. Both projections are pinned by this case's
+# query and column list; if either changes, the patterns must be updated with
+# it.
+[scenario.queries.plan_checks]
+require = [
+  "DynamicFilter",
+  'trace_id@\d+\s+IN\s+\(',
+  '"projection": \["trace_id", "severity_text", "body", "timestamp"\][^\n]*"dyn_filters": \["DynamicFilter \[[^\n]*\bIN \(SET\)',
+]
+forbid = [
+  'DynamicFilter \[ empty \]',
+  '"projection": \["trace_id", "severity_text", "body", "timestamp"\][^\n]*"dyn_filters": \["DynamicFilter \[ true \]"\]',
+  'DynamicFilter \[[^\n]*\bAND true\b',
+]
+
+[scenario.queries.thresholds]
+# Candidate-only latency non-regression against the base.
+max_candidate_latency_regression_pct = 30
+
+# Rows decoded from SST (`num_sst_rows`), summed over both table scans, taken as
+# the maximum over the cold execution and the measured iterations.
+# Measured on this fixture with the merged stack: 2,568 (the 1,926 matching probe
+# rows plus the 642 build rows), with the probe scan reporting
+# `rg_minmax_filtered: 49` of its 50 row groups. Degraded shapes read more:
+# 20,642 when the probe decodes one complete 20,000-row row group plus the 642
+# build rows (the synthetic case's measured control for a bounds-only or
+# list-lost filter) and 1,000,642 for a probe scan with no dynamic filter at all.
+# 8,192 keeps ~3.2x headroom above the target value while still failing a full
+# row group.
+max_candidate_num_sst_rows = 8192
+
+# Bytes fetched from the object store (`page_size_to_fetch_store`), summed over
+# both table scans and every region/partition entry.
+# Calibration on this fixture with the merged stack: the analyze query's first
+# data-touching pass (the pass that warms the page cache, before any row-group
+# pruning) fetched 393,216 B for the build scan plus 131,072 B for the probe scan
+# - 524,288 B total, read from the datanode's own scan metrics - while a probe
+# scan that read the whole SST would fetch its full 9,672,060 B file. 1 MiB sits
+# ~2x above that upper bound and ~9x below a full probe scan.
+#
+# Caveat: this counter only shows real store reads on the *first* `measure` pass
+# against a fresh datanode. `.github/scripts/query-regression-run.py` retries
+# `measure` (restarting the frontend but not the datanode) when a pass fails, and
+# the retried pass is served from the Mito page cache, so the metric disappears
+# and this assertion reports "scan metric not found" instead of a number. The
+# same happens to `tests/perf/query_cases/dyn_filter_join`. Values above come
+# from a first pass, in which the synthetic case's documented 192 KiB
+# (131,072 B probe + 65,536 B build) reproduces exactly.
+max_candidate_page_size_to_fetch_store_bytes = 1048576
+
+# Second execution of the same SQL without EXPLAIN ANALYZE. The harness has no
+# expected-row-count threshold, so this sample is what makes the 20-row result
+# visible in the report (`measurements[name=dyn_membership_join_target_result]`
+# -> `samples[0].response`): it must contain exactly 20 rows, one per joined
+# trace/log pair kept by `ORDER BY duration_nano DESC LIMIT 20`. It carries no
+# plan checks or scan thresholds, and it is declared after the analyze query so
+# the analyze query keeps the report's cold `first_execution` sample.
+[[scenario.queries]]
+name = "dyn_membership_join_target_result"
+kind = "sql"
+query = "SELECT t.service_name,t.span_name,t.duration_nano/1000000 AS duration_ms, l.timestamp AS log_time,l.severity_text,l.body FROM dyn_filter_traces_target t JOIN dyn_filter_logs_target l ON l.trace_id=t.trace_id WHERE t.timestamp >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.timestamp < '2024-01-01 00:10:42+0000'::TIMESTAMP AND t.span_status_code='STATUS_CODE_ERROR' ORDER BY t.duration_nano DESC LIMIT 20"
+warmup = 0
+iterations = 1

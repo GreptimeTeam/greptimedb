@@ -192,10 +192,11 @@ fn tag_value(col: &ColumnConfig, series: usize) -> String {
 
 /// Resolves a STRING field value for one logical row.
 ///
-/// `dense_string` is the only supported STRING field distribution: the first
+/// `dense_string` is the JOIN-membership distribution: the first
 /// `matching_rows` logical rows cycle through `values` keys so a JOIN can be
 /// bounded by a small membership set, and every later row is a unique noise
-/// value that never matches.
+/// value that never matches. `fixed_string` splits the same row boundary into
+/// two literal values for enum-like columns.
 fn string_field_value(col: &ColumnConfig, logical_row: usize) -> String {
     match col
         .distribution
@@ -214,8 +215,19 @@ fn string_field_value(col: &ColumnConfig, logical_row: usize) -> String {
                 format!("{}{}", noise_prefix, logical_row)
             }
         }
+        Distribution::FixedString {
+            matching_value,
+            noise_value,
+            matching_rows,
+        } => {
+            if logical_row < matching_rows.get() {
+                matching_value.clone()
+            } else {
+                noise_value.clone()
+            }
+        }
         other => panic!(
-            "STRING field column {} requires dense_string distribution, got {other:?}",
+            "STRING field column {} requires dense_string or fixed_string distribution, got {other:?}",
             col.name
         ),
     }
@@ -665,7 +677,33 @@ series_layout = "timestamp_major"
     }
 
     #[test]
-    #[should_panic(expected = "requires dense_string distribution")]
+    fn fixed_string_splits_matching_rows_from_noise() {
+        let case: CaseFile = toml::from_str(&DENSE_STRING_CASE.replace(
+            r#"distribution = { kind = "dense_string", values = 3, matching_rows = 5, prefix = "trace", noise_prefix = "noise" }"#,
+            r#"distribution = { kind = "fixed_string", matching_value = "STATUS_CODE_ERROR", noise_value = "STATUS_CODE_UNSET", matching_rows = 5 }"#,
+        ))
+        .expect("fixed_string case parses");
+        let table = &case.scenario.direct_readable_sst().tables[0];
+        assert_eq!(
+            "STATUS_CODE_ERROR",
+            string_field_value(&table.columns[1], 0)
+        );
+        assert_eq!(
+            "STATUS_CODE_ERROR",
+            string_field_value(&table.columns[1], 4)
+        );
+        assert_eq!(
+            "STATUS_CODE_UNSET",
+            string_field_value(&table.columns[1], 5)
+        );
+        assert_eq!(
+            "STATUS_CODE_UNSET",
+            string_field_value(&table.columns[1], 999_999)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires dense_string or fixed_string distribution")]
     fn dense_string_rejects_other_distributions() {
         let case: CaseFile = toml::from_str(&DENSE_STRING_CASE.replace(
             r#"distribution = { kind = "dense_string", values = 3, matching_rows = 5, prefix = "trace", noise_prefix = "noise" }"#,
