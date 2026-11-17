@@ -474,6 +474,8 @@ impl TryFrom<pb::SketchSplitResponse> for SketchSplitResponse {
             sampled_files: response.sampled_files,
             proposal_files: response.proposal_files,
             validation_files: response.validation_files,
+            shared_files: response.shared_files,
+            directory_files: response.directory_files,
             rounds: response.rounds,
             gaps: response
                 .gaps
@@ -513,6 +515,8 @@ impl TryFrom<SketchSplitResponse> for pb::SketchSplitResponse {
             sampled_files: response.sampled_files,
             proposal_files: response.proposal_files,
             validation_files: response.validation_files,
+            shared_files: response.shared_files,
+            directory_files: response.directory_files,
             rounds: response.rounds,
             gaps: response.gaps.into_iter().map(Into::into).collect(),
         })
@@ -526,8 +530,11 @@ fn validate_split_response(response: &SketchSplitResponse) -> Result<(), BoxedEr
     );
     if response
         .proposal_files
-        .checked_add(response.validation_files)
+        .checked_sub(response.shared_files)
+        .and_then(|count| count.checked_add(response.validation_files))
         != Some(response.sampled_files)
+        || response.shared_files > response.validation_files
+        || response.directory_files > response.candidate_files
         || response.sampled_files > response.candidate_files
         || (response.sampled_files > 0 && response.rounds == 0)
         || response.points.len() > 63
@@ -537,9 +544,7 @@ fn validate_split_response(response: &SketchSplitResponse) -> Result<(), BoxedEr
                 || response.proposal_files == 0))
         || (!actionable && !response.points.is_empty())
         || (response.status == SketchSplitStatus::Validated && response.validation_files == 0)
-        || (response.status == SketchSplitStatus::Census
-            && (response.validation_files != 0
-                || response.sampled_files != response.candidate_files))
+        || (response.status == SketchSplitStatus::Census && response.validation_files != 0)
     {
         return Err(invalid("inconsistent sketch split outcome or file counts"));
     }
@@ -637,6 +642,8 @@ mod tests {
             sampled_files: 512,
             proposal_files: 256,
             validation_files: 256,
+            shared_files: 0,
+            directory_files: 512,
             rounds: 3,
             gaps: vec![],
         }
@@ -667,6 +674,39 @@ mod tests {
             SketchSplitResponse::try_from(wire.clone()).unwrap(),
             response
         );
+        // Independent samples can reuse payloads while probing every candidate directory.
+        let mut shared = response.clone();
+        shared.proposal_files = 320;
+        shared.validation_files = 256;
+        shared.shared_files = 64;
+        shared.directory_files = shared.candidate_files;
+        assert_eq!(
+            SketchSplitResponse::try_from(
+                pb::SketchSplitResponse::try_from(shared.clone()).unwrap()
+            )
+            .unwrap(),
+            shared
+        );
+        // Additive counters default to zero when decoding earlier responses.
+        let mut legacy = wire.clone();
+        legacy.directory_files = 0;
+        assert!(SketchSplitResponse::try_from(legacy).is_ok());
+        for (proposal, validation, overlap, sampled) in [
+            (256, 256, 257, 255),
+            (320, 32, 64, 288),
+            (256, 256, 64, 512),
+            (u64::MAX, 1, 0, u64::MAX),
+        ] {
+            let mut invalid = wire.clone();
+            invalid.proposal_files = proposal;
+            invalid.validation_files = validation;
+            invalid.shared_files = overlap;
+            invalid.sampled_files = sampled;
+            assert!(SketchSplitResponse::try_from(invalid).is_err());
+        }
+        let mut invalid = wire.clone();
+        invalid.directory_files = invalid.candidate_files + 1;
+        assert!(SketchSplitResponse::try_from(invalid).is_err());
         for status in [0, 100] {
             let mut invalid = wire.clone();
             invalid.status = status;
@@ -703,6 +743,16 @@ mod tests {
         census.proposal_files = census.sampled_files;
         census.validation_files = 0;
         census.points[0].validation_rank = None;
+        assert_eq!(
+            SketchSplitResponse::try_from(
+                pb::SketchSplitResponse::try_from(census.clone()).unwrap()
+            )
+            .unwrap(),
+            census
+        );
+        // Complete directories can establish empty buckets without payload reads.
+        census.candidate_files += 10;
+        census.directory_files = census.candidate_files;
         assert_eq!(
             SketchSplitResponse::try_from(
                 pb::SketchSplitResponse::try_from(census.clone()).unwrap()

@@ -111,7 +111,8 @@ impl SketchRequest {
 }
 
 /// Proposes and validates split points within one pinned SST snapshot.
-/// File limits count unique files across the proposal and validation samples together.
+/// File limits count unique algorithm-payload files across both samples.
+/// Additional directory probes use separate byte budgets and concurrency limits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SketchSplitRequest {
     pub time_range: SketchTimeRange,
@@ -122,7 +123,7 @@ pub struct SketchSplitRequest {
     pub initial_files: u32,
     /// Minimum total files before a sampled result may be accepted.
     pub min_files: u32,
-    /// Maximum total unique files read across all sampling rounds.
+    /// Maximum unique algorithm-payload files across rounds, excluding directory-only probes.
     pub max_files: u32,
     pub seed: u64,
     /// Maximum allowed CDF disagreement; this is not a statistical confidence bound.
@@ -183,7 +184,8 @@ pub struct SketchSplitPoint {
 pub enum SketchSplitStatus {
     /// Both samples satisfy the requested stability and partition-mass controls.
     Validated,
-    /// Every candidate file was read and the requested partition-mass controls hold.
+    /// Every candidate was accounted for and the partition-mass controls hold.
+    /// Complete directories may prove empty buckets without reading algorithm payloads.
     Census,
     /// Sampling exhausted its file budget without satisfying the controls.
     Unstable,
@@ -202,12 +204,16 @@ pub struct SketchSplitResponse {
     pub points: Vec<SketchSplitPoint>,
     /// Number of unique files eligible before sampling.
     pub candidate_files: u64,
-    /// Total unique files read, equal to proposal_files plus validation_files.
+    /// Unique payload files: proposal_files + validation_files - shared_files.
     pub sampled_files: u64,
-    /// Files used to propose boundaries; includes all files for a census.
+    /// Files used to propose boundaries; includes all nonempty payloads for a census.
     pub proposal_files: u64,
-    /// Disjoint files used to evaluate boundaries; zero for a census.
+    /// Files used to evaluate boundaries; may overlap proposal files; zero for a census.
     pub validation_files: u64,
+    /// Files contributing to both samples, read once.
+    pub shared_files: u64,
+    /// Unique directory probes, including cache hits; may exceed the payload file limit.
+    pub directory_files: u64,
     pub rounds: u32,
     pub gaps: Vec<SketchGap>,
 }
