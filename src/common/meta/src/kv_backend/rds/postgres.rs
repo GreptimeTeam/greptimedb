@@ -49,6 +49,9 @@ use crate::rpc::store::{
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, RangeRequest, RangeResponse,
 };
 
+/// Leaves headroom below PostgreSQL's 65,535 bind-parameter limit.
+const BATCH_GET_CHUNK_SIZE: usize = 60_000;
+
 /// TLS mode configuration for PostgreSQL connections.
 /// This mirrors the TlsMode from servers::tls to avoid circular dependencies.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -749,16 +752,23 @@ impl KvQueryExecutor<PgClient> for PgStore {
         if req.keys.is_empty() {
             return Ok(BatchGetResponse { kvs: vec![] });
         }
-        let query = self
-            .sql_template_set
-            .generate_batch_get_query(req.keys.len());
-        let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        let kvs = crate::record_rds_sql_execute_elapsed!(
-            query_executor.query(&query, &params).await,
-            PG_STORE_NAME,
-            RDS_STORE_OP_BATCH_GET,
-            ""
-        )?;
+        // SQL IN returns each matching key once, including across chunks.
+        let mut keys = req.keys;
+        keys.sort_unstable();
+        keys.dedup();
+
+        let mut kvs = Vec::new();
+        for keys in keys.chunks(BATCH_GET_CHUNK_SIZE) {
+            let query = self.sql_template_set.generate_batch_get_query(keys.len());
+            let params = keys.iter().map(|x| x as _).collect::<Vec<_>>();
+            let chunk = crate::record_rds_sql_execute_elapsed!(
+                query_executor.query(&query, &params).await,
+                PG_STORE_NAME,
+                RDS_STORE_OP_BATCH_GET,
+                ""
+            )?;
+            kvs.extend(chunk);
+        }
         Ok(BatchGetResponse { kvs })
     }
 
@@ -922,6 +932,7 @@ impl PgStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_backend::KvBackend;
     use crate::kv_backend::test::{
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
@@ -1220,6 +1231,57 @@ mod tests {
         let prefix = b"batch_get/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
         test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_batch_get_chunks() {
+        maybe_skip_postgres_integration_test!();
+        let kv_backend = build_pg_kv_backend("batch_get_chunks-test").await.unwrap();
+        let prefix = b"batch_get_chunks/";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
+
+        let present = [prefix.as_slice(), b"key1"].concat();
+        let last = KeyValue {
+            key: [prefix.as_slice(), b"zz_last"].concat(),
+            value: b"last_value".to_vec(),
+        };
+        kv_backend
+            .batch_put(BatchPutRequest {
+                kvs: vec![last.clone()],
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        for count in [
+            BATCH_GET_CHUNK_SIZE - 1,
+            BATCH_GET_CHUNK_SIZE,
+            BATCH_GET_CHUNK_SIZE + 1,
+        ] {
+            let mut keys = (0..count)
+                .map(|index| format!("batch_get_chunks/missing_{index:06}").into_bytes())
+                .collect::<Vec<_>>();
+            keys[0] = present.clone();
+            keys[count - 1] = last.key.clone();
+            // Keep the duplicate beyond the first chunk in the original request.
+            keys.push(present.clone());
+            let mut response = kv_backend
+                .batch_get(BatchGetRequest { keys })
+                .await
+                .unwrap();
+            response.kvs.sort_by(|left, right| left.key.cmp(&right.key));
+            assert_eq!(
+                response.kvs,
+                vec![
+                    KeyValue {
+                        key: present.clone(),
+                        value: b"val1".to_vec(),
+                    },
+                    last.clone()
+                ]
+            );
+        }
         unprepare_kv(&kv_backend, prefix).await;
     }
 
