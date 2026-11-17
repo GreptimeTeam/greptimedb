@@ -412,13 +412,16 @@ mod tests {
             .await;
         let mut rx = env.frontend_receiver().await;
 
-        let err = state
-            .next(&mut ctx, &new_procedure_context())
-            .await
-            .unwrap_err();
+        // Every failed attempt broadcasts.
+        for _ in 0..2 {
+            let err = state
+                .next(&mut ctx, &new_procedure_context())
+                .await
+                .unwrap_err();
 
-        assert_matches!(err, Error::TableRouteNotFound { .. });
-        assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
+            assert_matches!(err, Error::TableRouteNotFound { .. });
+            assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
+        }
     }
 
     #[tokio::test]

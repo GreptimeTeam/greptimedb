@@ -907,40 +907,108 @@ mod tests {
 
     #[tokio::test]
     async fn test_upgrade_region_non_retryable_reply_takes_precedence() {
-        let state = UpgradeCandidateRegion::default();
-        let mut persistent_context = new_persistent_context();
         let upgraded = RegionId::new(1024, 1);
         let replaying = RegionId::new(1024, 2);
         let missing = RegionId::new(1024, 3);
-        persistent_context.region_ids = vec![upgraded, replaying, missing];
+        // The region that cannot be retried replies before or after the one that can.
+        for failed in [[replaying, missing], [missing, replaying]] {
+            let state = UpgradeCandidateRegion::default();
+            let mut persistent_context = new_persistent_context();
+            persistent_context.region_ids = vec![upgraded, replaying, missing];
+            let to_peer_id = persistent_context.to_peer.id;
+
+            let mut env = TestingEnv::new();
+            let mut ctx = env.context_factory().new_context(persistent_context);
+            prepare_table_metadata(&ctx, HashMap::default()).await;
+            let mailbox_ctx = env.mailbox_context();
+            let mailbox = mailbox_ctx.mailbox().clone();
+
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            mailbox_ctx
+                .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
+                .await;
+            send_mock_reply(mailbox, rx, move |id| {
+                let mut replies = failed
+                    .map(|region_id| new_region_reply(region_id, false, region_id != missing))
+                    .to_vec();
+                // The accepted region replies twice.
+                replies.insert(1, new_region_reply(upgraded, true, true));
+                replies.push(new_region_reply(upgraded, true, true));
+                Ok(new_upgrade_regions_reply(id, replies))
+            });
+
+            let err = state.upgrade_region(&mut ctx).await.unwrap_err();
+
+            assert_matches!(err, Error::Unexpected { .. });
+            assert!(!err.is_retryable());
+            assert_eq!(ctx.volatile_ctx.upgraded_regions, HashSet::from([upgraded]));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_region_failed_attempt_keeps_upgraded_regions() {
+        let mut state = UpgradeCandidateRegion::default();
+        let mut persistent_context = new_persistent_context();
+        let upgraded = RegionId::new(1024, 1);
+        let replaying = RegionId::new(1024, 2);
+        persistent_context.region_ids = vec![upgraded, replaying];
         let to_peer_id = persistent_context.to_peer.id;
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
+        ctx.volatile_ctx.upgraded_regions.insert(upgraded);
         prepare_table_metadata(&ctx, HashMap::default()).await;
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         mailbox_ctx
             .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
             .await;
-        send_mock_reply(mailbox, rx, move |id| {
-            Ok(new_upgrade_regions_reply(
-                id,
-                vec![
-                    new_region_reply(replaying, false, true),
-                    new_region_reply(missing, false, false),
-                    new_region_reply(upgraded, true, true),
-                ],
-            ))
+        common_runtime::spawn_global(async move {
+            let replaying_reply: fn(u64) -> Result<MailboxMessage> = |id| {
+                Ok(new_upgrade_regions_reply(
+                    id,
+                    vec![new_region_reply(RegionId::new(1024, 2), false, true)],
+                ))
+            };
+            let replies = [
+                |id| Err(error::MailboxTimeoutSnafu { id }.build()),
+                |id| Ok(new_close_region_reply(id)),
+                replaying_reply,
+                replaying_reply,
+            ];
+            for reply in replies {
+                let id = rx
+                    .recv()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .mailbox_message
+                    .unwrap()
+                    .id;
+                mailbox.on_recv(id, reply(id)).await.unwrap();
+            }
         });
 
+        // A timeout and a reply of another type record nothing.
         let err = state.upgrade_region(&mut ctx).await.unwrap_err();
-
-        assert_matches!(err, Error::Unexpected { .. });
-        assert!(!err.is_retryable());
+        assert_matches!(err, Error::RetryLater { .. });
         assert_eq!(ctx.volatile_ctx.upgraded_regions, HashSet::from([upgraded]));
+        let err = state.upgrade_region(&mut ctx).await.unwrap_err();
+        assert_matches!(err, Error::UnexpectedInstructionReply { .. });
+        assert_eq!(ctx.volatile_ctx.upgraded_regions, HashSet::from([upgraded]));
+
+        // A reply that is not ready is accepted only when the region need not be ready.
+        let err = state.upgrade_region(&mut ctx).await.unwrap_err();
+        assert_matches!(err, Error::RetryLater { .. });
+        assert_eq!(ctx.volatile_ctx.upgraded_regions, HashSet::from([upgraded]));
+        state.require_ready = false;
+        state.upgrade_region(&mut ctx).await.unwrap();
+        assert_eq!(
+            ctx.volatile_ctx.upgraded_regions,
+            HashSet::from([upgraded, replaying])
+        );
     }
 
     #[tokio::test]

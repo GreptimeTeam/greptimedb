@@ -17,7 +17,7 @@ use std::any::Any;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::{info, warn};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
@@ -57,15 +57,16 @@ impl State for RegionMigrationStart {
         let from_peer = &ctx.persistent_ctx.from_peer;
         let region_ids = &ctx.persistent_ctx.region_ids;
 
+        // A recovered procedure may have downgraded the leaders of the regions.
+        let downgraded = region_routes
+            .iter()
+            .any(|route| route.is_leader_downgrading());
+
         self.filter_unmigrated_regions(&mut region_routes, to_peer);
 
         // A procedure that stopped right after it switched the routes has not broadcast them.
-        if region_routes.len() != region_ids.len()
-            && let Err(err) = ctx.invalidate_table_cache().await
-        {
-            warn!(
-                "Failed to broadcast the invalidate table cache message for the migrated regions, error: {err:?}"
-            );
+        if region_routes.len() != region_ids.len() {
+            ctx.invalidate_table_cache().await?;
         }
 
         // No region to migrate, skip the migration.
@@ -77,29 +78,16 @@ impl State for RegionMigrationStart {
             return Ok((Box::new(RegionMigrationEnd), Status::done()));
         }
 
-        // Updates the region ids to the unmigrated regions.
-        if region_routes.len() != region_ids.len() {
-            let unmigrated_region_ids = region_routes.iter().map(|route| route.region.id).collect();
-            info!(
-                "Some of the regions have been migrated, only migrate the following regions: {:?}, to_peer: {:?}",
-                unmigrated_region_ids, to_peer
-            );
-            ctx.persistent_ctx.region_ids = unmigrated_region_ids;
-        }
-
-        // Checks if any of the region leaders is not the `from_peer`.
+        // Checks if any of the region leaders is not the `from_peer`. The region ids are still
+        // those of the whole batch, which a rollback restores.
         for region_route in &region_routes {
             if self.invalid_leader_peer(region_route, from_peer)? {
                 info!(
                     "Abort region migration, region:{}, unexpected leader peer: {:?}, expected: {:?}",
                     region_route.region.id, region_route.leader_peer, from_peer,
                 );
-                // A recovered procedure may have downgraded the leaders of other regions. The
-                // abort fails the procedure, and its rollback restores them.
-                let status = if region_routes
-                    .iter()
-                    .any(|route| route.is_leader_downgrading())
-                {
+                // The abort fails the procedure, and its rollback restores the downgraded leaders.
+                let status = if downgraded {
                     Status::executing(false)
                 } else {
                     Status::done()
@@ -113,6 +101,16 @@ impl State for RegionMigrationStart {
                     status,
                 ));
             }
+        }
+
+        // Updates the region ids to the unmigrated regions.
+        if region_routes.len() != region_ids.len() {
+            let unmigrated_region_ids = region_routes.iter().map(|route| route.region.id).collect();
+            info!(
+                "Some of the regions have been migrated, only migrate the following regions: {:?}, to_peer: {:?}",
+                unmigrated_region_ids, to_peer
+            );
+            ctx.persistent_ctx.region_ids = unmigrated_region_ids;
         }
 
         // If all checks pass, open the candidate region.
@@ -210,7 +208,7 @@ mod tests {
 
     use std::assert_matches;
 
-    use common_meta::key::test_utils::new_test_table_info;
+    use common_meta::key::test_utils::{new_test_table_info, new_test_table_info_with_name};
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use store_api::storage::RegionId;
@@ -300,28 +298,31 @@ mod tests {
         // to_peer: 2
         let mut persistent_context = new_persistent_context();
         let migrated = RegionId::new(1024, 1);
-        let remaining = RegionId::new(1024, 2);
+        let remaining = RegionId::new(1025, 1);
         persistent_context.region_ids = vec![migrated, remaining];
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
         let mut rx = env.frontend_receiver().await;
 
-        let region_routes = [(migrated, 2), (remaining, 1)]
-            .map(|(region_id, leader)| RegionRoute {
+        for (region_id, leader) in [(migrated, 2), (remaining, 1)] {
+            let table_id = region_id.table_id();
+            let table_info = new_test_table_info_with_name(table_id, &format!("table_{table_id}"));
+            let region_routes = vec![RegionRoute {
                 region: Region::new_test(region_id),
                 leader_peer: Some(Peer::empty(leader)),
                 ..Default::default()
-            })
-            .to_vec();
-        env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
-            .await;
+            }];
+            env.create_physical_table_metadata(table_info, region_routes)
+                .await;
+        }
         let procedure_ctx = new_procedure_context();
         let (next, status) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<OpenCandidateRegion>().unwrap();
         assert_need_persist(status);
         assert_eq!(ctx.persistent_ctx.region_ids, vec![remaining]);
-        assert_table_cache_invalidated(&mut rx, &[1024]);
+        // The table of the migrated region is invalidated too.
+        assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
     }
 
     #[tokio::test]
