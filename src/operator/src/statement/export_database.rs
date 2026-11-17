@@ -15,7 +15,7 @@
 //! Request-scoped database export preparation. The frontend authorizes the entire
 //! captured selection before preparation; these trusted methods do not check ACLs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 
 use common_datasource::file_format::Format;
@@ -55,6 +55,11 @@ impl PreparedDatabaseExport {
     }
 }
 
+fn is_packed_export(with: &HashMap<String, String>) -> bool {
+    with.get("metric_data_layout")
+        .is_some_and(|v| v == "packed")
+}
+
 enum DatabaseExportJob {
     Ordinary {
         table: TableRef,
@@ -71,11 +76,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         tables: Vec<TableRef>,
     ) -> Result<PreparedDatabaseExport> {
-        if req
-            .with
-            .get("metric_data_layout")
-            .is_none_or(|v| v != "packed")
-        {
+        if !is_packed_export(&req.with) {
             validate_database_export_layout(&req.with)?;
         }
         validate_database_directory(&req.location)?;
@@ -88,9 +89,7 @@ impl StatementExecutor {
             &req.location,
             tables.iter().map(|table| table.table_info().name.clone()),
             ".parquet",
-            req.with
-                .get("metric_data_layout")
-                .is_some_and(|v| v == "packed"),
+            is_packed_export(&req.with),
         )?;
         let mut logical = Vec::new();
         let mut jobs = Vec::new();
@@ -204,11 +203,7 @@ impl StatementExecutor {
         let req = &plan.request;
         let parallelism = parse_parallelism_from_option_map(&req.with);
         let budget = ExportWriteBudget::new(parallelism);
-        let packed = if req
-            .with
-            .get("metric_data_layout")
-            .is_some_and(|v| v == "packed")
-        {
+        let packed = if is_packed_export(&req.with) {
             let store =
                 build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
                     .await

@@ -19,7 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_error::ext::BoxedError;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, info};
 use object_store::ObjectStore;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -31,7 +31,7 @@ use crate::data::schema_export::append_schema_ddl;
 use crate::data::storage_export::{
     AzblobBackend, FsBackend, GcsBackend, OssBackend, S3Backend, StorageExport, StorageType,
 };
-use crate::data::{COPY_PATH_PLACEHOLDER, default_database};
+use crate::data::{COPY_PATH_PLACEHOLDER, collect_schema_job_results, default_database};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 use crate::error::{
     EmptyResultSnafu, Error, OpenDalSnafu, OutputDirNotSetSnafu, Result, SchemaNotFoundSnafu,
@@ -432,16 +432,9 @@ impl Export {
         }
 
         let results = futures::future::join_all(tasks).await;
-        for (schema, result) in db_names.iter().zip(&results) {
-            if let Err(error) = result {
-                error!(error; "Failed to export database schema {}.{schema}", self.catalog);
-            }
-        }
-        for result in results {
-            result?;
-        }
+        collect_schema_job_results(&self.catalog, &db_names, results, "export database schema")?;
         let elapsed = timer.elapsed();
-        info!("Success {db_count}/{db_count} jobs, cost: {elapsed:?}");
+        info!("Success {db_count} jobs, cost: {elapsed:?}");
 
         Ok(())
     }
@@ -555,16 +548,9 @@ impl Export {
         }
 
         let results = futures::future::join_all(tasks).await;
-        for (schema, result) in db_names.iter().zip(&results) {
-            if let Err(error) = result {
-                error!(error; "Failed to export database data {}.{schema}", self.catalog);
-            }
-        }
-        for result in results {
-            result?;
-        }
+        collect_schema_job_results(&self.catalog, &db_names, results, "export database data")?;
         let elapsed = timer.elapsed();
-        info!("Success {db_count}/{db_count} jobs, costs: {elapsed:?}");
+        info!("Success {db_count} jobs, costs: {elapsed:?}");
 
         Ok(())
     }

@@ -1506,7 +1506,7 @@ async fn export_http(instance: Arc<Instance>) -> (String, tokio::task::JoinHandl
 }
 
 struct FailCopyExport {
-    all_jobs: bool,
+    concurrent_jobs: bool,
 }
 
 impl servers::interceptor::SqlQueryInterceptor for FailCopyExport {
@@ -1529,7 +1529,7 @@ impl servers::interceptor::SqlQueryInterceptor for FailCopyExport {
             Some(Statement::ShowCreateTable(_))
                 | Some(Statement::Copy(Copy::CopyDatabase(CopyDatabase::From(_))))
         );
-        if copy_export || (self.all_jobs && other_job) {
+        if copy_export || (self.concurrent_jobs && other_job) {
             return Err(operator::error::InvalidDatabaseExportSnafu {
                 reason: "injected COPY export failure",
             }
@@ -1545,7 +1545,7 @@ async fn data_cli_propagates_copy_failures() {
     use servers::interceptor::SqlQueryInterceptorRef;
     let plugins = common_base::Plugins::new();
     plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(FailCopyExport {
-        all_jobs: false,
+        concurrent_jobs: false,
     }));
     let standalone = GreptimeDbStandaloneBuilder::new("cli_copy_failures")
         .with_plugin(plugins)
@@ -1633,13 +1633,13 @@ async fn data_cli_propagates_copy_failures() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn data_cli_logs_all_failed_schema_jobs() {
+async fn data_cli_logs_failed_concurrent_schema_jobs() {
     use common_telemetry::tracing::instrument::WithSubscriber;
     use servers::interceptor::SqlQueryInterceptorRef;
 
     let plugins = common_base::Plugins::new();
     plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(FailCopyExport {
-        all_jobs: true,
+        concurrent_jobs: true,
     }));
     let standalone = GreptimeDbStandaloneBuilder::new("cli_failed_schema_jobs")
         .with_plugin(plugins)

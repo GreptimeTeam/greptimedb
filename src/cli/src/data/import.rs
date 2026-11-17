@@ -20,12 +20,12 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::ext::BoxedError;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{info, warn};
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::data::{COPY_PATH_PLACEHOLDER, default_database};
+use crate::data::{COPY_PATH_PLACEHOLDER, collect_schema_job_results, default_database};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 use crate::error::{Error, FileIoSnafu, InvalidArgumentsSnafu, Result, SchemaNotFoundSnafu};
 use crate::{Tool, database};
@@ -173,16 +173,14 @@ impl Import {
         }
 
         let results = futures::future::join_all(tasks).await;
-        for (schema, result) in db_names.iter().zip(&results) {
-            if let Err(error) = result {
-                error!(error; "Failed to import {filename} for database {}.{schema}", self.catalog);
-            }
-        }
-        for result in results {
-            result?;
-        }
+        collect_schema_job_results(
+            &self.catalog,
+            &db_names,
+            results,
+            &format!("import {filename} for database"),
+        )?;
         let elapsed = timer.elapsed();
-        info!("Success {db_count}/{db_count} `{filename}` jobs, cost: {elapsed:?}");
+        info!("Success {db_count} `{filename}` jobs, cost: {elapsed:?}");
 
         Ok(())
     }
