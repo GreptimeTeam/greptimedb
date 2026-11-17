@@ -299,12 +299,12 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Number of live object store WAL actors observed without permission to
+    /// Number of live object store logstores observed without permission to
     /// initiate I/O, including before the first grant and while idle. This
     /// measures permission availability, not retained backlog size.
     pub static ref METRIC_OBJECT_STORE_WAL_IO_PERMISSION_UNAVAILABLE: IntGauge = register_int_gauge!(
         "greptime_logstore_object_store_wal_io_permission_unavailable",
-        "live object store WAL actors observed without permission to initiate I/O, including idle actors and those awaiting their first grant",
+        "live object store logstores observed without permission to initiate I/O, including idle stores and those awaiting their first grant",
     )
     .unwrap();
 
