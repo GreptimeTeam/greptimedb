@@ -19,11 +19,11 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_telemetry::warn;
-use snafu::IntoError;
+use snafu::{IntoError, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig, MitoConfig};
 use crate::error::{Error, ExternalSnafu, InvalidConfigSnafu};
 use crate::metrics::{INDEX_CREATE_DISCARDED_TOTAL, INDEX_DISCARD_ADMISSION_REJECTED};
 use crate::sst::file::{FileMeta, IndexType};
@@ -59,6 +59,22 @@ impl IndexRegistry {
         }
     }
 
+    /// Assembles the configured built-ins and the injected provider.
+    pub(crate) fn from_config(
+        config: &MitoConfig,
+        provider: Option<IndexKindProviderRef>,
+    ) -> crate::error::Result<Self> {
+        Self::new(
+            config.inverted_index.clone(),
+            config.fulltext_index.clone(),
+            config.bloom_filter_index.clone(),
+        )
+        .with_provider(provider)
+        .with_context(|_| ExternalSnafu {
+            context: "registering index handlers".to_string(),
+        })
+    }
+
     /// Adds the embedding application's handlers after the built-in configuration.
     pub fn with_provider(
         mut self,
@@ -70,6 +86,16 @@ impl IndexRegistry {
             }
         }
         Ok(self)
+    }
+
+    /// Validates required providers and their options before creating a new region.
+    /// Built-in handlers preserve their existing schema/build-time validation.
+    pub fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        self.validate_schema_kinds(context.metadata)?;
+        for handler in &self.handlers {
+            handler.validate(context)?;
+        }
+        Ok(())
     }
 
     /// Installs a handler, rejecting empty or overlapping kind ownership.
@@ -89,6 +115,57 @@ impl IndexRegistry {
         files: impl IntoIterator<Item = &'a FileMeta>,
     ) -> Result<(), BoxedError> {
         self.validate_schema_kinds(metadata)?;
+        self.validate_file_kinds(files)
+    }
+
+    /// Reports unavailable sketches without blocking compaction after a downgrade.
+    /// Logs each missing kind at most once for this input group.
+    pub(crate) fn warn_missing_compaction_handlers<'a>(
+        &self,
+        metadata: &RegionMetadataRef,
+        files: impl IntoIterator<Item = &'a FileMeta>,
+    ) {
+        let missing = ExtensionIndexKind::ALL
+            .map(|kind| !self.has_handler(IndexKind::Extension(kind).index_type()));
+        if !missing.iter().any(|missing| *missing) {
+            return;
+        }
+        let mut requested = ExtensionIndexKind::ALL.map(|kind| {
+            metadata.column_metadatas.iter().any(|column| {
+                column
+                    .column_schema
+                    .metadata()
+                    .contains_key(kind.required_metadata_key())
+            })
+        });
+        for file in files {
+            for (position, kind) in ExtensionIndexKind::ALL.iter().enumerate() {
+                if missing[position] && !requested[position] {
+                    let index_type = IndexKind::Extension(*kind).index_type();
+                    requested[position] = file.available_indexes.contains(&index_type)
+                        || file
+                            .indexes
+                            .iter()
+                            .any(|column| column.created_indexes.contains(&index_type));
+                }
+            }
+        }
+        for (position, kind) in ExtensionIndexKind::ALL.iter().enumerate() {
+            if missing[position] && requested[position] {
+                warn!(
+                    "Compacting without unavailable sketch provider, region_id: {}, kind: {}; output will omit this sketch",
+                    metadata.region_id,
+                    kind.as_str()
+                );
+            }
+        }
+    }
+
+    /// Rejects unavailable implementations for indexes being replaced.
+    fn validate_file_kinds<'a>(
+        &self,
+        files: impl IntoIterator<Item = &'a FileMeta>,
+    ) -> Result<(), BoxedError> {
         for file in files {
             for kind in file.available_indexes.iter().chain(
                 file.indexes
@@ -223,7 +300,10 @@ impl IndexRegistry {
         });
     }
 
-    fn validate_schema_kinds(&self, metadata: &RegionMetadataRef) -> Result<(), BoxedError> {
+    pub(crate) fn validate_schema_kinds(
+        &self,
+        metadata: &RegionMetadataRef,
+    ) -> Result<(), BoxedError> {
         for column in &metadata.column_metadatas {
             let schema = &column.column_schema;
             for kind in ExtensionIndexKind::ALL {
@@ -270,6 +350,11 @@ impl IndexBuildPlan {
         &self.planned
     }
 
+    /// Whether no handler requested work, including metadata-only maintenance.
+    pub fn is_empty(&self) -> bool {
+        self.planned.is_empty()
+    }
+
     /// All requested column formats.
     pub fn entries(&self) -> impl Iterator<Item = &PlanEntry> {
         self.planned.iter().flat_map(|plan| plan.entries())
@@ -301,6 +386,51 @@ impl IndexBuildPlan {
         self.planned
             .retain(|plan| plan.kinds().iter().all(|kind| kind.is_builtin()));
     }
+
+    /// Whether every handler considers the published file current.
+    pub fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool {
+        let has_removed_extensions = matches!(
+            context.build_type,
+            IndexBuildType::Manual | IndexBuildType::SchemaChange
+        ) && ExtensionIndexKind::ALL.iter().any(|kind| {
+            let index_type = IndexKind::Extension(*kind).index_type();
+            let configured = |column_id| {
+                context
+                    .metadata
+                    .column_by_id(column_id)
+                    .is_some_and(|column| {
+                        column
+                            .column_schema
+                            .metadata()
+                            .contains_key(kind.required_metadata_key())
+                    })
+            };
+            let mut has_column_descriptor = false;
+            for column in &file.indexes {
+                if column.created_indexes.contains(&index_type) {
+                    has_column_descriptor = true;
+                    if !configured(column.column_id) {
+                        return true;
+                    }
+                }
+            }
+            // Legacy file-level descriptors cannot identify individual columns.
+            !has_column_descriptor
+                && file.available_indexes.contains(&index_type)
+                && !context.metadata.column_metadatas.iter().any(|column| {
+                    column
+                        .column_schema
+                        .metadata()
+                        .contains_key(kind.required_metadata_key())
+                })
+        });
+        self.failure.is_none()
+            && !has_removed_extensions
+            && self
+                .planned
+                .iter()
+                .all(|plan| plan.is_current(file, context))
+    }
 }
 
 #[cfg(test)]
@@ -315,6 +445,11 @@ mod tests {
         fn kinds(&self) -> &[IndexKind] {
             &self.0
         }
+
+        fn validate(&self, _: &PlanContext<'_>) -> Result<(), BoxedError> {
+            Ok(())
+        }
+
         fn plan(&self, _: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
             Ok(None)
         }
@@ -339,6 +474,10 @@ mod tests {
             _: &crate::sst::index::handler::BuildContext<'_>,
         ) -> Result<Option<Box<dyn crate::sst::index::handler::IndexCreator>>, BoxedError> {
             unreachable!("admission must not construct creators")
+        }
+
+        fn is_current(&self, _: &FileMeta, _: &PlanContext<'_>) -> bool {
+            false
         }
     }
 
@@ -425,6 +564,10 @@ mod tests {
     impl IndexKindHandler for PlannedHandler {
         fn kinds(&self) -> &[IndexKind] {
             &self.owned
+        }
+
+        fn validate(&self, _: &PlanContext<'_>) -> Result<(), BoxedError> {
+            Ok(())
         }
 
         fn plan(&self, _: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod memory;
+
 use std::collections::HashMap;
 
 use api::helper::{
@@ -28,6 +30,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::TableInfo;
 
 use crate::error::{self, Result};
+
+pub(crate) use memory::estimated_record_batch_bytes;
 
 /// Converts prepared rows in target-schema order without Prom-specific renaming.
 ///
@@ -198,10 +202,14 @@ mod tests {
     use std::sync::Arc;
     use std::thread::yield_now;
 
+    use api::helper::to_grpc_value;
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema as ProtoColumnSchema, Row, Value};
     use arrow::array::{Array, Int32Array, StringArray};
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
+    use datatypes::types::json_type::JsonNativeType;
     use datatypes::value::Value as DtValue;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
 
@@ -258,6 +266,230 @@ mod tests {
             }],
         };
         (rows, schema)
+    }
+
+    fn json_column(metadata: JsonMetadata) -> ColumnSchema {
+        let mut column = ColumnSchema::new(
+            "json",
+            ConcreteDataType::json2(JsonNativeType::object()),
+            true,
+        );
+        column.with_extension_type(&Json2ExtensionType::new(Arc::new(metadata)));
+        column
+    }
+
+    fn json_rows(column: &ColumnSchema, values: impl IntoIterator<Item = DtValue>) -> Rows {
+        let (kind, extension) = ColumnDataTypeWrapper::try_from(column.data_type.clone())
+            .unwrap()
+            .to_parts();
+        let mut input = source(&column.name, kind);
+        input.datatype_extension = extension;
+        Rows {
+            schema: vec![input],
+            rows: values
+                .into_iter()
+                .map(|value| Row {
+                    values: vec![to_grpc_value(value)],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_conversion_estimate_covers_destination_padding_and_defaults() {
+        let (mut rows, schema) = fixture();
+        rows.rows[0].values[0] = ValueData::StringValue("x".repeat(10_000)).into();
+        rows.rows.resize(1000, rows.rows[0].clone());
+        let mut columns = schema.column_schemas().to_vec();
+        columns.extend((0..2048).map(|i| {
+            ColumnSchema::new(
+                format!("tag_{i}"),
+                ConcreteDataType::string_datatype(),
+                true,
+            )
+        }));
+        columns.push(
+            ColumnSchema::new("default", ConcreteDataType::string_datatype(), true)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(DtValue::String(
+                    "default".repeat(1000).into(),
+                ))))
+                .unwrap(),
+        );
+        let table = table_info(Schema::new(columns));
+        let estimate = estimated_record_batch_bytes(&rows, &table).unwrap();
+        let batch = rows_to_record_batch(&rows, &table).unwrap();
+        assert!(estimate >= batch.get_array_memory_size());
+        assert!(estimate > 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_conversion_estimate_covers_nested_values_and_defaults() {
+        use datatypes::value::ListValue;
+
+        let value = DtValue::List(ListValue::new(
+            vec![
+                DtValue::String("a".into()),
+                DtValue::String("b".repeat(30_000).into()),
+            ],
+            Arc::new(ConcreteDataType::string_datatype()),
+        ));
+        let datatype = value.data_type();
+        let table = table_info(Schema::new(vec![
+            ColumnSchema::new("input", datatype.clone(), true),
+            ColumnSchema::new("default", datatype.clone(), true)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(value.clone())))
+                .unwrap(),
+        ]));
+        let (kind, extension) = ColumnDataTypeWrapper::try_from(datatype)
+            .unwrap()
+            .to_parts();
+        let mut input = source("input", kind);
+        input.datatype_extension = extension;
+        let rows = Rows {
+            schema: vec![input],
+            rows: vec![
+                Row {
+                    values: vec![to_grpc_value(value)]
+                };
+                10
+            ],
+        };
+        let estimate = estimated_record_batch_bytes(&rows, &table).unwrap();
+        let batch = rows_to_record_batch(&rows, &table).unwrap();
+        assert!(estimate >= batch.get_array_memory_size());
+    }
+
+    #[test]
+    fn test_conversion_estimate_covers_json2_expansion() {
+        for (legacy, max_paths) in [
+            (false, None),
+            (false, Some(0)),
+            (false, Some(1)),
+            (true, None),
+        ] {
+            let settings = JsonSettings::try_new(
+                (0..200)
+                    .map(|i| JsonTypeHint {
+                        path: vec![format!("hint_{i}")],
+                        data_type: ConcreteDataType::string_datatype(),
+                        inverted_index: false,
+                        skipping_index: None,
+                        fulltext_index: None,
+                    })
+                    .collect(),
+                max_paths,
+            )
+            .unwrap();
+            let column = json_column(if legacy {
+                JsonMetadata::new_v1(settings.clone())
+            } else {
+                JsonMetadata::new(settings.clone())
+            });
+            let rows = json_rows(
+                &column,
+                (0..200).map(|i| {
+                    settings
+                        .encode(serde_json::json!({
+                            format!("field_{i}"): "x".repeat(i * 100),
+                            "nested": [{"name": "y".repeat(i)}, {"other": i}],
+                        }))
+                        .unwrap()
+                }),
+            );
+            let table = table_info(Schema::new(vec![column]));
+            let estimate = estimated_record_batch_bytes(&rows, &table).unwrap();
+            let batch = rows_to_record_batch(&rows, &table).unwrap();
+            assert!(
+                estimate >= batch.get_array_memory_size(),
+                "legacy={legacy}, max_paths={max_paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_conversion_estimate_respects_json2_expansion_limit() {
+        for (legacy, max_paths) in [
+            (false, Some(0)),
+            (false, Some(100)),
+            (false, None),
+            (true, Some(0)),
+        ] {
+            let settings = JsonSettings::try_new(vec![], max_paths).unwrap();
+            let column = json_column(if legacy {
+                JsonMetadata::new_v1(settings.clone())
+            } else {
+                JsonMetadata::new(settings.clone())
+            });
+            let rows = json_rows(
+                &column,
+                (0..1000).map(|i| {
+                    settings
+                        .encode(serde_json::json!({format!("field_{i}"): "a"}))
+                        .unwrap()
+                }),
+            );
+            let table = table_info(Schema::new(vec![column]));
+            let estimate = estimated_record_batch_bytes(&rows, &table).unwrap();
+            let batch = rows_to_record_batch(&rows, &table).unwrap();
+            assert!(
+                estimate >= batch.get_array_memory_size(),
+                "legacy={legacy}, max_paths={max_paths:?}"
+            );
+            if !legacy {
+                // Small batches must fit this quota even when every row has a different key.
+                assert!(estimate < 64 * 1024 * 1024, "max_paths={max_paths:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_conversion_estimate_covers_nested_json2_paths_and_defaults() {
+        // One selected array path can contain many fields, with padding for every element.
+        let items = (0..256)
+            .map(|i| serde_json::json!({format!("field_{i}"): "a"}))
+            .collect::<Vec<_>>();
+        for use_default in [false, true] {
+            let settings =
+                JsonSettings::try_new(vec![], Some(if use_default { 0 } else { 1 })).unwrap();
+            let value = settings
+                .encode(serde_json::json!({"outer": {"inner": {"items": items}}}))
+                .unwrap();
+            let mut column = json_column(JsonMetadata::new(settings));
+            let rows = if use_default {
+                column = column
+                    .with_default_constraint(Some(ColumnDefaultConstraint::Value(value)))
+                    .unwrap();
+                Rows {
+                    schema: vec![],
+                    rows: vec![Row { values: vec![] }; 2],
+                }
+            } else {
+                json_rows(&column, [value.clone(), value])
+            };
+            let table = table_info(Schema::new(vec![column]));
+            let estimate = estimated_record_batch_bytes(&rows, &table).unwrap();
+            let batch = rows_to_record_batch(&rows, &table).unwrap();
+            assert!(
+                estimate >= batch.get_array_memory_size(),
+                "use_default={use_default}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_conversion_estimate_covers_small_json2_view_buffers() {
+        let settings = JsonSettings::default();
+        let column = json_column(JsonMetadata::new_v1(settings.clone()));
+        let rows = json_rows(
+            &column,
+            [settings
+                .encode(serde_json::json!({"value": "x".repeat(13)}))
+                .unwrap()],
+        );
+        let table = table_info(Schema::new(vec![column]));
+        let estimate = estimated_record_batch_bytes(&rows, &table).unwrap();
+        let batch = rows_to_record_batch(&rows, &table).unwrap();
+        assert!(estimate >= batch.get_array_memory_size());
     }
 
     #[test]
@@ -349,11 +581,7 @@ mod tests {
 
     #[test]
     fn test_json2_expanded_schema() {
-        use api::helper::to_grpc_value;
-        use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
-        use datatypes::json::JsonSettings;
         use datatypes::schema::SchemaBuilder;
-        use datatypes::types::json_type::JsonNativeType;
 
         let settings = JsonSettings::default();
         let mut column_schema = ColumnSchema::new(

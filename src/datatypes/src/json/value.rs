@@ -379,6 +379,11 @@ impl JsonValue {
         self.json_variant
     }
 
+    /// Borrows the JSON representation without constructing a tree of value references.
+    pub fn variant(&self) -> &JsonVariant {
+        &self.json_variant
+    }
+
     pub(crate) fn into_value(self) -> Value {
         fn helper(v: JsonVariant) -> Value {
             match v {

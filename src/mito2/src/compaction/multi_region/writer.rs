@@ -16,23 +16,27 @@ use common_base::readable_size::ReadableSize;
 use partition::expr::PartitionExpr;
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
 use crate::compaction::multi_region::memory::{self, MemoryLimits};
 use crate::compaction::multi_region::{MultiRegionCompactionContext, MultiRegionTarget};
-use crate::config::MemoryThreshold;
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::read::FlatSource;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
+use crate::sst::index::build::IndexBuildInputs;
+use crate::sst::index::registry::IndexBuildPlan;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
+use crate::sst::parquet::writer::SstWriteContext;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub(crate) struct TargetWriter<'a> {
     target: &'a MultiRegionTarget,
     context: &'a MultiRegionCompactionContext,
     limits: &'a MemoryLimits,
+    index_plan: Arc<IndexBuildPlan>,
     max_file_size: usize,
     sequence: Option<NonZeroU64>,
     preserve_row_sequence: bool,
@@ -44,6 +48,7 @@ impl<'a> TargetWriter<'a> {
         context: &'a MultiRegionCompactionContext,
         limits: &'a MemoryLimits,
         max_file_size: usize,
+        index_plan: Arc<IndexBuildPlan>,
     ) -> Self {
         let sequence = crate::sst::file::known_max_input_sequence(target.inputs.values());
         let preserve_row_sequence = target.options.preserve_row_sequence
@@ -55,6 +60,7 @@ impl<'a> TargetWriter<'a> {
             target,
             context,
             limits,
+            index_plan,
             max_file_size,
             sequence,
             preserve_row_sequence,
@@ -71,13 +77,14 @@ impl<'a> TargetWriter<'a> {
         let infos = self
             .context
             .access_layer
-            .write_sst_with_guard(
+            .write_sst_with_context(
                 request,
                 &self.options(),
                 &mut metrics,
-                crate::sst::parquet::writer::SstWriteContext {
-                    guard: self.context.protection.clone(),
-                    limits: self.limits.writer,
+                SstWriteContext {
+                    guard: Some(self.context.protection.clone()),
+                    limits: Some(self.limits.writer),
+                    ..Default::default()
                 },
             )
             .await?;
@@ -96,16 +103,19 @@ impl<'a> TargetWriter<'a> {
 
     fn request(&self, source: FlatSource) -> Result<SstWriteRequest> {
         let config = &self.context.config;
-        let mut inverted = config.inverted_index.clone();
-        inverted.mem_threshold_on_create = self.index_threshold(inverted.mem_threshold_on_create());
-        let mut fulltext = config.fulltext_index.clone();
-        fulltext.mem_threshold_on_create =
-            self.index_threshold(Some(fulltext.mem_threshold_on_create()));
-        let mut bloom = config.bloom_filter_index.clone();
-        bloom.mem_threshold_on_create = self.index_threshold(bloom.mem_threshold_on_create());
+        // The shared source plan already applies the admitted index thresholds.
         let source = output_projection(self.target, source, self.context.cancellation.clone())?;
+        let index_build_inputs = Some(IndexBuildInputs {
+            output_rows: None,
+            plan: self.index_plan.clone(),
+            input_puffin_manager: self.context.access_layer.build_puffin_manager(),
+            // Routing and file rollover change coverage. Consume only actual output rows.
+            inputs: Arc::from([]),
+            can_merge_inputs: false,
+            memory_limit: self.limits.extension_index_memory_limit,
+        });
         Ok(SstWriteRequest {
-            index_build_inputs: None,
+            index_build_inputs,
             op_type: OperationType::Compact,
             metadata: self.target.metadata.clone(),
             source,
@@ -121,18 +131,10 @@ impl<'a> TargetWriter<'a> {
             preserve_row_sequence: self.preserve_row_sequence,
             index_options: self.target.options.index_options.clone(),
             index_config: config.index.clone(),
-            inverted_index_config: inverted,
-            fulltext_index_config: fulltext,
-            bloom_filter_index_config: bloom,
+            inverted_index_config: config.inverted_index.clone(),
+            fulltext_index_config: config.fulltext_index.clone(),
+            bloom_filter_index_config: config.bloom_filter_index.clone(),
         })
-    }
-
-    fn index_threshold(&self, configured: Option<usize>) -> MemoryThreshold {
-        MemoryThreshold::Size(ReadableSize(
-            configured
-                .unwrap_or(self.limits.index)
-                .min(self.limits.index) as u64,
-        ))
     }
 
     fn options(&self) -> WriteOptions {
@@ -207,7 +209,7 @@ impl<'a> TargetWriter<'a> {
 fn output_projection(
     target: &MultiRegionTarget,
     mut source: FlatSource,
-    cancellation: Arc<common_base::cancellation::CancellationHandle>,
+    cancellation: CancellationToken,
 ) -> Result<FlatSource> {
     let projection: Vec<_> = source
         .schema()

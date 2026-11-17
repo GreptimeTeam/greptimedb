@@ -29,7 +29,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
-use common_wal::config::object_store::{AckMode, ObjectStoreWalConfig, STANDALONE_GENERATION};
+use common_wal::config::object_store::{AckMode, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig};
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::value::Value;
 use futures::TryStreamExt;
@@ -82,7 +82,7 @@ pub(crate) fn wal_config() -> ObjectStoreWalConfig {
 /// The node prefix a standalone datanode derives from the configured root,
 /// which the regions persist in their WAL options.
 fn node_prefix() -> String {
-    wal_config().node_prefix(0, STANDALONE_GENERATION)
+    wal_config().node_prefix(0, FIXED_DIRECTORY_GENERATION)
 }
 
 pub(crate) fn wal_options() -> HashMap<String, String> {
@@ -449,7 +449,13 @@ pub(crate) async fn create_leased_region_on(
     let (table_dir, schema) = create_region(engine, region_id).await;
     let deadline = Instant::now() + Duration::from_secs(10);
     engine
-        .set_region_role_with_lease(region_id, RegionRole::Leader, Instant::now(), deadline)
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            Instant::now(),
+            deadline,
+            None,
+        )
         .unwrap();
     (table_dir, schema, deadline)
 }
@@ -618,12 +624,48 @@ fn held_wal_config() -> ObjectStoreWalConfig {
     }
 }
 
+#[tokio::test]
+async fn test_node_lease_fences_wal_and_renews_without_region_grants() {
+    let mut env = TestEnv::with_prefix("wal-node-lease").await;
+    let (engine, log_store) = env
+        .create_engine_with_object_store_wal(MitoConfig::default(), &held_wal_config())
+        .await;
+    engine.require_write_lease();
+    log_store
+        .set_io_permit(engine.object_store_wal_io_permit())
+        .unwrap();
+    let region_id = RegionId::new(1, 1);
+    let (_, schema, deadline) = create_leased_region_on(&engine, region_id).await;
+    engine.renew_node_lease(deadline);
+    put_range(&engine, region_id, &schema, 0, 3).await;
+    engine.freeze_lease_clock(deadline);
+    let error = log_store.seal_open_batch().await.unwrap_err();
+    assert_eq!(
+        common_error::status_code::StatusCode::RegionNotReady,
+        error.status_code()
+    );
+    assert_eq!(
+        common_error::ext::RetryHint::RetryAfterRouteRefresh,
+        error.retry_hint()
+    );
+    assert!(stored_entry_ids(&log_store, region_id).await.is_empty());
+
+    // Node renewal, including an empty heartbeat grant list, unblocks WAL I/O
+    // independently of this region's expired Leader grant.
+    engine.renew_node_lease(deadline + Duration::from_secs(10));
+    log_store.seal_open_batch().await.unwrap();
+    assert_eq!(1, stored_entry_ids(&log_store, region_id).await.len());
+    assert_eq!(3, count_rows(&engine, region_id).await);
+    log_store.stop().await.unwrap();
+    engine.stop().await.unwrap();
+}
+
 async fn new_log_store() -> Arc<ObjectStoreLogStore> {
     ObjectStoreLogStore::try_new(
         ObjectStore::new(Memory::default()).unwrap(),
         &wal_config(),
         0,
-        STANDALONE_GENERATION,
+        FIXED_DIRECTORY_GENERATION,
     )
     .await
     .unwrap()
@@ -953,7 +995,7 @@ async fn test_lease_on_fenced_region_only_extends_deadline() {
 
     let later = deadline + Duration::from_secs(10);
     let promoted = engine
-        .set_region_role_with_lease(region_id, RegionRole::Leader, Instant::now(), later)
+        .set_region_role_with_lease(region_id, RegionRole::Leader, Instant::now(), later, None)
         .unwrap();
 
     assert!(!promoted);
@@ -1087,6 +1129,49 @@ async fn test_reload_waits_for_held_upload() {
         .unwrap();
     assert!(!is_replaced(&engine, &old));
     log_store.seal_open_batch().await.unwrap();
+
+    wait_until(|| is_replaced(&engine, &old)).await;
+    assert_eq!(3, count_rows(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_reload_waits_for_running_checkpoint() {
+    let (blocker, layer) = CheckpointTaskBlocker::block_last_checkpoint_write();
+    let mut env = TestEnv::with_prefix("reload-waits-for-running-checkpoint")
+        .await
+        .with_mock_layer(layer);
+    let region_id = RegionId::new(1, 1);
+    let (engine, _log_store, _, schema, _) = create_leased_region(&mut env, region_id).await;
+    put_range(&engine, region_id, &schema, 0, 3).await;
+    // The flush starts a checkpoint, which blocks after it has created `_last_checkpoint`
+    // and before it has written the pointer.
+    flush_region(&engine, region_id, None).await;
+    blocker.wait_until_blocked().await;
+    let old = engine.get_region(region_id).unwrap();
+    let wait_started = old
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .checkpointer()
+        .pending_checkpoint_wait_started();
+    fence(&old).await;
+
+    notify_fenced(&engine, region_id).await;
+    tokio::time::timeout(Duration::from_secs(10), wait_started.notified())
+        .await
+        .expect("the reload does not wait for the checkpoint");
+    // The worker takes the manifest lock of the fenced instance, for example to close it,
+    // while the reload waits.
+    let manager = tokio::time::timeout(
+        Duration::from_secs(10),
+        old.manifest_ctx.manifest_manager.write(),
+    )
+    .await
+    .expect("the reload holds the manifest lock while it waits");
+    drop(manager);
+    assert!(!is_replaced(&engine, &old));
+    blocker.release();
 
     wait_until(|| is_replaced(&engine, &old)).await;
     assert_eq!(3, count_rows(&engine, region_id).await);
@@ -1310,7 +1395,7 @@ async fn test_reload_ignores_leases_sent_before_swap() {
     wait_until(|| is_replaced(&engine, &old)).await;
 
     let lease = |sent_at| {
-        engine.set_region_role_with_lease(region_id, RegionRole::Leader, sent_at, deadline)
+        engine.set_region_role_with_lease(region_id, RegionRole::Leader, sent_at, deadline, None)
     };
     assert!(!lease(sent_before_swap).unwrap());
     assert!(engine.get_region(region_id).unwrap().is_follower());

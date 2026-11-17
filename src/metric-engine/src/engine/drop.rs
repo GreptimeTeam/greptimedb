@@ -189,7 +189,7 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod tests {
     use api::v1::Rows;
-    use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use common_wal::config::object_store::{FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig};
     use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
     use log_store::ObjectStoreLogStore;
     use mito2::config::MitoConfig;
@@ -238,7 +238,7 @@ mod tests {
                     object_store.clone(),
                     &config,
                     0,
-                    STANDALONE_GENERATION,
+                    FIXED_DIRECTORY_GENERATION,
                 )
             };
             let wal = open_wal().await.unwrap();

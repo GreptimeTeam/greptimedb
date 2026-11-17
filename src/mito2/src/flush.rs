@@ -21,10 +21,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
-use common_base::cancellation::CancellableFuture;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
+use prometheus::{Histogram, IntCounter};
 use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
@@ -40,7 +40,7 @@ use crate::access_layer::{
 use crate::cache::CacheManagerRef;
 use crate::compaction::{collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema};
 use crate::config::{IndexBuildMode, MitoConfig};
-use crate::engine::region_hook::SstFileInfo;
+use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
 use crate::error::{
     Error, FlushCancelledSnafu, FlushRegionSnafu, JoinSnafu, RegionBusySnafu, RegionClosedSnafu,
     RegionDroppedSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu,
@@ -53,14 +53,14 @@ use crate::memtable::{
 };
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
-    INFLIGHT_FLUSH_COUNT,
+    INFLIGHT_FLUSH_COUNT, TAIL_REPLAY_BYTES_TOTAL, TAIL_REPLAY_ELAPSED, TAIL_REPLAY_FILE_TOTAL,
 };
 use crate::read::FlatSource;
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
-use crate::region::{ManifestContextRef, RegionLeaderState, parse_partition_expr};
+use crate::region::{ManifestContextRef, MitoRegion, RegionLeaderState, parse_partition_expr};
 use crate::request::{
     BackgroundNotify, DdlRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx, OutputTx,
     SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
@@ -240,8 +240,6 @@ pub enum FlushReason {
     RemoteWalPrune,
     /// Flush before closing a region.
     Closing,
-    /// Writes a chunk of pending WAL tails replayed in the background.
-    TailReplay,
 }
 
 impl FlushReason {
@@ -273,24 +271,53 @@ pub(crate) struct RegionFlushTask {
     pub(crate) senders: Vec<OutputTx>,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
-
-    pub(crate) access_layer: AccessLayerRef,
     pub(crate) listener: WorkerListener,
-    pub(crate) engine_config: Arc<MitoConfig>,
-    pub(crate) row_group_size: Option<usize>,
-    pub(crate) cache_manager: CacheManagerRef,
     pub(crate) manifest_ctx: ManifestContextRef,
+    /// Writes the immutable memtables to SSTs.
+    pub(crate) sst_writer: MemtableSstWriter,
+    /// Waits until the WAL is durable through the entry id the flush records.
+    pub(crate) durability_barrier: DurabilityBarrier,
+}
+
+/// Writes the immutable memtables of a version to level 0 SSTs, for a flush or a tail replay.
+pub(crate) struct MemtableSstWriter {
+    region_id: RegionId,
+    /// Kind of the writes, which selects their metrics.
+    kind: MemtableWriteKind,
+    access_layer: AccessLayerRef,
+    engine_config: Arc<MitoConfig>,
+    row_group_size: Option<usize>,
+    cache_manager: CacheManagerRef,
+    /// Hook told of the written SSTs.
+    hook: Option<RegionHookRef>,
 
     /// Index options for the region.
-    pub(crate) index_options: IndexOptions,
-    /// Semaphore to control flush concurrency.
-    pub(crate) flush_semaphore: Arc<Semaphore>,
+    index_options: IndexOptions,
+    /// Semaphore to control concurrent SST writes.
+    write_semaphore: Arc<Semaphore>,
     /// Partition expression of the region.
     ///
     /// This is used to generate the file meta.
-    pub(crate) partition_expr: Option<String>,
-    /// Waits until the WAL is durable through the entry id the flush records.
-    pub(crate) durability_barrier: DurabilityBarrier,
+    partition_expr: Option<String>,
+}
+
+/// Kind of the writes of a [MemtableSstWriter].
+#[derive(Clone, Copy)]
+enum MemtableWriteKind {
+    /// Writes of a flush, for the reason its log names.
+    Flush(FlushReason),
+    /// Writes of the replay of pending WAL tails.
+    TailReplay,
+}
+
+impl MemtableWriteKind {
+    /// Returns the [WriteType] of the writes' metrics.
+    fn write_type(self) -> WriteType {
+        match self {
+            MemtableWriteKind::Flush(_) => WriteType::Flush,
+            MemtableWriteKind::TailReplay => WriteType::TailReplay,
+        }
+    }
 }
 
 struct FlushTaskWaiters {
@@ -385,8 +412,8 @@ impl RegionFlushTask {
         let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
         let uncommitted = UncommittedSsts::new(
             self.region_id,
-            self.access_layer.clone(),
-            Some(self.cache_manager.clone()),
+            self.sst_writer.access_layer.clone(),
+            Some(self.sst_writer.cache_manager.clone()),
         );
         self.listener.on_flush_begin(self.region_id).await;
         let flush_result = if state.is_cancelled() {
@@ -444,81 +471,6 @@ impl RegionFlushTask {
         self.send_worker_request(worker_request).await;
     }
 
-    /// Writes the immutable memtables of `version` to level 0 SSTs, which `uncommitted`
-    /// tracks until a manifest edit references them, and returns their file metas.
-    pub(crate) async fn write_ssts(
-        &self,
-        version: &VersionRef,
-        state: &CancellableTaskState,
-        uncommitted: &UncommittedSsts,
-    ) -> Result<Vec<FileMeta>> {
-        let timer = FLUSH_ELAPSED
-            .with_label_values(&["flush_memtables"])
-            .start_timer();
-
-        let mut write_opts = WriteOptions {
-            write_buffer_size: self.engine_config.sst_write_buffer_size,
-            float_field_encoding: version.options.float_field_encoding,
-            ..Default::default()
-        };
-        if let Some(row_group_size) = self.row_group_size {
-            write_opts.row_group_size = row_group_size;
-        }
-
-        let DoFlushMemtablesResult {
-            file_metas,
-            flushed_bytes,
-            series_count,
-            encoded_part_count,
-            flush_metrics,
-            sst_infos,
-        } = self
-            .do_flush_memtables(version, write_opts, state, uncommitted)
-            .await?;
-
-        if !file_metas.is_empty() {
-            FLUSH_BYTES_TOTAL.inc_by(flushed_bytes);
-        }
-
-        let mut file_ids = Vec::with_capacity(file_metas.len());
-        let mut total_rows = 0;
-        let mut total_bytes = 0;
-        for meta in &file_metas {
-            file_ids.push(meta.file_id);
-            total_rows += meta.num_rows;
-            total_bytes += meta.file_size;
-        }
-        info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, encoded_part_count: {}, metrics: {:?}",
-            self.region_id,
-            self.reason.as_str(),
-            file_ids,
-            series_count,
-            total_rows,
-            total_bytes,
-            timer.stop_and_record(),
-            encoded_part_count,
-            flush_metrics,
-        );
-        flush_metrics.observe();
-
-        let hook = self.manifest_ctx.hook();
-        if let Some(hook) = &hook {
-            let files: Vec<SstFileInfo<'_>> = sst_infos
-                .iter()
-                .zip(file_metas.iter())
-                .map(|(sst_info, file_meta)| SstFileInfo {
-                    sst_info_ref: sst_info,
-                    file_meta,
-                })
-                .collect();
-            hook.on_sst_files_written(self.region_id, &version.metadata, &files)
-                .await;
-        }
-
-        Ok(file_metas)
-    }
-
     /// Flushes memtables to level 0 SSTs and updates the manifest.
     /// Returns the [RegionEdit] to apply.
     async fn flush_memtables(
@@ -530,6 +482,7 @@ impl RegionFlushTask {
         // We must use the immutable memtables list and entry ids from the `version_data`
         // for consistency as others might already modify the version in the `version_control`.
         let file_metas = self
+            .sst_writer
             .write_ssts(&version_data.version, state, uncommitted)
             .await?;
 
@@ -537,11 +490,11 @@ impl RegionFlushTask {
         // that acknowledges appends before their entries are durable can have
         // handed out `last_entry_id` for an entry that is still in its backlog.
         // A DDL that cancels the flush must not wait behind that upload.
-        let durable = self.durability_barrier.wait(version_data.last_entry_id);
-        tokio::pin!(durable);
-        match CancellableFuture::new(durable.as_mut(), state.cancel_handle()).await {
-            Ok(result) => result?,
-            Err(_) => return FlushCancelledSnafu.fail(),
+        let cancellation = state.cancel_token();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return FlushCancelledSnafu.fail(),
+            result = self.durability_barrier.wait(version_data.last_entry_id) => result?,
         }
 
         let edit = RegionEdit {
@@ -601,6 +554,193 @@ impl RegionFlushTask {
         Ok(edit)
     }
 
+    /// Notify flush job status.
+    pub(crate) async fn send_worker_request(&self, request: WorkerRequest) {
+        if let Err(e) = self
+            .request_sender
+            .send(WorkerRequestWithTime::new(request))
+            .await
+        {
+            let request = e.0.request;
+            error!(
+                "Failed to notify flush job status for region {}, request: {:?}",
+                self.region_id, request
+            );
+            if let WorkerRequest::Background { notify, .. } = request {
+                let err = RegionClosedSnafu {
+                    region_id: self.region_id,
+                }
+                .build();
+                match notify {
+                    BackgroundNotify::FlushFinished(mut finished) => {
+                        finished.on_failure(err);
+                    }
+                    BackgroundNotify::FlushFailed(failed) => {
+                        let err = Arc::new(err);
+                        for sender in failed.senders {
+                            sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                                region_id: self.region_id,
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Merge two flush tasks.
+    fn merge(&mut self, mut other: RegionFlushTask) {
+        assert_eq!(self.region_id, other.region_id);
+        // Now we only merge senders. They share the same flush reason.
+        self.senders.append(&mut other.senders);
+    }
+}
+
+impl MemtableSstWriter {
+    /// Creates a writer of the `region`'s immutable memtables for a flush with `reason`.
+    pub(crate) fn new_flush(
+        region: &MitoRegion,
+        reason: FlushReason,
+        row_group_size: Option<usize>,
+        engine_config: Arc<MitoConfig>,
+        cache_manager: CacheManagerRef,
+        write_semaphore: Arc<Semaphore>,
+    ) -> Self {
+        Self::new(
+            MemtableWriteKind::Flush(reason),
+            region,
+            row_group_size,
+            engine_config,
+            cache_manager,
+            write_semaphore,
+        )
+    }
+
+    /// Creates a writer of the `region`'s immutable memtables for a tail replay. Only
+    /// [TailReplayLimits::new_sst_writer](crate::tail_replay::TailReplayLimits::new_sst_writer)
+    /// calls it, with the replays' write semaphore.
+    pub(crate) fn new_tail_replay(
+        region: &MitoRegion,
+        engine_config: Arc<MitoConfig>,
+        cache_manager: CacheManagerRef,
+        write_semaphore: Arc<Semaphore>,
+    ) -> Self {
+        Self::new(
+            MemtableWriteKind::TailReplay,
+            region,
+            None,
+            engine_config,
+            cache_manager,
+            write_semaphore,
+        )
+    }
+
+    fn new(
+        kind: MemtableWriteKind,
+        region: &MitoRegion,
+        row_group_size: Option<usize>,
+        engine_config: Arc<MitoConfig>,
+        cache_manager: CacheManagerRef,
+        write_semaphore: Arc<Semaphore>,
+    ) -> Self {
+        Self {
+            region_id: region.region_id,
+            kind,
+            access_layer: region.access_layer.clone(),
+            engine_config,
+            // The request-provided size (e.g. manual flush) takes precedence over the
+            // region option.
+            row_group_size: row_group_size.or(region.version().options.max_row_group_row_count),
+            cache_manager,
+            hook: region.manifest_ctx.hook(),
+            index_options: region.version().options.index_options.clone(),
+            write_semaphore,
+            partition_expr: region.metadata().partition_expr.clone(),
+        }
+    }
+
+    /// Returns the cache manager the written SSTs go through.
+    pub(crate) fn cache_manager(&self) -> &CacheManagerRef {
+        &self.cache_manager
+    }
+
+    /// Writes the immutable memtables of `version` to level 0 SSTs, which `uncommitted`
+    /// tracks until a manifest edit references them, and returns their file metas. Its log
+    /// names the flush reason, or the write type when the write is not a flush.
+    pub(crate) async fn write_ssts(
+        &self,
+        version: &VersionRef,
+        state: &CancellableTaskState,
+        uncommitted: &UncommittedSsts,
+    ) -> Result<Vec<FileMeta>> {
+        let timer = self.write_elapsed().start_timer();
+
+        let mut write_opts = WriteOptions {
+            write_buffer_size: self.engine_config.sst_write_buffer_size,
+            float_field_encoding: version.options.float_field_encoding,
+            ..Default::default()
+        };
+        if let Some(row_group_size) = self.row_group_size {
+            write_opts.row_group_size = row_group_size;
+        }
+
+        let DoFlushMemtablesResult {
+            file_metas,
+            flushed_bytes,
+            series_count,
+            encoded_part_count,
+            flush_metrics,
+            sst_infos,
+        } = self
+            .do_flush_memtables(version, write_opts, state, uncommitted)
+            .await?;
+
+        if !file_metas.is_empty() {
+            self.bytes_total().inc_by(flushed_bytes);
+        }
+
+        let mut file_ids = Vec::with_capacity(file_metas.len());
+        let mut total_rows = 0;
+        let mut total_bytes = 0;
+        for meta in &file_metas {
+            file_ids.push(meta.file_id);
+            total_rows += meta.num_rows;
+            total_bytes += meta.file_size;
+        }
+        info!(
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, encoded_part_count: {}, metrics: {:?}",
+            self.region_id,
+            match self.kind {
+                MemtableWriteKind::Flush(reason) => reason.as_str(),
+                MemtableWriteKind::TailReplay => WriteType::TailReplay.into(),
+            },
+            file_ids,
+            series_count,
+            total_rows,
+            total_bytes,
+            timer.stop_and_record(),
+            encoded_part_count,
+            flush_metrics,
+        );
+        flush_metrics.observe();
+
+        if let Some(hook) = &self.hook {
+            let files: Vec<SstFileInfo<'_>> = sst_infos
+                .iter()
+                .zip(file_metas.iter())
+                .map(|(sst_info, file_meta)| SstFileInfo {
+                    sst_info_ref: sst_info,
+                    file_meta,
+                })
+                .collect();
+            hook.on_sst_files_written(self.region_id, &version.metadata, &files)
+                .await;
+        }
+
+        Ok(file_metas)
+    }
+
     async fn do_flush_memtables(
         &self,
         version: &VersionRef,
@@ -613,9 +753,8 @@ impl RegionFlushTask {
         let mut flushed_bytes = 0;
         let mut series_count = 0;
         let mut encoded_part_count = 0;
-        let mut flush_metrics = Metrics::new(WriteType::Flush);
+        let mut flush_metrics = Metrics::new(self.kind.write_type());
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
-        let hook = self.manifest_ctx.hook();
         let mut all_sst_infos = Vec::new();
         for mem in memtables {
             if mem.is_empty() {
@@ -691,7 +830,7 @@ impl RegionFlushTask {
                         version.options.preserve_row_sequence,
                     )?);
                 }
-                if hook.is_some() {
+                if self.hook.is_some() {
                     all_sst_infos.extend(ssts_written);
                 }
             }
@@ -740,22 +879,24 @@ impl RegionFlushTask {
             &version.options,
             field_column_start,
         )?;
+        let file_total = self.file_total();
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
         for (source, max_sequence) in flat_sources.sources {
             let write_request = self.new_write_request(version, max_sequence, source);
             let access_layer = self.access_layer.clone();
             let write_opts = write_opts.clone();
-            let semaphore = self.flush_semaphore.clone();
+            let semaphore = self.write_semaphore.clone();
             let uncommitted = uncommitted.clone();
+            let write_type = self.kind.write_type();
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                let mut metrics = Metrics::new(WriteType::Flush);
+                let mut metrics = Metrics::new(write_type);
                 let ssts = access_layer
                     .write_sst(write_request, &write_opts, &mut metrics)
                     .await?;
                 uncommitted.track(&ssts);
-                FLUSH_FILE_TOTAL.inc_by(ssts.len() as u64);
+                file_total.inc_by(ssts.len() as u64);
                 Ok((max_sequence, ssts, metrics))
             });
             tasks.push(task);
@@ -764,10 +905,11 @@ impl RegionFlushTask {
         for (mut encoded, max_sequence) in flat_sources.encoded {
             let access_layer = self.access_layer.clone();
             let cache_manager = self.cache_manager.clone();
-            let region_id = version.metadata.region_id;
+            let region_id = self.region_id;
             let write_buffer_size = write_opts.write_buffer_size;
-            let semaphore = self.flush_semaphore.clone();
+            let semaphore = self.write_semaphore.clone();
             let uncommitted = uncommitted.clone();
+            let write_type = self.kind.write_type();
             let index_build_params = build_index.then(|| EncodedSstIndexBuildParams {
                 metadata: version.metadata.clone(),
                 index_options: self.index_options.clone(),
@@ -780,7 +922,8 @@ impl RegionFlushTask {
             uncommitted.track_before_upload(encoded.sst_info.file_id, index_build_params.is_some());
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                let metrics = access_layer
+                let mut metrics = Metrics::new(write_type);
+                access_layer
                     .put_sst(
                         &encoded.data,
                         region_id,
@@ -788,10 +931,11 @@ impl RegionFlushTask {
                         &cache_manager,
                         write_buffer_size,
                         index_build_params,
+                        &mut metrics,
                     )
                     .await?;
                 uncommitted.track(std::slice::from_ref(&encoded.sst_info));
-                FLUSH_FILE_TOTAL.inc();
+                file_total.inc();
                 Ok((max_sequence, smallvec![encoded.sst_info], metrics))
             });
             tasks.push(task);
@@ -803,12 +947,17 @@ impl RegionFlushTask {
             .collect::<Vec<_>>();
         let join_all = futures::future::join_all(tasks);
         tokio::pin!(join_all);
-        let results = match CancellableFuture::new(join_all.as_mut(), state.cancel_handle()).await {
-            Ok(results) => results
+        let cancellation = state.cancel_token();
+        let results = match tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            results = join_all.as_mut() => Some(results),
+        } {
+            Some(results) => results
                 .into_iter()
                 .map(|result| result.context(JoinSnafu))
                 .collect::<Result<Vec<_>>>()?,
-            Err(_) => {
+            None => {
                 for handle in abort_handles {
                     handle.abort();
                 }
@@ -894,46 +1043,30 @@ impl RegionFlushTask {
         }
     }
 
-    /// Notify flush job status.
-    pub(crate) async fn send_worker_request(&self, request: WorkerRequest) {
-        if let Err(e) = self
-            .request_sender
-            .send(WorkerRequestWithTime::new(request))
-            .await
-        {
-            let request = e.0.request;
-            error!(
-                "Failed to notify flush job status for region {}, request: {:?}",
-                self.region_id, request
-            );
-            if let WorkerRequest::Background { notify, .. } = request {
-                let err = RegionClosedSnafu {
-                    region_id: self.region_id,
-                }
-                .build();
-                match notify {
-                    BackgroundNotify::FlushFinished(mut finished) => {
-                        finished.on_failure(err);
-                    }
-                    BackgroundNotify::FlushFailed(failed) => {
-                        let err = Arc::new(err);
-                        for sender in failed.senders {
-                            sender.send(Err(err.clone()).context(FlushRegionSnafu {
-                                region_id: self.region_id,
-                            }));
-                        }
-                    }
-                    _ => {}
-                }
+    /// Returns the histogram that times [Self::write_ssts] for this writer's kind.
+    fn write_elapsed(&self) -> Histogram {
+        match self.kind {
+            MemtableWriteKind::TailReplay => {
+                TAIL_REPLAY_ELAPSED.with_label_values(&["write_chunk"])
             }
+            MemtableWriteKind::Flush(_) => FLUSH_ELAPSED.with_label_values(&["flush_memtables"]),
         }
     }
 
-    /// Merge two flush tasks.
-    fn merge(&mut self, mut other: RegionFlushTask) {
-        assert_eq!(self.region_id, other.region_id);
-        // Now we only merge senders. They share the same flush reason.
-        self.senders.append(&mut other.senders);
+    /// Returns the counter of SST bytes this writer writes.
+    fn bytes_total(&self) -> &'static IntCounter {
+        match self.kind {
+            MemtableWriteKind::TailReplay => &TAIL_REPLAY_BYTES_TOTAL,
+            MemtableWriteKind::Flush(_) => &FLUSH_BYTES_TOTAL,
+        }
+    }
+
+    /// Returns the counter of SST files this writer writes.
+    fn file_total(&self) -> &'static IntCounter {
+        match self.kind {
+            MemtableWriteKind::TailReplay => &TAIL_REPLAY_FILE_TOTAL,
+            MemtableWriteKind::Flush(_) => &FLUSH_FILE_TOTAL,
+        }
     }
 }
 
@@ -1729,15 +1862,20 @@ mod tests {
             reason,
             senders: Vec::new(),
             request_sender,
-            access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
-            engine_config: Arc::new(MitoConfig::default()),
-            row_group_size: None,
-            cache_manager: Arc::new(CacheManager::default()),
             manifest_ctx,
-            index_options: IndexOptions::default(),
-            flush_semaphore: Arc::new(Semaphore::new(2)),
-            partition_expr: None,
+            sst_writer: MemtableSstWriter {
+                region_id,
+                kind: MemtableWriteKind::Flush(reason),
+                access_layer: env.access_layer.clone(),
+                engine_config: Arc::new(MitoConfig::default()),
+                row_group_size: None,
+                cache_manager: Arc::new(CacheManager::default()),
+                hook: None,
+                index_options: IndexOptions::default(),
+                write_semaphore: Arc::new(Semaphore::new(2)),
+                partition_expr: None,
+            },
             durability_barrier: DurabilityBarrier::noop(),
         }
     }
@@ -1872,24 +2010,16 @@ mod tests {
 
         let version_control = Arc::new(builder.build());
         let (output_tx, output_rx) = oneshot::channel();
-        let mut task = RegionFlushTask {
-            region_id: builder.region_id(),
-            reason: FlushReason::Manual,
-            senders: Vec::new(),
-            request_sender: tx,
-            access_layer: env.access_layer.clone(),
-            listener: WorkerListener::default(),
-            engine_config: Arc::new(MitoConfig::default()),
-            row_group_size: None,
-            cache_manager: Arc::new(CacheManager::default()),
-            manifest_ctx: env
-                .mock_manifest_context(version_control.current().version.metadata.clone())
-                .await,
-            index_options: IndexOptions::default(),
-            flush_semaphore: Arc::new(Semaphore::new(2)),
-            partition_expr: None,
-            durability_barrier: DurabilityBarrier::noop(),
-        };
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let mut task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Manual,
+            tx,
+            manifest_ctx,
+        );
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
             .schedule_flush(builder.region_id(), &version_control, task)
@@ -2251,21 +2381,14 @@ mod tests {
             .await;
         // Creates 3 tasks.
         let mut tasks: Vec<_> = (0..3)
-            .map(|_| RegionFlushTask {
-                region_id: builder.region_id(),
-                reason: FlushReason::Manual,
-                senders: Vec::new(),
-                request_sender: tx.clone(),
-                access_layer: env.access_layer.clone(),
-                listener: WorkerListener::default(),
-                engine_config: Arc::new(MitoConfig::default()),
-                row_group_size: None,
-                cache_manager: Arc::new(CacheManager::default()),
-                manifest_ctx: manifest_ctx.clone(),
-                index_options: IndexOptions::default(),
-                flush_semaphore: Arc::new(Semaphore::new(2)),
-                partition_expr: None,
-                durability_barrier: DurabilityBarrier::noop(),
+            .map(|_| {
+                new_test_flush_task(
+                    &env,
+                    builder.region_id(),
+                    FlushReason::Manual,
+                    tx.clone(),
+                    manifest_ctx.clone(),
+                )
             })
             .collect();
         // Schedule first task.
@@ -2558,21 +2681,14 @@ mod tests {
             .await;
         // Creates 2 tasks.
         let mut tasks: Vec<_> = (0..2)
-            .map(|_| RegionFlushTask {
-                region_id: builder.region_id(),
-                reason: FlushReason::Manual,
-                senders: Vec::new(),
-                request_sender: tx.clone(),
-                access_layer: env.access_layer.clone(),
-                listener: WorkerListener::default(),
-                engine_config: Arc::new(MitoConfig::default()),
-                row_group_size: None,
-                cache_manager: Arc::new(CacheManager::default()),
-                manifest_ctx: manifest_ctx.clone(),
-                index_options: IndexOptions::default(),
-                flush_semaphore: Arc::new(Semaphore::new(2)),
-                partition_expr: None,
-                durability_barrier: DurabilityBarrier::noop(),
+            .map(|_| {
+                new_test_flush_task(
+                    &env,
+                    builder.region_id(),
+                    FlushReason::Manual,
+                    tx.clone(),
+                    manifest_ctx.clone(),
+                )
             })
             .collect();
         // Schedule first task.
