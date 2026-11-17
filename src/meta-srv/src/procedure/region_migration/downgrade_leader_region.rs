@@ -747,7 +747,7 @@ mod tests {
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
             .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
@@ -755,18 +755,9 @@ mod tests {
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_moved = attempts.clone();
-        common_runtime::spawn_global(async move {
-            while let Some(resp) = rx.recv().await {
-                let reply_id = resp.unwrap().mailbox_message.unwrap().id;
-                attempts_moved.fetch_add(1, Ordering::Relaxed);
-                mailbox
-                    .on_recv(
-                        reply_id,
-                        Ok(new_downgrade_region_reply(reply_id, None, false, None)),
-                    )
-                    .await
-                    .unwrap();
-            }
+        send_mock_reply(mailbox, rx, move |id| {
+            attempts_moved.fetch_add(1, Ordering::Relaxed);
+            Ok(new_downgrade_region_reply(id, None, false, None))
         });
 
         ctx.volatile_ctx
