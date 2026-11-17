@@ -7114,9 +7114,10 @@ async fn write_native_histogram_sample(
 /// consumer above the series router answers the statement. Only the consumer answers the statement's
 /// rows, so its schema is what tells the two apart.
 ///
-/// `sum` and `avg` over native histograms answer a histogram - they add the payloads and the counts
-/// - so the answer column is a column whose type is the native histogram value type. Its name is the
-/// expression's now (`sum(some_metric)`), which is why the type and not the name identifies it.
+/// `sum` and `avg` over native histograms answer a histogram (they add the payloads and the
+/// counts), so the answer column is a column whose type is the native histogram value type. Its
+/// name is the expression's now (`sum(some_metric)`), which is why the type and not the name
+/// identifies it.
 ///
 /// The two schemas are otherwise unrelated: a state frame's columns are `read_key`, `is_last`,
 /// `time`, `fields`, `name` and `labels`, while the consumer's are the time index, the answer and
