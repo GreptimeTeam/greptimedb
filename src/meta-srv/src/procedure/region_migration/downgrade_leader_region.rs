@@ -160,23 +160,29 @@ impl DowngradeLeaderRegion {
             );
         }
 
+        // A closing region is no longer found on the datanode while its in-flight
+        // manifest updates may still be written, so a missing region does not prove
+        // that the leader has stopped.
         if !exists {
-            warn!(
-                "Trying to downgrade the region {} on datanode {:?}, but region doesn't exist!, elapsed: {:?}",
-                region_id,
-                leader,
-                now.elapsed()
-            );
-        } else {
-            info!(
-                "Region {} leader is downgraded on datanode {:?}, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
-                region_id,
-                leader,
-                last_entry_id,
-                metadata_last_entry_id,
-                now.elapsed()
-            );
+            return error::RetryLaterSnafu {
+                reason: format!(
+                    "Region {} doesn't exist on datanode {:?}, elapsed: {:?}",
+                    region_id,
+                    leader,
+                    now.elapsed()
+                ),
+            }
+            .fail();
         }
+
+        info!(
+            "Region {} leader is downgraded on datanode {:?}, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
+            region_id,
+            leader,
+            last_entry_id,
+            metadata_last_entry_id,
+            now.elapsed()
+        );
 
         if let Some(last_entry_id) = last_entry_id {
             debug!(
@@ -200,6 +206,7 @@ impl DowngradeLeaderRegion {
     /// Retry:
     /// - [MailboxTimeout](error::Error::MailboxTimeout), Timeout.
     /// - Failed to downgrade region on the Datanode.
+    /// - The region doesn't exist on the Datanode.
     ///
     /// Abort:
     /// - [PusherNotFound](error::Error::PusherNotFound), The datanode is unreachable.
@@ -378,6 +385,8 @@ impl DowngradeLeaderRegion {
 mod tests {
     use std::assert_matches;
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
@@ -717,6 +726,61 @@ mod tests {
         );
         assert!(ctx.volatile_ctx.leader_region_lease_deadline.is_none());
 
+        let _ = next
+            .as_any()
+            .downcast_ref::<UpgradeCandidateRegion>()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_next_waits_for_lease_deadline_if_region_not_found() {
+        let mut state = Box::new(DowngradeLeaderRegion {
+            optimistic_retry: 3,
+            retry_initial_interval: Duration::from_millis(100),
+        });
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
+            .await;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_moved = attempts.clone();
+        common_runtime::spawn_global(async move {
+            while let Some(resp) = rx.recv().await {
+                let reply_id = resp.unwrap().mailbox_message.unwrap().id;
+                attempts_moved.fetch_add(1, Ordering::Relaxed);
+                mailbox
+                    .on_recv(
+                        reply_id,
+                        Ok(new_downgrade_region_reply(reply_id, None, false, None)),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        ctx.volatile_ctx
+            .set_leader_region_lease_deadline(Duration::from_secs(1));
+        let expected_deadline = ctx.volatile_ctx.leader_region_lease_deadline.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
+
+        assert!(Instant::now() >= expected_deadline);
+        assert_eq!(attempts.load(Ordering::Relaxed), state.optimistic_retry);
+        assert_eq!(
+            ctx.volatile_ctx.leader_region_lease_deadline,
+            Some(expected_deadline)
+        );
         let _ = next
             .as_any()
             .downcast_ref::<UpgradeCandidateRegion>()
