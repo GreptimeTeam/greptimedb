@@ -23,6 +23,13 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to initialize logging"))]
+    InitLogging {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_telemetry::logging::InitLoggingError,
+    },
+
     #[snafu(display("Failed to install ring crypto provider: {}", msg))]
     InitTlsProvider {
         #[snafu(implicit)]
@@ -337,6 +344,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::InitLogging { source, .. } => source.status_code(),
             Error::StartDatanode { source, .. } => source.status_code(),
             Error::StartFrontend { source, .. } => source.status_code(),
             Error::ShutdownDatanode { source, .. } => source.status_code(),

@@ -24,9 +24,10 @@ use std::time::SystemTime;
 
 use common_base::readable_size::ReadableSize;
 use parking_lot::Mutex;
+use snafu::ResultExt;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
-use crate::logging::LoggingOptions;
+use crate::logging::{FileAppenderSnafu, InitLoggingError, LoggingOptions};
 
 /// A managed file-log kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -421,7 +422,7 @@ pub(crate) fn build_file_appender(
     opts: &LoggingOptions,
     kind: LogFileKind,
     retention: Option<&DirectoryRetention>,
-) -> Box<dyn Write + Send> {
+) -> Result<Box<dyn Write + Send>, InitLoggingError> {
     // Directory retention owns size and count pruning so its index remains authoritative.
     let upstream_max_log_files = if retention.is_some() {
         0
@@ -440,18 +441,24 @@ pub(crate) fn build_file_appender(
     // before creating it, so a missing directory prints a misleading error. If this fails,
     // `build` reports it.
     let _ = fs::create_dir_all(&opts.dir);
-    let appender = builder.build(&opts.dir).unwrap_or_else(|error| {
-        panic!(
-            "initializing rolling file appender at {} failed: {}",
-            opts.dir, error
-        )
-    });
+    let appender = builder.build(&opts.dir).with_context(|_| FileAppenderSnafu {
+        directory: opts.dir.clone(),
+        hint: if retention.is_some() {
+            " logging.max_log_dir_size requires creating symbolic links in this directory. Check directory permissions and conflicting paths; on Windows, enable Developer Mode or set logging.max_log_dir_size = \"0B\" to disable size-based retention."
+        } else {
+            ""
+        },
+    })?;
 
     if let Some(retention) = retention {
         retention.register(kind);
-        Box::new(RetentionAppender::new(appender, retention.clone(), kind))
+        Ok(Box::new(RetentionAppender::new(
+            appender,
+            retention.clone(),
+            kind,
+        )))
     } else {
-        Box::new(appender)
+        Ok(Box::new(appender))
     }
 }
 
@@ -521,7 +528,7 @@ mod tests {
         };
         let retention = DirectoryRetention::new(directory.path(), ReadableSize::mb(1), 0).unwrap();
 
-        let _appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention));
+        let _appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention)).unwrap();
 
         let symlink = directory.path().join(".greptimedb.current");
         assert!(symlink.is_symlink());
@@ -542,7 +549,8 @@ mod tests {
             ..Default::default()
         };
         let retention = DirectoryRetention::new(directory.path(), ReadableSize(1024), 0).unwrap();
-        let mut appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention));
+        let mut appender =
+            build_file_appender(&opts, LogFileKind::Default, Some(&retention)).unwrap();
 
         retention.initialize();
         appender.write_all(b"current").unwrap();
@@ -570,7 +578,8 @@ mod tests {
             ..Default::default()
         };
         let retention = DirectoryRetention::new(directory.path(), ReadableSize(1024), 0).unwrap();
-        let mut appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention));
+        let mut appender =
+            build_file_appender(&opts, LogFileKind::Default, Some(&retention)).unwrap();
 
         retention.initialize();
         appender.write_all(b"current").unwrap();
@@ -593,7 +602,8 @@ mod tests {
             ..Default::default()
         };
         let retention = DirectoryRetention::new(directory.path(), ReadableSize::gb(1), 2).unwrap();
-        let mut appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention));
+        let mut appender =
+            build_file_appender(&opts, LogFileKind::Default, Some(&retention)).unwrap();
 
         retention.initialize();
         appender.write_all(b"current").unwrap();
@@ -616,7 +626,8 @@ mod tests {
             ..Default::default()
         };
         let retention = DirectoryRetention::new(directory.path(), ReadableSize(1), 0).unwrap();
-        let mut appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention));
+        let mut appender =
+            build_file_appender(&opts, LogFileKind::Default, Some(&retention)).unwrap();
 
         retention.initialize();
         appender.write_all(b"current").unwrap();
