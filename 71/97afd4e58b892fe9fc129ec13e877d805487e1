@@ -24,6 +24,7 @@ src/common/wal/Cargo.toml
 src/common/wal/src/config/object_store.rs
   s_b7d7dd5280bd00::t_e5ec421f5ec1cf 119-121
   s_b7d7dd5280bd00::t_b395a1cfe9e9f1 27,31
+  s_b7d7dd5280bd00::t_458c829e1eec17 28-30,32-34
 src/common/wal/src/config.rs
   s_b7d7dd5280bd00::t_868b3213e97148 41-44,94-96,110-111,120-121,131-132,342
   s_b7d7dd5280bd00::t_b7fc2c7b26fd4f 170-173,177-180
