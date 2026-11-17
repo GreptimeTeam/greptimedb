@@ -20,7 +20,10 @@ use tests_integration::test_util::{StorageType, get_test_store_config};
 #[tokio::test]
 async fn test_minio_head_storage() {
     if !StorageType::S3.test_on() {
-        eprintln!("NOT RUN: Authority storage qualification requires configured S3/MinIO");
+        common_telemetry::init_default_ut_logging();
+        common_telemetry::warn!(
+            "NOT RUN: Authority storage qualification requires configured S3/MinIO"
+        );
         return;
     }
     for name in [
