@@ -164,15 +164,14 @@ impl DowngradeLeaderRegion {
         // manifest updates may still be written, so a missing region does not prove
         // that the leader has stopped.
         if !exists {
-            return error::RetryLaterSnafu {
-                reason: format!(
-                    "Region {} doesn't exist on datanode {:?}, elapsed: {:?}",
-                    region_id,
-                    leader,
-                    now.elapsed()
-                ),
-            }
-            .fail();
+            let reason = format!(
+                "Region {} doesn't exist on datanode {:?}, elapsed: {:?}",
+                region_id,
+                leader,
+                now.elapsed()
+            );
+            warn!("{}", reason);
+            return error::RetryLaterSnafu { reason }.fail();
         }
 
         info!(
@@ -205,10 +204,11 @@ impl DowngradeLeaderRegion {
     ///
     /// Retry:
     /// - [MailboxTimeout](error::Error::MailboxTimeout), Timeout.
-    /// - Failed to downgrade region on the Datanode.
-    /// - The region doesn't exist on the Datanode.
+    /// - The Datanode replies with a retryable error.
+    /// - The Datanode replies that the region doesn't exist.
     ///
     /// Abort:
+    /// - The Datanode replies with a non-retryable error.
     /// - [PusherNotFound](error::Error::PusherNotFound), The datanode is unreachable.
     /// - [PushMessage](error::Error::PushMessage), The receiver is dropped.
     /// - [MailboxReceiver](error::Error::MailboxReceiver), The sender is dropped without sending (impossible).
@@ -392,7 +392,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use api::v1::meta::mailbox_message::Payload;
+    use common_error::ext::RetryHint;
+    use common_error::status_code::StatusCode;
+    use common_meta::instruction::InstructionError;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -408,7 +410,8 @@ mod tests {
         ContextFactory, PersistentContext, RegionMigrationTriggerReason,
     };
     use crate::procedure::test_util::{
-        new_close_region_reply, new_downgrade_region_reply, send_mock_reply,
+        new_close_region_reply, new_downgrade_region_reply, new_downgrade_regions_reply,
+        send_mock_reply,
     };
 
     fn new_persistent_context() -> PersistentContext {
@@ -589,6 +592,71 @@ mod tests {
         assert_matches!(err, Error::RetryLater { .. });
         assert!(err.is_retryable());
         assert!(format!("{err:?}").contains("test mocked"), "err: {err:?}",);
+    }
+
+    #[tokio::test]
+    async fn test_downgrade_region_returns_first_failure_of_batch() {
+        let missing = DowngradeRegionReply {
+            region_id: RegionId::new(1024, 1),
+            last_entry_id: None,
+            metadata_last_entry_id: None,
+            exists: false,
+            error: None,
+        };
+        let failed = DowngradeRegionReply {
+            region_id: RegionId::new(1024, 2),
+            last_entry_id: None,
+            metadata_last_entry_id: None,
+            exists: true,
+            error: Some(InstructionError::new(
+                StatusCode::Internal,
+                "non retryable mocked",
+                RetryHint::NonRetryable,
+            )),
+        };
+        let downgraded = DowngradeRegionReply {
+            region_id: RegionId::new(1024, 3),
+            last_entry_id: Some(1),
+            metadata_last_entry_id: None,
+            exists: true,
+            error: None,
+        };
+
+        for (replies, retryable) in [
+            (
+                vec![missing.clone(), failed.clone(), downgraded.clone()],
+                true,
+            ),
+            (vec![failed, missing, downgraded.clone()], false),
+        ] {
+            let state = DowngradeLeaderRegion::default();
+            let persistent_context = new_persistent_context();
+            let from_peer_id = persistent_context.from_peer.id;
+
+            let mut env = TestingEnv::new();
+            let mut ctx = env.context_factory().new_context(persistent_context);
+            prepare_table_metadata(&ctx, HashMap::default()).await;
+            let mailbox_ctx = env.mailbox_context();
+            let mailbox = mailbox_ctx.mailbox().clone();
+
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+            mailbox_ctx
+                .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
+                .await;
+
+            send_mock_reply(mailbox, rx, move |id| {
+                Ok(new_downgrade_regions_reply(id, replies.clone()))
+            });
+
+            let err = state.downgrade_region(&mut ctx).await.unwrap_err();
+
+            assert_eq!(err.is_retryable(), retryable, "err: {err:?}");
+            assert_eq!(
+                ctx.volatile_ctx.leader_region_last_entry_ids,
+                HashMap::from([(downgraded.region_id, 1)])
+            );
+        }
     }
 
     #[tokio::test]
@@ -780,12 +848,7 @@ mod tests {
                     error: None,
                 },
             ];
-            let reply = InstructionReply::DowngradeRegions(DowngradeRegionsReply::new(replies));
-            Ok(MailboxMessage {
-                id,
-                payload: Some(Payload::Json(serde_json::to_string(&reply).unwrap())),
-                ..Default::default()
-            })
+            Ok(new_downgrade_regions_reply(id, replies))
         });
 
         ctx.volatile_ctx
