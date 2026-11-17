@@ -19,6 +19,7 @@
 //! fast path, compression, schema evolution and write semantics. COPY returns
 //! one final row count, not Flight's per-batch request IDs or timings.
 
+use std::io::BufRead;
 use std::sync::Arc;
 
 use arrow_flight::{FlightData, FlightDescriptor};
@@ -220,6 +221,10 @@ impl ArrowCopyState {
                 data_body: bytes.slice(prefix + metadata_len..),
                 ..Default::default()
             };
+            // Arrow 59.2's LZ4 decoder grows a Vec with read_to_end and checks
+            // the declared length only afterward. Bound the actual output first,
+            // after reserving both expansion and the decoder's block workspace.
+            validate_lz4_output(&flight_data)?;
             self.input
                 .unbounded_send(Ok(flight_data))
                 .map_err(|_| bad_copy_data("Arrow ingestion stream closed"))?;
@@ -300,8 +305,32 @@ fn frame_target(buffer: &[u8]) -> PgWireResult<usize> {
 }
 
 /// Compressed IPC buffers carry their uncompressed length in an i64 prefix.
-/// Reserve the expansion before FlightDecoder is allowed to allocate it.
+/// Includes the peak LZ4 workspace, which depends on its frame header, not the
+/// IPC length prefix. Buffers are decoded sequentially, so workspaces do not sum.
 fn decompressed_size(message: &arrow_ipc::Message<'_>, body: &[u8]) -> PgWireResult<u64> {
+    let mut total = 0u64;
+    let mut workspace = 0;
+    visit_compressed_buffers(message, body, |codec, length, compressed| {
+        total = total
+            .checked_add(length.max(0) as u64)
+            .ok_or_else(|| bad_copy_data("Arrow decompression size overflow"))?;
+        if codec == arrow_ipc::CompressionType::LZ4_FRAME && length > 0 {
+            workspace = workspace.max(lz4_workspace_size(compressed)?);
+        }
+        Ok(())
+    })?;
+    total
+        .checked_add(workspace)
+        .ok_or_else(|| bad_copy_data("Arrow decompression size overflow"))
+}
+
+/// Visits compressed record/dictionary buffers, excluding their IPC length
+/// prefix. A length of -1 denotes an uncompressed buffer; zero is empty.
+fn visit_compressed_buffers(
+    message: &arrow_ipc::Message<'_>,
+    body: &[u8],
+    mut visit: impl FnMut(arrow_ipc::CompressionType, i64, &[u8]) -> PgWireResult<()>,
+) -> PgWireResult<()> {
     let batch = match message.header_type() {
         MessageHeader::RecordBatch => message.header_as_record_batch(),
         MessageHeader::DictionaryBatch => {
@@ -310,12 +339,11 @@ fn decompressed_size(message: &arrow_ipc::Message<'_>, body: &[u8]) -> PgWireRes
         _ => None,
     };
     let Some(batch) = batch else {
-        return Ok(0);
+        return Ok(());
     };
-    if batch.compression().is_none() {
-        return Ok(0);
-    }
-    let mut total = 0u64;
+    let Some(compression) = batch.compression() else {
+        return Ok(());
+    };
     if let Some(buffers) = batch.buffers() {
         for buffer in buffers {
             if buffer.length() == 0 {
@@ -328,9 +356,10 @@ fn decompressed_size(message: &arrow_ipc::Message<'_>, body: &[u8]) -> PgWireRes
                 .map_err(|_| bad_copy_data("invalid Arrow buffer offset"))?;
             let length = usize::try_from(buffer.length())
                 .map_err(|_| bad_copy_data("invalid Arrow buffer length"))?;
-            if start.checked_add(length).is_none_or(|end| end > body.len()) {
-                return Err(bad_copy_data("truncated compressed Arrow buffer"));
-            }
+            let buffer_end = start
+                .checked_add(length)
+                .filter(|end| *end <= body.len())
+                .ok_or_else(|| bad_copy_data("truncated compressed Arrow buffer"))?;
             let end = start
                 .checked_add(8)
                 .ok_or_else(|| bad_copy_data("invalid Arrow buffer offset"))?;
@@ -341,12 +370,74 @@ fn decompressed_size(message: &arrow_ipc::Message<'_>, body: &[u8]) -> PgWireRes
             if length < -1 {
                 return Err(bad_copy_data("invalid compressed Arrow buffer length"));
             }
-            total = total
-                .checked_add(length.max(0) as u64)
-                .ok_or_else(|| bad_copy_data("Arrow decompression size overflow"))?;
+            visit(compression.codec(), length, &body[end..buffer_end])?;
         }
     }
-    Ok(total)
+    Ok(())
+}
+
+/// lz4_flex 0.14 allocates a source block plus a destination block; linked mode
+/// uses two destination blocks and a 64 KiB history window. Admission must cover
+/// these allocations even when the IPC prefix claims just one byte of output.
+/// See the LZ4 frame specification's magic, FLG and BD fields and
+/// lz4_flex::frame::FrameDecoder::read_frame_info. Keep this calculation in sync
+/// with the pinned decoder version used by Arrow.
+fn lz4_workspace_size(input: &[u8]) -> PgWireResult<u64> {
+    if input.starts_with(&[0x02, 0x21, 0x4c, 0x18]) {
+        // Legacy frames use independent 8 MiB blocks.
+        return Ok(2 * 8 * 1024 * 1024);
+    }
+    if !input.starts_with(&[0x04, 0x22, 0x4d, 0x18]) || input.len() < 7 {
+        return Err(bad_copy_data("invalid LZ4 frame header"));
+    }
+    let block = match (input[5] >> 4) & 7 {
+        4 => 64 * 1024,
+        5 => 256 * 1024,
+        6 => 1024 * 1024,
+        7 => 4 * 1024 * 1024,
+        _ => return Err(bad_copy_data("invalid LZ4 block size")),
+    };
+    Ok(if input[4] & 0x20 != 0 {
+        2 * block
+    } else {
+        3 * block + 64 * 1024
+    })
+}
+
+/// Rejects dishonest LZ4 output lengths before Arrow's unbounded read_to_end.
+/// The same decoder Arrow uses is drained block-by-block without collecting
+/// output. Each block fits the workspace already admitted above; as soon as a
+/// block exceeds the remaining declared length, decoding stops. Thus even a
+/// tiny declared length cannot trigger an unreserved whole-output allocation.
+/// FIXME(#10470): Remove this extra LZ4 pass when Arrow bounds output itself.
+fn validate_lz4_output(data: &FlightData) -> PgWireResult<()> {
+    let message = arrow_ipc::root_as_message(&data.data_header)
+        .map_err(|e| bad_copy_data(format!("invalid Arrow IPC metadata: {e}")))?;
+    visit_compressed_buffers(&message, &data.data_body, |codec, length, compressed| {
+        if codec != arrow_ipc::CompressionType::LZ4_FRAME || length <= 0 {
+            return Ok(());
+        }
+        let mut decoder = lz4_flex::frame::FrameDecoder::new(compressed);
+        let mut remaining = length as u64;
+        loop {
+            let block = decoder
+                .fill_buf()
+                .map_err(|e| bad_copy_data(format!("invalid LZ4 buffer: {e}")))?;
+            if block.is_empty() {
+                if remaining != 0 {
+                    return Err(bad_copy_data(
+                        "LZ4 output is shorter than its declared length",
+                    ));
+                }
+                return Ok(());
+            }
+            let len = block.len();
+            remaining = remaining
+                .checked_sub(len as u64)
+                .ok_or_else(|| bad_copy_data("LZ4 output exceeds its declared length"))?;
+            decoder.consume(len);
+        }
+    })
 }
 
 #[cfg(test)]
@@ -566,6 +657,129 @@ mod tests {
         assert!(copy.feed(&bytes).await.is_err());
         drop(copy);
         assert_eq!(limiter.used_bytes(), 0);
+    }
+
+    /// Corrupts the largest IPC buffer's declared length, leaving the actual
+    /// compressed frame untouched (the reviewer's 8 MiB -> 1 byte repro).
+    fn understate_lz4_length(bytes: &mut [u8]) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let (prefix, length) = frame_prefix(&bytes[offset..]).unwrap().unwrap();
+            assert_ne!(length, 0, "expected a compressed string buffer");
+            let body_start = offset + prefix + length;
+            let message = arrow_ipc::root_as_message(&bytes[offset + prefix..body_start]).unwrap();
+            let batch = match message.header_type() {
+                MessageHeader::RecordBatch => message.header_as_record_batch(),
+                MessageHeader::DictionaryBatch => {
+                    message.header_as_dictionary_batch().unwrap().data()
+                }
+                _ => None,
+            };
+            if let Some(buffers) = batch.and_then(|batch| batch.buffers()) {
+                for buffer in buffers {
+                    if buffer.length() < 8 {
+                        continue;
+                    }
+                    let start = body_start + buffer.offset() as usize;
+                    let declared = (&bytes[start..start + 8]).get_i64_le();
+                    if declared >= 8 * 1024 * 1024 {
+                        bytes[start..start + 8].copy_from_slice(&1i64.to_le_bytes());
+                        return;
+                    }
+                }
+            }
+            offset = body_start + message.bodyLength() as usize;
+        }
+        panic!("expected a compressed string buffer");
+    }
+
+    #[tokio::test]
+    async fn dishonest_lz4_length_is_bounded_before_arrow_decode() {
+        use arrow::array::{ArrayRef, StringDictionaryBuilder};
+        use arrow::datatypes::Int32Type;
+
+        for dictionary in [false, true] {
+            let value = "x".repeat(8 * 1024 * 1024);
+            let array: ArrayRef = if dictionary {
+                let mut builder = StringDictionaryBuilder::<Int32Type>::new();
+                builder.append(&value).unwrap();
+                Arc::new(builder.finish())
+            } else {
+                Arc::new(StringArray::from(vec![value]))
+            };
+            let batch = RecordBatch::try_from_iter(vec![("value", array)]).unwrap();
+            let options = IpcWriteOptions::default()
+                .try_with_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+                .unwrap();
+            let mut writer =
+                StreamWriter::try_new_with_options(Vec::new(), &batch.schema(), options).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+            let mut bytes = writer.into_inner().unwrap();
+            assert!(bytes.len() < 64 * 1024);
+            understate_lz4_length(&mut bytes);
+
+            // The workspace fits, but no full-output Vec is ever built: the
+            // bounded preflight stops at the first block that exceeds 1 byte.
+            let mut copy = state(12 * 1024 * 1024).await;
+            let limiter = copy.limiter.clone();
+            let error = copy.feed(&bytes).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("LZ4 output exceeds its declared length"),
+                "{error}"
+            );
+            assert!(limiter.used_bytes() <= limiter.limit_bytes());
+            drop(copy);
+            assert_eq!(limiter.used_bytes(), 0);
+
+            // A smaller quota rejects even the block decoder's workspace before
+            // constructing it, despite the tiny declared expansion.
+            let mut copy = state(128 * 1024).await;
+            let limiter = copy.limiter.clone();
+            let error = copy.feed(&bytes).await.unwrap_err();
+            assert!(!error.to_string().contains("LZ4 output exceeds"), "{error}");
+            drop(copy);
+            assert_eq!(limiter.used_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn lz4_workspace_covers_block_modes_and_sizes() {
+        use lz4_flex::frame::{BlockMode, BlockSize, FrameEncoder, FrameInfo};
+        use std::io::Write;
+
+        for (block_size, size) in [
+            (BlockSize::Max64KB, 64 * 1024),
+            (BlockSize::Max256KB, 256 * 1024),
+            (BlockSize::Max1MB, 1024 * 1024),
+            (BlockSize::Max4MB, 4 * 1024 * 1024),
+        ] {
+            for mode in [BlockMode::Independent, BlockMode::Linked] {
+                let info = FrameInfo::new().block_size(block_size).block_mode(mode);
+                let mut encoder = FrameEncoder::with_frame_info(info, Vec::new());
+                encoder.write_all(b"test").unwrap();
+                let compressed = encoder.finish().unwrap();
+                let expected = if mode == BlockMode::Independent {
+                    2 * size
+                } else {
+                    3 * size + 64 * 1024
+                };
+                assert_eq!(lz4_workspace_size(&compressed).unwrap(), expected);
+            }
+        }
+        assert_eq!(
+            lz4_workspace_size(&[0x02, 0x21, 0x4c, 0x18]).unwrap(),
+            16 * 1024 * 1024
+        );
+        for invalid in [
+            &b""[..],
+            &b"garbage"[..],
+            &[0x04, 0x22, 0x4d, 0x18, 0x60, 0, 0][..],
+        ] {
+            assert!(lz4_workspace_size(invalid).is_err());
+        }
     }
 
     #[test]

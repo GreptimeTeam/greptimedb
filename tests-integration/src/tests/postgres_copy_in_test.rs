@@ -127,6 +127,119 @@ async fn test_postgres_copy_in_arrow_end_to_end() {
     server.shutdown().await.unwrap();
 }
 
+/// A forged IPC length must be rejected before Arrow's LZ4 decoder can grow
+/// an output Vec beyond that length. Exercise the actual COPY endpoint, not
+/// just the reservation estimator, and verify failure leaves the session usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_arrow_understated_lz4_length() {
+    use arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
+    use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+    use arrow::record_batch::RecordBatch;
+    use bytes::Buf;
+    use std::sync::Arc;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_arrow_lz4_bound").await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    client
+        .simple_query(
+            "CREATE TABLE arrow_lz4 (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+    let batch = RecordBatch::try_from_iter(vec![
+        (
+            "host",
+            Arc::new(StringArray::from(vec!["x".repeat(8 * 1024 * 1024)])) as ArrayRef,
+        ),
+        ("val", Arc::new(Float64Array::from(vec![1.5])) as ArrayRef),
+        (
+            "ts",
+            Arc::new(TimestampMillisecondArray::from(vec![1000])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let options = IpcWriteOptions::default()
+        .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))
+        .unwrap();
+    let mut writer =
+        StreamWriter::try_new_with_options(Vec::new(), &batch.schema(), options).unwrap();
+    writer.write(&batch).unwrap();
+    writer.finish().unwrap();
+    let mut payload = writer.into_inner().unwrap();
+    assert!(payload.len() < 64 * 1024);
+    // StreamWriter emits modern IPC framing: continuation + metadata length.
+    let mut offset = 0;
+    let mut forged = false;
+    while offset < payload.len() {
+        let mut prefix = &payload[offset..];
+        assert_eq!(prefix.get_i32_le(), -1);
+        let length = prefix.get_i32_le() as usize;
+        if length == 0 {
+            break;
+        }
+        let body_start = offset + 8 + length;
+        let message = arrow::ipc::root_as_message(&payload[offset + 8..body_start]).unwrap();
+        let next = body_start + message.bodyLength() as usize;
+        if let Some(batch) = message.header_as_record_batch() {
+            for buffer in batch.buffers().unwrap() {
+                if buffer.length() < 8 {
+                    continue;
+                }
+                let start = body_start + buffer.offset() as usize;
+                if (&payload[start..start + 8]).get_i64_le() >= 8 * 1024 * 1024 {
+                    payload[start..start + 8].copy_from_slice(&1i64.to_le_bytes());
+                    forged = true;
+                    break;
+                }
+            }
+        }
+        if forged {
+            break;
+        }
+        offset = next;
+    }
+    assert!(forged);
+    let error = feed_copy_in(
+        &client,
+        "COPY arrow_lz4 FROM STDIN WITH (FORMAT arrow)",
+        payload.chunks(1024).map(Bytes::copy_from_slice).collect(),
+    )
+    .await
+    .unwrap_err();
+    let error = error.as_db_error().unwrap();
+    assert_eq!(error.code().code(), "22P04");
+    assert!(
+        error
+            .message()
+            .contains("LZ4 output exceeds its declared length"),
+        "{error}"
+    );
+    let messages = client
+        .simple_query("SELECT count(*) FROM arrow_lz4")
+        .await
+        .unwrap();
+    let count = messages.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+        _ => None,
+    });
+    assert_eq!(count, Some("0"));
+    assert_eq!(
+        feed_copy_in(
+            &client,
+            "COPY arrow_lz4 FROM STDIN WITH (FORMAT arrow)",
+            vec![Bytes::from(arrow_copy_payload(
+                Some(arrow::ipc::CompressionType::LZ4_FRAME),
+                1
+            ))]
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    server.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_postgres_copy_in_arrow_partitioned() {
     init_default_ut_logging();
