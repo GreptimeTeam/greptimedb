@@ -12122,10 +12122,9 @@ async fn native_promql_answers_a_selection_that_depends_on_input_order() {
 /// The multi-input route skips the aggregate split, and the split is what refuses a tree the runtime
 /// cannot run. The native node is chosen while planning the logical plan, so a refusal the physical
 /// layer raises later is an error the statement reports, not a fall back - which would turn a query
-/// the existing plan answers into a failure. `quantile` is outside the eight complete kinds the
-/// runtime computes, and a grouping by a value field needs a per-point adapter it does not have, so
-/// both are checked here on the shape that would otherwise reach the node: two aggregates, one per
-/// logical table of one physical table, which is the multi-input case.
+/// the existing plan answers into a failure. A grouping by a value field needs a per-point adapter
+/// the runtime does not have, so it is checked here on the shape that would otherwise reach the
+/// node: two aggregates, one per logical table of one physical table, which is the multi-input case.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_declines_a_tree_the_runtime_cannot_execute() {
     common_telemetry::init_default_ut_logging();
@@ -12158,34 +12157,94 @@ async fn native_promql_declines_a_tree_the_runtime_cannot_execute() {
     )
     .await;
 
-    for query in [
-        // `quantile` computes a value the eight complete kinds do not, so the runtime refuses it.
-        "quantile(0.5, native_unexec_demo) / sum(native_unexec_other)",
-        // The outer `count` clears the labels the inner grouping writes, so no column check stops
-        // this one: the refusal is the grouping by a value field, which the runtime has no adapter
-        // for.
-        "count(count by (val) (native_unexec_demo)) / sum(native_unexec_other)",
-    ] {
-        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
-        let (_, legacy_rows) =
-            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
-        assert!(
-            !legacy_rows.is_empty(),
-            "{query}: the existing plan must answer this, otherwise there is nothing to keep"
-        );
+    // The outer `count` clears the labels the inner grouping writes, so no column check stops this
+    // one: the refusal is the grouping by a value field, which the runtime has no adapter for.
+    let query = "count(count by (val) (native_unexec_demo)) / sum(native_unexec_other)";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    let (_, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(
+        !legacy_rows.is_empty(),
+        "{query}: the existing plan must answer this, otherwise there is nothing to keep"
+    );
 
-        observer.clear();
-        let (_, native_rows) =
-            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert_eq!(
-            native_rows, legacy_rows,
-            "{query}: a tree the runtime cannot execute must keep the existing plan"
-        );
-        assert!(
-            observer.fused().is_none(),
-            "{query}: the route must decline it instead of planning a node the runtime refuses"
-        );
-    }
+    observer.clear();
+    let (_, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{query}: a tree the runtime cannot execute must keep the existing plan"
+    );
+    assert!(
+        observer.fused().is_none(),
+        "{query}: the route must decline it instead of planning a node the runtime refuses"
+    );
+}
+
+/// A `quantile` over one logical table, divided by a `sum` over another, answers natively and the
+/// rows are the existing plan's.
+///
+/// The two tables are one physical table, so the statement has two inputs and the multi-input route
+/// answers it without the aggregate split - the split is what refuses a `quantile`, whose state is
+/// the group's samples rather than one of the eight fixed-width accumulators. The runtime computes
+/// the `Complete` stage of a `quantile` itself, so the tree is answerable and the route adopts it;
+/// the answer must still be the existing plan's. Both tables carry samples of 2 and 4 on the left,
+/// so the median is their midpoint 3, and of 8 and 8 on the right, so the sum is 16: the answer is
+/// one unlabelled row at `3 / 16`.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_answers_a_quantile_over_a_multi_input_tree() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_quantile_multi_input",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_quant_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_quant_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_quant_phy');
+        CREATE TABLE native_quant_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_quant_phy');
+        INSERT INTO native_quant_demo (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
+        INSERT INTO native_quant_other (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let query = "quantile(0.5, native_quant_demo) / sum(native_quant_other)";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    let (_, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(
+        legacy_rows,
+        vec![(0, std::collections::BTreeMap::new(), 3.0 / 16.0)],
+        "{query}: the existing plan answers the median divided by the sum"
+    );
+
+    observer.clear();
+    let (_, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "{query}: the runtime computes a `Complete` quantile, so the route answers the tree: {}",
+        display_plan_tree(&observer.root_plan())
+    );
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{query}: the native answer must be the existing plan's rows"
+    );
 }
 
 /// OTLP delta temporality on the public TQL route: a `delta`-marked series answers the raw sample
