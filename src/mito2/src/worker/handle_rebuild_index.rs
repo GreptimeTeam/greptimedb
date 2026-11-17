@@ -293,7 +293,7 @@ impl<S> RegionWorkerLoop<S> {
                 &region,
                 &snapshot,
                 file_handle,
-                file_meta,
+                file_meta.as_ref().clone(),
                 request.build_type.clone(),
                 result_senders,
             );
@@ -389,7 +389,8 @@ impl<S> RegionWorkerLoop<S> {
 
         let manager = region.manifest_ctx.manifest_manager.read().await;
         let manifest = manager.manifest();
-        let is_current = manifest.files.get(&file_meta.file_id) == Some(&file_meta);
+        let is_current =
+            manifest.files.get(&file_meta.file_id).map(AsRef::as_ref) == Some(&file_meta);
         if is_current {
             region.version_control.apply_edit(
                 Some(RegionEdit {

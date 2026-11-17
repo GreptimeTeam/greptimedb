@@ -25,6 +25,7 @@ use common_error::ext::ErrorExt;
 use common_telemetry::{debug, error};
 use headers::ContentType;
 use once_cell::sync::Lazy;
+use pipeline::util::to_pipeline_version;
 use pipeline::{
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GreptimePipelineParams, PipelineDefinition,
 };
@@ -44,7 +45,10 @@ use crate::http::event::{
     LogIngesterQueryParams, LogState, PipelineIngestRequest,
     extract_pipeline_params_map_from_headers, ingest_logs_inner,
 };
-use crate::http::header::constants::GREPTIME_PIPELINE_NAME_HEADER_NAME;
+use crate::http::extractor::string_value_from_header;
+use crate::http::header::constants::{
+    GREPTIME_PIPELINE_NAME_HEADER_NAME, GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+};
 use crate::metrics::{
     METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT, METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED,
 };
@@ -155,6 +159,32 @@ async fn do_handle_bulk_api(
             .unwrap_or(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME)
     });
 
+    // The pipeline version can be selected with the `version` query parameter or the
+    // `x-greptime-pipeline-version` header; the query parameter takes precedence, consistent
+    // with how `pipeline_name` is resolved above. Without either, the latest version is used.
+    // Read the header through the shared extractor so a present but non-UTF-8 value is
+    // rejected with 400 instead of silently falling back to the latest pipeline.
+    let header_version = if params.version.is_none() {
+        match string_value_from_header(&headers, &[GREPTIME_PIPELINE_VERSION_HEADER_NAME]) {
+            Ok(version) => version,
+            Err((status, reason)) => {
+                return (
+                    status,
+                    elasticsearch_headers(),
+                    axum::Json(write_bulk_response(
+                        start.elapsed().as_millis() as i64,
+                        0,
+                        status.as_u16() as u32,
+                        reason.as_str(),
+                    )),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let pipeline_version = params.version.as_deref().or(header_version.as_deref());
+
     // Read the ndjson payload and convert it to a vector of Value.
     let requests = match parse_bulk_request(&payload, &index, &params.msg_field) {
         Ok(requests) => requests,
@@ -173,18 +203,22 @@ async fn do_handle_bulk_api(
     };
     let log_num = requests.len();
 
-    let pipeline = match PipelineDefinition::from_name(pipeline_name, None, None) {
+    let pipeline_result = to_pipeline_version(pipeline_version)
+        .and_then(|version| PipelineDefinition::from_name(pipeline_name, version, None));
+    let pipeline = match pipeline_result {
         Ok(pipeline) => pipeline,
         Err(e) => {
-            // should be unreachable
             error!(e; "Failed to ingest logs");
+            // Elasticsearch clients inspect `items[].create.status`, so report the
+            // HTTP status rather than GreptimeDB's internal status code.
+            let http_status = status_code_to_http_status(&e.status_code());
             return (
-                status_code_to_http_status(&e.status_code()),
+                http_status,
                 elasticsearch_headers(),
                 axum::Json(write_bulk_response(
                     start.elapsed().as_millis() as i64,
                     0,
-                    e.status_code() as u32,
+                    http_status.as_u16() as u32,
                     e.to_string().as_str(),
                 )),
             );
@@ -202,13 +236,14 @@ async fn do_handle_bulk_api(
     .await
     {
         error!(e; "Failed to ingest logs");
+        let http_status = status_code_to_http_status(&e.status_code());
         return (
-            status_code_to_http_status(&e.status_code()),
+            http_status,
             elasticsearch_headers(),
             axum::Json(write_bulk_response(
                 start.elapsed().as_millis() as i64,
                 0,
-                e.status_code() as u32,
+                http_status.as_u16() as u32,
                 e.to_string().as_str(),
             )),
         );

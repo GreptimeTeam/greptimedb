@@ -43,6 +43,7 @@ pub mod request;
 pub mod schedule;
 pub mod series_index;
 pub mod sst;
+mod tail_replay;
 #[cfg(feature = "hdfs-object-store")]
 mod temp_file_sweeper;
 mod time_provider;

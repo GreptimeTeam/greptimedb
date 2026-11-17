@@ -26,6 +26,11 @@ provided through handler traits, mostly implemented by `frontend`.
   after bumping it.
 - Auth or `QueryContext` changes must cover HTTP, gRPC, MySQL, and PostgreSQL
   entry points.
+- A protocol handler that changes the `QueryContext` catalog or schema after
+  authentication (HTTP `db` query/form parameters, MySQL `COM_INIT_DB`) calls
+  `UserProvider::authorize` for the new scope before mutating the context. The
+  HTTP middleware authorizes only the scope it extracts itself
+  (`extract_catalog_and_schema` in `http/authorize.rs`).
 - Internal frontend gRPC listeners set `Channel::Internal` in server-owned request
   extensions. Handlers preserve it through query execution and metering; client
   flow metadata does not grant an internal channel.

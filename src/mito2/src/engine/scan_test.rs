@@ -5341,14 +5341,16 @@ async fn test_reset_state_discards_dynamic_field_pruning() {
             )))
             .unwrap();
 
-        // Dynamic pruning skips the first row group but does not filter individual
-        // rows in the second. Drop before consuming the third row group.
+        // Dynamic pruning skips the first row group, and the dynamic prefilter prunes the
+        // row the producer rejects in the second. Only the row above the producer's
+        // threshold is left; the live filter above the scan still owns the final result.
+        // Drop before consuming the third row group.
         let mut stream = scanner
             .scan_partition(&Default::default(), &ExecutionPlanMetricsSet::default(), 0)
             .unwrap();
         let first_batch = stream.try_next().await.unwrap().unwrap();
         assert_eq!(
-            vec![2.0, 3.0],
+            vec![3.0],
             scan_field_values(std::slice::from_ref(&first_batch))
         );
         drop(stream);

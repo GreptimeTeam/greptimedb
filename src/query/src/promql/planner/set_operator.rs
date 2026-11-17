@@ -20,7 +20,7 @@ use std::sync::Arc;
 use datafusion::logical_expr::{Cast, Extension, LogicalPlan, LogicalPlanBuilder};
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
-use datafusion_common::{NullEquality, TableReference};
+use datafusion_common::{DFSchema, NullEquality, TableReference};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use promql::extension_plan::UnionDistinctOn;
 use promql_parser::parser::token::{self, TokenType};
@@ -404,10 +404,17 @@ impl PromPlanner {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
         });
-        let right_time_index_expr = DfExpr::Column(Column::new(
+        // The right operand does not necessarily qualify every column with the qualifier of its
+        // first field: a binary operation with a matching modifier (`on`, `ignoring`, `group_left`,
+        // `group_right`) derives its result labels from the left operand and projects them under
+        // that side's qualifier (`lhs.<label>`), while its time index keeps the qualifier of the
+        // context's table. Resolve the time index against the actual schema so the reference
+        // cannot miss.
+        let right_time_index_expr = DfExpr::Column(Self::resolved_column(
+            right.schema(),
             right_qualifier.clone(),
-            right_time_index_column,
-        ))
+            &right_time_index_column,
+        )?)
         .alias(left_time_index_column.clone());
         // The field column in right side may not have qualifier (it may be removed by join operation),
         // so we need to find it from the schema.
@@ -631,6 +638,32 @@ impl PromPlanner {
         self.ctx = output_context;
 
         Ok(result)
+    }
+
+    /// Resolves the column `name` of `schema`, preferring `preferred_qualifier`.
+    ///
+    /// A single operand plan can mix qualifiers, so the qualifier of its first field is not a
+    /// reliable prefix for every column of that plan. When `preferred_qualifier` does not hold the
+    /// column, the fallback is `qualified_field_with_unqualified_name`: it resolves a unique name
+    /// match, or a single unqualified candidate next to qualified ones, and reports
+    /// `AmbiguousReference` otherwise. This mirrors how the planner already resolves derived
+    /// columns against a join output.
+    fn resolved_column(
+        schema: &DFSchema,
+        preferred_qualifier: Option<TableReference>,
+        name: &str,
+    ) -> Result<Column> {
+        let qualifier = match &preferred_qualifier {
+            Some(qualifier) if schema.field_with_name(Some(qualifier), name).is_ok() => {
+                preferred_qualifier.clone()
+            }
+            _ => schema
+                .qualified_field_with_unqualified_name(name)
+                .context(DataFusionPlanningSnafu)?
+                .0
+                .cloned(),
+        };
+        Ok(Column::new(qualifier, name))
     }
 
     /// Build a set operator (AND/OR/UNLESS)
