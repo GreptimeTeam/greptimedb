@@ -29,10 +29,10 @@ use crate::error::{
 };
 use crate::kv_backend::ClosableKvBackendRef;
 use crate::kv_backend::rds::{
-    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
-    RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
-    RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
-    ensure_rustls_crypto_provider_installed,
+    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_BATCH_SIZE,
+    RDS_STORE_OP_BATCH_DELETE, RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT,
+    RDS_STORE_OP_RANGE_DELETE, RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore,
+    Transaction, ensure_rustls_crypto_provider_installed,
 };
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -41,6 +41,10 @@ use crate::rpc::store::{
 };
 
 const MYSQL_STORE_NAME: &str = "mysql_store";
+
+// MySQL prepared statements accept at most 65,535 parameters.
+const MAX_BATCH_KEYS: usize = u16::MAX as usize;
+const MAX_BATCH_PUT_KVS: usize = MAX_BATCH_KEYS / 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueBlobType {
@@ -408,49 +412,19 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         query_executor: &mut ExecutorImpl<'_, MySqlClient>,
         req: BatchPutRequest,
     ) -> Result<BatchPutResponse> {
-        let mut in_params = Vec::with_capacity(req.kvs.len() * 3);
-        let mut values_params = Vec::with_capacity(req.kvs.len() * 2);
-
-        for kv in &req.kvs {
-            let processed_key = &kv.key;
-            in_params.push(processed_key);
-
-            let processed_value = &kv.value;
-            values_params.push(processed_key);
-            values_params.push(processed_value);
-        }
-        let in_params = in_params.iter().map(|x| x as _).collect::<Vec<_>>();
-        let values_params = values_params.iter().map(|x| x as _).collect::<Vec<_>>();
-        let (select, update) = self
-            .sql_template_set
-            .generate_batch_upsert_query(req.kvs.len());
-
-        // Fast path: if we don't need previous kvs, we can just upsert the keys.
-        if !req.prev_kv {
-            crate::record_rds_sql_execute_elapsed!(
-                query_executor.execute(&update, &values_params).await,
-                MYSQL_STORE_NAME,
-                RDS_STORE_OP_BATCH_PUT,
-                ""
-            )?;
+        let kvs = &req.kvs;
+        if kvs.is_empty() {
             return Ok(BatchPutResponse::default());
         }
-        // Should use transaction to ensure atomicity.
-        if let ExecutorImpl::Default(query_executor) = query_executor {
-            let txn = query_executor.txn_executor().await?;
-            let mut txn = ExecutorImpl::Txn(txn);
-            let res = self.batch_put_with_query_executor(&mut txn, req).await;
+        if (req.prev_kv || kvs.len() > (*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS))
+            && let ExecutorImpl::Default(executor) = query_executor
+        {
+            let mut txn = ExecutorImpl::Txn(executor.txn_executor().await?);
+            let response = self.put_chunks(&mut txn, kvs, req.prev_kv).await?;
             txn.commit().await?;
-            return res;
+            return Ok(response);
         }
-        let prev_kvs = crate::record_rds_sql_execute_elapsed!(
-            query_executor.query(&select, &in_params).await,
-            MYSQL_STORE_NAME,
-            RDS_STORE_OP_BATCH_PUT,
-            ""
-        )?;
-        query_executor.execute(&update, &values_params).await?;
-        Ok(BatchPutResponse { prev_kvs })
+        self.put_chunks(query_executor, kvs, req.prev_kv).await
     }
 
     async fn batch_get_with_query_executor(
@@ -458,19 +432,20 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         query_executor: &mut ExecutorImpl<'_, MySqlClient>,
         req: BatchGetRequest,
     ) -> Result<BatchGetResponse> {
-        if req.keys.is_empty() {
-            return Ok(BatchGetResponse { kvs: vec![] });
+        let keys = req.keys;
+        let mut kvs = Vec::new();
+        let mut params = Vec::with_capacity(keys.len().min(*RDS_BATCH_SIZE));
+        for keys in keys.chunks(*RDS_BATCH_SIZE) {
+            let query = self.sql_template_set.generate_batch_get_query(keys.len());
+            params.clear();
+            params.extend(keys);
+            kvs.extend(crate::record_rds_sql_execute_elapsed!(
+                query_executor.query(&query, &params).await,
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_GET,
+                ""
+            )?);
         }
-        let query = self
-            .sql_template_set
-            .generate_batch_get_query(req.keys.len());
-        let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        let kvs = crate::record_rds_sql_execute_elapsed!(
-            query_executor.query(&query, &params).await,
-            MYSQL_STORE_NAME,
-            RDS_STORE_OP_BATCH_GET,
-            ""
-        )?;
         Ok(BatchGetResponse { kvs })
     }
 
@@ -520,55 +495,91 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         query_executor: &mut ExecutorImpl<'_, MySqlClient>,
         req: BatchDeleteRequest,
     ) -> Result<BatchDeleteResponse> {
-        if req.keys.is_empty() {
+        let keys = req.keys;
+        if keys.is_empty() {
             return Ok(BatchDeleteResponse::default());
         }
-        let query = self
-            .sql_template_set
-            .generate_batch_delete_query(req.keys.len());
-        let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        // Fast path: if we don't need previous kvs, we can just delete the keys.
-        if !req.prev_kv {
-            crate::record_rds_sql_execute_elapsed!(
-                query_executor.execute(&query, &params).await,
-                MYSQL_STORE_NAME,
-                RDS_STORE_OP_BATCH_DELETE,
-                ""
-            )?;
-            return Ok(BatchDeleteResponse::default());
-        }
-        // Should use transaction to ensure atomicity.
-        if let ExecutorImpl::Default(query_executor) = query_executor {
-            let txn = query_executor.txn_executor().await?;
-            let mut txn = ExecutorImpl::Txn(txn);
-            let res = self.batch_delete_with_query_executor(&mut txn, req).await;
+        if (req.prev_kv || keys.len() > *RDS_BATCH_SIZE)
+            && let ExecutorImpl::Default(executor) = query_executor
+        {
+            let mut txn = ExecutorImpl::Txn(executor.txn_executor().await?);
+            let response = self.delete_chunks(&mut txn, &keys, req.prev_kv).await?;
             txn.commit().await?;
-            return res;
+            return Ok(response);
         }
-        // Should get previous kvs first
-        let batch_get_req = BatchGetRequest {
-            keys: req.keys.clone(),
-        };
-        let prev_kvs = self
-            .batch_get_with_query_executor(query_executor, batch_get_req)
-            .await?
-            .kvs;
-        // Pure `DELETE` has no return value, so we need to use `execute` instead of `query`.
-        crate::record_rds_sql_execute_elapsed!(
-            query_executor.execute(&query, &params).await,
-            MYSQL_STORE_NAME,
-            RDS_STORE_OP_BATCH_DELETE,
-            ""
-        )?;
-        if req.prev_kv {
-            Ok(BatchDeleteResponse { prev_kvs })
-        } else {
-            Ok(BatchDeleteResponse::default())
-        }
+        self.delete_chunks(query_executor, &keys, req.prev_kv).await
     }
 }
 
 impl MySqlStore {
+    async fn put_chunks(
+        &self,
+        executor: &mut ExecutorImpl<'_, MySqlClient>,
+        kvs: &[KeyValue],
+        prev_kv: bool,
+    ) -> Result<BatchPutResponse> {
+        let mut prev_kvs = Vec::new();
+        let chunk_size = (*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS);
+        let mut params = Vec::with_capacity(kvs.len().min(chunk_size) * 2);
+        for chunk in kvs.chunks(chunk_size) {
+            let (select, update) = self
+                .sql_template_set
+                .generate_batch_upsert_query(chunk.len());
+            if prev_kv {
+                params.clear();
+                params.extend(chunk.iter().map(|kv| &kv.key));
+                prev_kvs.extend(crate::record_rds_sql_execute_elapsed!(
+                    executor.query(&select, &params).await,
+                    MYSQL_STORE_NAME,
+                    RDS_STORE_OP_BATCH_PUT,
+                    ""
+                )?);
+            }
+            params.clear();
+            params.extend(chunk.iter().flat_map(|kv| [&kv.key, &kv.value]));
+            crate::record_rds_sql_execute_elapsed!(
+                executor.execute(&update, &params).await,
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_PUT,
+                ""
+            )?;
+        }
+        Ok(BatchPutResponse { prev_kvs })
+    }
+
+    async fn delete_chunks(
+        &self,
+        executor: &mut ExecutorImpl<'_, MySqlClient>,
+        keys: &[Vec<u8>],
+        prev_kv: bool,
+    ) -> Result<BatchDeleteResponse> {
+        let mut prev_kvs = Vec::new();
+        let mut params = Vec::with_capacity(keys.len().min(*RDS_BATCH_SIZE));
+        for chunk in keys.chunks(*RDS_BATCH_SIZE) {
+            params.clear();
+            params.extend(chunk);
+            if prev_kv {
+                let select = self.sql_template_set.generate_batch_get_query(chunk.len());
+                prev_kvs.extend(crate::record_rds_sql_execute_elapsed!(
+                    executor.query(&select, &params).await,
+                    MYSQL_STORE_NAME,
+                    RDS_STORE_OP_BATCH_DELETE,
+                    ""
+                )?);
+            }
+            let delete = self
+                .sql_template_set
+                .generate_batch_delete_query(chunk.len());
+            crate::record_rds_sql_execute_elapsed!(
+                executor.execute(&delete, &params).await,
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_DELETE,
+                ""
+            )?;
+        }
+        Ok(BatchDeleteResponse { prev_kvs })
+    }
+
     /// Reads the current table definition for best-effort schema upgrades.
     async fn fetch_create_table_sql(
         pool: &Pool<MySql>,
@@ -813,6 +824,247 @@ mod tests {
             },
             _phantom: PhantomData,
         })
+    }
+
+    #[tokio::test]
+    async fn test_mysql_batch_parameter_boundaries() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("batch_parameter_boundaries");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let client = store.executor_factory.default_executor().await.unwrap();
+        let mut executor = ExecutorImpl::Default(client.clone());
+        for size in [
+            0,
+            MAX_BATCH_PUT_KVS - 1,
+            MAX_BATCH_PUT_KVS,
+            MAX_BATCH_PUT_KVS + 1,
+            MAX_BATCH_KEYS - 1,
+            MAX_BATCH_KEYS,
+            MAX_BATCH_KEYS + 1,
+        ] {
+            let kvs: Vec<_> = (0..size)
+                .map(|index| KeyValue {
+                    key: format!("key-{index:06}").into_bytes(),
+                    value: b"original".to_vec(),
+                })
+                .collect();
+            let keys: Vec<_> = kvs.iter().map(|kv| kv.key.clone()).collect();
+            let response = store
+                .batch_put_with_query_executor(
+                    &mut executor,
+                    BatchPutRequest {
+                        kvs: kvs.clone(),
+                        prev_kv: false,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(response.prev_kvs.is_empty());
+            let mut fetched = store
+                .batch_get_with_query_executor(
+                    &mut executor,
+                    BatchGetRequest { keys: keys.clone() },
+                )
+                .await
+                .unwrap()
+                .kvs;
+            fetched.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(fetched, kvs);
+            let updated = kvs
+                .iter()
+                .map(|kv| KeyValue {
+                    key: kv.key.clone(),
+                    value: b"updated".to_vec(),
+                })
+                .collect::<Vec<_>>();
+            let mut previous = store
+                .batch_put_with_query_executor(
+                    &mut executor,
+                    BatchPutRequest {
+                        kvs: updated.clone(),
+                        prev_kv: true,
+                    },
+                )
+                .await
+                .unwrap()
+                .prev_kvs;
+            previous.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(previous, kvs);
+            let mut deleted = store
+                .batch_delete_with_query_executor(
+                    &mut executor,
+                    BatchDeleteRequest {
+                        keys: keys.clone(),
+                        prev_kv: true,
+                    },
+                )
+                .await
+                .unwrap()
+                .prev_kvs;
+            deleted.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(deleted, updated);
+            assert!(
+                store
+                    .batch_get_with_query_executor(&mut executor, BatchGetRequest { keys })
+                    .await
+                    .unwrap()
+                    .kvs
+                    .is_empty()
+            );
+        }
+        drop_table(&store.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_chunks_reuse_existing_transaction() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("existing_chunk_transaction");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let mut client = store.executor_factory.default_executor().await.unwrap();
+        let kvs: Vec<_> = (0..=(*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS))
+            .map(|index| KeyValue {
+                key: format!("key-{index:06}").into_bytes(),
+                value: b"value".to_vec(),
+            })
+            .collect();
+        let keys = kvs.iter().map(|kv| kv.key.clone()).collect::<Vec<_>>();
+        {
+            let mut txn = ExecutorImpl::Txn(client.txn_executor().await.unwrap());
+            store
+                .batch_put_with_query_executor(
+                    &mut txn,
+                    BatchPutRequest {
+                        kvs,
+                        prev_kv: false,
+                    },
+                )
+                .await
+                .unwrap();
+            let inside = store
+                .batch_get_with_query_executor(&mut txn, BatchGetRequest { keys: keys.clone() })
+                .await
+                .unwrap();
+            assert_eq!(inside.kvs.len(), keys.len());
+            // The caller owns this transaction and deliberately does not commit it.
+        }
+        let mut executor = ExecutorImpl::Default(client.clone());
+        let outside = store
+            .batch_get_with_query_executor(&mut executor, BatchGetRequest { keys })
+            .await
+            .unwrap();
+        assert!(outside.kvs.is_empty());
+        drop_table(&store.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_later_put_chunk_failure_rolls_back() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("put_chunk_rollback");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let trigger_name = new_test_table_name("put_failure");
+        let trigger = format!(
+            "CREATE TRIGGER `{trigger_name}` BEFORE INSERT ON `{table}` \
+            FOR EACH ROW BEGIN IF NEW.v = X'6661696c' THEN \
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected put failure'; END IF; END"
+        );
+        sqlx::raw_sql(AssertSqlSafe(trigger.as_str()))
+            .execute(store.executor_factory.pool.as_ref())
+            .await
+            .unwrap();
+        let client = store.executor_factory.default_executor().await.unwrap();
+        let mut executor = ExecutorImpl::Default(client.clone());
+        for prev_kv in [false, true] {
+            let mut kvs: Vec<_> = (0..(*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS))
+                .map(|index| KeyValue {
+                    key: format!("key-{index:06}").into_bytes(),
+                    value: b"ok".to_vec(),
+                })
+                .collect();
+            kvs.push(KeyValue {
+                key: b"last".to_vec(),
+                value: b"fail".to_vec(),
+            });
+            assert!(
+                store
+                    .batch_put_with_query_executor(&mut executor, BatchPutRequest { kvs, prev_kv })
+                    .await
+                    .is_err()
+            );
+            let remaining = store
+                .range_with_query_executor(
+                    &mut executor,
+                    RangeRequest::new().with_range(vec![0], vec![0]),
+                )
+                .await
+                .unwrap();
+            assert!(
+                remaining.kvs.is_empty(),
+                "successful earlier chunks must roll back"
+            );
+        }
+        drop_table(&store.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_later_delete_chunk_failure_rolls_back() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("delete_chunk_rollback");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let client = store.executor_factory.default_executor().await.unwrap();
+        let mut executor = ExecutorImpl::Default(client.clone());
+        let kvs: Vec<_> = (0..=*RDS_BATCH_SIZE)
+            .map(|index| KeyValue {
+                key: format!("key-{index:06}").into_bytes(),
+                value: b"original".to_vec(),
+            })
+            .collect();
+        let keys = kvs.iter().map(|kv| kv.key.clone()).collect::<Vec<_>>();
+        store
+            .batch_put_with_query_executor(
+                &mut executor,
+                BatchPutRequest {
+                    kvs: kvs.clone(),
+                    prev_kv: false,
+                },
+            )
+            .await
+            .unwrap();
+        let last_key = String::from_utf8(keys.last().unwrap().clone()).unwrap();
+        let trigger_name = new_test_table_name("delete_failure");
+        let trigger = format!(
+            "CREATE TRIGGER `{trigger_name}` BEFORE DELETE ON `{table}` \
+            FOR EACH ROW BEGIN IF OLD.k = '{last_key}' THEN \
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected delete failure'; END IF; END"
+        );
+        sqlx::raw_sql(AssertSqlSafe(trigger.as_str()))
+            .execute(store.executor_factory.pool.as_ref())
+            .await
+            .unwrap();
+        for prev_kv in [false, true] {
+            assert!(
+                store
+                    .batch_delete_with_query_executor(
+                        &mut executor,
+                        BatchDeleteRequest {
+                            keys: keys.clone(),
+                            prev_kv
+                        }
+                    )
+                    .await
+                    .is_err()
+            );
+            let mut remaining = store
+                .batch_get_with_query_executor(
+                    &mut executor,
+                    BatchGetRequest { keys: keys.clone() },
+                )
+                .await
+                .unwrap()
+                .kvs;
+            remaining.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(remaining, kvs, "successful earlier chunks must roll back");
+        }
+        drop_table(&store.executor_factory.pool, &table).await;
     }
 
     #[test]
