@@ -3698,7 +3698,7 @@ mod tests {
     }
 
     #[test]
-    fn sum_aggregate_keeps_the_start_timestamp_of_a_single_sample() {
+    fn sum_aggregate_exports_no_start_timestamp_of_its_own() {
         let mut histogram = sample_histogram(2.0, 3.0, vec![2.0]);
         histogram.start_timestamp = Some(1_234);
 
@@ -3706,10 +3706,17 @@ mod tests {
             NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Sum, None);
         accumulator.push_histogram(histogram, 1).unwrap();
 
+        // The answer is a derived histogram, not the sample that was pushed: it is read out of the
+        // fold the way the native kernel reads one, and that clears the timestamp along with the
+        // empty buckets it compacts away. The sample's own timestamp stays inside the fold.
         assert_eq!(
-            accumulator.value.unwrap().start_timestamp,
-            Some(1_234),
-            "the first sample is passed through untouched, so its start timestamp survives"
+            accumulator
+                .state_histogram()
+                .unwrap()
+                .unwrap()
+                .start_timestamp,
+            None,
+            "a derived sum carries no start timestamp, not even from a single sample"
         );
     }
 
@@ -3726,7 +3733,11 @@ mod tests {
         accumulator.push_histogram(second, 1).unwrap();
 
         assert_eq!(
-            accumulator.value.unwrap().start_timestamp,
+            accumulator
+                .state_histogram()
+                .unwrap()
+                .unwrap()
+                .start_timestamp,
             None,
             "a derived sum carries no start timestamp of its own"
         );
