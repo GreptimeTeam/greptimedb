@@ -17,12 +17,13 @@ use std::fmt;
 use tracing_log::NormalizeEvent;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use url::Url;
 
 /// Redacts passwords of connection DSNs embedded in arbitrary text such as raw
 /// SQL, parser error messages, or token dumps. Text without a `scheme://` DSN is
 /// returned unchanged.
 pub fn redact_connection_in_text(text: &str) -> String {
-    const REDACTED: &str = "REDACTED";
+    const REDACTED: &str = "******";
     let mut output = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut index = 0;
@@ -36,29 +37,21 @@ pub fn redact_connection_in_text(text: &str) -> String {
                 output.push_str(&text[index..start]);
 
                 let host_start = scheme_end + 3;
-                let end = find_connection_end(bytes, host_start);
-                let authority_end = bytes[host_start..end]
-                    .iter()
-                    .position(|&b| matches!(b, b'/' | b'?' | b'#'))
-                    .map(|p| host_start + p)
-                    .unwrap_or(end);
-                let at = bytes[host_start..authority_end]
-                    .iter()
-                    .rposition(|&b| b == b'@')
-                    .map(|p| host_start + p);
-
-                match at.and_then(|at| {
-                    bytes[host_start..at]
-                        .iter()
-                        .rposition(|&b| b == b':')
-                        .map(|colon| (at, host_start + colon))
-                }) {
-                    Some((at, colon)) => {
-                        output.push_str(&text[start..=colon]);
-                        output.push_str(REDACTED);
-                        output.push_str(&text[at..end]);
-                    }
-                    None => output.push_str(&text[start..end]),
+                let end = find_dsn_end(bytes, host_start);
+                let raw = &text[start..end];
+                // Parse the extracted DSN with the `url` crate, which splits the
+                // username/password at the *first* `:` and the host at the *last*
+                // `@`, so passwords containing `:`, `,`, `;`, `(`, `)` or `@` are
+                // handled correctly. DSNs without a password are left unchanged.
+                match Url::parse(raw)
+                    .ok()
+                    .filter(|url| url.password().is_some())
+                    .map(|mut url| {
+                        let _ = url.set_password(Some(REDACTED));
+                        url.to_string()
+                    }) {
+                    Some(redacted) => output.push_str(&redacted),
+                    None => output.push_str(raw),
                 }
                 index = end;
             }
@@ -85,19 +78,28 @@ fn find_subslice(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
         .map(|pos| from + pos)
 }
 
-fn find_connection_end(bytes: &[u8], from: usize) -> usize {
+fn find_dsn_end(bytes: &[u8], from: usize) -> usize {
     let mut end = from;
     while end < bytes.len() {
         let c = bytes[end];
-        if c.is_ascii_whitespace()
-            || matches!(
-                c,
-                b'\'' | b'"' | b',' | b';' | b'(' | b')' | b'<' | b'>' | b'`'
-            )
-        {
+        if c.is_ascii_whitespace() || matches!(c, b'\'' | b'"' | b'<' | b'>' | b'`') {
             break;
         }
         end += 1;
+    }
+    // If another `scheme://` is glued directly onto this DSN (no whitespace or
+    // quote separating them), stop at that scheme's start so the following DSN
+    // isn't swallowed into this one's path. `//` cannot occur unencoded in a
+    // userinfo/host, so a `://` after `from` is always either a new DSN or an
+    // embedded URL further along in the path/query — both safe to split on.
+    if let Some(next_scheme_end) = find_subslice(bytes, from, b"://") {
+        let mut next_start = next_scheme_end;
+        while next_start > from && is_scheme_char(bytes[next_start - 1]) {
+            next_start -= 1;
+        }
+        if next_start < end {
+            end = next_start;
+        }
     }
     end
 }
@@ -187,6 +189,64 @@ mod tests {
 
         let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
         assert!(!output.contains("secret"));
-        assert!(output.contains("mysql://user:REDACTED@127.0.0.1:3306/db"));
+        assert!(output.contains("mysql://user:******@127.0.0.1:3306/db"));
+    }
+
+    #[test]
+    fn test_redact_connection_in_text() {
+        assert_eq!(
+            redact_connection_in_text(
+                "CREATE EXTERNAL TABLE t (...) ENGINE=relational \
+                 WITH(connection='mysql://user:secret@127.0.0.1:3306/db', remote_table='sample')"
+            ),
+            "CREATE EXTERNAL TABLE t (...) ENGINE=relational \
+             WITH(connection='mysql://user:******@127.0.0.1:3306/db', remote_table='sample')"
+        );
+        assert_eq!(
+            redact_connection_in_text("Expected =, found: mysql://user:secret@127.0.0.1:3306/db"),
+            "Expected =, found: mysql://user:******@127.0.0.1:3306/db"
+        );
+        assert_eq!(
+            redact_connection_in_text("postgresql://user:secret@host:5432/db?sslmode=require"),
+            "postgresql://user:******@host:5432/db?sslmode=require"
+        );
+        // A DSN without a password, or a non-DSN, is left unchanged.
+        assert_eq!(
+            redact_connection_in_text("mysql://host/db"),
+            "mysql://host/db"
+        );
+        assert_eq!(
+            redact_connection_in_text("mysql://host/db?email=a@b.com"),
+            "mysql://host/db?email=a@b.com"
+        );
+        assert_eq!(redact_connection_in_text("SELECT 1"), "SELECT 1");
+        // Multiple DSNs are all redacted.
+        assert_eq!(
+            redact_connection_in_text("mysql://a:one@h1/db1 and mysql://b:two@h2/db2"),
+            "mysql://a:******@h1/db1 and mysql://b:******@h2/db2"
+        );
+        // Passwords may contain URL-legal punctuation; only the password is
+        // replaced (the `url` crate splits at the first `:` and last `@`).
+        assert_eq!(
+            redact_connection_in_text("mysql://user:abc:def@host/db"),
+            "mysql://user:******@host/db"
+        );
+        assert_eq!(
+            redact_connection_in_text("mysql://user:abc,def@host/db"),
+            "mysql://user:******@host/db"
+        );
+        assert_eq!(
+            redact_connection_in_text("mysql://user:abc;def@host/db"),
+            "mysql://user:******@host/db"
+        );
+        assert_eq!(
+            redact_connection_in_text("mysql://user:abc(def)@host/db"),
+            "mysql://user:******@host/db"
+        );
+        // Adjacent DSNs glued together by punctuation are still both redacted.
+        assert_eq!(
+            redact_connection_in_text("mysql://a:one@h1/db1,mysql://b:two@h2/db2"),
+            "mysql://a:******@h1/db1,mysql://b:******@h2/db2"
+        );
     }
 }

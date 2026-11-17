@@ -991,41 +991,6 @@ mod tests {
     }
 
     #[test]
-    fn test_redact_connection_in_text() {
-        assert_eq!(
-            redact_connection_in_text(
-                "CREATE EXTERNAL TABLE t (...) ENGINE=relational \
-                 WITH(connection='mysql://user:secret@127.0.0.1:3306/db', remote_table='sample')"
-            ),
-            "CREATE EXTERNAL TABLE t (...) ENGINE=relational \
-             WITH(connection='mysql://user:REDACTED@127.0.0.1:3306/db', remote_table='sample')"
-        );
-        assert_eq!(
-            redact_connection_in_text("Expected =, found: mysql://user:secret@127.0.0.1:3306/db"),
-            "Expected =, found: mysql://user:REDACTED@127.0.0.1:3306/db"
-        );
-        assert_eq!(
-            redact_connection_in_text("postgresql://user:secret@host:5432/db?sslmode=require"),
-            "postgresql://user:REDACTED@host:5432/db?sslmode=require"
-        );
-        // A DSN without a password, or a non-DSN, is left unchanged.
-        assert_eq!(
-            redact_connection_in_text("mysql://host/db"),
-            "mysql://host/db"
-        );
-        assert_eq!(
-            redact_connection_in_text("mysql://host/db?email=a@b.com"),
-            "mysql://host/db?email=a@b.com"
-        );
-        assert_eq!(redact_connection_in_text("SELECT 1"), "SELECT 1");
-        // Multiple DSNs are all redacted.
-        assert_eq!(
-            redact_connection_in_text("mysql://a:one@h1/db1 and mysql://b:two@h2/db2"),
-            "mysql://a:REDACTED@h1/db1 and mysql://b:REDACTED@h2/db2"
-        );
-    }
-
-    #[test]
     fn test_relational_options_redacted() {
         let options = RelationalOptions {
             connection: "mysql://user:secret@127.0.0.1:3306/db".to_string(),
