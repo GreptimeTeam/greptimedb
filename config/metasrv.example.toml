@@ -63,6 +63,8 @@ selector = "round_robin"
 ## This feature is only available on GreptimeDB running on cluster mode and
 ## - Using Remote WAL
 ## - Using shared storage (e.g., s3).
+## Object store WAL requires the enterprise enablement plugin, which must only be
+## registered once the distributed recovery prerequisites, including handoff and takeover, are available.
 enable_region_failover = false
 
 ## The delay before starting region failure detection.

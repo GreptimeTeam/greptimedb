@@ -65,6 +65,9 @@ pub struct ObjectStoreWalConfig {
     /// An empty name selects the default object store.
     pub storage_provider: String,
     /// Path prefix of the WAL objects inside the storage provider.
+    /// In distributed mode, metasrv and all datanodes must use the same public
+    /// root prefix and shared object storage. A mismatched prefix prevents regions
+    /// from opening.
     ///
     /// The store runs under a node prefix derived from it, see
     /// [`node_prefix`](Self::node_prefix).
