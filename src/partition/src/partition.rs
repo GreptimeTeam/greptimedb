@@ -48,7 +48,9 @@ pub trait PartitionRule: Sync + Send {
 
     fn partition_columns(&self) -> &[String];
 
-    /// Context for this table's write routing; it is not shared physical-route metadata.
+    /// Additional inputs for evaluating physical partition expressions during write routing.
+    /// Defaults to [`PartitionEvalContext::FromPayload`]. Override when routing needs
+    /// inputs supplied outside the write payload.
     fn eval_context(&self) -> PartitionEvalContext {
         PartitionEvalContext::FromPayload
     }
