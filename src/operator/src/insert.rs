@@ -3830,9 +3830,11 @@ mod tests {
         }
         meter.attempts.lock().unwrap().clear();
 
-        // Rejection must also precede admission to the table batcher's queue.
+        // Rejection must precede queue submission, but conversion memory is reserved first.
         if enabled {
-            let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+            let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher {
+                allow_acquire: true,
+            });
             let rows = Rows {
                 schema: vec![
                     api::v1::helper::tag_column_schema("a", ColumnDataType::Int32),
@@ -4317,12 +4319,19 @@ mod tests {
         );
     }
 
-    struct UnexpectedBatcher;
+    #[derive(Default)]
+    struct UnexpectedBatcher {
+        allow_acquire: bool,
+    }
 
     #[async_trait::async_trait]
     impl PendingRowsBatcher for UnexpectedBatcher {
         async fn acquire(&self, _: usize, _: u64) -> Result<crate::batcher::PendingRowsPermit> {
-            panic!("empty writes must not acquire batch admission")
+            assert!(
+                self.allow_acquire,
+                "empty writes must not acquire batch admission"
+            );
+            Ok(Arc::new(()))
         }
 
         async fn submit(
@@ -4332,7 +4341,7 @@ mod tests {
             _ctx: QueryContextRef,
             _permit: crate::batcher::PendingRowsPermit,
         ) -> Result<Output> {
-            panic!("empty writes must not submit a batch")
+            panic!("writes must not submit a batch")
         }
     }
 
@@ -4489,7 +4498,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_instant_table_bypasses_batcher() {
-        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher::default());
         let inserter = batcher_test_inserter()
             .await
             .with_pending_rows_batcher(Some(batcher));
@@ -4509,7 +4518,7 @@ mod tests {
         let inserter = batcher_test_inserter().await;
         let table = make_table_ref_with_schema("ts", "value", ConcreteDataType::float64_datatype())
             .table_info();
-        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher::default());
         let ctx = QueryContext::arc();
         let output = inserter
             .submit_table_rows(
