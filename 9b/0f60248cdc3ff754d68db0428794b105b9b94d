@@ -1,0 +1,19 @@
+docs/rfcs/2025-06-20-repartition.md
+  s_7ef52bdf343b92::t_d22e99cb94780b 41-42,73,75,98-99,102,113-129,131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9b0f60248cdc3ff754d68db0428794b105b9b94d",
+  "prompts": {},
+  "sessions": {
+    "s_7ef52bdf343b92": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1ed9c-1e79-7140-b070-9166a03a0fc6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
