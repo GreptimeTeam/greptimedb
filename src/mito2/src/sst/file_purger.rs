@@ -393,7 +393,7 @@ mod tests {
             None,
         ));
         let (_, _, edit) = RegionMetaActionList::decode(include_bytes!(
-            "../../../../tests/compatibility/manifest/native_metric_storage/narthex-delta.json"
+            "../../../../tests/compatibility/manifest/narthex/delta.json"
         ))
         .unwrap()
         .split_region_change_and_edit();
