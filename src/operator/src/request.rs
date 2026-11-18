@@ -27,7 +27,7 @@ use common_catalog::consts::METRIC_ENGINE;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit as TimestampUnit;
 use futures_util::future;
@@ -286,7 +286,10 @@ impl Requester {
 
         info!("Handle table discard unflushed data request: {table_name}");
         self.do_request(
-            requests.into_iter().map(RegionRequestBody::Truncate).collect(),
+            requests
+                .into_iter()
+                .map(RegionRequestBody::Truncate)
+                .collect(),
             Some(build_db_string(
                 &table_name.catalog_name,
                 &table_name.schema_name,
@@ -323,7 +326,7 @@ impl Requester {
 
     /// Discards the pending WAL tails that datanode `node_id` wrote in every region of the
     /// table. Each failed region is logged with its error, and the first error is returned
-    /// after logging the number of tails the other regions discarded.
+    /// after a warning with the number of tails the regions that succeeded discarded.
     pub(crate) async fn handle_discard_pending_tails_by_table(
         &self,
         table_name: TableName,
@@ -347,7 +350,10 @@ impl Requester {
         );
         let results = self
             .do_requests(
-                requests.into_iter().map(RegionRequestBody::Truncate).collect(),
+                requests
+                    .into_iter()
+                    .map(RegionRequestBody::Truncate)
+                    .collect(),
                 Some(build_db_string(
                     &table_name.catalog_name,
                     &table_name.schema_name,
@@ -364,7 +370,9 @@ impl Requester {
             }
         }
         if let Some(e) = first_error {
-            info!("Other regions of table {table_name} discarded {discarded} pending tails from node {node_id}");
+            warn!(
+                "Discarded {discarded} pending tails from node {node_id} in the regions of table {table_name} that succeeded"
+            );
             return Err(e);
         }
         if discarded == 0 {
@@ -666,7 +674,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discard_pending_tails_targets_regions_and_node() {
+    async fn test_discard_pending_tails_routes_by_node_and_sums_regions() {
         use catalog::RegisterTableRequest;
         use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
         use table::dist_table::DummyDataSource;

@@ -2456,7 +2456,7 @@ async fn test_discard_stays_busy_after_an_uncertain_replay_ends() {
 /// A replay's commit that succeeds after one with an uncertain result clears the uncertainty,
 /// so a discard of the tail the replay keeps succeeds.
 #[tokio::test]
-async fn test_discard_kept_tail_after_replay_recommits() {
+async fn test_discard_succeeds_after_an_uncertain_replay_commit_is_retried() {
     let version = Arc::new(AtomicU64::new(u64::MAX));
     let region = TestRegion::new(
         "tail-discard-recommitted",
@@ -2521,9 +2521,9 @@ async fn test_conditional_discard_over_uncertain_replay_reloads_region() {
     assert_eq!(9, count_rows(&region.engine, region.region_id).await);
 }
 
-/// A discard raises the flushed entry id to a listed tail's bound. After a crash, the region
-/// opens only if this node's WAL durably holds history past the bound, as whoever records the
-/// tail ensures.
+/// A discard raises the flushed entry id to a listed tail's bound. After a crash, the
+/// object-store WAL checks history, so the region opens only if this node's WAL durably holds
+/// history through the bound, as whoever records the tail ensures.
 #[rstest]
 #[case::history_past_bound(true)]
 #[case::history_below_bound(false)]

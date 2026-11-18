@@ -271,9 +271,14 @@ impl RegionManifest {
     /// Entries of the node in `(after, upto]` of one of its tails belong to that tail.
     /// Whoever adds a tail ensures that every entry id the node allocates afterwards is
     /// above the tail's `upto`, so no later write of the node falls in a skipped range.
-    /// It also ensures that the node's WAL durably holds history past `upto`: a tail commit
-    /// or discard can raise the flushed entry id to it, and an open after a crash checks the
-    /// WAL history up to the flushed entry id, so it would otherwise fail that check.
+    /// It also ensures that the node's WAL durably holds history through `upto`: a tail
+    /// commit or a discard can raise the flushed entry id to it, and an open of the region
+    /// checks that the WAL holds history through the flushed entry id where the log store
+    /// checks history (see [LogStore::check_region_history]). A discard raises the flushed
+    /// entry id on whichever node leads the region, so whoever adds a tail ensures both for
+    /// every node that may lead the region afterwards, not only for the tail's own node.
+    ///
+    /// [LogStore::check_region_history]: store_api::logstore::LogStore::check_region_history
     pub(crate) fn wal_replay_start(&self, node_id: Option<u64>) -> EntryId {
         let floor = node_id.and_then(|node_id| self.handoff_floors.get(&node_id).copied());
         self.pending_tails

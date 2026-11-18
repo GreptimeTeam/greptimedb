@@ -80,12 +80,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// sends 0 and changes nothing.
     ///
     /// The edit removes the tails, keeps the others in order and raises the flushed entry id
-    /// to the largest `upto` of the removed tails, for a listed tail too, which can lie above
-    /// every entry this node wrote. Replaying the WAL at open then skips entries of this node
-    /// at or below it, except those its remaining tails cover, which a background replay
-    /// still reads, and an open of the region after a crash requires this node's WAL to
-    /// durably hold history past it. Whoever records a tail keeps this node's later entries
-    /// above it and makes that history durable; the discard checks neither (see
+    /// to the largest `upto` of the removed tails, for a listed tail too, whose `upto` can lie
+    /// above every entry this node wrote. Replaying the WAL at open then skips this node's
+    /// entries up to the new flushed entry id, except those covered by the node's remaining
+    /// tails, which a background replay still reads.
+    ///
+    /// Where the log store checks history, opening the region also requires this node's WAL
+    /// to hold history through the new flushed entry id. The discard checks neither
+    /// condition: whoever adds a tail ensures both (see
     /// [RegionManifest::wal_replay_start](crate::manifest::action::RegionManifest::wal_replay_start)).
     ///
     /// The edit is committed outside the worker against the tails the version records now, so
