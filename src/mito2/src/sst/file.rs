@@ -324,9 +324,6 @@ impl NarthexSamplesMeta {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FileMeta {
-    /// Physical encoding, omitted for legacy Parquet files.
-    #[serde(default, skip_serializing_if = "FileFormat::is_parquet")]
-    pub format: FileFormat,
     /// Region that created the file. The region id may not be the id of the current region.
     pub region_id: RegionId,
     /// Compared to normal file names, FileId ignore the extension
@@ -419,6 +416,9 @@ pub struct FileMeta {
     /// restore this capability for untrusted inputs.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
+    /// Physical encoding, omitted for legacy Parquet files.
+    #[serde(default, skip_serializing_if = "FileFormat::is_parquet")]
+    pub format: FileFormat,
 }
 
 fn is_false(value: &bool) -> bool {
