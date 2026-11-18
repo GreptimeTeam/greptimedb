@@ -17,7 +17,7 @@ pub(crate) use parallelism::{automatic_parallelism, merge_parallelism};
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common_base::cancellation::CancellationHandle;
 use object_store::{ErrorKind, ObjectStore};
@@ -112,7 +112,7 @@ fn batch_root(root: &str, files: usize, index: usize) -> String {
     }
 }
 
-static CURSORS: LazyLock<Mutex<HashMap<RegionId, u64>>> = LazyLock::new(Default::default);
+static CURSORS: LazyLock<Mutex<HashMap<(RegionId, u32), u64>>> = LazyLock::new(Default::default);
 pub(crate) fn enabled(id: RegionId) -> bool {
     uses_shared_compaction(id, &TABLES, region_count(id))
 }
@@ -125,7 +125,7 @@ fn uses_shared_compaction(id: RegionId, tables: &[u32], regions: u32) -> bool {
 
 /// Only mixed bulk L0s belong to the shared scan. Routed L1s keep the regular picker.
 pub(crate) fn is_shared(file: &FileMeta) -> bool {
-    file.level == 0 && file.region_id.region_number() == 0 && file.partition_expr.is_none()
+    file.level == 0 && file.partition_expr.is_none()
 }
 
 pub(crate) fn shared_inputs<'a>(files: impl Iterator<Item = &'a FileMeta>) -> bool {
@@ -205,11 +205,35 @@ mod tests {
         assert_eq!(1, version.levels()[0].files().count());
     }
 }
-fn cursor(id: RegionId) -> u64 {
-    *CURSORS.lock().unwrap().get(&id).unwrap_or(&0)
+fn cursor(id: RegionId, owner: u32) -> u64 {
+    *CURSORS.lock().unwrap().get(&(id, owner)).unwrap_or(&0)
 }
-fn prefix(id: RegionId, round: u64) -> String {
-    format!("_testbed_table_jobs/{}/{round}", id.table_id())
+fn prefix(id: RegionId, owner: u32, round: u64) -> String {
+    // Keep the old Region-0 layout readable after upgrading/restarting.
+    if owner == 0 {
+        format!("_testbed_table_jobs/{}/{round}", id.table_id())
+    } else {
+        format!(
+            "_testbed_table_jobs/{}/owners/{owner}/{round}",
+            id.table_id()
+        )
+    }
+}
+
+fn source_owner<'a>(mut inputs: impl Iterator<Item = &'a FileMeta>) -> Result<RegionId> {
+    let first = inputs.next().ok_or_else(|| {
+        Invalid {
+            reason: "empty shared input",
+        }
+        .build()
+    })?;
+    ensure!(
+        is_shared(first) && inputs.all(|f| is_shared(f) && f.region_id == first.region_id),
+        Invalid {
+            reason: "shared batch mixes source owners"
+        }
+    );
+    Ok(first.region_id)
 }
 
 async fn read<T: DeserializeOwned>(store: &ObjectStore, key: &str) -> Result<Option<T>> {
@@ -256,12 +280,18 @@ type Outputs = BTreeMap<RegionId, Vec<FileMeta>>;
 /// Only a complete, registered shared batch needs a readiness retry.
 /// Routed L1, unsequenced files and an undersized tail do not keep polling.
 pub(crate) fn has_pending_shared_batch(ssts: &crate::sst::version::SstVersion) -> bool {
-    ssts.levels()[0]
+    let mut counts = HashMap::new();
+    for f in ssts.levels()[0]
         .files()
         .filter(|f| is_shared(f.meta_ref()) && f.meta_ref().sequence.is_some())
-        .take(*WIDTH)
-        .count()
-        == *WIDTH
+    {
+        let n = counts.entry(f.meta_ref().region_id).or_insert(0usize);
+        *n += 1;
+        if *n >= *WIDTH {
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) async fn pick(region: &CompactionRegion) -> Result<Option<PickerOutput>> {
@@ -278,92 +308,147 @@ pub(crate) async fn pick(region: &CompactionRegion) -> Result<Option<PickerOutpu
         .filter(|f| is_shared(f.meta_ref()) && f.meta_ref().sequence.is_some())
         .map(|f| (f.meta_ref().file_id, f))
         .collect();
-    let mut round = cursor(id);
-    loop {
-        let root = prefix(id, round);
-        let key = format!("{root}/sources");
-        let ids: Vec<FileId> = if let Some(ids) = read(store, &key).await? {
-            ids
-        } else {
-            if id.region_number() != 0 || handles.len() < *WIDTH {
-                return Ok(None);
-            }
-            let mut files: Vec<_> = handles.values().map(|f| f.meta_ref()).collect();
-            files.sort_by(|a, b| {
-                (a.sequence, a.file_id.as_bytes()).cmp(&(b.sequence, b.file_id.as_bytes()))
-            });
-            let ids =
-                batch_window::new_roster(files.iter().map(|f| f.file_id), *WIDTH, batch_limit());
-            create(store, &key, &ids).await?;
-            ids
-        };
-        ensure!(
-            batch_window::valid_roster(&ids, *WIDTH),
-            Invalid {
-                reason: "invalid immutable round roster"
-            }
-        );
-        let mut pending = Vec::new();
-        let mut waiting = false;
-        for (index, batch) in ids.chunks_exact(*WIDTH).enumerate() {
-            let job = batch_root(&root, ids.len(), index);
-            // Record successful local publication before allowing L1 compaction.
-            // Its output may later be replaced by a remote merge, so checking
-            // the original L1 IDs on every restart would be incorrect.
-            let applied_key = format!("{job}/applied-{}", id.region_number());
-            if read::<bool>(store, &applied_key).await? == Some(true) {
-                continue;
-            }
-            let inputs: Vec<_> = batch
-                .iter()
-                .filter_map(|k| handles.get(k).map(|f| (**f).clone()))
-                .collect();
-            if inputs.len() == *WIDTH {
-                pending.push(CompactionOutput {
-                    output_level: 1,
-                    inputs,
-                    filter_deleted: false,
-                    output_time_range: None,
-                });
-                continue;
-            }
-            let Some(result): Option<Outputs> = read(store, &format!("{job}/result")).await? else {
-                waiting = true;
-                continue;
-            };
-            let expected = result.get(&id).ok_or_else(|| {
-                Invalid {
-                    reason: "region missing from table result",
+    let mut pending = Vec::new();
+    // Every participant advertises readiness without taking an execution slot.
+    // Only the source owner creates a roster and executes its shared scan.
+    for owner in 0..region_count(id) {
+        let mut round = cursor(id, owner);
+        loop {
+            let root = prefix(id, owner, round);
+            let key = format!("{root}/sources");
+            let ids: Vec<FileId> = if let Some(ids) = read(store, &key).await? {
+                ids
+            } else {
+                if id.region_number() != owner {
+                    break;
                 }
-                .build()
-            })?;
-            let live: HashMap<_, _> = region.current_version.ssts.levels()[1]
-                .files()
-                .map(|f| (f.meta_ref().file_id, f.meta_ref()))
-                .collect();
+                let mut files: Vec<_> = handles
+                    .values()
+                    .map(|f| f.meta_ref())
+                    .filter(|f| f.region_id == id)
+                    .collect();
+                if files.len() < *WIDTH {
+                    break;
+                }
+                files.sort_by(|a, b| {
+                    (a.sequence, a.file_id.as_bytes()).cmp(&(b.sequence, b.file_id.as_bytes()))
+                });
+                let ids = batch_window::new_roster(
+                    files.iter().map(|f| f.file_id),
+                    *WIDTH,
+                    batch_limit(),
+                );
+                create(store, &key, &ids).await?;
+                ids
+            };
             ensure!(
-                inputs.is_empty() && expected.iter().all(|f| live.get(&f.file_id) == Some(&f)),
+                batch_window::valid_roster(&ids, *WIDTH),
                 Invalid {
-                    reason: "partial or conflicting region publication"
+                    reason: "invalid immutable round roster"
                 }
             );
-            create(store, &applied_key, &true).await?;
+            let mut outstanding = false;
+            for (index, batch) in ids.chunks_exact(*WIDTH).enumerate() {
+                let job = batch_root(&root, ids.len(), index);
+                let applied_key = format!("{job}/applied-{}", id.region_number());
+                if read::<bool>(store, &applied_key).await? == Some(true) {
+                    continue;
+                }
+                let inputs: Vec<_> = batch
+                    .iter()
+                    .filter_map(|k| handles.get(k).map(|f| (**f).clone()))
+                    .collect();
+                if inputs.len() == *WIDTH {
+                    ensure!(
+                        source_owner(inputs.iter().map(|f| f.meta_ref()))?
+                            == RegionId::new(id.table_id(), owner),
+                        Invalid {
+                            reason: "roster source owner mismatch"
+                        }
+                    );
+                    let ready_key = format!("{job}/ready-{}", id.region_number());
+                    // The experiment's fixed topology excludes DDL/migration;
+                    // ordinary L1 selection excludes these L0 files entirely.
+                    if !store.exists(&ready_key).await.context(OpenDalSnafu)? {
+                        let reservation = Reservation {
+                            metadata: (*region.region_metadata).clone(),
+                            options: region.region_options.clone(),
+                            inputs: inputs.iter().map(|f| f.meta_ref().clone()).collect(),
+                        };
+                        create(store, &ready_key, &reservation).await?;
+                    }
+                    let result_exists = store
+                        .exists(&format!("{job}/result"))
+                        .await
+                        .context(OpenDalSnafu)?;
+                    let executable = result_exists
+                        || (id.region_number() == owner
+                            && all_ready(store, &job, region_count(id)).await?);
+                    if executable {
+                        pending.push(CompactionOutput {
+                            output_level: 1,
+                            inputs,
+                            filter_deleted: false,
+                            output_time_range: None,
+                        });
+                    }
+                    outstanding = true;
+                    continue;
+                }
+                let Some(result): Option<Outputs> = read(store, &format!("{job}/result")).await?
+                else {
+                    outstanding = true;
+                    continue;
+                };
+                let expected = result.get(&id).ok_or_else(|| {
+                    Invalid {
+                        reason: "region missing from table result",
+                    }
+                    .build()
+                })?;
+                let live: HashMap<_, _> = region.current_version.ssts.levels()[1]
+                    .files()
+                    .map(|f| (f.meta_ref().file_id, f.meta_ref()))
+                    .collect();
+                ensure!(
+                    inputs.is_empty() && expected.iter().all(|f| live.get(&f.file_id) == Some(&f)),
+                    Invalid {
+                        reason: "partial or conflicting region publication"
+                    }
+                );
+                create(store, &applied_key, &true).await?;
+            }
+            if outstanding {
+                break;
+            }
+            round += 1;
+            CURSORS.lock().unwrap().insert((id, owner), round);
         }
-        if !pending.is_empty() {
-            return Ok(Some(PickerOutput {
-                outputs: pending,
-                expired_ssts: vec![],
-                time_window_size: DAY,
-                max_file_size: Some(256 << 20),
-            }));
-        }
-        if waiting {
-            return Ok(None);
-        }
-        round += 1;
-        CURSORS.lock().unwrap().insert(id, round);
-        // L1 has its own scheduling state and no longer needs a turn here.
     }
+    if pending.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PickerOutput {
+        outputs: pending,
+        expired_ssts: vec![],
+        time_window_size: DAY,
+        max_file_size: Some(256 << 20),
+    }))
+}
+
+async fn ready_regions(
+    store: &ObjectStore,
+    root: &str,
+    count: u32,
+) -> Result<Option<BTreeMap<u32, Reservation>>> {
+    let mut ready = BTreeMap::new();
+    for n in 0..count {
+        let Some(r) = read::<Reservation>(store, &format!("{root}/ready-{n}")).await? else {
+            return Ok(None);
+        };
+        ready.insert(n, r);
+    }
+    Ok(Some(ready))
 }
 
 struct Guard {
@@ -393,8 +478,9 @@ pub(crate) async fn merge(
     cancel: Arc<CancellationHandle>,
 ) -> Result<MergeOutput> {
     let id = ctx.region_id;
-    let round = cursor(id);
-    let root = prefix(id, round);
+    let owner = source_owner(unit.inputs.iter().map(|f| f.meta_ref()))?.region_number();
+    let round = cursor(id, owner);
+    let root = prefix(id, owner, round);
     let store = ctx.access_layer.object_store();
     let ids: Vec<FileId> = read(store, &format!("{root}/sources"))
         .await?
@@ -418,32 +504,13 @@ pub(crate) async fn merge(
         })?;
     let root = batch_root(&root, ids.len(), index);
     let ids = batch;
-    let wait_start = Instant::now();
     let inputs: Vec<_> = ids.iter().map(|k| by_id[k].clone()).collect();
-    let reservation = Reservation {
-        metadata: (*ctx.region_metadata).clone(),
-        options: ctx.region_options.clone(),
-        inputs: inputs.clone(),
-    };
-    create(
-        store,
-        &format!("{root}/ready-{}", id.region_number()),
-        &reservation,
-    )
-    .await?;
     let result_key = format!("{root}/result");
-    let start = Instant::now();
-    let mut ready = BTreeMap::new();
+    // No timer, sleep, or readiness wait runs inside the bounded executor.
     loop {
         if cancel.is_cancelled() {
             return crate::error::CompactionCancelledSnafu.fail();
         }
-        ensure!(
-            start.elapsed() < Duration::from_secs(900),
-            Invalid {
-                reason: "timed out waiting for table result"
-            }
-        );
         if let Some(outputs) = read::<Outputs>(store, &result_key).await? {
             let files = outputs.get(&id).ok_or_else(|| {
                 Invalid {
@@ -464,137 +531,139 @@ pub(crate) async fn merge(
                 ..Default::default()
             });
         }
-        if id.region_number() == 0 {
-            for n in 0..region_count(id) {
-                if !ready.contains_key(&n)
-                    && let Some(r) =
-                        read::<Reservation>(store, &format!("{root}/ready-{n}")).await?
-                {
-                    ready.insert(n, r);
-                }
+        ensure!(
+            id.region_number() == owner,
+            Invalid {
+                reason: "result not ready at dispatch"
             }
-            if ready.len() == region_count(id) as usize {
-                let ready_wait = wait_start.elapsed();
-                let mut targets = BTreeMap::new();
-                let mut expressions = Vec::new();
-                for (n, r) in &ready {
-                    ensure!(
-                        r.metadata.region_id == RegionId::new(id.table_id(), *n)
-                            && r.inputs.iter().map(|f| f.file_id).eq(ids.iter().copied()),
-                        Invalid {
-                            reason: "conflicting reservation"
-                        }
-                    );
-                    let expr =
-                        crate::region::parse_partition_expr(r.metadata.partition_expr.as_deref())?
-                            .ok_or_else(|| {
-                                Invalid {
-                                    reason: "missing partition expression",
-                                }
-                                .build()
-                            })?;
-                    expressions.push(expr);
-                    targets.insert(
-                        r.metadata.region_id,
-                        MultiRegionTarget {
-                            metadata: Arc::new(r.metadata.clone()),
-                            options: r.options.clone(),
-                            inputs: r.inputs.iter().map(|f| (f.file_id(), f.clone())).collect(),
-                        },
-                    );
+        );
+        let ready = ready_regions(store, &root, region_count(id))
+            .await?
+            .ok_or_else(|| {
+                Invalid {
+                    reason: "source owner dispatched before readiness",
                 }
-                let mut columns = std::collections::HashSet::new();
-                for expression in &expressions {
-                    expression.collect_column_names(&mut columns);
+                .build()
+            })?;
+        let mut targets = BTreeMap::new();
+        let mut expressions = Vec::new();
+        for (n, r) in &ready {
+            ensure!(
+                r.metadata.region_id == RegionId::new(id.table_id(), *n)
+                    && r.inputs.iter().map(|f| f.file_id).eq(ids.iter().copied()),
+                Invalid {
+                    reason: "conflicting reservation"
                 }
-                ensure!(
-                    columns.len() == 1,
-                    Invalid {
-                        reason: "expected one partition tag"
-                    }
-                );
-                let rule = MultiDimPartitionRule::try_new(
-                    columns.into_iter().collect(),
-                    (0..region_count(id)).collect(),
-                    expressions,
-                    true,
-                )
-                .context(crate::error::RouteMultiRegionSnafu)?;
-                let plan = MultiRegionCompactionPlan {
-                    partition_rule: Arc::new(rule),
-                    sources: inputs.clone(),
-                    targets,
-                    memory_limit: std::env::var("TESTBED_SHARED_COMPACTION_MEMORY_MIB")
-                        .unwrap_or_else(|_| "8192".into())
-                        .parse::<usize>()
-                        .map_err(|_| {
-                            Invalid {
-                                reason: "invalid shared memory MiB",
-                            }
-                            .build()
-                        })?
-                        .checked_mul(1 << 20)
-                        .ok_or_else(|| {
-                            Invalid {
-                                reason: "shared memory MiB overflow",
-                            }
-                            .build()
-                        })?,
-                    max_active_workers: 2,
-                    spill_limit: 0,
-                    max_output_file_size: 256 << 20,
-                    window_seconds: DAY,
-                };
-                let context = MultiRegionCompactionContext {
-                    access_layer: ctx.access_layer.clone(),
-                    cache: ctx.cache_manager.clone(),
-                    config: ctx.engine_config.clone(),
-                    protection: Arc::new(Guard {
-                        store: store.clone(),
-                        root: root.clone(),
-                    }),
-                    cancellation: cancel.clone(),
-                    spill_directory: Default::default(),
-                };
-                common_telemetry::info!(
-                    "table merge start table={} round={} batch={} memory_limit_bytes={} table_batch_limit={}",
-                    id.table_id(),
-                    round,
-                    index,
-                    plan.memory_limit,
-                    batch_limit()
-                );
-                let execution_start = Instant::now();
-                let output = compact_regions(plan, context).await?;
-                let execution = execution_start.elapsed();
-                ensure!(
-                    output.stats.source_files == *WIDTH as u64
-                        && output.stats.source_rows == output.stats.output_rows,
-                    Invalid {
-                        reason: "table scan accounting mismatch"
-                    }
-                );
-                common_telemetry::info!(
-                    "testbed shared compaction table={} round={} batch={} region_ready_wait_ms={} execution_ms={} stats={:?}",
-                    id.table_id(),
-                    round,
-                    index,
-                    ready_wait.as_millis(),
-                    execution.as_millis(),
-                    output.stats
-                );
-                create(store, &result_key, &output.files).await?;
-                continue;
-            }
+            );
+            let expr = crate::region::parse_partition_expr(r.metadata.partition_expr.as_deref())?
+                .ok_or_else(|| {
+                Invalid {
+                    reason: "missing partition expression",
+                }
+                .build()
+            })?;
+            expressions.push(expr);
+            targets.insert(
+                r.metadata.region_id,
+                MultiRegionTarget {
+                    metadata: Arc::new(r.metadata.clone()),
+                    options: r.options.clone(),
+                    inputs: r.inputs.iter().map(|f| (f.file_id(), f.clone())).collect(),
+                },
+            );
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut columns = std::collections::HashSet::new();
+        for expression in &expressions {
+            expression.collect_column_names(&mut columns);
+        }
+        ensure!(
+            columns.len() == 1,
+            Invalid {
+                reason: "expected one partition tag"
+            }
+        );
+        let rule = MultiDimPartitionRule::try_new(
+            columns.into_iter().collect(),
+            (0..region_count(id)).collect(),
+            expressions,
+            true,
+        )
+        .context(crate::error::RouteMultiRegionSnafu)?;
+        let plan = MultiRegionCompactionPlan {
+            partition_rule: Arc::new(rule),
+            sources: inputs.clone(),
+            targets,
+            memory_limit: std::env::var("TESTBED_SHARED_COMPACTION_MEMORY_MIB")
+                .unwrap_or_else(|_| "8192".into())
+                .parse::<usize>()
+                .map_err(|_| {
+                    Invalid {
+                        reason: "invalid shared memory MiB",
+                    }
+                    .build()
+                })?
+                .checked_mul(1 << 20)
+                .ok_or_else(|| {
+                    Invalid {
+                        reason: "shared memory MiB overflow",
+                    }
+                    .build()
+                })?,
+            max_active_workers: 2,
+            spill_limit: 0,
+            max_output_file_size: 256 << 20,
+            window_seconds: DAY,
+        };
+        let context = MultiRegionCompactionContext {
+            access_layer: ctx.access_layer.clone(),
+            cache: ctx.cache_manager.clone(),
+            config: ctx.engine_config.clone(),
+            protection: Arc::new(Guard {
+                store: store.clone(),
+                root: root.clone(),
+            }),
+            cancellation: cancel.clone(),
+            spill_directory: Default::default(),
+        };
+        common_telemetry::info!(
+            "table merge start table={} owner={} round={} batch={} memory_limit_bytes={} table_batch_limit={}",
+            id.table_id(),
+            owner,
+            round,
+            index,
+            plan.memory_limit,
+            batch_limit()
+        );
+        let execution_start = Instant::now();
+        let output = compact_regions(plan, context).await?;
+        let execution = execution_start.elapsed();
+        ensure!(
+            output.stats.source_files == *WIDTH as u64
+                && output.stats.source_rows == output.stats.output_rows,
+            Invalid {
+                reason: "table scan accounting mismatch"
+            }
+        );
+        common_telemetry::info!(
+            "testbed shared compaction table={} owner={} round={} batch={} region_ready_wait_ms={} execution_ms={} stats={:?}",
+            id.table_id(),
+            owner,
+            round,
+            index,
+            0,
+            execution.as_millis(),
+            output.stats
+        );
+        create(store, &result_key, &output.files).await?;
+        continue;
     }
 }
 
 /// Persist the completion marker after the manifest edit, before the worker
 /// makes the new L1s selectable. This also leaves the old-layout replay intact.
 pub(crate) async fn record_publication(ctx: &CompactionContext, inputs: &[FileMeta]) -> Result<()> {
-    let root = prefix(ctx.region_id, cursor(ctx.region_id));
+    let owner = source_owner(inputs.iter())?.region_number();
+    let root = prefix(ctx.region_id, owner, cursor(ctx.region_id, owner));
     let store = ctx.access_layer.object_store();
     let ids: Vec<FileId> = read(store, &format!("{root}/sources"))
         .await?
@@ -654,5 +723,164 @@ mod readiness_tests {
         assert!(!has_pending_shared_batch(&ssts));
         ssts.add_files(Arc::new(NoopFilePurger), [last].into_iter());
         assert!(has_pending_shared_batch(&ssts));
+    }
+}
+
+// Check immutable readiness markers without reparsing wide Region schemas.
+async fn all_ready(store: &ObjectStore, root: &str, count: u32) -> Result<bool> {
+    for n in 0..count {
+        if !store
+            .exists(&format!("{root}/ready-{n}"))
+            .await
+            .context(OpenDalSnafu)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use crate::compaction::test_util::{new_file_handle, primary_key_metadata_for_test};
+    use crate::sst::file_purger::NoopFilePurger;
+    use crate::sst::version::SstVersion;
+
+    fn input(owner: u32) -> FileMeta {
+        let mut f = new_file_handle(FileId::random(), 0, 100, 0)
+            .meta_ref()
+            .clone();
+        f.region_id = RegionId::new(42, owner);
+        f.partition_expr = None;
+        f.sequence = std::num::NonZeroU64::new(1);
+        f
+    }
+
+    #[test]
+    fn source_owner_is_not_a_partition_filter() {
+        for n in 0..12 {
+            let a = input(n);
+            let b = input(n);
+            assert!(is_shared(&a));
+            assert_eq!(
+                source_owner([&a, &b].into_iter()).unwrap(),
+                RegionId::new(42, n)
+            );
+            let other = input((n + 1) % 12);
+            assert!(source_owner([&a, &other].into_iter()).is_err());
+            let mut routed = b;
+            routed.level = 1;
+            assert!(!is_shared(&routed));
+        }
+        assert!(source_owner(std::iter::empty()).is_err());
+    }
+
+    #[test]
+    fn small_tails_from_different_owners_do_not_form_one_batch() {
+        let mut ssts = SstVersion::new(primary_key_metadata_for_test());
+        let mut files = Vec::new();
+        for owner in 0..12 {
+            files.extend((0..(*WIDTH - 1)).map(|_| input(owner)));
+        }
+        ssts.add_files(Arc::new(NoopFilePurger), files.into_iter());
+        assert!(!has_pending_shared_batch(&ssts));
+        ssts.add_files(Arc::new(NoopFilePurger), [input(7)].into_iter());
+        assert!(has_pending_shared_batch(&ssts));
+    }
+
+    #[test]
+    fn owners_and_followers_have_independent_round_cursors() {
+        let id = RegionId::new(43, 2);
+        CURSORS.lock().unwrap().insert((id, 1), 3);
+        assert_eq!(cursor(id, 1), 3);
+        assert_eq!(cursor(id, 0), 0);
+        assert_eq!(cursor(RegionId::new(43, 3), 1), 0);
+        assert_eq!(prefix(id, 0, 3), "_testbed_table_jobs/43/3");
+        assert_eq!(prefix(id, 1, 3), "_testbed_table_jobs/43/owners/1/3");
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_every_target_and_does_not_wait() {
+        let store =
+            object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap();
+        for n in [2, 0] {
+            store
+                .write(format!("job/ready-{n}").as_str(), "ready")
+                .await
+                .unwrap();
+            assert!(!all_ready(&store, "job", 3).await.unwrap());
+        }
+        store.write("job/ready-1", "ready").await.unwrap();
+        assert!(all_ready(&store, "job", 3).await.unwrap());
+        // A different owner's batch cannot borrow these readiness markers.
+        assert!(!all_ready(&store, "other-job", 3).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn picker_only_dispatches_owner_scan_or_finished_result() {
+        let mut regions = Vec::new();
+        let mut files = Vec::new();
+        for owner in [3, 5] {
+            files.extend((0..*WIDTH).map(|_| {
+                let mut f = input(owner);
+                f.region_id = RegionId::new(98765, owner);
+                f
+            }));
+        }
+        let mut prototype = super::super::new_test_compaction_region().await;
+        prototype.access_layer = Arc::new(crate::access_layer::AccessLayer::new(
+            "",
+            PathType::Data,
+            object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+            prototype.access_layer.puffin_manager_factory().clone(),
+            prototype.access_layer.intermediate_manager().clone(),
+        ));
+        for n in 0..region_count(RegionId::new(98765, 0)) {
+            let mut r = super::super::new_test_compaction_region().await;
+            r.region_id = RegionId::new(98765, n);
+            r.access_layer = prototype.access_layer.clone();
+            let mut metadata = (*r.region_metadata).clone();
+            metadata.region_id = r.region_id;
+            r.region_metadata = Arc::new(metadata);
+            let mut ssts = SstVersion::new(r.region_metadata.clone());
+            ssts.add_files(Arc::new(NoopFilePurger), files.clone().into_iter());
+            r.current_version.ssts = Arc::new(ssts);
+            regions.push(r);
+        }
+        assert!(pick(&regions[3]).await.unwrap().is_none());
+        assert!(pick(&regions[5]).await.unwrap().is_none());
+        for r in &regions {
+            if ![3, 5].contains(&r.region_id.region_number()) {
+                assert!(pick(r).await.unwrap().is_none());
+            }
+        }
+        // Each owner must also join the other's roster, without running it.
+        pick(&regions[3]).await.unwrap();
+        pick(&regions[5]).await.unwrap();
+        for owner in [3usize, 5] {
+            let plan = pick(&regions[owner]).await.unwrap().unwrap();
+            assert_eq!(plan.outputs.len(), 1);
+            assert_eq!(
+                source_owner(plan.outputs[0].inputs.iter().map(|f| f.meta_ref())).unwrap(),
+                regions[owner].region_id
+            );
+        }
+        assert!(pick(&regions[0]).await.unwrap().is_none());
+        let root = prefix(regions[0].region_id, 3, 0);
+        let outputs: Outputs = regions.iter().map(|r| (r.region_id, Vec::new())).collect();
+        create(
+            prototype.access_layer.object_store(),
+            &format!("{root}/result"),
+            &outputs,
+        )
+        .await
+        .unwrap();
+        let publish = pick(&regions[0]).await.unwrap().unwrap();
+        assert_eq!(publish.outputs.len(), 1);
+        assert_eq!(
+            source_owner(publish.outputs[0].inputs.iter().map(|f| f.meta_ref())).unwrap(),
+            regions[3].region_id
+        );
     }
 }
