@@ -85,7 +85,7 @@ impl State for DowngradeLeaderRegion {
                 return Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)));
             }
             Err(err) => {
-                error!(err; "Occurs non-retryable error, region: {:?}", ctx.persistent_ctx.region_ids);
+                error!(err; "Failed to downgrade region leader, region: {:?}", ctx.persistent_ctx.region_ids);
                 if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
                     info!(
                         "Running into the downgrade region leader slow path, region: {:?}, sleep until {:?}",
