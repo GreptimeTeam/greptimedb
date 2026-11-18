@@ -115,6 +115,34 @@ impl Default for ObjectStoreWalConfig {
 }
 
 impl ObjectStoreWalConfig {
+    /// Validates the public root prefix without changing its stored identity.
+    /// Other WAL settings are irrelevant to metasrv and validated by the datanode.
+    pub fn validate_prefix(&self) -> Result<(), &'static str> {
+        let prefix = self.prefix.trim();
+        if prefix.is_empty() {
+            return Err("must not be empty");
+        }
+        if prefix.starts_with('/') {
+            return Err("must be a relative path");
+        }
+        if prefix
+            .split('/')
+            .any(|component| component.is_empty() || component == "..")
+        {
+            return Err("must not contain empty or `..` components");
+        }
+        // The node suffix preserves trailing whitespace in the root's last component.
+        if self
+            .prefix
+            .trim_start()
+            .split('/')
+            .any(|component| component == ".")
+        {
+            return Err("must not contain `.` components");
+        }
+        Ok(())
+    }
+
     /// Returns the prefix the store of `node_id` runs under in `generation`:
     /// `<prefix>/datanodes/<node_id>/epochs/<generation>`.
     ///
@@ -129,6 +157,27 @@ impl ObjectStoreWalConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_prefix() {
+        for prefix in [
+            "", "   ", "/wal", "wal/", "wal//a", "wal/../a", ".", "wal/./a",
+        ] {
+            let config = ObjectStoreWalConfig {
+                prefix: prefix.to_string(),
+                ..Default::default()
+            };
+            assert!(config.validate_prefix().is_err(), "{prefix:?}");
+        }
+        for prefix in ["wal", "tenant/wal", " wal ", "wal/. ", ". "] {
+            let config = ObjectStoreWalConfig {
+                prefix: prefix.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(Ok(()), config.validate_prefix());
+            assert_eq!(prefix, config.prefix);
+        }
+    }
 
     #[test]
     fn test_node_prefix() {
