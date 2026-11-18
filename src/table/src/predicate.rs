@@ -372,7 +372,8 @@ fn regex_column_type(expr: &Expr, schema: &arrow::datatypes::SchemaRef) -> Optio
 /// on every evaluation, because arrow's `regexp_is_match_scalar` compiles the pattern it is given.
 /// A scan evaluates its physical expr once per batch, so that costs one `Regex::new` per batch, and
 /// a series scan evaluates one batch per series. [`SimpleFilterEvaluator`] already holds a compiled
-/// `Regex`; this expression wraps it so a scan pays one compilation and reuses it.
+/// `CompiledRegex`; this expression wraps it so a scan pays one compilation, and the evaluator
+/// then searches a whole batch under one cache acquisition instead of one per row.
 ///
 /// The result is bit-identical to the arrow expression it replaces: `evaluate_array` folds SQL
 /// `NULL` into `false`, so the column's logical nulls are restored afterwards — exactly the validity
@@ -1968,5 +1969,46 @@ mod tests {
             evaluate_rows(&physical, &batch)
         );
         assert_same_regex_result(&expr, &schema, &batch);
+    }
+
+    /// A scan hands one physical expr to every thread that evaluates it, and the precompiled
+    /// expression owns the one cache those threads search with. Sharing it must neither panic nor
+    /// change an answer.
+    #[test]
+    fn test_precompiled_regex_is_shared_between_threads() {
+        let _guard = regex_test_guard();
+
+        let (schema, batch) = regex_batch(
+            DataType::Utf8,
+            Arc::new(StringArray::from(vec![
+                Some("host-a"),
+                None,
+                Some(""),
+                Some("db"),
+                Some("host-b"),
+            ])) as ArrayRef,
+            true,
+        );
+        let expr = regex_expr("host", Operator::RegexMatch, "host.*");
+        let physical = Predicate::to_physical_expr(&expr, &schema).unwrap();
+        assert!(physical.downcast_ref::<PrecompiledRegexExpr>().is_some());
+        let expected = vec![Some(true), None, Some(false), Some(false), Some(true)];
+        assert_eq!(expected, evaluate_rows(&physical, &batch));
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let physical = Arc::clone(&physical);
+                let batch = batch.clone();
+                let expected = expected.clone();
+                scope.spawn(move || {
+                    for _ in 0..50 {
+                        assert_eq!(expected, evaluate_rows(&physical, &batch));
+                    }
+                });
+            }
+        });
+
+        // The concurrent evaluations neither compiled nor changed the expression.
+        assert_eq!(expected, evaluate_rows(&physical, &batch));
     }
 }

@@ -2858,6 +2858,7 @@ dependencies = [
  "jsonb",
  "pin-project",
  "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "snafu 0.8.6",

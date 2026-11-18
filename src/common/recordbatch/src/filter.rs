@@ -37,7 +37,7 @@ use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
-pub use self::predicate::{regexp_is_match_dictionary, regexp_is_match_scalar};
+pub use self::predicate::{CompiledRegex, regexp_is_match_dictionary, regexp_is_match_scalar};
 pub use self::timestamp::timestamp_scalar_value;
 use crate::error::{Result, ToArrowScalarSnafu};
 use crate::filter::predicate::SimplePredicate;
