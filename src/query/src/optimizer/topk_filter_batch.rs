@@ -101,11 +101,17 @@ fn rewrite(plan: Arc<dyn ExecutionPlan>, under_topk: bool) -> Result<Arc<dyn Exe
 
 #[cfg(test)]
 mod tests {
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
+    use datafusion::execution::TaskContext;
     use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
+    use datafusion::physical_plan::collect;
     use datafusion::physical_plan::empty::EmptyExec;
     use datafusion_physical_expr::expressions::{Column, IsNotNullExpr};
     use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
+    use datatypes::arrow::array::{StringArray, TimestampMillisecondArray};
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
 
@@ -184,5 +190,41 @@ mod tests {
 
         let plan = optimize(sort(aggregate, Some(100)));
         assert_eq!(default_size, filter_batch_size(&plan));
+    }
+
+    #[tokio::test]
+    async fn test_filter_with_batch_size_one_keeps_batches_whole() {
+        // The rule relies on the coalescer passing batches through at a target of 1;
+        // splitting them into single rows would multiply the per-batch cost.
+        let schema = filter_over_empty().schema();
+        let batch = |rows: usize| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(vec![0; rows])),
+                    Arc::new(StringArray::from(vec!["a"; rows])),
+                ],
+            )
+            .unwrap()
+        };
+        let input = DataSourceExec::from_data_source(
+            MemorySourceConfig::try_new(
+                &[vec![batch(3), batch(100), batch(100)]],
+                schema.clone(),
+                None,
+            )
+            .unwrap(),
+        );
+        let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 1))));
+        let filter = FilterExec::try_new(predicate, input)
+            .unwrap()
+            .with_batch_size(1)
+            .unwrap();
+
+        let output = collect(Arc::new(filter), Arc::new(TaskContext::default()))
+            .await
+            .unwrap();
+        let sizes: Vec<_> = output.iter().map(|b| b.num_rows()).collect();
+        assert_eq!(vec![3, 100, 100], sizes);
     }
 }
