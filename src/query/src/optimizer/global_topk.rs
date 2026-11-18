@@ -120,49 +120,11 @@ pub(crate) fn filtered_scan_below_topk(sort: &SortExec) -> Result<Option<&Region
 
 #[cfg(test)]
 mod tests {
-    use api::v1::SemanticType;
-    use common_recordbatch::RecordBatches;
     use datafusion_physical_expr::expressions::{Column, IsNotNullExpr};
     use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
-    use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema};
-    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::region_engine::SinglePartitionScanner;
-    use store_api::storage::{RegionId, ScanRequest};
 
     use super::*;
-
-    fn region_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
-        let ts_type = ConcreteDataType::timestamp_millisecond_datatype();
-        let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new("body", ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new("ts", ts_type.clone(), false),
-        ]));
-        let stream = RecordBatches::try_new(schema, vec![]).unwrap().as_stream();
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("body", ConcreteDataType::string_datatype(), true),
-                semantic_type: SemanticType::Field,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("ts", ts_type, false),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 2,
-            });
-        let scanner = Box::new(SinglePartitionScanner::new(
-            stream,
-            false,
-            Arc::new(builder.build().unwrap()),
-            None,
-        ));
-        let scan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
-        Arc::new(
-            scan.with_new_partitions(vec![vec![]; partitions], partitions)
-                .unwrap(),
-        )
-    }
+    use crate::optimizer::test_util::log_region_scan as region_scan;
 
     fn filter(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 0))));

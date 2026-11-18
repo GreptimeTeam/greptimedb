@@ -25,14 +25,18 @@ use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion_common::Result;
 
+use crate::optimizer::windowed_sort::is_time_index_expr;
+
 /// Lets a TopK see filtered rows as soon as it can use them.
 ///
 /// `FilterExec` buffers its output until `batch_size` rows pass. Under a selective
 /// filter a TopK above it receives nothing until the whole input partition is
 /// scanned, so its heap never fills and it never publishes the dynamic filter
-/// threshold that lets the scan skip older files and row groups. This rule sets the
-/// batch size of such filters to 1, which passes each filtered input batch on whole:
-/// the coalescer never splits a batch into pieces of the target size or holds rows back.
+/// threshold that lets the scan skip older files and row groups. For a TopK on the
+/// time index, this rule sets the batch size of such filters to 1, which passes each
+/// filtered input batch on whole: the coalescer never splits a batch into pieces of the
+/// target size or holds rows back. Other sort keys are left alone, since file and row
+/// group ranges rarely let the scan skip anything by them.
 #[derive(Debug)]
 pub struct TopKFilterBatchSize;
 
@@ -54,12 +58,13 @@ impl PhysicalOptimizerRule for TopKFilterBatchSize {
     }
 }
 
-/// `under_topk` is true if a TopK reads `plan`'s output through operators that
-/// neither combine rows nor reorder them by anything but the sort key.
+/// `under_topk` is true if a TopK on the time index reads `plan`'s output through
+/// operators that neither combine rows nor reorder them by anything but the sort key.
 fn rewrite(plan: Arc<dyn ExecutionPlan>, under_topk: bool) -> Result<Arc<dyn ExecutionPlan>> {
     let (plan, child_under_topk) = if let Some(sort) = plan.downcast_ref::<SortExec>() {
-        let is_topk = sort.fetch().is_some();
-        (plan, is_topk)
+        let is_time_topk =
+            sort.fetch().is_some() && is_time_index_expr(sort.input(), &sort.expr().first().expr)?;
+        (plan, is_time_topk)
     } else if let Some(filter) = plan.downcast_ref::<FilterExec>() {
         if under_topk && filter.batch_size() > 1 {
             (
@@ -106,7 +111,6 @@ mod tests {
     use datafusion::execution::TaskContext;
     use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
     use datafusion::physical_plan::collect;
-    use datafusion::physical_plan::empty::EmptyExec;
     use datafusion_physical_expr::expressions::{Column, IsNotNullExpr};
     use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
     use datatypes::arrow::array::{StringArray, TimestampMillisecondArray};
@@ -114,25 +118,20 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
+    use crate::optimizer::test_util::log_region_scan;
 
-    fn filter_over_empty() -> Arc<dyn ExecutionPlan> {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("body", DataType::Utf8, true),
-        ]));
-        let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 1))));
-        Arc::new(FilterExec::try_new(predicate, Arc::new(EmptyExec::new(schema))).unwrap())
+    fn filter_over_scan() -> Arc<dyn ExecutionPlan> {
+        let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 0))));
+        Arc::new(FilterExec::try_new(predicate, log_region_scan(1)).unwrap())
     }
 
-    fn sort(input: Arc<dyn ExecutionPlan>, fetch: Option<usize>) -> Arc<dyn ExecutionPlan> {
-        let ordering = LexOrdering::new(vec![PhysicalSortExpr::new_default(Arc::new(
-            Column::new("ts", 0),
-        ))])
-        .unwrap();
+    fn sort(
+        input: Arc<dyn ExecutionPlan>,
+        key: Column,
+        fetch: Option<usize>,
+    ) -> Arc<dyn ExecutionPlan> {
+        let ordering =
+            LexOrdering::new(vec![PhysicalSortExpr::new_default(Arc::new(key))]).unwrap();
         Arc::new(SortExec::new(ordering, input).with_fetch(fetch))
     }
 
@@ -151,33 +150,39 @@ mod tests {
 
     #[test]
     fn test_topk_flushes_filter_per_batch() {
-        let filter = filter_over_empty();
+        let filter = filter_over_scan();
         let default_size = filter_batch_size(&filter);
         let projection = Arc::new(
             ProjectionExec::try_new(
-                vec![(Arc::new(Column::new("ts", 0)) as _, "ts".to_string())],
+                vec![(Arc::new(Column::new("ts", 1)) as _, "ts".to_string())],
                 filter.clone(),
             )
             .unwrap(),
         );
 
-        let plan = optimize(sort(projection, Some(100)));
+        let plan = optimize(sort(projection, Column::new("ts", 0), Some(100)));
         assert_eq!(1, filter_batch_size(&plan));
 
         // A full sort needs every row; batching does not delay any decision.
-        let plan = optimize(sort(filter.clone(), None));
+        let plan = optimize(sort(filter.clone(), Column::new("ts", 1), None));
         assert_eq!(default_size, filter_batch_size(&plan));
     }
 
     #[test]
-    fn test_aggregate_between_topk_and_filter_keeps_batch_size() {
-        let filter = filter_over_empty();
+    fn test_filter_batch_size_kept_when_topk_cannot_prune() {
+        let filter = filter_over_scan();
         let default_size = filter_batch_size(&filter);
+
+        // The scan cannot skip ranges on a sort key other than the time index.
+        let plan = optimize(sort(filter.clone(), Column::new("body", 0), Some(100)));
+        assert_eq!(default_size, filter_batch_size(&plan));
+
+        // An aggregate combines rows, so its input order does not decide the TopK.
         let aggregate = Arc::new(
             AggregateExec::try_new(
                 AggregateMode::Single,
                 PhysicalGroupBy::new_single(vec![(
-                    Arc::new(Column::new("ts", 0)) as _,
+                    Arc::new(Column::new("ts", 1)) as _,
                     "ts".to_string(),
                 )]),
                 vec![],
@@ -187,8 +192,7 @@ mod tests {
             )
             .unwrap(),
         );
-
-        let plan = optimize(sort(aggregate, Some(100)));
+        let plan = optimize(sort(aggregate, Column::new("ts", 0), Some(100)));
         assert_eq!(default_size, filter_batch_size(&plan));
     }
 
@@ -196,7 +200,14 @@ mod tests {
     async fn test_filter_with_batch_size_one_keeps_batches_whole() {
         // The rule relies on the coalescer passing batches through at a target of 1;
         // splitting them into single rows would multiply the per-batch cost.
-        let schema = filter_over_empty().schema();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("body", DataType::Utf8, true),
+        ]));
         let batch = |rows: usize| {
             RecordBatch::try_new(
                 schema.clone(),

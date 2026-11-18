@@ -23,7 +23,9 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use datatypes::schema::ColumnSchema;
+use common_recordbatch::RecordBatches;
+use datafusion::physical_plan::ExecutionPlan;
+use datatypes::schema::{ColumnSchema, Schema};
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
@@ -31,10 +33,11 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
     RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
     RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
-    SyncRegionFromRequest, SyncRegionFromResponse,
+    SinglePartitionScanner, SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest, SequenceNumber};
+use table::table::scan::RegionScanExec;
 
 use crate::dummy_catalog::DummyTableProvider;
 
@@ -225,4 +228,38 @@ fn mock_region_metadata_with_tsid(region_id: RegionId) -> RegionMetadata {
         })
         .primary_key(vec![1, 2]);
     builder.build().unwrap()
+}
+
+/// A region scan over an empty `(body STRING, ts TIMESTAMP TIME INDEX)` table split
+/// into `partitions` partitions.
+pub(crate) fn log_region_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
+    let ts_type = ConcreteDataType::timestamp_millisecond_datatype();
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("body", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new("ts", ts_type.clone(), false),
+    ]));
+    let stream = RecordBatches::try_new(schema, vec![]).unwrap().as_stream();
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("body", ConcreteDataType::string_datatype(), true),
+            semantic_type: SemanticType::Field,
+            column_id: 1,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("ts", ts_type, false),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 2,
+        });
+    let scanner = Box::new(SinglePartitionScanner::new(
+        stream,
+        false,
+        Arc::new(builder.build().unwrap()),
+        None,
+    ));
+    let scan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
+    Arc::new(
+        scan.with_new_partitions(vec![vec![]; partitions], partitions)
+            .unwrap(),
+    )
 }
