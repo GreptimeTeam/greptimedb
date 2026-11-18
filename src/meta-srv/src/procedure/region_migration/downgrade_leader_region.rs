@@ -164,14 +164,15 @@ impl DowngradeLeaderRegion {
         // manifest updates may still be written, so a missing region does not prove
         // that the leader has stopped.
         if !exists {
-            let reason = format!(
-                "Region {} doesn't exist on datanode {:?}, elapsed: {:?}",
-                region_id,
-                leader,
-                now.elapsed()
-            );
-            warn!("{}", reason);
-            return error::RetryLaterSnafu { reason }.fail();
+            return error::RetryLaterSnafu {
+                reason: format!(
+                    "Region {} doesn't exist on datanode {:?}, elapsed: {:?}",
+                    region_id,
+                    leader,
+                    now.elapsed()
+                ),
+            }
+            .fail();
         }
 
         info!(
@@ -205,7 +206,8 @@ impl DowngradeLeaderRegion {
     /// Retry:
     /// - [MailboxTimeout](error::Error::MailboxTimeout), Timeout.
     /// - The Datanode replies with a retryable error.
-    /// - The Datanode replies without an error that the region doesn't exist.
+    /// - The Datanode replies, without an error, that the region doesn't exist. A closing
+    ///   region leaves the region map while its manifest write may still be in flight.
     ///
     /// Abort:
     /// - The Datanode replies with a non-retryable error.
@@ -260,12 +262,14 @@ impl DowngradeLeaderRegion {
                     .fail();
                 };
 
-                // Handles every reply, so that a failed region does not drop the
-                // last entry ids of the other regions.
                 let mut result = Ok(());
                 for reply in replies {
                     let handled = self.handle_downgrade_region_reply(ctx, &reply, &now);
-                    result = result.and(handled);
+                    // The first failure in reply order decides the retry; later replies
+                    // are still handled so that their last entry ids are recorded.
+                    if result.is_ok() {
+                        result = handled;
+                    }
                 }
                 result
             }
