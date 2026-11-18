@@ -12,13 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{BinaryHeap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::adapter::RegionQueryStatCounters;
+use common_query::series_frame::{
+    PendingBatching, pack_raw_series_with, raw_series_frame_schema_with_ordering,
+};
+use common_recordbatch::adapter::{
+    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+};
 use common_recordbatch::{
     DfRecordBatch, DfSendableRecordBatchStream, MemoryTrackedStream, QueryMemoryTracker,
     RecordBatch, SendableRecordBatchStream,
@@ -50,10 +57,12 @@ use datafusion_physical_expr::{
 };
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
+use datatypes::series::SeriesOrdering;
+use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
+    BoundTag, PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScannerRef,
 };
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
@@ -99,6 +108,66 @@ impl std::fmt::Debug for RegionScanExec {
             .field("pushed_dyn_filters", &self.pushed_dyn_filters)
             .finish()
     }
+}
+
+/// Distribute [`PartitionRange`]s to each partition.
+///
+/// Currently we assign ranges to partitions according to their rows so each partition
+/// has similar number of rows. This method always return `expected_partition_num` partitions.
+pub fn assign_partition_ranges(
+    mut ranges: Vec<PartitionRange>,
+    expected_partition_num: usize,
+) -> Vec<Vec<PartitionRange>> {
+    if ranges.is_empty() {
+        // Returns a single partition with no range.
+        return vec![vec![]; expected_partition_num];
+    }
+
+    if ranges.len() == 1 {
+        let mut vec = vec![vec![]; expected_partition_num];
+        vec[0] = ranges;
+        return vec;
+    }
+
+    // Sort ranges by number of rows in descending order.
+    ranges.sort_by_key(|b| std::cmp::Reverse(b.num_rows));
+    let mut partition_ranges = vec![vec![]; expected_partition_num];
+
+    #[derive(Eq, PartialEq)]
+    struct HeapNode {
+        num_rows: usize,
+        partition_idx: usize,
+    }
+
+    impl Ord for HeapNode {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            // Reverse for min-heap.
+            self.num_rows.cmp(&other.num_rows).reverse()
+        }
+    }
+
+    impl PartialOrd for HeapNode {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    let mut part_heap =
+        BinaryHeap::from_iter((0..expected_partition_num).map(|partition_idx| HeapNode {
+            num_rows: 0,
+            partition_idx,
+        }));
+
+    // Assigns the range to the partition with the smallest number of rows.
+    for range in ranges {
+        let mut node = part_heap.pop().unwrap();
+        let partition_idx = node.partition_idx;
+        node.num_rows += range.num_rows;
+        partition_ranges[partition_idx].push(range);
+        part_heap.push(node);
+    }
+
+    partition_ranges
 }
 
 impl RegionScanExec {
@@ -404,6 +473,425 @@ impl RegionScanExec {
             .properties()
             .query_stat_counters()
     }
+
+    /// Resolves authorized logical names against this prepared scanner's physical metadata,
+    /// then selects a native raw-series leaf.
+    ///
+    /// The caller is responsible for authorizing the logical table and supplying its complete
+    /// logical tag names and requested field names. This method resolves them only against this
+    /// scanner's metadata snapshot.
+    pub fn try_to_named_series_scan(
+        self: Arc<Self>,
+        metric_name: &str,
+        logical_tags: &[String],
+        field_names: &[String],
+    ) -> DfResult<Option<Arc<SeriesScanExec>>> {
+        if !self.is_partition_set || field_names.is_empty() {
+            return Ok(None);
+        }
+        if !self.pushed_dyn_filters.lock().unwrap().is_empty() {
+            return Ok(None);
+        }
+        let (metadata, expected_field_ids, fields, tags) = {
+            let scanner = self.scanner.lock().unwrap();
+            let metadata = scanner.metadata();
+            let primary_key_ids = metadata
+                .primary_key_columns()
+                .map(|column| column.column_id)
+                .collect::<HashSet<_>>();
+            let mut names = HashSet::new();
+            let mut column_ids = HashSet::new();
+            let mut tags = Vec::with_capacity(logical_tags.len());
+            for name in logical_tags {
+                if !names.insert(name.as_str())
+                    || name == "__name__"
+                    || store_api::metric_engine_consts::is_metric_engine_internal_column(name)
+                    || store_api::storage::consts::is_internal_column(name)
+                {
+                    return Ok(None);
+                }
+                let Some(column) = metadata.column_by_name(name) else {
+                    return Ok(None);
+                };
+                if column.semantic_type != SemanticType::Tag
+                    || store_api::storage::consts::ReservedColumnId::is_reserved(column.column_id)
+                    || !primary_key_ids.contains(&column.column_id)
+                    || !column_ids.insert(column.column_id)
+                {
+                    return Ok(None);
+                }
+                tags.push(BoundTag {
+                    column_id: column.column_id,
+                    name: Arc::from(name.as_str()),
+                });
+            }
+
+            let mut fields = Vec::with_capacity(field_names.len());
+            let mut expected_field_ids = Vec::with_capacity(field_names.len());
+            for name in field_names {
+                if !names.insert(name.as_str())
+                    || name == "__name__"
+                    || store_api::metric_engine_consts::is_metric_engine_internal_column(name)
+                    || store_api::storage::consts::is_internal_column(name)
+                {
+                    return Ok(None);
+                }
+                let Some(column) = metadata.column_by_name(name) else {
+                    return Ok(None);
+                };
+                if column.semantic_type != SemanticType::Field
+                    || store_api::storage::consts::ReservedColumnId::is_reserved(column.column_id)
+                    || !column_ids.insert(column.column_id)
+                {
+                    return Ok(None);
+                }
+                expected_field_ids.push(column.column_id);
+                fields.push(FieldSpec {
+                    name: Arc::from(name.as_str()),
+                });
+            }
+            (metadata, expected_field_ids, fields, tags)
+        };
+        // The requested field sequence must exactly match the scanner's projected field IDs.
+        let projected = self
+            .arrow_schema
+            .fields()
+            .iter()
+            .filter_map(|field| {
+                metadata
+                    .column_by_name(field.name())
+                    .filter(|column| column.semantic_type == SemanticType::Field)
+                    .map(|column| column.column_id)
+            })
+            .collect::<Vec<_>>();
+        if expected_field_ids != projected {
+            return Ok(None);
+        }
+        let source = RawLabelSource::PrimaryKey {
+            metric_name: Arc::from(metric_name),
+            physical_metadata: metadata,
+            logical_tags: tags.into(),
+        };
+        let schema = Arc::new(SeriesSchema {
+            fields: fields.into(),
+            eval_grid: None,
+        });
+        let Some(native) = self.try_to_series_scan(source)? else {
+            return Ok(None);
+        };
+        if native.series_schema.eval_grid.is_some()
+            || native.series_schema.fields.len() != schema.fields.len()
+            || native
+                .series_schema
+                .fields
+                .iter()
+                .zip(schema.fields.iter())
+                .any(|(actual, expected)| actual.name != expected.name)
+        {
+            return Ok(None);
+        }
+        Ok(Some(native))
+    }
+
+    /// Builds a native raw-series leaf when the scanner's current preparation supports it.
+    /// Finish partition preparation before selecting or executing this leaf. Callers must
+    /// already have resolved the authorized scanner and logical binding; this method does not
+    /// authenticate them.
+    pub fn try_to_series_scan(
+        self: Arc<Self>,
+        label_source: RawLabelSource,
+    ) -> DfResult<Option<Arc<SeriesScanExec>>> {
+        if !self.pushed_dyn_filters.lock().unwrap().is_empty() {
+            return Ok(None);
+        }
+        let scanner = self.scanner.lock().unwrap();
+        let Some(schema) = scanner
+            .raw_series_schema(&label_source)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        else {
+            return Ok(None);
+        };
+        let ordering = scanner
+            .raw_series_ordering()
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        // A scan's planned ordering is a guarantee its own partitions keep. Interleaved is a
+        // transport annotation for fragments several producers contribute; it is not something a
+        // single scanner can promise, so a scan that planned it is refused here.
+        if ordering == SeriesOrdering::Interleaved {
+            return Err(DataFusionError::Plan(
+                "a scan cannot plan interleaved raw series ordering".into(),
+            ));
+        }
+        let frame_labels = if scanner
+            .raw_series_has_explicit_labels(&label_source)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        {
+            RawLabelSource::Explicit
+        } else {
+            label_source.clone()
+        };
+        let arrow_schema = raw_series_frame_schema_with_ordering(&schema, &frame_labels, ordering)?;
+        let partition_count = scanner.properties().num_partitions().max(1);
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(arrow_schema.clone()),
+            Partitioning::UnknownPartitioning(partition_count),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        drop(scanner);
+        Ok(Some(Arc::new(SeriesScanExec {
+            scan: self,
+            label_source: frame_labels,
+            scan_binding: label_source,
+            series_schema: schema,
+            arrow_schema,
+            ordering,
+            properties,
+        })))
+    }
+}
+
+/// Native physical leaf that packs a prepared region scanner's raw series chunks.
+/// Do not prepare, reset, or execute concurrently through scanner aliases.
+pub struct SeriesScanExec {
+    label_source: RawLabelSource,
+    scan: Arc<RegionScanExec>,
+    scan_binding: RawLabelSource,
+    series_schema: Arc<SeriesSchema>,
+    arrow_schema: ArrowSchemaRef,
+    ordering: SeriesOrdering,
+    properties: Arc<PlanProperties>,
+}
+
+impl std::fmt::Debug for SeriesScanExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let source = match &self.scan_binding {
+            RawLabelSource::Explicit => "explicit",
+            RawLabelSource::PrimaryKey { .. } => "primary_key",
+        };
+        f.debug_struct("SeriesScanExec")
+            .field("source", &source)
+            .field("fields", &self.series_schema.fields.len())
+            .field(
+                "partitions",
+                &self.properties.output_partitioning().partition_count(),
+            )
+            .finish()
+    }
+}
+
+impl SeriesScanExec {
+    /// Returns the immutable label binding supplied to the storage scan.
+    pub fn scan_binding(&self) -> &RawLabelSource {
+        &self.scan_binding
+    }
+
+    /// Returns the label representation carried by output frames.
+    pub fn label_source(&self) -> &RawLabelSource {
+        &self.label_source
+    }
+    pub fn series_schema(&self) -> &Arc<SeriesSchema> {
+        &self.series_schema
+    }
+
+    /// Returns the producer ordering captured when this scan was prepared.
+    pub fn raw_series_ordering(&self) -> SeriesOrdering {
+        self.ordering
+    }
+
+    pub fn query_load_region_id(&self) -> Option<u64> {
+        self.scan.query_load_region_id()
+    }
+
+    pub fn query_stat_counters(&self) -> Option<RegionQueryStatCounters> {
+        self.scan.query_stat_counters()
+    }
+}
+
+fn same_label_source(left: &RawLabelSource, right: &RawLabelSource) -> bool {
+    match (left, right) {
+        (RawLabelSource::Explicit, RawLabelSource::Explicit) => true,
+        (
+            RawLabelSource::PrimaryKey {
+                metric_name: lm,
+                physical_metadata: lp,
+                logical_tags: lt,
+            },
+            RawLabelSource::PrimaryKey {
+                metric_name: rm,
+                physical_metadata: rp,
+                logical_tags: rt,
+            },
+        ) => {
+            lm == rm
+                && Arc::ptr_eq(lp, rp)
+                && lt.len() == rt.len()
+                && lt
+                    .iter()
+                    .zip(rt.iter())
+                    .all(|(l, r)| l.name == r.name && l.column_id == r.column_id)
+        }
+        _ => false,
+    }
+}
+
+impl DisplayAs for SeriesScanExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let source = match &self.scan_binding {
+            RawLabelSource::Explicit => "explicit",
+            RawLabelSource::PrimaryKey { .. } => "primary_key",
+        };
+        write!(
+            f,
+            "SeriesScanExec: source={source}, fields={}, partitions={}",
+            self.series_schema.fields.len(),
+            self.properties.output_partitioning().partition_count()
+        )
+    }
+}
+
+impl ExecutionPlan for SeriesScanExec {
+    fn schema(&self) -> ArrowSchemaRef {
+        self.arrow_schema.clone()
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+        if !children.is_empty() {
+            return Err(DataFusionError::Plan("SeriesScanExec is a leaf".into()));
+        }
+        Ok(self)
+    }
+    fn name(&self) -> &str {
+        SERIES_SCAN_EXEC_NAME
+    }
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.scan.metric.clone_inner())
+    }
+    fn reset_state(self: Arc<Self>) -> DfResult<Arc<dyn ExecutionPlan>> {
+        self.scan.scanner.lock().unwrap().reset_state();
+        self.scan.pushed_dyn_filters.lock().unwrap().clear();
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+        let partitions = self.properties.output_partitioning().partition_count();
+        if partition >= partitions {
+            return Err(DataFusionError::Execution(format!(
+                "partition {partition} out of bounds for {partitions} partitions"
+            )));
+        }
+        if !self.scan.pushed_dyn_filters.lock().unwrap().is_empty() {
+            return Err(DataFusionError::Execution(
+                "dynamic filters changed after native series planning".into(),
+            ));
+        }
+        let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let span = tracing_context.attach(common_telemetry::tracing::info_span!(
+            "read_from_region",
+            partition = partition
+        ));
+        let _enter = span.enter();
+        let ctx = QueryScanContext {
+            explain_verbose: self.scan.explain_verbose,
+            memory_pool: context.memory_pool().clone(),
+        };
+        let scanner = self.scan.scanner.lock().unwrap();
+        let current = scanner
+            .raw_series_schema(&self.scan_binding)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+            .ok_or_else(|| {
+                DataFusionError::Execution("raw series capability changed after planning".into())
+            })?;
+        let current_ordering = scanner
+            .raw_series_ordering()
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let frame_labels = if scanner
+            .raw_series_has_explicit_labels(&self.scan_binding)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        {
+            RawLabelSource::Explicit
+        } else {
+            self.scan_binding.clone()
+        };
+        let current_frame =
+            raw_series_frame_schema_with_ordering(&current, &frame_labels, current_ordering)?;
+        if current_frame != self.arrow_schema
+            || scanner.properties().num_partitions().max(1) != partitions
+        {
+            return Err(DataFusionError::Execution(
+                "raw series schema or prepared partitions changed after planning".into(),
+            ));
+        }
+        let raw = scanner
+            .scan_series_partition(&ctx, &self.scan.metric, partition, &self.scan_binding)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "raw series capability disappeared during execution".into(),
+                )
+            })?;
+        if raw.ordering() != current_ordering {
+            return Err(DataFusionError::Execution(
+                "raw series stream ordering does not match its planned guarantee".into(),
+            ));
+        }
+        if raw.schema().fields.len() != self.series_schema.fields.len()
+            || raw
+                .schema()
+                .fields
+                .iter()
+                .zip(self.series_schema.fields.iter())
+                .any(|(a, b)| a.name != b.name)
+            || raw.schema().eval_grid.is_some()
+            || !same_label_source(raw.label_source(), &self.scan_binding)
+        {
+            return Err(DataFusionError::Execution(
+                "raw series stream does not match its planned binding".into(),
+            ));
+        }
+        // This stream is polled by the query engine's DataFusion execution, whose runtimes are
+        // built with the time driver enabled, so the packer may hold a partially filled batch across
+        // a pending period instead of publishing one batch per source wakeup.
+        let packed = pack_raw_series_with(raw, PendingBatching::Deadline)?;
+        if packed.schema() != self.arrow_schema {
+            return Err(DataFusionError::Execution(
+                "raw series label representation changed after planning".into(),
+            ));
+        }
+        let stream = RecordBatchStreamAdapter::try_new(packed)
+            .map_err(|e| DataFusionError::External(Box::new(BoxedError::new(e))))?;
+        let stream: SendableRecordBatchStream = Box::pin(stream);
+        let stream = if let Some(tracker) = &self.scan.query_memory_tracker {
+            Box::pin(MemoryTrackedStream::new(stream, tracker.clone())) as SendableRecordBatchStream
+        } else {
+            stream
+        };
+        drop(_enter);
+        Ok(Box::pin(StreamWithMetricWrapper {
+            stream,
+            metric: StreamMetrics::new(&self.scan.metric, partition),
+            span,
+            await_timer: None,
+            dyn_filter: None,
+        }))
+    }
 }
 
 impl ExecutionPlan for RegionScanExec {
@@ -691,6 +1179,10 @@ impl DfRecordBatchStream for StreamWithMetricWrapper {
 }
 
 #[cfg(test)]
+#[path = "scan/series_tests.rs"]
+mod series_tests;
+
+#[cfg(test)]
 mod test {
     use std::any::Any;
     use std::fmt;
@@ -885,6 +1377,102 @@ mod test {
             schema,
             RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap(),
         )
+    }
+
+    #[test]
+    fn assign_partition_ranges_balances_rows_deterministically() {
+        let ranges: Vec<_> = [100, 200, 150, 250]
+            .into_iter()
+            .enumerate()
+            .map(|(identifier, num_rows)| PartitionRange {
+                start: common_time::Timestamp::new(
+                    identifier as i64,
+                    common_time::timestamp::TimeUnit::Second,
+                ),
+                end: common_time::Timestamp::new(
+                    identifier as i64 + 1,
+                    common_time::timestamp::TimeUnit::Second,
+                ),
+                num_rows,
+                identifier: identifier + 1,
+            })
+            .collect();
+        let assigned = assign_partition_ranges(ranges.clone(), 2);
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|partition| {
+                    partition
+                        .iter()
+                        .map(|range| range.identifier)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![vec![4, 1], vec![2, 3]]
+        );
+        let mut assigned_identifiers = assigned
+            .iter()
+            .flatten()
+            .map(|range| range.identifier)
+            .collect::<Vec<_>>();
+        assigned_identifiers.sort_unstable();
+        assert_eq!(assigned_identifiers, vec![1, 2, 3, 4]);
+
+        let assigned = assign_partition_ranges(ranges.clone(), 5);
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|partition| {
+                    partition
+                        .iter()
+                        .map(|range| range.identifier)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![vec![4], vec![1], vec![2], vec![], vec![3]]
+        );
+        let mut assigned_identifiers = assigned
+            .iter()
+            .flatten()
+            .map(|range| range.identifier)
+            .collect::<Vec<_>>();
+        assigned_identifiers.sort_unstable();
+        assert_eq!(assigned_identifiers, vec![1, 2, 3, 4]);
+
+        assert_eq!(assign_partition_ranges(vec![], 5), vec![vec![]; 5]);
+    }
+
+    #[test]
+    fn named_series_scan_requires_prepared_scanner_and_valid_names() {
+        let (_, plan) = dynamic_filter_fixture(5686);
+        let plan = Arc::new(plan);
+        assert!(
+            plan.clone()
+                .try_to_named_series_scan("cpu", &[], &["a".to_string()])
+                .unwrap()
+                .is_none()
+        );
+
+        let prepared = Arc::new(
+            plan.with_new_partitions(vec![vec![]], 1)
+                .expect("prepare scanner partitions"),
+        );
+        for (tags, fields) in [
+            (vec![], vec!["missing".to_string()]),
+            (vec!["a".to_string()], vec!["a".to_string()]),
+            (
+                vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string()],
+                vec!["a".to_string()],
+            ),
+        ] {
+            assert!(
+                prepared
+                    .clone()
+                    .try_to_named_series_scan("cpu", &tags, &fields)
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

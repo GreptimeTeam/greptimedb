@@ -481,7 +481,8 @@ impl RegionOpener {
             region_id,
             compaction_state: Default::default(),
             version_control,
-            series_index_version_control: Default::default(),
+            series_index_version_control: crate::series_index::SeriesIndexVersionControl::default()
+                .with_format(config.experimental_series_index_format),
             series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is writable after it is created.
@@ -744,7 +745,8 @@ impl RegionOpener {
             region_id: self.region_id,
             compaction_state: Default::default(),
             version_control: version_control.clone(),
-            series_index_version_control,
+            series_index_version_control: series_index_version_control
+                .with_format(config.experimental_series_index_format),
             series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.

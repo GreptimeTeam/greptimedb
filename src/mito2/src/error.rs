@@ -622,6 +622,14 @@ pub enum Error {
         error: datafusion::error::DataFusionError,
     },
 
+    #[snafu(display("Scan memory exhausted"))]
+    ScanMemoryExhausted {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
     #[snafu(display("Failed to compute vector"))]
     ComputeVector {
         #[snafu(implicit)]
@@ -1830,6 +1838,8 @@ impl ErrorExt for Error {
             // the conflict is reported to the caller, which decides whether to
             // issue a new request after the running one finishes.
             ManualCompactionAlreadyRunning { .. } => StatusCode::RegionBusy,
+
+            ScanMemoryExhausted { .. } => StatusCode::RuntimeResourcesExhausted,
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 

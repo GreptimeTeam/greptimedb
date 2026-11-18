@@ -16,6 +16,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::promql::native_compile::{compile, statement_grid};
 use arrow::datatypes::{DataType, IntervalDayTime, TimeUnit};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_error::ext::BoxedError;
@@ -43,10 +44,14 @@ use datafusion_functions::datetime::expr_fn::now;
 use datafusion_functions::unicode::expr_fn::substring;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::series::SeriesOrdering;
+use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
-use promql::extension_plan::{HistogramFold, HistogramFoldOperation};
+use promql::extension_plan::{
+    FusedSeries, FusedSeriesBinding, HistogramFold, HistogramFoldOperation,
+};
 use regex::Regex;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
@@ -67,6 +72,33 @@ fn collect_merge_scan_remote_dyn_filter_producer_ids(
     let mut producer_id_list = Vec::new();
     collect_merge_scan_remote_dyn_filter_producer_id_list(plan, &mut producer_id_list);
     producer_ids.extend(producer_id_list);
+}
+
+/// The analyzer an engine that plans distributed statements builds: every plan a region receives
+/// from it has to be encodable.
+fn analyzer() -> DistPlannerAnalyzer {
+    DistPlannerAnalyzer::default()
+}
+
+#[test]
+fn ordinary_encodable_plan_reports_encodability() {
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    assert!(
+        DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .is_ok()
+    );
+
+    let rewriter = PlanRewriter::new(&plan);
+    assert!(rewriter.whole_plan_encodable);
 }
 
 struct MergeScanRemoteDynFilterProducerIdCollector<'a> {
@@ -291,6 +323,139 @@ impl Stream for EmptyStream {
     }
 }
 
+fn hybrid_fused(scan: LogicalPlan, metric: &str) -> LogicalPlan {
+    let stmt = promql_parser::parser::EvalStmt {
+        expr: promql_parser::parser::parse(metric).unwrap(),
+        start: std::time::UNIX_EPOCH,
+        end: std::time::UNIX_EPOCH + std::time::Duration::from_secs(10),
+        interval: std::time::Duration::from_secs(1),
+        lookback_delta: std::time::Duration::from_secs(1),
+    };
+    let series = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec { name: "v0".into() }]),
+        eval_grid: None,
+    });
+    let tree = compile(&stmt, series, SeriesOrdering::KeyThenTime).unwrap();
+    let fused = FusedSeries::try_new(
+        Arc::from(metric),
+        tree,
+        FusedSeriesBinding {
+            grid: statement_grid(&stmt).unwrap(),
+            time_index: "ts".into(),
+            tags: vec![],
+            metric_name: Some(Arc::from(metric)),
+        },
+        vec![scan],
+        Arc::new(
+            datafusion_common::DFSchema::try_from(arrow::datatypes::Schema::new(vec![
+                arrow::datatypes::Field::new("v0", DataType::Float64, true),
+            ]))
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(fused),
+    })
+}
+
+fn count_merge_scans(plan: &LogicalPlan) -> usize {
+    usize::from(
+        matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<MergeScanLogicalPlan>()),
+    ) + plan
+        .inputs()
+        .iter()
+        .map(|input| count_merge_scans(input))
+        .sum::<usize>()
+}
+
+#[test]
+fn hybrid_binary_join_rewrites_each_native_operand_boundary() {
+    let left_table = TestTable::table_with_name(0, "left_metric".into());
+    let right_table = TestTable::table_with_name(1, "right_metric".into());
+    let scan = |table: TableRef| {
+        LogicalPlanBuilder::scan(
+            table.table_info().name.clone(),
+            Arc::new(DefaultTableSource::new(Arc::new(
+                DfTableProviderAdapter::new(table),
+            ))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    };
+    let left = LogicalPlanBuilder::from(hybrid_fused(scan(left_table), "left_metric"))
+        .alias(TableReference::bare("left_metric"))
+        .unwrap()
+        .build()
+        .unwrap();
+    let right = LogicalPlanBuilder::from(hybrid_fused(scan(right_table), "right_metric"))
+        .alias(TableReference::bare("right_metric"))
+        .unwrap()
+        .build()
+        .unwrap();
+    let plan = LogicalPlanBuilder::from(left)
+        .join(
+            LogicalPlanBuilder::from(right).build().unwrap(),
+            JoinType::Inner,
+            (vec![Column::from_name("v0")], vec![Column::from_name("v0")]),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let rewritten = DistPlannerAnalyzer::default().try_push_down(plan).unwrap();
+    let LogicalPlan::Join(join) = &rewritten else {
+        panic!("Join must remain frontend: {rewritten}");
+    };
+    for (side, expected_table) in [(&join.left, "left_metric"), (&join.right, "right_metric")] {
+        assert_eq!(1, count_merge_scans(side), "{rewritten}");
+        assert_no_fused_series_outside_merge_scan(side);
+
+        let merge_scan = find_merge_scan(side).expect("each join operand has a MergeScan");
+        let LogicalPlan::Extension(extension) = merge_scan.input() else {
+            panic!("MergeScan remote input must be a FusedSeries root");
+        };
+        let fused = extension
+            .node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .expect("MergeScan remote input must be a FusedSeries root");
+        assert!(
+            fused
+                .tree()
+                .to_string()
+                .contains("Input: raw samples source=0")
+        );
+        assert_eq!(1, fused.children().len());
+        let [LogicalPlan::TableScan(table_scan)] = fused.children() else {
+            panic!("FusedSeries operand must directly consume a TableScan: {fused:?}");
+        };
+        assert_eq!(expected_table, table_scan.table_name.to_string());
+    }
+    assert_eq!(
+        2,
+        count_merge_scans(&rewritten),
+        "Join must be outside both MergeScans: {rewritten}"
+    );
+}
+
+fn assert_no_fused_series_outside_merge_scan(plan: &LogicalPlan) {
+    if let LogicalPlan::Extension(extension) = plan {
+        if extension.node.as_any().is::<MergeScanLogicalPlan>() {
+            return;
+        }
+        assert!(
+            !extension.node.as_any().is::<FusedSeries>(),
+            "FusedSeries must be contained in a MergeScan remote input: {plan}"
+        );
+    }
+    for input in plan.inputs() {
+        assert_no_fused_series_outside_merge_scan(input);
+    }
+}
+
 fn find_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
     if let LogicalPlan::Extension(extension) = plan
         && let Some(merge_scan) = extension
@@ -396,8 +561,8 @@ fn frontend_only_histogram_folds_stay_above_merge_scan() {
             "{name}"
         );
 
-        let result = DistPlannerAnalyzer {}
-            .analyze(plan, &ConfigOptions::default())
+        let result = DistPlannerAnalyzer::default()
+            .analyze(plan.clone(), &ConfigOptions::default())
             .unwrap();
         let result_text = result.to_string();
         assert!(
@@ -443,8 +608,8 @@ fn unencodable_unnest_stays_above_merge_scan() {
             .is_err()
     );
 
-    let result = DistPlannerAnalyzer {}
-        .analyze(plan, &ConfigOptions::default())
+    let result = DistPlannerAnalyzer::default()
+        .analyze(plan.clone(), &ConfigOptions::default())
         .unwrap();
     let result_text = result.to_string();
     assert!(result_text.contains("Unnest:"), "{result_text}");
@@ -456,6 +621,189 @@ fn unencodable_unnest_stays_above_merge_scan() {
     DFLogicalSubstraitConvertor
         .encode(remote_input, DefaultSerializer)
         .unwrap();
+}
+
+/// A scan of the test table qualified by `alias`, so one table can stand on both sides of a join.
+fn aliased_scan(alias: &str) -> LogicalPlan {
+    let table = TestTable::table_with_name(0, "t".to_string());
+    LogicalPlanBuilder::scan(
+        "t",
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(table),
+        ))),
+        None,
+    )
+    .unwrap()
+    .alias(TableReference::bare(alias))
+    .unwrap()
+    .build()
+    .unwrap()
+}
+
+/// `Projection → Join → two aliased scans`: a real join, wrapped the way a query plan wraps one.
+fn join_under_projection() -> LogicalPlan {
+    LogicalPlanBuilder::from(aliased_scan("l"))
+        .join(
+            aliased_scan("r"),
+            JoinType::Inner,
+            (
+                vec![Column::new(Some(TableReference::bare("l")), "number")],
+                vec![Column::new(Some(TableReference::bare("r")), "number")],
+            ),
+            None,
+        )
+        .unwrap()
+        .project(vec![col("l.number")])
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// The same join, with one input deeper than the other, so a plan inside one branch has a level no
+/// node of the other branch shares.
+fn lopsided_join_under_projection() -> LogicalPlan {
+    let left = LogicalPlanBuilder::from(aliased_scan("l"))
+        .project(vec![col("l.number"), col("l.pk1")])
+        .unwrap()
+        .project(vec![col("l.number")])
+        .unwrap()
+        .build()
+        .unwrap();
+    LogicalPlanBuilder::from(left)
+        .join(
+            aliased_scan("r"),
+            JoinType::Inner,
+            (
+                vec![Column::new(Some(TableReference::bare("l")), "number")],
+                vec![Column::new(Some(TableReference::bare("r")), "number")],
+            ),
+            None,
+        )
+        .unwrap()
+        .project(vec![col("l.number")])
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// A multi-input node is only the requirement rewriter's business when a requirement has to travel
+/// through it. With nothing to require there is nothing to enforce, and the subtree comes back
+/// exactly as it went in: the join is not rejected for having two inputs.
+#[test]
+fn empty_requirements_leave_a_multi_input_subtree_untouched() {
+    let plan = join_under_projection();
+    let LogicalPlan::Projection(projection) = &plan else {
+        panic!("expected the join under a projection: {plan}");
+    };
+    assert!(
+        matches!(projection.input.as_ref(), LogicalPlan::Join(_)),
+        "the join must be part of the subtree: {plan}"
+    );
+
+    let mut rewriter = EnforceDistRequirementRewriter::new(Vec::new(), 1);
+    assert!(!rewriter.has_applicable_requirements());
+    let rewritten = plan.clone().rewrite(&mut rewriter).unwrap().data;
+
+    assert_eq!(plan, rewritten);
+    assert!(
+        rewriter.visited.len() > 3,
+        "the rewrite did walk both join inputs"
+    );
+
+    // The same plan through the analyzer, which reaches the same conclusion and carries on: a join
+    // nothing requires a column of is planned as before.
+    let analyzed = DistPlannerAnalyzer::default()
+        .analyze(plan.clone(), &ConfigOptions::default())
+        .unwrap();
+    assert_eq!(
+        2,
+        count_merge_scans(&analyzed),
+        "each join input keeps its own region: {analyzed}"
+    );
+}
+
+/// A requirement is still satisfied: the projection that has to publish a required column gets it,
+/// even though the plan that required it is a level below.
+#[test]
+fn a_projection_publishes_the_column_a_plan_below_it_requires() {
+    let plan = LogicalPlanBuilder::from(aliased_scan("t"))
+        .project(vec![col("t.number"), col("t.pk1")])
+        .unwrap()
+        .project(vec![col("t.number")])
+        .unwrap()
+        .build()
+        .unwrap();
+    let LogicalPlan::Projection(outer) = &plan else {
+        panic!("expected a projection at the root: {plan}");
+    };
+    let LogicalPlan::Projection(inner) = outer.input.as_ref() else {
+        panic!("expected the repaired projection over a projection: {plan}");
+    };
+    assert_eq!(2, inner.expr.len(), "the inner projection exposes pk1");
+
+    // `pk1` as the inner projection publishes it, required at that projection's own level.
+    let mut requirement = EnforceDistRequirementRewriter::new(
+        vec![(
+            HashSet::from([Column::new(Some(TableReference::bare("t")), "pk1")]),
+            2,
+        )],
+        1,
+    );
+    assert!(requirement.has_applicable_requirements());
+    let rewritten = plan.clone().rewrite(&mut requirement).unwrap().data;
+
+    assert_eq!(
+        [
+            "Projection: t.number, t.pk1",
+            "  Projection: t.number, t.pk1",
+            "    SubqueryAlias: t",
+            "      TableScan: t",
+        ]
+        .join("\n"),
+        rewritten.to_string(),
+        "the outer projection republishes the required column"
+    );
+}
+
+/// A requirement whose lineage runs through a real join is refused rather than guessed at.
+///
+/// A requirement was made inside a join input. Neither direction of the join maps a column of an
+/// output row to a column of one input: an input can be reached through the join only by picking a
+/// branch, and a level both inputs have names two possible origins. Both cases stop the rewrite with
+/// an error instead of publishing a column that may come from the wrong side.
+#[test]
+fn a_requirement_that_has_to_cross_a_join_is_refused() {
+    let required = |plan: &str, level: usize| {
+        EnforceDistRequirementRewriter::new(
+            vec![(
+                HashSet::from([Column::new(Some(TableReference::bare(plan)), "number")]),
+                level,
+            )],
+            1,
+        )
+    };
+
+    // One origin - the left input's own alias node - reached through the join.
+    let plan = lopsided_join_under_projection();
+    let err = plan
+        .clone()
+        .rewrite(&mut required("l", 5))
+        .expect_err("a column requirement cannot be traced through a join");
+    assert!(
+        err.to_string().contains("at most one child"),
+        "expected the lineage through the join to be unresolvable, got: {err}"
+    );
+
+    // Two origins, one in each join input, at the level the requirement names.
+    let plan = join_under_projection();
+    let err = plan
+        .clone()
+        .rewrite(&mut required("l", 3))
+        .expect_err("a column requirement over two branches cannot be resolved");
+    assert!(
+        err.to_string().contains("ambiguous"),
+        "expected the two branches to be reported as ambiguous, got: {err}"
+    );
 }
 
 #[test]
@@ -482,9 +830,7 @@ fn dictionary_literals_are_unwrapped_before_pushdown() {
         .build()
         .unwrap();
 
-    let result = DistPlannerAnalyzer {}
-        .analyze(plan, &ConfigOptions::default())
-        .unwrap();
+    let result = analyzer().analyze(plan, &ConfigOptions::default()).unwrap();
     assert!(
         result
             .to_string()
@@ -574,7 +920,7 @@ fn like_filters_are_pushed_down() {
             .build()
             .unwrap();
 
-        let result = DistPlannerAnalyzer {}
+        let result = DistPlannerAnalyzer::default()
             .analyze(plan, &ConfigOptions::default())
             .unwrap();
         let remote_input = find_merge_scan(&result).unwrap().input();
@@ -645,7 +991,7 @@ fn expand_proj_sort_proj() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: t.number",
@@ -692,7 +1038,7 @@ fn expand_proj_sort_partial_proj() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: t.number",
@@ -728,7 +1074,7 @@ fn expand_sort_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
@@ -766,7 +1112,7 @@ fn expand_sort_alias_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: something",
@@ -805,7 +1151,7 @@ fn expand_sort_alias_conflict_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan.clone(), &config);
+    let result = analyzer().analyze(plan.clone(), &config);
     assert!(result.is_err(), "Expected error for ambiguous alias");
     assert!(format!("{result:?}").contains("AmbiguousReference"));
 
@@ -813,7 +1159,7 @@ fn expand_sort_alias_conflict_limit() {
     config.extensions.insert(DistPlannerOptions {
         allow_query_fallback: true,
     });
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Limit: skip=0, fetch=10",
@@ -847,7 +1193,7 @@ fn expand_sort_alias_conflict_but_not_really_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: t.pk1",
@@ -885,7 +1231,7 @@ fn expand_limit_sort() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Sort: t.pk1 ASC NULLS LAST",
@@ -920,7 +1266,7 @@ fn expand_sort_limit_sort() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Sort: t.pk1 ASC NULLS LAST",
@@ -965,7 +1311,7 @@ fn expand_proj_step_aggr() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: min(t.number)",
@@ -1010,7 +1356,7 @@ fn expand_proj_alias_fake_part_col_aggr() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: pk1, pk2, min(t.number)",
@@ -1054,7 +1400,7 @@ fn expand_proj_alias_aliased_part_col_aggr() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: pk42, pk43, min(t.number)",
@@ -1089,7 +1435,7 @@ fn expand_expr_over_part_col_aggr() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: substr(t.pk1,Int64(1),Int64(1)), t.pk2, min(t.number)",
@@ -1124,7 +1470,7 @@ fn expand_part_col_aggr_step_aggr() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: min(max(t.number))",
@@ -1157,7 +1503,7 @@ fn expand_step_aggr_step_aggr() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Aggregate: groupBy=[[]], aggr=[[min(max(t.number))]]",
@@ -1202,7 +1548,7 @@ fn expand_part_col_aggr_part_col_aggr() {
     assert_eq!(expected_original, plan.to_string());
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: t.pk1, t.pk2, min(max(t.number))",
@@ -1234,7 +1580,7 @@ fn expand_step_aggr_proj() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: min(t.number)",
@@ -1292,7 +1638,7 @@ fn expand_complex_col_req_sort_pql() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         "Projection: t.pk1, t.pk2",
@@ -1338,7 +1684,7 @@ fn expand_proj_sort_step_aggr_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Limit: skip=0, fetch=10",
         "  Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
@@ -1379,7 +1725,7 @@ fn expand_proj_sort_limit_step_aggr() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
         "  Projection: t.number",
@@ -1421,7 +1767,7 @@ fn expand_proj_limit_step_aggr_sort() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Sort: min(t.number) ASC NULLS LAST",
         "  Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
@@ -1463,7 +1809,7 @@ fn expand_proj_sort_part_col_aggr_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Limit: skip=0, fetch=10",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
@@ -1505,7 +1851,7 @@ fn expand_proj_sort_limit_part_col_aggr() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
         "  Projection: t.number, t.pk1, t.pk2",
@@ -1547,7 +1893,7 @@ fn expand_proj_part_col_aggr_limit_sort() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Sort: t.pk2 ASC NULLS LAST",
         "  Projection: t.pk1, t.pk2, min(t.number)",
@@ -1589,7 +1935,7 @@ fn expand_proj_part_col_aggr_sort_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Projection: t.pk1, t.pk2, min(t.number)",
         "  Limit: skip=0, fetch=10",
@@ -1624,9 +1970,7 @@ fn test_simplify_select_now_expression() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}
-        .analyze(plan.clone(), &config)
-        .unwrap();
+    let result = analyzer().analyze(plan.clone(), &config).unwrap();
 
     common_telemetry::info!("Analyzed plan: {}", result);
 
@@ -1682,7 +2026,7 @@ fn sibling_merge_scans_have_unique_remote_dyn_filter_producer_ids() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let mut producer_ids = Vec::new();
     collect_merge_scan_remote_dyn_filter_producer_id_list(&result, &mut producer_ids);
@@ -1721,7 +2065,7 @@ async fn having_bound_reaches_remote_scan_before_aggregate_splitting() {
                 .analyzer()
                 .execute_and_check(plan, state.config_options(), |_, _| {})
                 .unwrap();
-            let planned = DistPlannerAnalyzer
+            let planned = DistPlannerAnalyzer::default()
                 .analyze(plan, state.config_options())
                 .unwrap();
             let remote = find_merge_scan_for_table(&planned, "t").unwrap().input();
@@ -1764,7 +2108,7 @@ async fn frontend_having_does_not_reinfer_remote_bounds() {
             .analyzer()
             .execute_and_check(plan, state.config_options(), |_, _| {})
             .unwrap();
-        let planned = DistPlannerAnalyzer
+        let planned = DistPlannerAnalyzer::default()
             .analyze(plan, state.config_options())
             .unwrap();
         let remote = find_merge_scan_for_table(&planned, "t").unwrap().input();
@@ -1847,7 +2191,7 @@ fn pre_merge_scan_optimizer_eliminates_projected_false_filter() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     assert_eq!("EmptyRelation: rows=0", result.to_string());
 }
@@ -1895,7 +2239,7 @@ fn test_simplify_now_expression() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let plan_str = result.to_string();
     common_telemetry::info!("Analyzed plan: {}", plan_str);
@@ -1934,7 +2278,7 @@ fn expand_proj_limit_part_col_aggr_sort() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     // Pre-MergeScan optimizer intentionally excludes PushDownLimit, so the
     // remote plan shows an explicit Limit node instead of `fetch=10` on
     // TableScan.
@@ -1979,7 +2323,7 @@ fn expand_proj_limit_sort_part_col_aggr() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     // Pre-MergeScan optimizer intentionally excludes PushDownLimit, so the
     // remote plan shows an explicit Limit node instead of `fetch=10` on
     // TableScan.
@@ -2017,7 +2361,7 @@ fn expand_step_aggr_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Limit: skip=0, fetch=10",
         "  Projection: t.pk1, min(t.number)",
@@ -2050,7 +2394,7 @@ fn expand_step_aggr_avg_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Limit: skip=0, fetch=10",
         "  Projection: t.pk1, avg(t.number)",
@@ -2095,7 +2439,9 @@ fn expand_step_aggr_count_wildcard_and_time_index() {
 
     let config = ConfigOptions::default();
     let plan = CountWildcardToTimeIndexRule.analyze(plan, &config).unwrap();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = DistPlannerAnalyzer::default()
+        .analyze(plan, &config)
+        .unwrap();
     let expected = [
         "Projection: count(*) AS a, count(Int64(1)), count(t.ts) AS b",
         "  Projection: count(*), count(Int64(1)), count(t.ts)",
@@ -2143,7 +2489,9 @@ fn expand_step_aggr_count_wildcard_and_cast_time_index() {
 
     let config = ConfigOptions::default();
     let plan = CountWildcardToTimeIndexRule.analyze(plan, &config).unwrap();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = DistPlannerAnalyzer::default()
+        .analyze(plan, &config)
+        .unwrap();
     let expected = [
         "Projection: count(*), t.ts, c",
         "  Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(t.ts)) AS count(*), __count_merge(__count_state(t.ts)_1) AS t.ts, __count_merge(__count_state(t.ts)_2) AS c]]",
@@ -2175,7 +2523,7 @@ fn expand_part_col_aggr_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Projection: t.pk1, t.pk2, min(t.number)",
         "  Limit: skip=0, fetch=10",
@@ -2209,7 +2557,7 @@ fn transform_simple_projection_filter() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Distinct:",
         "  MergeScan [is_placeholder=false]",
@@ -2237,7 +2585,7 @@ fn transform_aggregator() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = "Projection: avg(t.number)\
         \n  MergeScan [is_placeholder=false, remote_input=[\
         \nAggregate: groupBy=[[]], aggr=[[avg(t.number)]]\
@@ -2263,7 +2611,7 @@ fn transform_distinct_order() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Projection: t.number",
         "  MergeScan [is_placeholder=false, remote_input=[
@@ -2291,7 +2639,7 @@ fn transform_single_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = "Projection: t.number\
         \n  MergeScan [is_placeholder=false, remote_input=[
 Limit: skip=0, fetch=1
@@ -2332,7 +2680,7 @@ fn transform_unalighed_join_with_alias() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Limit: skip=0, fetch=1",
         "  LeftSemi Join: t.number = right.number",
@@ -2368,7 +2716,7 @@ fn transform_subquery_sort_alias() {
         .build()
         .unwrap();
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Projection: a.pk1, a.pk2, a.pk3, a.ts, a.number",
         "  MergeSort: a.number ASC NULLS LAST",
@@ -2399,7 +2747,7 @@ fn transform_sort_subquery_alias() {
         .build()
         .unwrap();
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let expected = [
         "Projection: a.pk1, a.pk2, a.pk3, a.ts, a.number",
         "  MergeSort: a.number ASC NULLS LAST",
@@ -2438,7 +2786,7 @@ fn remote_dyn_filter_producer_ids_do_not_collide_between_subquery_and_outer_plan
         .unwrap()
         .build()
         .unwrap();
-    let rewritten = DistPlannerAnalyzer {}.try_push_down(outer_plan).unwrap();
+    let rewritten = analyzer().try_push_down(outer_plan).unwrap();
 
     let mut producer_ids = BTreeSet::new();
     collect_merge_scan_remote_dyn_filter_producer_ids(&rewritten, &mut producer_ids);
@@ -2470,7 +2818,7 @@ fn date_bin_ts_group_by() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
 
     let expected = [
         r#"Projection: date_bin(IntervalDayTime("IntervalDayTime { days: 0, milliseconds: 60000 }"),t.ts), min(t.number)"#,
@@ -2528,7 +2876,7 @@ fn ignore_nulls_aggregate_stays_on_frontend() {
             .unwrap()
             .build()
             .unwrap();
-        let analyzed = DistPlannerAnalyzer {}
+        let analyzed = DistPlannerAnalyzer::default()
             .analyze(plan.clone(), &ConfigOptions::default())
             .unwrap();
         if null_treatment == Some(NullTreatment::IgnoreNulls) {
@@ -2587,9 +2935,7 @@ fn test_last_value_order_by() {
     try_encode_decode_substrait(&plan, ctx.state());
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}
-        .analyze(plan.clone(), &config)
-        .unwrap();
+    let result = analyzer().analyze(plan.clone(), &config).unwrap();
 
     let expected = [
         "Projection: last_value(t.ts) ORDER BY [t.ts ASC NULLS FIRST]",
@@ -2650,9 +2996,7 @@ fn test_last_value_no_order_by() {
     try_encode_decode_substrait(&split.lower_state, ctx.state());
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}
-        .analyze(plan.clone(), &config)
-        .unwrap();
+    let result = analyzer().analyze(plan.clone(), &config).unwrap();
 
     let expected = [
         "Projection: last_value(t.ts)",
@@ -2682,9 +3026,7 @@ fn test_table_scan_projection() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}
-        .analyze(plan.clone(), &config)
-        .unwrap();
+    let result = analyzer().analyze(plan.clone(), &config).unwrap();
     let expected = [
         "Projection: t.ts",
         "  MergeScan [is_placeholder=false, remote_input=[",
@@ -2718,9 +3060,7 @@ fn test_table_scan_cast_projection_pushdown() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}
-        .analyze(plan.clone(), &config)
-        .unwrap();
+    let result = analyzer().analyze(plan.clone(), &config).unwrap();
     let expected = [
         "Projection: ts",
         "  MergeScan [is_placeholder=false, remote_input=[",
@@ -2764,9 +3104,7 @@ fn test_cast_filter_simplified_after_pushdown() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}
-        .analyze(plan.clone(), &config)
-        .unwrap();
+    let result = analyzer().analyze(plan.clone(), &config).unwrap();
     let expected = [
         "Projection: ts",
         "  MergeScan [is_placeholder=false, remote_input=[",
@@ -2821,7 +3159,7 @@ fn test_join_side_local_filter_pushdown_into_merge_scan() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     assert_remote_table_scan_filters_are_safe(&result);
 
     let predicate = col("t1.pk1").eq(lit("v"));
@@ -2893,7 +3231,7 @@ fn test_left_join_left_side_filter_pushdown_into_merge_scan() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     assert_remote_table_scan_filters_are_safe(&result);
 
     let plan_str = result.to_string();
@@ -2949,7 +3287,7 @@ fn test_join_cross_table_predicate_not_pushed_to_single_side() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     assert_remote_table_scan_filters_are_safe(&result);
 
     let plan_str = result.to_string();
@@ -3006,9 +3344,7 @@ fn scheduled_now_yields_stable_literal_in_remote_plan() {
         scheduled_time: Some(scheduled_time),
     });
 
-    let result = DistPlannerAnalyzer {}
-        .analyze(plan.clone(), &config)
-        .unwrap();
+    let result = analyzer().analyze(plan.clone(), &config).unwrap();
     let result_str = result.to_string();
     common_telemetry::info!("Analyzed plan with scheduled time: {}", result_str);
 
@@ -3044,9 +3380,7 @@ fn scheduled_now_yields_stable_literal_in_remote_plan() {
     // Absent the extension (default config), the same plan simplifies to a
     // wall-clock literal — the remote_input contains a variable timestamp.
     let default_config = ConfigOptions::default();
-    let wall_result = DistPlannerAnalyzer {}
-        .analyze(plan, &default_config)
-        .unwrap();
+    let wall_result = analyzer().analyze(plan, &default_config).unwrap();
     let wall_str = wall_result.to_string();
     // The wall-clock result must NOT contain the scheduled literal.
     assert!(
@@ -3107,7 +3441,7 @@ fn scheduled_current_timestamp_filter_folds_before_remote_pushdown() {
         scheduled_time: Some(scheduled_time),
     });
 
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     assert_remote_table_scan_filters_are_safe(&result);
 
     let result_str = result.to_string();
@@ -3154,7 +3488,7 @@ fn scheduled_none_falls_back_to_wall_clock() {
         scheduled_time: None,
     });
 
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let result_str = result.to_string();
 
     // Must still simplify now() — remotely a literal, top is now().
@@ -3222,7 +3556,7 @@ fn expand_nested_scalar_subquery() {
         .unwrap();
 
     let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result = analyzer().analyze(plan, &config).unwrap();
     let result_str = result.to_string();
 
     // The main scan and both subquery levels must each be wrapped in a MergeScan.

@@ -563,6 +563,13 @@ max_running_procedures = 128
 
 ## The query engine options.
 [query]
+
+## Enable experimental native PromQL execution for compatible queries.
+## This is the engine-wide default: a session
+## SET query.experimental_native_promql = true or a per-request
+## query.experimental_native_promql option overrides it, in that order.
+## Default: false
+#+ experimental_native_promql = false
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
@@ -782,6 +789,9 @@ compress_manifest = false
 ## Under development; do not enable. Whether to enable series indexes.
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
+
+## Under development. Select legacy Parquet indexes or paired columnar series and samples.
+#+ experimental_series_index_format = "legacy"
 
 ## Approximate series and range index size limit in open regions, shared across workers.
 ## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation

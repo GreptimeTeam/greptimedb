@@ -1632,10 +1632,15 @@ mod tests {
         assert_eq!(batch.num_rows(), 1);
 
         let err = record_batch_stream.next().await.unwrap().unwrap_err();
-        assert_eq!("External error", err.to_string());
+        // The failure keeps its message: a client reading the error learns what went wrong, not
+        // just that a stream failed.
         assert!(
-            format!("{err:?}").contains("Invalid terminal metrics message"),
-            "unexpected error: {err:?}"
+            err.to_string().starts_with("External error: "),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("Invalid terminal metrics message"),
+            "unexpected error: {err}"
         );
         assert!(record_batch_stream.next().await.is_none());
         assert!(terminal_metrics.is_ready());
