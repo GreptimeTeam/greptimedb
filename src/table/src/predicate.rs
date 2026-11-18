@@ -139,7 +139,6 @@ impl Predicate {
     ///
     /// Pruning only: see [`Self::dyn_filters`] for why these expressions must not filter
     /// rows. Producers must conservatively encode which NULL inputs can contribute.
-
     pub fn dyn_filter_phy_exprs(&self) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
         self.dyn_filters
             .load()
