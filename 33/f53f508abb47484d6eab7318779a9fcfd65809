@@ -1,0 +1,26 @@
+src/common/meta/src/kv_backend/rds.rs
+  s_b00f3e7f61bc85::t_d869ac6192b7fc 115-117
+src/common/meta/src/kv_backend/rds/mysql.rs
+  s_b00f3e7f61bc85::t_d869ac6192b7fc 303-305,307-308,310-312,446-447,1090,1109,1115,1132
+  s_b00f3e7f61bc85::t_53e9f106e14490 298,306
+  s_b00f3e7f61bc85::t_849161e0e04dbf 309,725,955,958,960,972-976,979-1067,1069-1070,1074-1089,1091-1108,1110-1114,1116-1131,1133
+src/common/meta/src/kv_backend/rds/postgres.rs
+  s_b00f3e7f61bc85::t_d869ac6192b7fc 347-360,757-758,1317,1334,1358,1380,1393,1395,1403
+  s_b00f3e7f61bc85::t_cae48b3a81e07b 1313-1316,1318-1333,1335-1357,1359-1379,1381-1392,1394,1396-1402,1404
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "33f53f508abb47484d6eab7318779a9fcfd65809",
+  "prompts": {},
+  "sessions": {
+    "s_b00f3e7f61bc85": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1edc2-05db-7232-ab28-ed52bdcb3dcf",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
