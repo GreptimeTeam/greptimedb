@@ -1,0 +1,51 @@
+src/api/src/region.rs
+  s_17057bba187655::t_11b345889b2fb6 38-39,63,73,83
+src/store-api/src/sketch/proto.rs
+  s_17057bba187655::t_11b345889b2fb6 1-632
+src/store-api/src/sketch.rs
+  s_17057bba187655::t_11b345889b2fb6 15-17,45-46,70-71,142-144
+src/datanode/src/region_server/sketch.rs
+  s_17057bba187655::t_11b345889b2fb6 18,23,32-34,62-105
+src/metric-engine/src/engine/read.rs
+  s_17057bba187655::t_11b345889b2fb6 18-19,27,30,38-79
+src/store-api/src/region_engine.rs
+  s_17057bba187655::t_11b345889b2fb6 1178
+Cargo.toml
+  s_17057bba187655::t_11b345889b2fb6 167
+src/datanode/src/region_server.rs
+  s_17057bba187655::t_11b345889b2fb6 551-552,556,678,1145-1159,1190,1340,1960,2068
+src/store-api/src/region_request.rs
+  s_17057bba187655::t_11b345889b2fb6 203-208
+src/metric-engine/Cargo.toml
+  s_17057bba187655::t_11b345889b2fb6 10-12
+src/metric-engine/src/engine/create.rs
+  s_17057bba187655::t_11b345889b2fb6 132-158,606-628,1071-1104
+src/meta-srv/src/metasrv.rs
+  s_17057bba187655::t_11b345889b2fb6 588,917-919
+src/metric-engine/src/engine.rs
+  s_17057bba187655::t_11b345889b2fb6 183,198,328,531-534,641
+src/meta-srv/src/procedure/utils.rs
+  s_17057bba187655::t_11b345889b2fb6 365
+src/client/src/region.rs
+  s_17057bba187655::t_11b345889b2fb6 154-187,701-754
+src/meta-srv/src/metasrv/builder.rs
+  s_17057bba187655::t_11b345889b2fb6 670
+src/common/meta/src/ddl/test_util/datanode_handler.rs
+  s_17057bba187655::t_11b345889b2fb6 42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cfeb563dd67580bb0f04cee12bf65ad25d3f6278",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
