@@ -803,7 +803,9 @@ mod tests {
 
             // The first region leaves while the second registration waits for
             // the query lock: its filter goes away and so does the now empty
-            // query state.
+            // query state. Remove both directly: the real removal path takes
+            // the registry shard and then this query lock, which this thread
+            // holds, so calling it here would deadlock.
             locked.remove(&filter_id);
             assert!(regs_by_query.queries.remove(&query_id).is_some());
             drop(locked);
@@ -826,25 +828,30 @@ mod tests {
     fn remote_dyn_filter_registered_region_sees_filter_until_removed() {
         let regs_by_query = RemoteDynFilterRegistry::new();
         let query_id = QueryId::new();
-        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]);
         let schema = Schema::empty();
 
         std::thread::scope(|scope| {
             for region_number in 0..4 {
-                let (regs_by_query, regs, schema) = (&regs_by_query, &regs, &schema);
+                let (regs_by_query, schema) = (&regs_by_query, &schema);
                 scope.spawn(move || {
                     let region_id = RegionId::new(1024, region_number);
-                    for _ in 0..10_000 {
+                    // Each region registers its own filter, so only its own
+                    // registration can satisfy the lookup below.
+                    let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+                        format!("filter-{region_number}"),
+                        vec![],
+                    )]);
+                    for _ in 0..1_000 {
                         let filter_ids = register_initial_dyn_filter_regs(
                             regs_by_query,
                             &query_id,
                             region_id,
-                            regs,
+                            &regs,
                         );
                         let exprs = remote_dyn_filter_exprs_for_initial_regs(
                             regs_by_query,
                             &query_id,
-                            regs,
+                            &regs,
                             schema,
                         );
                         assert_eq!(exprs.len(), 1);
