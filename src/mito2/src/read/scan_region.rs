@@ -3542,6 +3542,70 @@ mod tests {
         assert!(exact_sequence_range(&request, &version).is_err());
     }
 
+    /// Internal superset probe: file-level selection still prunes files whose
+    /// barrier cannot contain in-range rows, but an unprovable row-level range
+    /// must stay `None` instead of claiming exactness.
+    #[test]
+    fn test_exact_sequence_probe_keeps_file_selection_without_claiming_exactness() {
+        use std::num::NonZeroU64;
+
+        use crate::test_util::new_noop_file_purger;
+
+        let request = ScanRequest {
+            exact_sequence_range: true,
+            internal_sequence_range_probe: true,
+            memtable_min_sequence: Some(3),
+            memtable_max_sequence: Some(6),
+            ..Default::default()
+        };
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
+            metadata.clone(),
+            Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
+            0,
+            None,
+        );
+        let target_region_id = metadata.region_id;
+        let below = store_api::storage::FileId::random();
+        let in_range = store_api::storage::FileId::random();
+        let version = crate::region::version::VersionBuilder::new(metadata, mutable)
+            // Without the preserve option no row-level `SequenceRange` is provable.
+            .add_files(
+                new_noop_file_purger(),
+                [
+                    FileMeta {
+                        region_id: target_region_id,
+                        file_id: below,
+                        sequence: NonZeroU64::new(3),
+                        ..Default::default()
+                    },
+                    FileMeta {
+                        region_id: target_region_id,
+                        file_id: in_range,
+                        sequence: NonZeroU64::new(6),
+                        ..Default::default()
+                    },
+                ]
+                .into_iter(),
+            )
+            .build();
+
+        let (files, range) = exact_sequence_range(&request, &version).unwrap();
+        assert_eq!(1, files.len(), "a file at the lower bound cannot hold rows");
+        assert_eq!(in_range, files[0].file_id().file_id());
+        assert_eq!(None, range, "unprovable exactness must not be claimed");
+
+        // Without the probe flag the same selection is still denied downstream by
+        // the fence validation; the helper itself never produces a fake range.
+        let plain_request = ScanRequest {
+            internal_sequence_range_probe: false,
+            ..request
+        };
+        let (files, range) = exact_sequence_range(&plain_request, &version).unwrap();
+        assert_eq!(1, files.len());
+        assert_eq!(None, range);
+    }
+
     #[tokio::test]
     async fn test_parallel_flat_source_stops_after_receiver_dropped() {
         use std::sync::atomic::{AtomicUsize, Ordering};

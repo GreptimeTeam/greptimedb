@@ -1286,8 +1286,17 @@ impl EngineInner {
             exact_sequence_range
         };
         let exact_selection = exact_selection.map(|(files, _)| (files, exact_sequence_range));
+        // Internal-only superset probe: an explicit `sequence_range` request that
+        // tolerates missing row-level exactness. It must stay unreachable from
+        // ordinary SQL/user requests, so it is only honored when the internal
+        // query-context extension set it on the request.
+        let sequence_range_probe =
+            request.exact_sequence_range && request.internal_sequence_range_probe;
         let exact_denial_reason = if !request.exact_sequence_range {
             "not_requested"
+        } else if sequence_range_probe {
+            // No denial: the probe deliberately accepts a superset result.
+            "internal_probe_superset"
         } else if request.skip_sst_files {
             "sst_files_skipped"
         } else if request.memtable_min_sequence.is_none() {
@@ -1343,11 +1352,17 @@ impl EngineInner {
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start);
-        let scan_region = if let Some(selection) = exact_selection {
+        let mut scan_region = if let Some(selection) = exact_selection {
             scan_region.with_exact_selection(selection)
         } else {
             scan_region
         };
+        if sequence_range_probe {
+            // A deleted timestamp was still affected by the same sequence delta, so
+            // the probe keeps delete rows instead of dropping them: dropping would
+            // let the returned timestamp range under-report.
+            scan_region.set_filter_deleted(false);
+        }
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
@@ -1474,6 +1489,24 @@ fn validate_sequence_fences(
     exact_sequence_range_available: bool,
     extension_provider_blocks_exact: bool,
 ) -> Result<()> {
+    if request.exact_sequence_range && request.internal_sequence_range_probe {
+        // Internal-only superset probe (see
+        // `ScanRequest::internal_sequence_range_probe`): the caller asked "which
+        // timestamps could this sequence delta have touched?" and accepts a
+        // superset, so neither fence applies.
+        //
+        // - Unfiltered SST rows below the lower bound only make the result older
+        //   than the delta, which over-invalidates instead of under-reporting.
+        // - Rows above `memtable_max_sequence` may be returned when a file cannot
+        //   be row-filtered, so that bound is a *cursor* bound `H`: the caller
+        //   must never advance past it, which keeps the next probe covering every
+        //   row this one could not exclude.
+        //
+        // This branch is unreachable from ordinary SQL/user requests: the flag is
+        // only set from the reserved internal query-context extension.
+        return Ok(());
+    }
+
     if request.exact_sequence_range {
         // Exact `sequence_range` mode: when the capability is available the
         // requested (C, H] delta is enforced row-level on memtables and every

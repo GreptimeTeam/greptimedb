@@ -365,6 +365,10 @@ struct FlowScanDecision {
     skip_sst_files: bool,
     /// Whether this source scan must enforce the exact sequence range.
     exact_sequence_range: bool,
+    /// Whether to run the internal superset probe instead of failing closed when
+    /// row-level sequence filtering is unavailable. Only set together with
+    /// `exact_sequence_range` and only from the reserved internal extension.
+    sequence_range_probe: bool,
 }
 
 impl FlowScanDecision {
@@ -376,6 +380,7 @@ impl FlowScanDecision {
             memtable_max_sequence: None,
             skip_sst_files: false,
             exact_sequence_range: false,
+            sequence_range_probe: false,
         }
     }
 }
@@ -391,6 +396,7 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
             skip_sst_files: false,
             exact_sequence_range: false,
+            sequence_range_probe: false,
         });
     };
 
@@ -426,6 +432,9 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         && memtable_min_sequence.is_some()
         && flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly);
 
+    let exact_sequence_range = apply_incremental
+        && flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange);
+
     Ok(FlowScanDecision {
         is_sink_scan: false,
         snapshot_on_scan: memtable_max_sequence.is_none()
@@ -433,8 +442,10 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         memtable_min_sequence,
         memtable_max_sequence,
         skip_sst_files,
-        exact_sequence_range: apply_incremental
-            && flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange),
+        exact_sequence_range,
+        // The probe only relaxes an already requested exact sequence range; it
+        // never turns another mode into one.
+        sequence_range_probe: exact_sequence_range && flow_extensions.sequence_range_probe,
     })
 }
 
@@ -453,6 +464,7 @@ fn build_scan_request(
         skip_sst_files: decision.skip_sst_files,
         snapshot_on_scan: decision.snapshot_on_scan,
         exact_sequence_range: decision.exact_sequence_range,
+        internal_sequence_range_probe: decision.sequence_range_probe,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
         ..Default::default()
@@ -650,7 +662,7 @@ mod tests {
     use crate::error::Error;
     use crate::options::{
         FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
-        FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
+        FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID, INTERNAL_SEQUENCE_RANGE_PROBE,
     };
 
     #[test]
@@ -804,6 +816,77 @@ mod tests {
         assert_eq!(request.memtable_min_sequence, Some(10));
         assert_eq!(request.memtable_max_sequence, Some(42));
         assert_eq!(request.sst_min_sequence, None);
+    }
+
+    #[test]
+    fn test_scan_request_from_sequence_range_probe_context_sets_internal_probe() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, region_id.as_u64()),
+                ),
+                (
+                    INTERNAL_SEQUENCE_RANGE_PROBE.to_string(),
+                    "true".to_string(),
+                ),
+            ]))
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                42_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(request.exact_sequence_range);
+        assert!(request.internal_sequence_range_probe);
+        assert_eq!(request.memtable_min_sequence, Some(10));
+        assert_eq!(request.memtable_max_sequence, Some(42));
+        // The probe never participates in the `sst_min_sequence` pruning hint.
+        assert_eq!(request.sst_min_sequence, None);
+    }
+
+    #[test]
+    fn test_scan_request_probe_requires_sequence_range_mode() {
+        let region_id = test_region_id();
+
+        // Memtable-only mode never becomes an exact probe.
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    "memtable_only".to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, region_id.as_u64()),
+                ),
+                (
+                    INTERNAL_SEQUENCE_RANGE_PROBE.to_string(),
+                    "true".to_string(),
+                ),
+            ]))
+            .build();
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+        assert!(!request.exact_sequence_range);
+        assert!(!request.internal_sequence_range_probe);
+
+        // Without any flow context the internal key alone changes nothing.
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                INTERNAL_SEQUENCE_RANGE_PROBE.to_string(),
+                "true".to_string(),
+            )]))
+            .build();
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+        assert!(!request.exact_sequence_range);
+        assert!(!request.internal_sequence_range_probe);
     }
 
     #[test]

@@ -87,6 +87,29 @@ pub struct ScanRequest {
     ///
     /// Historical `memtable_only` reads must never set this flag.
     pub exact_sequence_range: bool,
+    /// Internal-only opt-in that turns an [`Self::exact_sequence_range`] scan
+    /// into a **superset probe** instead of failing closed.
+    ///
+    /// The probe answers "which timestamps could the sequence delta
+    /// `(memtable_min_sequence, memtable_max_sequence]` have touched?". It
+    /// selects SST files whose file-level sequence can contain in-range rows and
+    /// applies row-level sequence filtering only when `SequenceRange` is
+    /// constructible; otherwise it keeps the extra rows. The memtable is still
+    /// filtered by the requested range because its rows carry per-row sequences.
+    /// The result is therefore a superset of the delta, never a subset, and
+    /// `memtable_max_sequence` acts only as a cursor bound `H`: the caller must
+    /// not advance its cursor beyond it.
+    ///
+    /// A selected foreign file without a target-local sequence barrier still
+    /// fails closed with a broken-sequence-domain error: its domain cannot be
+    /// bounded at all, so no superset can be proven.
+    ///
+    /// Only settable through the reserved query-context extension
+    /// `internal.sequence_range_probe`
+    /// (`session::hints::INTERNAL_SEQUENCE_RANGE_PROBE_EXTENSION_KEY`), which is
+    /// stripped from user-supplied HTTP/gRPC hints. Ordinary SQL requests and
+    /// the public `sequence_range` mode always keep the fail-closed behavior.
+    pub internal_sequence_range_probe: bool,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
     /// Optional hint from query-driven JSON type concretization.
@@ -180,6 +203,13 @@ impl Display for ScanRequest {
         }
         if self.exact_sequence_range {
             write!(f, "{}exact_sequence_range: true", delimiter.as_str())?;
+        }
+        if self.internal_sequence_range_probe {
+            write!(
+                f,
+                "{}internal_sequence_range_probe: true",
+                delimiter.as_str()
+            )?;
         }
         if self.preserve_pk_dictionary_encoding {
             write!(
@@ -279,5 +309,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(request.to_string(), "ScanRequest { skip_sst_files: true }");
+
+        let request = ScanRequest {
+            exact_sequence_range: true,
+            internal_sequence_range_probe: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            request.to_string(),
+            "ScanRequest { exact_sequence_range: true, internal_sequence_range_probe: true }"
+        );
     }
 }

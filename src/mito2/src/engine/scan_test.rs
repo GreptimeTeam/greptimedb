@@ -3203,6 +3203,345 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
     assert_eq!(err.status_code(), StatusCode::Unsupported);
 }
 
+/// Collects the projected timestamp column (milliseconds) of one scan, sorted.
+async fn probe_ts_millis(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> Vec<i64> {
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let mut ts = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let column = batch
+            .column_by_name("ts")
+            .expect("ts column")
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp millisecond column");
+        ts.extend(column.values().iter().copied());
+    }
+    ts.sort_unstable();
+    ts
+}
+
+/// Internal superset probe on a dedup (non-append) region without
+/// `preserve_row_sequence`: the delta `(2, 5]` is spread over one flushed SST
+/// (which cannot be row-filtered) and the memtable. The probe must return a
+/// timestamp superset of the changed rows instead of failing closed.
+#[tokio::test]
+async fn test_sequence_range_probe_superset_on_dedup_region_without_preserve() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::with_prefix("test_sequence_range_probe_superset_dedup").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    // Non-append (dedup/merge) region with the default merge mode and without
+    // the preserved per-row sequence capability.
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Sequences 1..=3: timestamps 0, 1000, 2000; flushed into one SST (barrier 3).
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Sequences 4..=6: timestamps 5000, 6000, 7000 stay in the memtable.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(5, 8),
+        },
+    )
+    .await;
+
+    let probe_request = ScanRequest {
+        memtable_min_sequence: Some(2),
+        memtable_max_sequence: Some(5),
+        exact_sequence_range: true,
+        internal_sequence_range_probe: true,
+        ..Default::default()
+    };
+
+    // Rows that the delta `(2, 5]` wrote: sequence 3 -> ts 2000 (flushed), and
+    // sequences 4, 5 -> ts 5000, 6000 (memtable). The SST cannot be row-filtered,
+    // so ts 0 and 1000 (sequences 1, 2) also come back: a superset, never a
+    // subset.
+    let probe_ts = probe_ts_millis(&engine, region_id, probe_request.clone()).await;
+    assert!(
+        probe_ts.contains(&2000) && probe_ts.contains(&5000) && probe_ts.contains(&6000),
+        "probe must cover every changed row, got {probe_ts:?}"
+    );
+    assert!(
+        probe_ts.iter().all(|ts| *ts <= 6000),
+        "delta upper bound 5 must not pull in later memtable rows, got {probe_ts:?}"
+    );
+    assert!(
+        probe_ts.contains(&0) && probe_ts.contains(&1000),
+        "the unmarked SST is read conservatively, got {probe_ts:?}"
+    );
+    assert_eq!(
+        Some(&0),
+        probe_ts.first(),
+        "superset may start before the delta"
+    );
+    assert_eq!(Some(&6000), probe_ts.last());
+
+    // Without the internal opt-in the same request must still fail closed. The
+    // lower fence fires first here because C=2 is behind the flushed frontier 3.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                internal_sequence_range_probe: false,
+                ..probe_request.clone()
+            },
+        )
+        .await
+        .err()
+        .expect("normal exact sequence scan must fail closed");
+    assert!(
+        matches!(err, Error::IncrementalQueryStale { .. }),
+        "unexpected err: {err}"
+    );
+
+    // With both bounds at or above the flushed frontier only the missing
+    // row-level capability can deny the scan: still `SequenceRangeUnsupported`.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(3),
+                memtable_max_sequence: Some(5),
+                exact_sequence_range: true,
+                internal_sequence_range_probe: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("normal exact sequence scan must fail closed");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected err: {err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+}
+
+/// The probe's upper bound `H` is a cursor bound: rows after `H` are not needed
+/// to advance the cursor, so a memtable-only delta above `H` stays invisible and
+/// the caller re-probes from `H`.
+#[tokio::test]
+async fn test_sequence_range_probe_upper_bound_is_cursor_bound() {
+    let mut env = TestEnv::with_prefix("test_sequence_range_probe_upper_bound").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Sequences 1..=4 -> timestamps 0, 1000, 2000, 3000, all in the memtable and
+    // none of them flushed, so the probe starts at the committed frontier.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 4),
+        },
+    )
+    .await;
+
+    // Probe (0, 2] with H = 2: only sequences 1 and 2 are in range.
+    let first = probe_ts_millis(
+        &engine,
+        region_id,
+        ScanRequest {
+            memtable_min_sequence: Some(0),
+            memtable_max_sequence: Some(2),
+            exact_sequence_range: true,
+            internal_sequence_range_probe: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        vec![0, 1000],
+        first,
+        "rows after H must not extend the probe"
+    );
+
+    // The caller advances its cursor to H = 2 only, so the follow-up probe
+    // (2, 4] covers the rows the first one skipped.
+    let second = probe_ts_millis(
+        &engine,
+        region_id,
+        ScanRequest {
+            memtable_min_sequence: Some(2),
+            memtable_max_sequence: Some(4),
+            exact_sequence_range: true,
+            internal_sequence_range_probe: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(vec![2000, 3000], second);
+}
+
+/// Probe on a region that *does* preserve per-row sequences (append-only, the
+/// only mode that supports the option): the exact `SequenceRange` is
+/// constructible, so the probe stays row-level exact and still covers every
+/// changed timestamp, including the stale lower bound below the flushed frontier.
+#[tokio::test]
+async fn test_sequence_range_probe_with_preserve_row_sequence() {
+    let mut env = TestEnv::with_prefix("test_sequence_range_probe_preserve_on").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Sequences 1..=3 -> ts 0, 1000, 2000, flushed into a preserved SST.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Sequences 4..=6 -> ts 5000, 6000, 7000 stay in the memtable.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(5, 8),
+        },
+    )
+    .await;
+
+    // Delta (2, 5] = sequences 3, 4, 5 -> ts 2000, 5000, 6000. The lower bound is
+    // below the flushed frontier (3), which only the probe tolerates.
+    let probe_ts = probe_ts_millis(
+        &engine,
+        region_id,
+        ScanRequest {
+            memtable_min_sequence: Some(2),
+            memtable_max_sequence: Some(5),
+            exact_sequence_range: true,
+            internal_sequence_range_probe: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(vec![2000, 5000, 6000], probe_ts);
+
+    // When exactness is provable the probe changes nothing: the same request
+    // without the opt-in stays exact and succeeds (a stale cursor below the
+    // flushed frontier is only tolerated because row-level filtering is proven).
+    let exact_ts = probe_ts_millis(
+        &engine,
+        region_id,
+        ScanRequest {
+            memtable_min_sequence: Some(2),
+            memtable_max_sequence: Some(5),
+            exact_sequence_range: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(probe_ts, exact_ts);
+}
+
+/// The probe still filters SST files by their file-level sequence: a file whose
+/// barrier is at or below the exclusive lower bound cannot hold in-range rows and
+/// is skipped, even though its rows could not be filtered row-level.
+#[tokio::test]
+async fn test_sequence_range_probe_excludes_files_below_lower_bound() {
+    let mut env = TestEnv::with_prefix("test_sequence_range_probe_file_selection").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Sequences 1..=3 -> ts 0, 1000, 2000 -> first SST with barrier 3.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Sequences 4..=6 -> ts 5000, 6000, 7000 -> second SST with barrier 6.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(5, 8),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let probe_ts = probe_ts_millis(
+        &engine,
+        region_id,
+        ScanRequest {
+            memtable_min_sequence: Some(3),
+            memtable_max_sequence: Some(6),
+            exact_sequence_range: true,
+            internal_sequence_range_probe: true,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The delta `(3, 6]` only wrote ts 5000, 6000, 7000. The barrier-3 file is
+    // wholly below the lower bound, so its timestamps must not appear even though
+    // the probe cannot filter rows inside a selected file.
+    assert_eq!(vec![5000, 6000, 7000], probe_ts);
+}
+
 /// Region edit assigns a target-local barrier to an imported foreign SST, so
 /// exact sequence-range capability can admit it without trusting its source
 /// region marker.
