@@ -43,6 +43,7 @@ This RFC follows the Druid and StarRocks approach, adapted to the GreptimeDB sto
 
 - Caching final results or raw rows. Only partial aggregation states are cached.
 - PromQL. Its range evaluation has a different plan shape. PromQL can reuse the fingerprint later; see [Future Work](#future-work).
+- Metric engine tables. The metric engine keeps the default `time_range_fingerprint`, which returns `None`, so the cache is off for its tables. These tables are queried mostly through PromQL and are handled together with it.
 - Sharing cache entries across nodes or persisting them. The cache is in memory and local to a node.
 - Caching slices that still have unflushed data. These slices are recomputed on every query.
 
@@ -127,14 +128,12 @@ Drawbacks:
 - The first execution of a query does more work: one scan per slice instead of one scan for the whole range. The prototype measured about 46.5 ms instead of 43 ms for a cold 24-hour query, and no difference for queries that never repeat.
 - Slices are not cached while a memtable overlaps them, and a memtable spans everything from its oldest row to its newest. A late write therefore disables the cache from its timestamp to the present until the next flush. A dashboard that only shows the last 15 minutes gains nothing.
 - Correctness depends on the fingerprint observing every change to the rows of a range. A new engine operation that changes rows without replacing files or bumping one of the hashed versions would make the cache return stale results. The engine contract and its tests must cover this requirement.
-- Metric engine logical regions share one physical region, so a write to any logical table changes the fingerprint for all logical tables in the overlapping range. Results stay correct, but the hit rate is lower.
 
 # Implementation Plan
 
 1. Add `RegionEngine::time_range_fingerprint`, implement it for mito, and test every change path listed in [Data fingerprint](#data-fingerprint).
 2. Add the optimizer rule and `SliceAggregateExec`, disabled by default behind a query option, with a node-level cache bounded by its own size option.
 3. Report cache hits and misses, and the metrics of the slice scans, in `EXPLAIN ANALYZE`.
-4. Delegate the fingerprint from the metric engine to the physical region.
 
 # Alternatives
 
@@ -154,7 +153,7 @@ Drawbacks:
 
 # Future Work
 
-- PromQL range queries, with per-step results cached under the same fingerprint.
+- PromQL range queries, with per-step results cached under the same fingerprint, and the metric engine fingerprint that they need. Logical tables share one physical region, so a flush or compaction of the physical region invalidates slices of every logical table it covers.
 - Caching slices of the current hour once flushed data covers part of the hour, by splitting the slice at the memtable's minimum timestamp.
 - Incremental refresh, as StarRocks does for tablets: when a slice has only gained new files since its entry was computed, aggregate the new files and merge the result into the cached states instead of recomputing the slice.
 
