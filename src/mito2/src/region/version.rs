@@ -527,20 +527,16 @@ impl VersionBuilder {
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
         }
-        if let Some(pending_tails) = edit.wal_recovery.pending_tails {
-            self.pending_tails = pending_tails;
-        }
-        if !edit.files_to_add.is_empty()
-            || !edit.files_to_remove.is_empty()
-            || !edit.series_indexes_to_add.is_empty()
-            || !edit.series_indexes_to_remove.is_empty()
-        {
+        if edit.has_file_changes() {
             let mut ssts = (*self.ssts).clone();
             ssts.add_series_indexes(file_purger.clone(), edit.series_indexes_to_add.into_iter());
             ssts.remove_series_indexes(edit.series_indexes_to_remove.into_iter());
             ssts.add_files(file_purger, edit.files_to_add.into_iter());
             ssts.remove_files(edit.files_to_remove.into_iter());
             self.ssts = Arc::new(ssts);
+        }
+        if let Some(pending_tails) = edit.wal_recovery.pending_tails {
+            self.pending_tails = pending_tails;
         }
 
         self
