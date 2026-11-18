@@ -252,9 +252,11 @@ impl StatementExecutor {
         let backend = build_backend_for_write_with_path(location, connection, local_file_access)
             .await
             .context(error::BuildBackendSnafu)?;
-        let filename = backend.object_path.context(error::UnexpectedSnafu {
-            violated: format!("Expected filename, path: {location}"),
-        })?;
+        let filename = backend
+            .object_path
+            .with_context(|| error::UnexpectedSnafu {
+                violated: format!("Expected filename, path: {location}"),
+            })?;
         if let Some((budget, token)) = managed {
             stream_to_managed_parquet_with_packed(
                 stream,
@@ -272,19 +274,10 @@ impl StatementExecutor {
     }
 }
 
-/// File destinations own their object key; packed streams use their writer's key.
+/// File destinations own their object key; packed streams use their writer's stream name.
 enum ManagedParquetDestination {
     Object { store: ObjectStore, path: String },
     Packed(PackedTableWriter),
-}
-
-impl ManagedParquetDestination {
-    fn path(&self) -> &str {
-        match self {
-            Self::Object { path, .. } => path,
-            Self::Packed(packed) => packed.path(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -330,23 +323,25 @@ async fn stream_to_managed_parquet_with_packed(
     } else {
         expanded_schema.clone()
     };
-    let destination_path = destination.path().to_owned();
-    let path = destination_path.as_str();
     let packed_destination = matches!(destination, ManagedParquetDestination::Packed(_));
-    let mut writer = match destination {
-        ManagedParquetDestination::Packed(packed) => ParquetFileWriter::open_packed(
-            output_schema.arrow_schema().clone(),
-            Some(
-                crate::statement::export_logical_tables::LogicalTableExportLimits::default().writer,
-            ),
-            packed,
-        ),
-        ManagedParquetDestination::Object { store, .. } => {
-            ParquetFileWriter::open(output_schema.arrow_schema().clone(), store, path, 1, None)
-                .await
+    let schema = output_schema.arrow_schema().clone();
+    let (writer, path) = match destination {
+        ManagedParquetDestination::Packed(packed) => {
+            let path = packed.path().to_owned();
+            let limits =
+                crate::statement::export_logical_tables::LogicalTableExportLimits::default();
+            (
+                ParquetFileWriter::open_packed(schema, Some(limits.writer), packed),
+                path,
+            )
         }
-    }
-    .context(error::WriteStreamToFileSnafu { path })?;
+        ManagedParquetDestination::Object { store, path } => (
+            ParquetFileWriter::open(schema, store, &path, 1, None).await,
+            path,
+        ),
+    };
+    let path = path.as_str();
+    let mut writer = writer.context(error::WriteStreamToFileSnafu { path })?;
     let mut started = false;
     let result = async {
         let mut rows = 0;

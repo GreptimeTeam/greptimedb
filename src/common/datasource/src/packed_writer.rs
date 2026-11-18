@@ -329,7 +329,7 @@ impl PackedTableWriter {
         }
     }
 
-    /// Object name identifying this table's Parquet stream, including when packed.
+    /// Parquet stream name, used as the object name when standalone and as an error label when packed.
     pub fn path(&self) -> &str {
         &self.path
     }
