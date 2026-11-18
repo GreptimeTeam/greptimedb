@@ -292,20 +292,12 @@ impl Executor for MySqlClient {
     }
 
     async fn txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>> {
-        // sqlx has no isolation level support for now, so we have to set it manually.
-        // TODO(CookiePie): Waiting for https://github.com/launchbadge/sqlx/pull/3614 and remove this.
-        let mut connection = self.acquire().await.context(MySqlExecutionSnafu {
-            sql: "acquire transaction connection",
-        })?;
-        sqlx::query("SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-            .execute(&mut *connection)
+        // MySQL requires SET TRANSACTION separately from BEGIN. Execute both on
+        // the connection acquired by begin_with so the isolation level applies.
+        let txn = self
+            .begin_with("SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN")
             .await
-            .context(MySqlExecutionSnafu {
-                sql: "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-            })?;
-        let txn = MySqlTransaction::begin(connection, None)
-            .await
-            .context(MySqlExecutionSnafu { sql: "begin" })?;
+            .context(MySqlTransactionSnafu { operation: "begin" })?;
         Ok(MySqlTxnClient(txn))
     }
 }
