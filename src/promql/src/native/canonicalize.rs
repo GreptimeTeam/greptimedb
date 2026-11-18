@@ -23,10 +23,10 @@
 //!
 //! # What decides it
 //!
-//! Only a rewrite can alias, and only one that writes a label its input already carries or drops one
-//! its output would still be told apart by: [`duplicates_canonical_labels`] is that fact, derived
-//! from the tree and the tags each source reports. A tree with no such rewrite gains no merge at
-//! all, so a per-series query keeps every scan partition and pays nothing for this pass.
+//! Only a rewrite can alias, and only one that writes a label its input already carries:
+//! [`duplicates_canonical_labels`] is that fact, derived from the tree and the tags each source
+//! reports. A tree with no such rewrite gains no merge at all, so a per-series query keeps every
+//! scan partition and pays nothing for this pass.
 //!
 //! Where a merge is added is a property of the consumer, and of what the operations between the
 //! consumer and the rewrite do to one sample:
@@ -45,39 +45,6 @@
 //! A merge is never added below a raw scan, a scalar or aggregate state: it binds samples evaluated
 //! on a grid, and no consumer asks for one over those.
 //!
-//! A node can be a source of duplicates without rewriting a label its input carries: a range
-//! function that computes its result and `timestamp` in both of its forms drop the metadata labels -
-//! the metric name, `__type__` and `__unit__` - and hand out a set those no longer tell apart. What
-//! they produce is collected by their consumer - the root included - exactly as a rewrite of an
-//! existing label is, unless
-//! [`duplicates_canonical_labels`](crate::native::plan::duplicates_canonical_labels) proves that
-//! nothing they drop was telling two of their series apart: a source bound to one metric names
-//! every series it hands over, a source whose tags carry neither `__type__` nor `__unit__` holds no
-//! series those two tell apart either, and the scan's key columns always decode a value.
-//! `rate(some_metric[5m])` over such a scan is then a window that streams its scan, and the same
-//! query over a selector that discovered several metrics keeps the collection it needs. The same
-//! rule - the labels and the scan's keys - is what a math or histogram map, a parameterized map and
-//! an arithmetic or `bool` scalar broadcast are judged by.
-//!
-//! The key half is not the tree's to answer, so the caller states it as `keys_survive`: two stored
-//! series of one metric whose key column holds `NULL` in one and `''` in the other decode to an
-//! absent and to an empty label, and the drop removes the empty one with the name, leaving both
-//! under one label set. The rule is
-//! [`keys_survive_metadata_drop`](crate::extension_plan::keys_survive_metadata_drop),
-//! which the physical per-series scan reads to decide whether a node may stream and the planner
-//! reads from the resolved table, so the two cannot disagree about a drop. A caller that cannot
-//! state it passes `false`; the statements collected for that reason alone are counted
-//! ([`leaves_a_drop_to_the_storage_keys`](crate::native::plan::leaves_a_drop_to_the_storage_keys)).
-//!
-//! A drop above a merge is not asked about the empty value it removes, which is what keeps a chain of
-//! drops to one collection: [`NativeExpr::Merge`] hands over one series per canonical label set - the
-//! comparison that treats an empty label value as no label - so no drop above it can fold two of its
-//! series by dropping an empty one. The metadata labels a drop removes are another matter: a merge
-//! keeps two series that differ in `__name__`, `__type__` or `__unit__`, so the labels half of the
-//! proof is still asked above it. With that, `abs(abs(rate(x[5m])))` over a table whose key columns
-//! can spell the `NULL`/`''` pair pays for the one merge at the bottom of the chain rather than one
-//! per drop.
-//!
 //! Canonicalizing a map's input is what makes the histogram case work: in
 //! `histogram_count(label_replace(x, "host", "same", "host", ".*"))` two scan partitions each
 //! rewrite one series to `{host="same"}` and `histogram_count` drops both - they are float samples -
@@ -93,8 +60,6 @@
 //! What this pass does *not* decide is placement: whether the merge can be answered inside one
 //! execution is the lowering's question. A merge that spans partitions uses a producer and the
 //! existing canonical router; downstream consumers read ordinary evaluated frames.
-
-use std::sync::Arc;
 
 use datafusion::error::Result as DfResult;
 
@@ -112,20 +77,6 @@ mod tests;
 /// source the caller says nothing about proves nothing, and a rewrite over it is collected. The
 /// index is what a leaf reads, so a tree with several sources is judged source by source.
 ///
-/// `source_metrics` is the other half of that knowledge, indexed the same way: the one metric each
-/// source is bound to, or `None` when it may hand over several. It is what lets a kernel that drops
-/// the metadata labels keep every partition - see
-/// [`duplicates_canonical_labels`](crate::native::plan::duplicates_canonical_labels) - and a caller
-/// that cannot say collects instead.
-///
-/// `keys_survive` is the last fact and the one the tree cannot carry: whether every scan below
-/// `tree` still tells its series apart once a drop has normalized their labels
-/// ([`keys_survive_metadata_drop`](crate::extension_plan::keys_survive_metadata_drop),
-/// read from the resolved table). A key column that holds `NULL` in one series and `''` in another
-/// decodes to an absent and to an empty label, and the empty one leaves with the metadata labels, so
-/// `false` collects a drop the labels alone would have proved. A caller that cannot state it passes
-/// `false`.
-///
 /// Every operation binding and every `source_index` stays where it was, so the rewrite changes which
 /// series a consumer reads and not what the query computes. The result is checked by
 /// [`NativeTree::try_new`], because a merge has to sit over an evaluated vector and the pass may
@@ -133,12 +84,10 @@ mod tests;
 pub fn merge_label_rewrites(
     tree: &NativeTree,
     source_tags: &[Vec<String>],
-    source_metrics: &[Option<Arc<str>>],
-    keys_survive: bool,
 ) -> DfResult<NativeTree> {
-    let root = rewrite(tree.root(), source_tags, source_metrics, keys_survive)?;
+    let root = rewrite(tree.root(), source_tags)?;
     // The root is a consumer too: whatever reads this tree reads one series per label set.
-    NativeTree::try_new(canonical(root, source_tags, source_metrics, keys_survive))
+    NativeTree::try_new(canonical(root, source_tags))
 }
 
 /// Wraps `node` in a [`NativeExpr::Merge`] when its pieces can share a label set.
@@ -151,19 +100,14 @@ pub fn merge_label_rewrites(
 ///   ([`duplicates_canonical_labels`]), because collecting pieces that are already distinct is a
 ///   barrier that buys nothing;
 /// - it is not already a merge, which would collect what is already collected.
-fn canonical(
-    node: NativeNode,
-    source_tags: &[Vec<String>],
-    source_metrics: &[Option<Arc<str>>],
-    keys_survive: bool,
-) -> NativeNode {
+fn canonical(node: NativeNode, source_tags: &[Vec<String>]) -> NativeNode {
     if !matches!(&node.output, NativeType::Samples(schema) if schema.eval_grid.is_some()) {
         return node;
     }
     if matches!(node.expr, NativeExpr::Merge { .. }) {
         return node;
     }
-    if !duplicates_canonical_labels(&node, source_tags, source_metrics, keys_survive) {
+    if !duplicates_canonical_labels(&node, source_tags) {
         return node;
     }
     // A merge reports its input's layout: the same fields on the same grid.
@@ -178,12 +122,7 @@ fn canonical(
 
 /// Rewrites `node` bottom-up: its children first, then the merge its own consumer contract needs of
 /// them.
-fn rewrite(
-    node: &NativeNode,
-    source_tags: &[Vec<String>],
-    source_metrics: &[Option<Arc<str>>],
-    keys_survive: bool,
-) -> DfResult<NativeNode> {
+fn rewrite(node: &NativeNode, source_tags: &[Vec<String>]) -> DfResult<NativeNode> {
     let expr = match &node.expr {
         // A source is the boundary it was bound to and there is nothing below it to rewrite. A
         // constant reads nothing.
@@ -194,27 +133,22 @@ fn rewrite(
         // grid; a timestamp replaces each value with its sample's time. Both read each piece as it
         // is, so neither collects what it reads.
         NativeExpr::Instant { input, op } => NativeExpr::Instant {
-            input: Box::new(rewrite(input, source_tags, source_metrics, keys_survive)?),
+            input: Box::new(rewrite(input, source_tags)?),
             op: op.clone(),
         },
         NativeExpr::Timestamp { input } => NativeExpr::Timestamp {
-            input: Box::new(rewrite(input, source_tags, source_metrics, keys_survive)?),
+            input: Box::new(rewrite(input, source_tags)?),
         },
         // A merge is the canonicalizer itself, so it asks nothing of its input: fragments are what it
         // was written to receive.
         NativeExpr::Merge { input } => NativeExpr::Merge {
-            input: Box::new(rewrite(input, source_tags, source_metrics, keys_survive)?),
+            input: Box::new(rewrite(input, source_tags)?),
         },
         // A window folds a range of one series' samples and hands the answer over as that series, so
         // it reads the series whole. Over a raw scan the pieces are whole storage series already and
         // the merge above is a no-op; over an evaluated vector a rewrite can have aliased them.
         NativeExpr::Window { input, op } => NativeExpr::Window {
-            input: Box::new(canonical(
-                rewrite(input, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
         },
         // A map is point-wise, but a point can drop out of its output: the histogram functions drop
@@ -223,12 +157,7 @@ fn rewrite(
         // merge above this map would be handed an occupancy the map may already have erased - the
         // pieces have to be collected where they still hold their samples, below it.
         NativeExpr::Map { input, op } => NativeExpr::Map {
-            input: Box::new(canonical(
-                rewrite(input, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
         },
         // A parameterized map's parameters are scalars, rewritten but never collected - a scalar
@@ -239,38 +168,23 @@ fn rewrite(
             op,
             parameters,
         } => NativeExpr::ParameterizedMap {
-            input: Box::new(canonical(
-                rewrite(input, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: *op,
             parameters: parameters
                 .iter()
-                .map(|parameter| rewrite(parameter, source_tags, source_metrics, keys_survive))
+                .map(|parameter| rewrite(parameter, source_tags))
                 .collect::<DfResult<Vec<_>>>()?,
         },
         // A fold answers its groups, so two pieces of one series in a group are summed as if the
         // query had written them twice: the merge is what makes one series arrive as one.
         NativeExpr::Aggregate { input, op } => NativeExpr::Aggregate {
-            input: Box::new(canonical(
-                rewrite(input, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
         },
         // Vector operations consume canonical series: ranking counts them, and presence checks and
         // folds must not silently consume overlapping fragments that a merge would reject.
         NativeExpr::Vector { input, op } => NativeExpr::Vector {
-            input: Box::new(canonical(
-                rewrite(input, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
         },
         // Each side of a binary or set operation is matched by label on its own, so each is
@@ -281,33 +195,13 @@ fn rewrite(
             right,
             matching,
         } => NativeExpr::Binary {
-            left: Box::new(canonical(
-                rewrite(left, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
-            right: Box::new(canonical(
-                rewrite(right, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            left: Box::new(canonical(rewrite(left, source_tags)?, source_tags)),
+            right: Box::new(canonical(rewrite(right, source_tags)?, source_tags)),
             matching: matching.clone(),
         },
         NativeExpr::Set { left, right, op } => NativeExpr::Set {
-            left: Box::new(canonical(
-                rewrite(left, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
-            right: Box::new(canonical(
-                rewrite(right, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            left: Box::new(canonical(rewrite(left, source_tags)?, source_tags)),
+            right: Box::new(canonical(rewrite(right, source_tags)?, source_tags)),
             op: op.clone(),
         },
         // `info` pairs each base series with the info series that share its identifying labels, so it
@@ -318,33 +212,18 @@ fn rewrite(
             info,
             selector,
         } => NativeExpr::Info {
-            base: Box::new(canonical(
-                rewrite(base, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
-            info: Box::new(canonical(
-                rewrite(info, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            base: Box::new(canonical(rewrite(base, source_tags)?, source_tags)),
+            info: Box::new(canonical(rewrite(info, source_tags)?, source_tags)),
             selector: selector.clone(),
         },
         // `vector(s)` builds its series from a scalar, which carries no label set to collect.
         NativeExpr::VectorOf { input } => NativeExpr::VectorOf {
-            input: Box::new(rewrite(input, source_tags, source_metrics, keys_survive)?),
+            input: Box::new(rewrite(input, source_tags)?),
         },
         // `scalar()` answers from the whole vector: a series that arrives in pieces would be seen
         // as several samples, so the pieces are collected where they still hold their samples.
         NativeExpr::ScalarOf { input } => NativeExpr::ScalarOf {
-            input: Box::new(canonical(
-                rewrite(input, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
         },
         // `topk` ranks the whole vector, so it counts canonical series; its parameter is a scalar,
         // rewritten but never collected - a scalar carries no label set.
@@ -353,19 +232,9 @@ fn rewrite(
             op,
             parameter,
         } => NativeExpr::ParameterizedTopK {
-            input: Box::new(canonical(
-                rewrite(input, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
-            parameter: Box::new(rewrite(
-                parameter,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )?),
+            parameter: Box::new(rewrite(parameter, source_tags)?),
         },
         // A histogram function folds the bucket series of one histogram, so overlapping fragments
         // must not reach it; its parameters are scalars and only need rewriting.
@@ -374,16 +243,11 @@ fn rewrite(
             op,
             parameters,
         } => NativeExpr::ParameterizedHistogram {
-            input: Box::new(canonical(
-                rewrite(input, source_tags, source_metrics, keys_survive)?,
-                source_tags,
-                source_metrics,
-                keys_survive,
-            )),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
             parameters: parameters
                 .iter()
-                .map(|parameter| rewrite(parameter, source_tags, source_metrics, keys_survive))
+                .map(|parameter| rewrite(parameter, source_tags))
                 .collect::<DfResult<Vec<_>>>()?,
         },
     };
