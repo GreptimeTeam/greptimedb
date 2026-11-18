@@ -158,28 +158,14 @@ impl SstVersion {
     /// # Panics
     /// Panics if the level of [FileMeta] has no storage slot.
     pub(crate) fn remove_files(&mut self, files_to_remove: impl Iterator<Item = FileMeta>) {
-        let mut retired = std::collections::HashSet::new();
         let levels = Arc::make_mut(&mut self.levels);
         for file in files_to_remove {
-            if !self.series_indexes.is_empty() {
-                retired.insert(file.file_id());
-            }
             let Some(slot) = file::level_slot(file.level) else {
                 panic!("Unsupported SST level {}", file.level);
             };
             if let Some(handle) = levels[slot].files.remove(&file.file_id) {
                 handle.mark_deleted();
             }
-        }
-        if !retired.is_empty() {
-            Arc::make_mut(&mut self.series_indexes).retain(|_, handle| {
-                let covered = matches!(&handle.meta_ref().format, file::FileFormat::NarthexSeriesIndex(index)
-                    if index.sources.iter().any(|id| retired.contains(id)));
-                if covered {
-                    handle.mark_deleted();
-                }
-                !covered
-            });
         }
     }
 

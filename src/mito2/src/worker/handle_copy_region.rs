@@ -251,7 +251,10 @@ impl<S> RegionWorkerLoop<S> {
             .values()
             .map(|meta| meta.as_ref())
             .chain(new_file_metas.iter())
-            .map(|file| (file.file_id, file.file_id()))
+            .filter_map(|target| {
+                let source = source_region_manifest.files.get(&target.file_id)?;
+                Some((source.file_id(), target.file_id()))
+            })
             .collect();
         let mut new_series_indexes = Vec::new();
         for (id, index) in &source_region_manifest.series_indexes {
@@ -261,13 +264,10 @@ impl<S> RegionWorkerLoop<S> {
             let (mut copied, objects) = prepare_narthex_copy(region, index).await?;
             if let file::FileFormat::NarthexSeriesIndex(narthex) = &mut copied.format {
                 for source in &mut narthex.sources {
-                    *source =
-                        *target_samples
-                            .get(&source.file_id())
-                            .context(InvalidRequestSnafu {
-                                region_id: target_region_id,
-                                reason: "Narthex copy index has missing samples",
-                            })?;
+                    // A retained index may refer to samples absent from this copy.
+                    if let Some(target) = target_samples.get(source) {
+                        *source = *target;
+                    }
                 }
             }
             // This index has its own physical target objects, even when some

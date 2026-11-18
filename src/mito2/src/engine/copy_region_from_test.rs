@@ -1032,7 +1032,10 @@ async fn test_narthex_copy_and_remap(
     );
     crate::engine::compaction_test::compact(&engine, target).await;
     let compacted = engine.get_region(target).unwrap();
-    assert!(compacted.version().ssts.series_indexes().is_empty());
+    assert_eq!(
+        compacted.version().ssts.series_indexes().len(),
+        usize::from(with_index)
+    );
     assert!(
         compacted
             .version()
@@ -1060,5 +1063,35 @@ async fn test_narthex_copy_and_remap(
     .await
     .unwrap();
     assert_eq!(result.pretty_print().unwrap(), text);
+    if with_index && !remap && !fail_copy {
+        // The index is still present, but its original samples were compacted away.
+        let next = RegionId::new(2, 3);
+        engine
+            .handle_request(next, RegionRequest::Create(request.clone()))
+            .await
+            .unwrap();
+        engine
+            .copy_region_from(
+                next,
+                MitoCopyRegionFromRequest {
+                    source_region_id: target,
+                    parallelism: 2,
+                },
+            )
+            .await
+            .unwrap();
+        let stream = engine
+            .scan_to_stream(next, ScanRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .pretty_print()
+                .unwrap(),
+            text
+        );
+    }
     engine.stop().await.unwrap();
 }

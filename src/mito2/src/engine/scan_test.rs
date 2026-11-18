@@ -327,7 +327,13 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
             .flat_map(|level| level.files.values().cloned())
             .collect();
         assert!(!outputs.is_empty());
-        assert!(region.version().ssts.series_indexes().is_empty());
+        assert!(
+            region
+                .version()
+                .ssts
+                .series_indexes()
+                .contains_key(&index_id)
+        );
         use crate::series_index::format::{FormatReader, SamplesFormatReader};
         let mut old_series = index_reader.read(crate::series_index::format::SeriesReadRequest {
             projection: index_reader

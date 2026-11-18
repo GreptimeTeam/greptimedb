@@ -1078,7 +1078,7 @@ async fn edit_region(
         }
     }
     for samples in &edit.files_to_add {
-        if matches!(samples.format, file::FileFormat::NarthexSamples(_)) {
+        if !matches!(samples.format, file::FileFormat::Parquet) {
             use crate::series_index::format::SamplesFormatReader;
             let handle = file::FileHandle::new(samples.clone(), region.file_purger.clone());
             let handle = crate::series_index::artifact::SamplesFileHandle::from_narthex(
