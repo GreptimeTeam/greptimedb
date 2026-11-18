@@ -25,8 +25,13 @@ use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
+use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
+use datafusion_physical_expr::expressions::{Column, IsNotNullExpr};
+use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
+use datatypes::arrow::compute::SortOptions;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
@@ -266,6 +271,21 @@ pub(crate) fn log_region_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
         scan.with_new_partitions(vec![vec![]; partitions], partitions)
             .unwrap(),
     )
+}
+
+/// Filters the output of a [`log_region_scan`] by `body IS NOT NULL`.
+pub(crate) fn body_is_not_null(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 0))));
+    Arc::new(FilterExec::try_new(predicate, input).unwrap())
+}
+
+pub(crate) fn sort_by(input: Arc<dyn ExecutionPlan>, key: Column, descending: bool) -> SortExec {
+    let options = SortOptions {
+        descending,
+        nulls_first: true,
+    };
+    let ordering = LexOrdering::new(vec![PhysicalSortExpr::new(Arc::new(key), options)]).unwrap();
+    SortExec::new(ordering, input)
 }
 
 /// A region scan over the same table as [`log_region_scan`] whose ranges are not yet

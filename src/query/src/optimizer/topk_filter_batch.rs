@@ -112,17 +112,14 @@ mod tests {
     use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
     use datafusion::physical_plan::collect;
     use datafusion_physical_expr::expressions::{Column, IsNotNullExpr};
-    use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
-    use datatypes::arrow::array::{StringArray, TimestampMillisecondArray};
-    use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use datatypes::arrow::array::{ArrayRef, StringArray};
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
-    use crate::optimizer::test_util::log_region_scan;
+    use crate::optimizer::test_util::{body_is_not_null, log_region_scan, sort_by};
 
     fn filter_over_scan() -> Arc<dyn ExecutionPlan> {
-        let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 0))));
-        Arc::new(FilterExec::try_new(predicate, log_region_scan(1)).unwrap())
+        body_is_not_null(log_region_scan(1))
     }
 
     fn sort(
@@ -130,9 +127,7 @@ mod tests {
         key: Column,
         fetch: Option<usize>,
     ) -> Arc<dyn ExecutionPlan> {
-        let ordering =
-            LexOrdering::new(vec![PhysicalSortExpr::new_default(Arc::new(key))]).unwrap();
-        Arc::new(SortExec::new(ordering, input).with_fetch(fetch))
+        Arc::new(sort_by(input, key, false).with_fetch(fetch))
     }
 
     fn filter_batch_size(plan: &Arc<dyn ExecutionPlan>) -> usize {
@@ -200,33 +195,16 @@ mod tests {
     async fn test_filter_with_batch_size_one_keeps_batches_whole() {
         // The rule relies on the coalescer passing batches through at a target of 1;
         // splitting them into single rows would multiply the per-batch cost.
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("body", DataType::Utf8, true),
-        ]));
         let batch = |rows: usize| {
-            RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(TimestampMillisecondArray::from(vec![0; rows])),
-                    Arc::new(StringArray::from(vec!["a"; rows])),
-                ],
-            )
-            .unwrap()
+            let body: ArrayRef = Arc::new(StringArray::from(vec!["a"; rows]));
+            RecordBatch::try_from_iter([("body", body)]).unwrap()
         };
+        let schema = batch(0).schema();
         let input = DataSourceExec::from_data_source(
-            MemorySourceConfig::try_new(
-                &[vec![batch(3), batch(100), batch(100)]],
-                schema.clone(),
-                None,
-            )
-            .unwrap(),
+            MemorySourceConfig::try_new(&[vec![batch(3), batch(100), batch(100)]], schema, None)
+                .unwrap(),
         );
-        let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 1))));
+        let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 0))));
         let filter = FilterExec::try_new(predicate, input)
             .unwrap()
             .with_batch_size(1)

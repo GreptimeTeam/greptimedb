@@ -177,106 +177,67 @@ fn assign_partition_ranges_by_time(
 mod test {
     use common_time::Timestamp;
     use common_time::timestamp::TimeUnit;
-    use datafusion::physical_plan::filter::FilterExec;
     use datafusion::physical_plan::union::UnionExec;
-    use datafusion_physical_expr::expressions::{Column, IsNotNullExpr};
-    use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
-    use datatypes::arrow::compute::SortOptions;
+    use datafusion_physical_expr::expressions::Column;
     use store_api::region_engine::PartitionRange;
 
     use super::*;
-    use crate::optimizer::test_util::unassigned_log_region_scan;
+    use crate::optimizer::test_util::{body_is_not_null, sort_by, unassigned_log_region_scan};
+
+    /// Consecutive ten-millisecond ranges with the given row counts, oldest first.
+    fn time_ranges(rows: &[usize]) -> Vec<PartitionRange> {
+        rows.iter()
+            .enumerate()
+            .map(|(i, &num_rows)| PartitionRange {
+                start: Timestamp::new(i as i64 * 10, TimeUnit::Millisecond),
+                end: Timestamp::new(i as i64 * 10 + 10, TimeUnit::Millisecond),
+                num_rows,
+                identifier: i,
+            })
+            .collect()
+    }
+
+    /// Older ranges are larger, as compacted files usually are, so assigning by rows
+    /// alone starts a partition with an old range.
+    const SHRINKING: [usize; 8] = [800, 700, 600, 500, 400, 300, 200, 100];
 
     #[test]
-    fn test_assign_by_time_starts_every_partition_with_newest_ranges() {
-        // Older ranges are larger, as compacted files usually are.
-        let ranges: Vec<_> = (0..8)
-            .map(|i| PartitionRange {
-                start: Timestamp::new(i * 10, TimeUnit::Second),
-                end: Timestamp::new(i * 10 + 10, TimeUnit::Second),
-                num_rows: (8 - i as usize) * 100,
-                identifier: i as usize,
-            })
-            .collect();
-
-        let firsts = |partitions: &Vec<Vec<PartitionRange>>| {
+    fn test_assign_by_time() {
+        let firsts = |partitions: Vec<Vec<PartitionRange>>| {
             let mut ids: Vec<_> = partitions.iter().map(|p| p[0].identifier).collect();
             ids.sort();
             ids
         };
-        let by_time = assign_partition_ranges_by_time(ranges.clone(), 3, true);
-        assert_eq!(vec![5, 6, 7], firsts(&by_time));
-        let by_time = assign_partition_ranges_by_time(ranges, 3, false);
-        assert_eq!(vec![0, 1, 2], firsts(&by_time));
-    }
-
-    #[test]
-    fn test_assign_by_time_balances_rows() {
-        // When fewer than `fetch` rows match, every range is read, so dealing these
-        // round-robin would leave one partition with 2000 rows and the other with 2.
-        let ranges: Vec<_> = [1000, 1, 1000, 1]
-            .into_iter()
-            .enumerate()
-            .map(|(i, num_rows)| PartitionRange {
-                start: Timestamp::new(i as i64 * 10, TimeUnit::Second),
-                end: Timestamp::new(i as i64 * 10 + 10, TimeUnit::Second),
-                num_rows,
-                identifier: i,
-            })
-            .collect();
-        let partitions = assign_partition_ranges_by_time(ranges, 2, false);
-        let rows: Vec<usize> = partitions
+        let assign = |rows: &[usize], partitions, descending| {
+            assign_partition_ranges_by_time(time_ranges(rows), partitions, descending)
+        };
+        // Every partition starts with one of the newest (or oldest) ranges.
+        assert_eq!(vec![5, 6, 7], firsts(assign(&SHRINKING, 3, true)));
+        assert_eq!(vec![0, 1, 2], firsts(assign(&SHRINKING, 3, false)));
+        // Rows stay balanced: when fewer than `fetch` rows match, every range is read.
+        let rows: Vec<usize> = assign(&[1000, 1, 1000, 1], 2, false)
             .iter()
             .map(|p| p.iter().map(|r| r.num_rows).sum())
             .collect();
         assert_eq!(vec![1001, 1001], rows);
-    }
-
-    #[test]
-    fn test_assign_by_time_spreads_ranges_of_unknown_size() {
-        let ranges = (0..4)
-            .map(|i| PartitionRange {
-                start: Timestamp::new(i * 10, TimeUnit::Second),
-                end: Timestamp::new(i * 10 + 10, TimeUnit::Second),
-                num_rows: 0,
-                identifier: i as usize,
-            })
+        // Ranges of old files report 0 rows, meaning unknown, and are spread by count.
+        let counts: Vec<_> = assign(&[0, 0, 0, 0], 2, true)
+            .iter()
+            .map(Vec::len)
             .collect();
-        let partitions = assign_partition_ranges_by_time(ranges, 2, true);
-        assert_eq!(
-            vec![2, 2],
-            partitions.iter().map(Vec::len).collect::<Vec<_>>()
-        );
+        assert_eq!(vec![2, 2], counts);
     }
 
     #[test]
     fn test_only_filtered_time_topk_scans_get_time_ordered_ranges() {
-        // Older ranges are larger, so assigning by rows alone starts a partition with
-        // an old range.
-        let ranges: Vec<_> = (0..8)
-            .map(|i| PartitionRange {
-                start: Timestamp::new(i * 10, TimeUnit::Millisecond),
-                end: Timestamp::new(i * 10 + 10, TimeUnit::Millisecond),
-                num_rows: (8 - i as usize) * 100,
-                identifier: i as usize,
-            })
-            .collect();
-        let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 0))));
-        let filter = Arc::new(
-            FilterExec::try_new(predicate, unassigned_log_region_scan(ranges.clone())).unwrap(),
-        );
-        let ordering = LexOrdering::new(vec![PhysicalSortExpr::new(
-            Arc::new(Column::new("ts", 1)),
-            SortOptions {
-                descending: true,
-                nulls_first: true,
-            },
-        )])
-        .unwrap();
-        let topk = Arc::new(SortExec::new(ordering, filter).with_fetch(Some(100)));
+        let filter = body_is_not_null(unassigned_log_region_scan(time_ranges(&SHRINKING)));
+        let topk = Arc::new(sort_by(filter, Column::new("ts", 1), true).with_fetch(Some(100)));
         // A sibling scan that no TopK reads must keep the row-balanced assignment.
-        let plan =
-            UnionExec::try_new(vec![topk, unassigned_log_region_scan(ranges.clone())]).unwrap();
+        let plan = UnionExec::try_new(vec![
+            topk,
+            unassigned_log_region_scan(time_ranges(&SHRINKING)),
+        ])
+        .unwrap();
 
         let mut config = ConfigOptions::default();
         config.execution.target_partitions = 3;
@@ -292,8 +253,12 @@ mod test {
         .unwrap();
         assert_eq!(
             vec![
-                members(&assign_partition_ranges_by_time(ranges.clone(), 3, true)),
-                members(&assign_partition_ranges(ranges, 3)),
+                members(&assign_partition_ranges_by_time(
+                    time_ranges(&SHRINKING),
+                    3,
+                    true
+                )),
+                members(&assign_partition_ranges(time_ranges(&SHRINKING), 3)),
             ],
             assignments
         );

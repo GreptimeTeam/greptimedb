@@ -117,26 +117,18 @@ pub(crate) fn filtered_scan_below_topk(sort: &SortExec) -> Result<Option<&Region
 
 #[cfg(test)]
 mod tests {
-    use datafusion_physical_expr::expressions::{Column, IsNotNullExpr};
-    use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
+    use datafusion_physical_expr::expressions::Column;
 
     use super::*;
-    use crate::optimizer::test_util::log_region_scan as region_scan;
-
-    fn filter(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 0))));
-        Arc::new(FilterExec::try_new(predicate, input).unwrap())
-    }
+    use crate::optimizer::test_util::{body_is_not_null as filter, log_region_scan, sort_by};
 
     fn partitioned_topk(
         input: Arc<dyn ExecutionPlan>,
         sort_key: Column,
         fetch: usize,
     ) -> Arc<dyn ExecutionPlan> {
-        let ordering =
-            LexOrdering::new(vec![PhysicalSortExpr::new_default(Arc::new(sort_key))]).unwrap();
         Arc::new(
-            SortExec::new(ordering, input)
+            sort_by(input, sort_key, false)
                 .with_fetch(Some(fetch))
                 .with_preserve_partitioning(true),
         )
@@ -160,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_filtered_scan_gets_one_heap() {
-        let topk = partitioned_topk(filter(region_scan(4)), ts(), 100);
+        let topk = partitioned_topk(filter(log_region_scan(4)), ts(), 100);
         let pushed_filter = topk.dynamic_expressions_produced()[0].clone();
         let plan = optimize(topk);
 
@@ -185,13 +177,13 @@ mod tests {
     #[test]
     fn test_topk_keeps_partitions_when_one_heap_does_not_help() {
         // One thread would merge every filtered row of a weak filter.
-        let plan = partitioned_topk(filter(region_scan(4)), ts(), MAX_GLOBAL_TOPK_FETCH + 1);
+        let plan = partitioned_topk(filter(log_region_scan(4)), ts(), MAX_GLOBAL_TOPK_FETCH + 1);
         assert!(is_partitioned_topk(&optimize(plan)));
         // Without a filter every scanned row reaches the heaps, so each fills at once.
-        let plan = partitioned_topk(region_scan(4), ts(), 100);
+        let plan = partitioned_topk(log_region_scan(4), ts(), 100);
         assert!(is_partitioned_topk(&optimize(plan)));
         // The scan cannot skip ranges on another sort key.
-        let plan = partitioned_topk(filter(region_scan(4)), Column::new("body", 0), 100);
+        let plan = partitioned_topk(filter(log_region_scan(4)), Column::new("body", 0), 100);
         assert!(is_partitioned_topk(&optimize(plan)));
     }
 }
