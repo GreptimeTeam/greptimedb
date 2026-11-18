@@ -74,6 +74,8 @@ including caches owned by pipeline and protocol handlers.
 - **Flight bulk insert** (`instance/grpc.rs`): initializes on the first batch after
   the lazy schema handshake; checks permissions and reconciles missing columns
   through `Inserter` once per stream, then reuses the refreshed table.
+  PostgreSQL Arrow COPY delegates to this same handler via `instance/copy_in.rs`;
+  keep bulk authorization, interceptors, schema-on-write, and writes shared.
 
 - **OTLP trace lookup tables** (`instance/otlp/trace_ingest.rs`): `Instance` owns
   a shared cache of confirmed service/operation writes, which bypass batching.

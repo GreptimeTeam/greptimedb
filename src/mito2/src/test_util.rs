@@ -42,7 +42,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_telemetry::{debug, warn};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
-use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+use common_wal::config::object_store::{FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig};
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
 use datatypes::extension::json::{Json2ExtensionType, JsonExtensionType};
@@ -683,10 +683,14 @@ impl TestEnv {
         wal_config: &ObjectStoreWalConfig,
     ) -> (MitoEngine, Arc<ObjectStoreLogStore>) {
         let wal_object_store = ObjectStore::new(Memory::default()).unwrap();
-        let log_store =
-            ObjectStoreLogStore::try_new(wal_object_store, wal_config, 0, STANDALONE_GENERATION)
-                .await
-                .unwrap();
+        let log_store = ObjectStoreLogStore::try_new(
+            wal_object_store,
+            wal_config,
+            0,
+            FIXED_DIRECTORY_GENERATION,
+        )
+        .await
+        .unwrap();
         let engine = self
             .create_engine_with_log_store(config, log_store.clone())
             .await;

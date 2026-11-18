@@ -27,8 +27,23 @@ use crate::request::{
     BuildIndexRequest, CompactionFailed, CompactionFinished, CompactionUnitNotification, OnFailure,
     OptionOutputTx,
 };
+use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
+use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
 use crate::worker::RegionWorkerLoop;
+
+/// Completed extensions prove the writer built this output's indexes together.
+/// A background replacement would otherwise erase those extension blobs.
+fn needs_background_indexes(file: &FileMeta) -> bool {
+    !ExtensionIndexKind::ALL.iter().any(|kind| {
+        let index_type = IndexKind::Extension(*kind).index_type();
+        file.available_indexes.contains(&index_type)
+            || file
+                .indexes
+                .iter()
+                .any(|column| column.created_indexes.contains(&index_type))
+    })
+}
 
 fn made_progress(files_to_add: usize, files_to_remove: usize) -> bool {
     files_to_add > 0 || files_to_remove > files_to_add
@@ -71,14 +86,19 @@ impl<S> RegionWorkerLoop<S> {
                             plan_id,
                             Ok(progress),
                         );
+                        let files_to_index = edit
+                            .files_to_add
+                            .into_iter()
+                            .filter(needs_background_indexes)
+                            .collect::<Vec<_>>();
                         if self.config.index.build_mode == IndexBuildMode::Async
-                            && !edit.files_to_add.is_empty()
+                            && !files_to_index.is_empty()
                         {
                             self.handle_rebuild_index(
                                 BuildIndexRequest {
                                     region_id,
                                     build_type: IndexBuildType::Compact,
-                                    file_metas: edit.files_to_add,
+                                    file_metas: files_to_index,
                                     result_senders: Vec::new(),
                                 },
                                 OptionOutputTx::new(None),
@@ -231,7 +251,10 @@ impl<S> RegionWorkerLoop<S> {
             region.file_purger.clone(),
         );
 
-        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
+        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add)
+            .into_iter()
+            .filter(needs_background_indexes)
+            .collect::<Vec<_>>();
 
         // compaction finished.
         request.on_success();

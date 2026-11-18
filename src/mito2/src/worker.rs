@@ -68,7 +68,7 @@ use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRe
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::compaction::{CancelCompactionResult, CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
-use crate::error::{self, CreateDirSnafu, ExternalSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::lease::{GrantedLeases, NodeLease};
@@ -441,6 +441,10 @@ impl WorkerGroup {
         handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
     }
 
+    pub(crate) fn node_lease_permit(&self) -> Arc<NodeLease> {
+        self.node_lease.clone()
+    }
+
     /// Asks the worker of `region` to cancel its tail replay, if one runs, without waiting.
     pub(crate) fn notify_cannot_replay(&self, region: &MitoRegionRef) {
         handle_tail_replay::notify_cannot_replay(&self.worker(region.region_id).sender, region);
@@ -689,16 +693,7 @@ fn index_registry(
     config: &MitoConfig,
     provider: Option<IndexKindProviderRef>,
 ) -> Result<IndexRegistryRef> {
-    IndexRegistry::new(
-        config.inverted_index.clone(),
-        config.fulltext_index.clone(),
-        config.bloom_filter_index.clone(),
-    )
-    .with_provider(provider)
-    .map(Arc::new)
-    .with_context(|_| ExternalSnafu {
-        context: "registering index handlers".to_string(),
-    })
+    IndexRegistry::from_config(config, provider).map(Arc::new)
 }
 
 /// Worker start config.

@@ -375,11 +375,16 @@ impl AccessLayer {
 
     async fn write_sst_inner(
         &self,
-        request: SstWriteRequest,
+        mut request: SstWriteRequest,
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
         context: Option<SstWriteContext>,
     ) -> Result<SstInfoArray> {
+        // Rollover can create multiple SSTs from this request, so no output may
+        // reuse summaries covering the complete input set.
+        if let Some(provider) = &mut request.index_build_inputs {
+            provider.can_merge_inputs &= write_opts.max_file_size.is_none();
+        }
         let context = context.unwrap_or_default();
         let limits = context.limits;
         let guard = context.guard.clone();

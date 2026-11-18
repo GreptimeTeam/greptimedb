@@ -132,8 +132,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::compaction_task::{self, CompactionTaskEntry};
-use store_api::logstore::LogStore;
 use store_api::logstore::provider::{KafkaProvider, Provider};
+use store_api::logstore::{LogStore, ObjectStoreWalIoPermit};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
@@ -344,6 +344,11 @@ impl MitoEngine {
     /// Makes regions acknowledge only writes whose WAL append completes within their lease.
     pub fn require_write_lease(&self) {
         self.inner.workers.node_lease().enable();
+    }
+
+    /// Returns the node-lease permission used to fence object-store WAL I/O.
+    pub fn object_store_wal_io_permit(&self) -> Arc<dyn ObjectStoreWalIoPermit> {
+        self.inner.workers.node_lease_permit()
     }
 
     /// Renews the lease of this node from a heartbeat response that carries region leases.

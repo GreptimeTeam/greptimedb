@@ -31,7 +31,7 @@ use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_wal::config::object_store::{
-    AckMode, CorruptedSegmentAction, ObjectStoreWalConfig, STANDALONE_GENERATION,
+    AckMode, CorruptedSegmentAction, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig,
 };
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use futures::TryStreamExt;
@@ -99,7 +99,7 @@ async fn open_store(object_store: &ObjectStore, ack_mode: AckMode) -> Arc<Object
         object_store.clone(),
         &store_config(ack_mode),
         0,
-        STANDALONE_GENERATION,
+        FIXED_DIRECTORY_GENERATION,
     )
     .await
     .unwrap()
@@ -568,7 +568,7 @@ async fn test_reopen_with_a_corrupted_segment(
         ..store_config(AckMode::Durable)
     };
     let store =
-        ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, STANDALONE_GENERATION)
+        ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, FIXED_DIRECTORY_GENERATION)
             .await
             .unwrap();
     let engine = new_engine(&mut env, store.clone()).await;
@@ -639,11 +639,15 @@ async fn test_open_region_rejects_mismatched_wal_prefix() {
     // The process now runs its store under the next generation while the
     // region still persists the prefix it was created with.
     let config = store_config(AckMode::Durable);
-    let other_prefix = config.node_prefix(0, STANDALONE_GENERATION + 1);
-    let store =
-        ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, STANDALONE_GENERATION + 1)
-            .await
-            .unwrap();
+    let other_prefix = config.node_prefix(0, FIXED_DIRECTORY_GENERATION + 1);
+    let store = ObjectStoreLogStore::try_new(
+        object_store.clone(),
+        &config,
+        0,
+        FIXED_DIRECTORY_GENERATION + 1,
+    )
+    .await
+    .unwrap();
     let engine = new_engine(&mut env, store).await;
     let err = open_region(&engine, REGION_A, &table_dir, &[])
         .await
@@ -666,7 +670,7 @@ async fn open_store_accepting_missing_history(
         accept_missing_history: true,
         ..store_config(AckMode::Durable)
     };
-    ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, STANDALONE_GENERATION)
+    ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, FIXED_DIRECTORY_GENERATION)
         .await
         .unwrap()
 }

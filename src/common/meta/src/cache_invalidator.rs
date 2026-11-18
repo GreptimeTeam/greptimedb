@@ -173,6 +173,10 @@ where
                     let key = NodeAddressKey::with_flownode(*node_id);
                     self.invalidate_key(&key.to_bytes()).await;
                 }
+                #[cfg(feature = "enterprise")]
+                CacheIdent::TriggerId(_) => {
+                    // Trigger keys are owned by enterprise cache invalidators.
+                }
                 CacheIdent::User(_) => {
                     // User cache invalidation is handled by external
                     // CacheInvalidator implementations.

@@ -411,6 +411,9 @@ impl UpgradeRegion {
 /// The identifier of cache.
 pub enum CacheIdent {
     FlowId(FlowId),
+    /// Indicates a change of trigger metadata; invalidated by enterprise plugins.
+    #[cfg(feature = "enterprise")]
+    TriggerId(u64),
     /// Indicate change of address of flownode.
     FlowNodeAddressChange(u64),
     FlowName(FlowName),

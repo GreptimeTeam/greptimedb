@@ -38,9 +38,12 @@ use tokio_util::sync::CancellationToken;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
+use crate::error::CompactionCancelledSnafu;
 use crate::error::{InvalidMultiRegionCompactionSnafu, Result};
 use crate::region::options::RegionOptions;
 use crate::sst::file::{FileMeta, RegionFileId};
+use crate::sst::index::handler::IndexKindProviderRef;
+use crate::sst::index::registry::IndexRegistry;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::writer::SstWriteGuard;
 
@@ -78,6 +81,8 @@ pub struct MultiRegionCompactionPlan {
 
 /// Shared storage services and attempt-owned output resources.
 pub struct MultiRegionCompactionContext {
+    /// Optional enterprise index implementation. Each routed output builds its own state.
+    pub index_kind_provider: Option<IndexKindProviderRef>,
     pub access_layer: AccessLayerRef,
     pub cache: CacheManagerRef,
     pub config: Arc<MitoConfig>,
@@ -127,8 +132,18 @@ pub async fn compact_regions(
     context: MultiRegionCompactionContext,
 ) -> Result<MultiRegionCompactionOutput> {
     let metadata = validate_plan(&plan)?;
+    // Invalid registrations still fail, but unavailable sketches only warn so
+    // compaction can continue after a downgrade.
+    let registry =
+        IndexRegistry::from_config(&context.config, context.index_kind_provider.clone())?;
+    for target in plan.targets.values() {
+        registry.warn_missing_compaction_handlers(
+            &target.metadata,
+            plan.sources.iter().chain(target.inputs.values()),
+        );
+    }
     if context.cancellation.is_cancelled() {
-        return crate::error::CompactionCancelledSnafu.fail();
+        return CompactionCancelledSnafu.fail();
     }
     let cancellation = context.cancellation.clone();
     let execution = async move {

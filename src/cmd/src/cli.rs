@@ -77,7 +77,8 @@ impl Command {
             &TracingOptions::default(),
             None,
             None,
-        );
+        )
+        .context(crate::error::InitLoggingSnafu)?;
 
         let tool = self.cmd.build().await.context(error::BuildCliSnafu)?;
         let instance = Instance {

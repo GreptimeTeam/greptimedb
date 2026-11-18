@@ -251,7 +251,8 @@ impl StartCommand {
             &opts.component.tracing,
             opts.component.node_id.map(|x| x.to_string()),
             None,
-        );
+        )
+        .context(crate::error::InitLoggingSnafu)?;
 
         common_runtime::init_global_runtimes(&opts.runtime);
 

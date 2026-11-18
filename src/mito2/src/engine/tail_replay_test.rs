@@ -25,7 +25,7 @@ use common_base::readable_size::ReadableSize;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
-use common_wal::config::object_store::STANDALONE_GENERATION;
+use common_wal::config::object_store::FIXED_DIRECTORY_GENERATION;
 use common_wal::options::WAL_OPTIONS_KEY;
 use datatypes::arrow::array::Array;
 use log_store::ObjectStoreLogStore;
@@ -251,7 +251,7 @@ impl TestRegion {
             wal_store.clone(),
             &wal_config(),
             NODE_ID,
-            STANDALONE_GENERATION,
+            FIXED_DIRECTORY_GENERATION,
         )
         .await
         .unwrap();
@@ -400,7 +400,7 @@ impl TestRegion {
             self.wal_store.clone(),
             &wal_config(),
             REMOTE_NODE_ID,
-            STANDALONE_GENERATION,
+            FIXED_DIRECTORY_GENERATION,
         )
         .await
         .unwrap();
@@ -530,7 +530,7 @@ fn remote_tail(after: EntryId, upto: EntryId, upto_kind: UptoKind) -> PendingTai
 }
 
 fn remote_prefix() -> String {
-    wal_config().node_prefix(REMOTE_NODE_ID, STANDALONE_GENERATION)
+    wal_config().node_prefix(REMOTE_NODE_ID, FIXED_DIRECTORY_GENERATION)
 }
 
 #[tokio::test]
@@ -674,7 +674,7 @@ async fn test_tail_read_stops_at_its_upto(#[case] upto_kind: UptoKind) {
         .reopen_with_tails(vec![own_tail(0, upto, upto_kind)])
         .await;
     // Makes the entry after the tail unreadable.
-    let prefix = wal_config().node_prefix(NODE_ID, STANDALONE_GENERATION);
+    let prefix = wal_config().node_prefix(NODE_ID, FIXED_DIRECTORY_GENERATION);
     let objects = region
         .wal_store
         .list(&format!("{prefix}/objects/"))
@@ -1578,10 +1578,14 @@ async fn test_replay_chunks_fire_sst_written_hook() {
         .await
         .with_node_id(NODE_ID);
     let wal_store = ObjectStore::new(Memory::default()).unwrap();
-    let log_store =
-        ObjectStoreLogStore::try_new(wal_store, &wal_config(), NODE_ID, STANDALONE_GENERATION)
-            .await
-            .unwrap();
+    let log_store = ObjectStoreLogStore::try_new(
+        wal_store,
+        &wal_config(),
+        NODE_ID,
+        FIXED_DIRECTORY_GENERATION,
+    )
+    .await
+    .unwrap();
     let hook = Arc::new(MockRegionHook::new());
     let plugins = Plugins::new();
     plugins.insert(hook.clone() as RegionHookRef);
