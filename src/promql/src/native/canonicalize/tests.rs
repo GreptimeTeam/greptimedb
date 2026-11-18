@@ -313,6 +313,9 @@ fn merges(tree: &NativeTree) -> usize {
             | NativeExpr::Merge { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. } => vec![input.as_ref()],
+            NativeExpr::ParameterizedAggregate {
+                input, parameter, ..
+            } => vec![input.as_ref(), parameter.as_ref()],
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
             | NativeExpr::Info {

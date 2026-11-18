@@ -2221,6 +2221,11 @@ fn depends_on_input_order(node: &NativeNode) -> bool {
         NativeExpr::ParameterizedTopK {
             input, parameter, ..
         } => depends_on_input_order(input) || depends_on_input_order(parameter),
+        // The fold's own order is its input's, and the argument it reads per point can hold an
+        // order-dependent selection of its own (`quantile(scalar(limitk(1, a)), b)`).
+        NativeExpr::ParameterizedAggregate {
+            input, parameter, ..
+        } => depends_on_input_order(input) || depends_on_input_order(parameter),
         NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
