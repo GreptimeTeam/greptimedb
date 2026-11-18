@@ -805,7 +805,8 @@ mod tests {
         assert!(!stat.has_pending_tails);
         assert_eq!(serde_json::to_vec(&stat).unwrap(), legacy_stat);
 
-        // A true flag is written under this key, which older or newer peers must read too.
+        // A true flag is written under this key, which readers that support the flag decode;
+        // older readers ignore it.
         let statistic = RegionStatistic {
             has_pending_tails: true,
             ..statistic

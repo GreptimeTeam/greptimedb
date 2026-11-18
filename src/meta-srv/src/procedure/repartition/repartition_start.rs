@@ -225,7 +225,9 @@ impl RepartitionStart {
     /// region of `plans` still had pending WAL tails when it last reported as leader, since
     /// entering staging would then fail after the route change. Targets are the sources or new
     /// regions, so only sources are checked. A source without a leader report to this metasrv
-    /// passes, and entering staging still refuses its pending tails.
+    /// passes, and entering staging still refuses its pending tails. Registry entries are not
+    /// expired, so after a datanode restart the check uses the flag of the last report until
+    /// the reopened region reports as leader again.
     fn ensure_no_pending_tails(ctx: &Context, plans: &[AllocationPlanEntry]) -> Result<()> {
         let region_ids = plans
             .iter()
