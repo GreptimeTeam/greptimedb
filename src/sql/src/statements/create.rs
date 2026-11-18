@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Write};
 use std::ops::ControlFlow;
 
-use common_catalog::consts::FILE_ENGINE;
+use common_catalog::consts::{FILE_ENGINE, RELATIONAL_ENGINE};
 use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{CompressionOptions, FulltextOptions, SkippingIndexOptions};
@@ -508,7 +508,7 @@ impl CreateTable {
 
     fn write_sql(&self, f: &mut dyn Write, complete: bool) -> std::fmt::Result {
         write!(f, "CREATE ")?;
-        if self.engine == FILE_ENGINE {
+        if self.engine == FILE_ENGINE || self.engine == RELATIONAL_ENGINE {
             write!(f, "EXTERNAL ")?;
         }
         write!(f, "TABLE ")?;

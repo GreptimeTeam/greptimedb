@@ -15,11 +15,11 @@
 //! Request-scoped database export preparation. The frontend authorizes the entire
 //! captured selection before preparation; these trusted methods do not check ACLs.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 
 use common_datasource::file_format::Format;
-use common_datasource::object_store::{FILE_SCHEMA, FS_SCHEMA, build_backend_for_write, parse_url};
+use common_datasource::object_store::build_backend_for_write;
 use common_datasource::packed_writer::{PackedTableWriter, PackedWriter};
 use common_meta::key::table_route::TableRouteValue;
 use futures::StreamExt;
@@ -35,8 +35,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{self, InvalidDatabaseExportSnafu, Result};
 use crate::statement::StatementExecutor;
 use crate::statement::database_copy::{
-    DatabaseExportFile, parse_parallelism_from_option_map, validate_database_directory,
-    validate_database_export_layout,
+    DatabaseExportFile, parse_parallelism_from_option_map, prepare_database_export_files,
+    validate_database_directory, validate_database_export_layout,
 };
 use crate::statement::export_logical_tables::writers::{ExportWriteBudget, retain_error};
 use crate::statement::export_logical_tables::{LogicalTableExport, LogicalTableExportLimits};
@@ -55,6 +55,11 @@ impl PreparedDatabaseExport {
     }
 }
 
+fn is_packed_export(with: &HashMap<String, String>) -> bool {
+    with.get("metric_data_layout")
+        .is_some_and(|v| v == "packed")
+}
+
 enum DatabaseExportJob {
     Ordinary {
         table: TableRef,
@@ -71,11 +76,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         tables: Vec<TableRef>,
     ) -> Result<PreparedDatabaseExport> {
-        if req
-            .with
-            .get("metric_data_layout")
-            .is_none_or(|v| v != "packed")
-        {
+        if !is_packed_export(&req.with) {
             validate_database_export_layout(&req.with)?;
         }
         validate_database_directory(&req.location)?;
@@ -84,26 +85,16 @@ impl StatementExecutor {
             matches!(format, Format::Parquet(_)),
             error::UnsupportedFormatSnafu { format }
         );
-        let (scheme, _, _) = parse_url(&req.location).context(error::BuildBackendSnafu)?;
-        let local =
-            scheme.eq_ignore_ascii_case(FS_SCHEMA) || scheme.eq_ignore_ascii_case(FILE_SCHEMA);
-        let mut filenames = HashSet::new();
+        let outputs = prepare_database_export_files(
+            &req.location,
+            tables.iter().map(|table| table.table_info().name.clone()),
+            ".parquet",
+            is_packed_export(&req.with),
+        )?;
         let mut logical = Vec::new();
         let mut jobs = Vec::new();
-        for table in tables {
+        for (table, output) in tables.into_iter().zip(outputs) {
             let info = table.table_info();
-            let name = &info.name;
-            let output = DatabaseExportFile::new(&req.location, name, ".parquet")?;
-            ensure!(
-                filenames.insert(if local {
-                    output.path.to_ascii_lowercase()
-                } else {
-                    output.path.clone()
-                }),
-                InvalidDatabaseExportSnafu {
-                    reason: format!("duplicate output name: {name}")
-                }
-            );
             ensure!(
                 info.catalog_name == req.catalog_name
                     && info.schema_name == req.schema_name
@@ -212,11 +203,7 @@ impl StatementExecutor {
         let req = &plan.request;
         let parallelism = parse_parallelism_from_option_map(&req.with);
         let budget = ExportWriteBudget::new(parallelism);
-        let packed = if req
-            .with
-            .get("metric_data_layout")
-            .is_some_and(|v| v == "packed")
-        {
+        let packed = if is_packed_export(&req.with) {
             let store =
                 build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
                     .await
@@ -255,7 +242,11 @@ impl StatementExecutor {
                             catalog_name: info.catalog_name.clone(),
                             schema_name: info.schema_name.clone(),
                             table_name: info.name.clone(),
-                            location: output.location,
+                            location: if packed.is_some() {
+                                req.location.clone()
+                            } else {
+                                output.location
+                            },
                             with: req.with.clone(),
                             connection: req.connection.clone(),
                             pattern: None,

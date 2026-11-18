@@ -16,6 +16,7 @@
 pub mod trigger;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::result;
 use std::time::Duration;
 
@@ -68,6 +69,8 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
+/// Ordered source table IDs pinned by the caller of an automatic logical-table ALTER.
+pub const ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY: &str = "__greptime_alter_logical_tables.ids";
 /// Reserved query-context extension key for the authenticated database creator.
 pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
 /// Internal gRPC metadata key for the authenticated database creator.
@@ -757,11 +760,27 @@ impl From<DropTableTask> for PbDropTableTask {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(PartialEq, Clone)]
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
     pub partitions: Vec<Partition>,
     pub table_info: TableInfo,
+}
+
+impl fmt::Debug for CreateTableTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut create_table = self.create_table.clone();
+        for (key, value) in create_table.table_options.iter_mut() {
+            if let Some(redacted) = table::requests::redact_option_value(key, value.as_str()) {
+                *value = redacted;
+            }
+        }
+        f.debug_struct("CreateTableTask")
+            .field("create_table", &create_table)
+            .field("partitions", &self.partitions)
+            .field("table_info", &self.table_info)
+            .finish()
+    }
 }
 
 impl TryFrom<PbCreateTableTask> for CreateTableTask {
@@ -1707,6 +1726,24 @@ impl QueryContext {
         &self.extensions
     }
 
+    pub(crate) fn pinned_logical_table_ids(&self) -> Result<Option<Vec<TableId>>> {
+        self.extensions
+            .get(ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY)
+            .map(|ids| {
+                ids.split(',')
+                    .map(|id| {
+                        id.parse::<TableId>().map_err(|error| {
+                            error::AlterLogicalTablesInvalidArgumentsSnafu {
+                                err_msg: format!("Invalid pinned logical table ID: {error}"),
+                            }
+                            .build()
+                        })
+                    })
+                    .collect()
+            })
+            .transpose()
+    }
+
     /// Get the channel
     pub fn channel(&self) -> u8 {
         self.channel
@@ -1892,6 +1929,32 @@ mod tests {
     use super::{AlterTableTask, CreateTableTask, *};
 
     #[test]
+    fn test_pinned_logical_table_ids_wire_compatibility() {
+        let legacy = include_bytes!(
+            "../../../../../tests/compatibility/wire/read_preference/legacy_query_context.pb"
+        );
+        let mut context = QueryContext::from(PbQueryContext::decode(legacy.as_slice()).unwrap());
+        assert_eq!(context.pinned_logical_table_ids().unwrap(), None);
+        context.extensions.insert(
+            "__greptime_alter_logical_tables.ids".into(),
+            "1025,1024".into(),
+        );
+        let wire = PbQueryContext::from(context.clone()).encode_to_vec();
+        let decoded = QueryContext::from(PbQueryContext::decode(wire.as_slice()).unwrap());
+        assert_eq!(decoded, context);
+        assert_eq!(
+            decoded.pinned_logical_table_ids().unwrap(),
+            Some(vec![1025, 1024])
+        );
+        for invalid in ["", "1024,", "1024,no", "-1", "4294967296"] {
+            context
+                .extensions
+                .insert(ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY.into(), invalid.into());
+            assert!(context.pinned_logical_table_ids().is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn test_ddl_timeout_secs() {
         assert_eq!(ddl_timeout_secs(Duration::ZERO), 0);
         assert_eq!(ddl_timeout_secs(Duration::from_nanos(1)), 1);
@@ -1950,6 +2013,40 @@ mod tests {
 
         let de = serde_json::from_slice(&output).unwrap();
         assert_eq!(task, de);
+    }
+
+    #[test]
+    fn test_create_table_task_debug_redacts_connection() {
+        let schema = SchemaBuilder::default().build().unwrap();
+        let table_info = test_table_info(1025, "foo", "bar", "baz", Arc::new(schema));
+        let mut create_table = CreateTableExpr::default();
+        create_table.table_options.insert(
+            table::requests::RELATIONAL_META_KEY.to_string(),
+            "{\"connection\":\"mysql://user:secret@127.0.0.1:3306/db\",\"remote_table\":\"sample\"}"
+                .to_string(),
+        );
+        let task = CreateTableTask::new(create_table, Vec::new(), table_info);
+        let debug = format!("{task:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("mysql://user:******@127.0.0.1:3306/db"));
+    }
+
+    #[test]
+    fn test_create_table_task_debug_redacts_credential() {
+        let schema = SchemaBuilder::default().build().unwrap();
+        let table_info = test_table_info(1026, "foo", "bar", "baz", Arc::new(schema));
+        let mut create_table = CreateTableExpr::default();
+        create_table
+            .table_options
+            .insert("secret_access_key".to_string(), "my-secret".to_string());
+        create_table
+            .table_options
+            .insert("session_token".to_string(), "my-token".to_string());
+        let task = CreateTableTask::new(create_table, Vec::new(), table_info);
+        let debug = format!("{task:?}");
+        assert!(!debug.contains("my-secret"));
+        assert!(!debug.contains("my-token"));
+        assert!(debug.contains("******"));
     }
 
     #[test]

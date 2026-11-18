@@ -558,6 +558,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to resolve the WAL provider, region_id: {}", region_id))]
+    ResolveWalProvider {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     // Shared error for each writer in the write group.
     #[snafu(display("Failed to write region"))]
     WriteGroup { source: Arc<Error> },
@@ -616,6 +624,14 @@ pub enum Error {
 
     #[snafu(display("Failed to merge candidate series"))]
     MergeCandidateSeries {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
+    #[snafu(display("Scan memory exhausted"))]
+    ScanMemoryExhausted {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -1398,6 +1414,9 @@ pub enum Error {
     #[snafu(display("Compaction is cancelled."))]
     CompactionCancelled {},
 
+    #[snafu(display("SST write is cancelled."))]
+    SstWriteCancelled {},
+
     #[snafu(display("Flush is cancelled."))]
     FlushCancelled {},
 
@@ -1660,6 +1679,7 @@ impl ErrorExt for Error {
             | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
+            | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
@@ -1818,14 +1838,17 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
-                StatusCode::Cancelled
-            }
+            ManualCompactionOverride {}
+            | CompactionCancelled {}
+            | FlushCancelled {}
+            | SstWriteCancelled {} => StatusCode::Cancelled,
 
             // A concurrent manual compaction fails fast instead of being queued;
             // the conflict is reported to the caller, which decides whether to
             // issue a new request after the running one finishes.
             ManualCompactionAlreadyRunning { .. } => StatusCode::RegionBusy,
+
+            ScanMemoryExhausted { .. } => StatusCode::RuntimeResourcesExhausted,
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 
@@ -1897,6 +1920,7 @@ impl ErrorExt for Error {
             | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
+            | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),

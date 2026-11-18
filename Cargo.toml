@@ -164,7 +164,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "5870f5adc4d601173e742888e7db2032a690b583" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c46f7ee9c82ff90f5762ae192fcf8bb2b0d6046f" }
 hdfs-native = "0.14.6"
 hex = "0.4"
 hostname = "0.4.0"
@@ -183,9 +183,12 @@ jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "5a6472858d860ac0
 lazy_static = "1.4"
 local-ip-address = "0.6"
 loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "f69c8924c4babe516373e26a4118be82d976629c" }
+# Keep in sync with Arrow IPC's decoder; COPY bounds its output before Arrow decoding.
+lz4_flex = { version = "=0.14.0", default-features = false, features = ["frame", "std"] }
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "f743c3a5fe8c1f57363eac5866c356b7d91f9b39" }
 mockall = "0.13"
 moka = "0.12"
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }
 nalgebra = "0.33"
 nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"
@@ -215,6 +218,7 @@ parquet-variant-json = "=59.2.0"
 paste = "1.0"
 percent-encoding = "2.3"
 pin-project = "1.0"
+postcard = { version = "1.1.3", default-features = false, features = ["alloc", "use-std"] }
 pretty_assertions = "1.4.0"
 prometheus = { version = "0.14", features = ["process"] }
 promql-parser = { version = "0.10.0", features = ["ser"] }
@@ -262,6 +266,7 @@ sqlx = { version = "0.9", default-features = false, features = [
     "tls-rustls-aws-lc-rs",
     "rust_decimal",
 ] }
+stacker = "0.1.25"
 stringprep = "0.1"
 strum = { version = "0.27", features = ["derive"] }
 sysinfo = "0.33"
@@ -283,6 +288,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
 typetag = "0.2"
 uddsketch-rs = "0.1.0"
 uuid = { version = "1.17", features = ["serde", "v4", "v7", "fast-rng"] }

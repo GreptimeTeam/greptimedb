@@ -38,6 +38,10 @@ pub enum MetasrvWalConfig {
     #[default]
     RaftEngine,
     Kafka(MetasrvKafkaConfig),
+    /// Distributed object store WAL; metasrv only uses the public prefix.
+    #[cfg(feature = "enterprise")]
+    #[serde(rename = "experimental_object_store")]
+    ObjectStore(ObjectStoreWalConfig),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -87,6 +91,9 @@ impl TryFrom<DatanodeWalConfig> for MetasrvWalConfig {
                 provider: "noop".to_string(),
             }
             .fail(),
+            #[cfg(feature = "enterprise")]
+            DatanodeWalConfig::ObjectStore(config) => Ok(Self::ObjectStore(config)),
+            #[cfg(not(feature = "enterprise"))]
             DatanodeWalConfig::ObjectStore(_) => UnsupportedWalProviderSnafu {
                 provider: "experimental_object_store".to_string(),
             }
@@ -100,6 +107,8 @@ impl MetasrvWalConfig {
     pub fn enable_active_wal_pruning(&self) -> bool {
         match self {
             MetasrvWalConfig::RaftEngine => false,
+            #[cfg(feature = "enterprise")]
+            MetasrvWalConfig::ObjectStore(_) => false,
             MetasrvWalConfig::Kafka(config) => config.auto_prune_interval > Duration::ZERO,
         }
     }
@@ -108,6 +117,8 @@ impl MetasrvWalConfig {
     pub fn remote_wal_options(&self) -> Option<&MetasrvKafkaConfig> {
         match self {
             MetasrvWalConfig::RaftEngine => None,
+            #[cfg(feature = "enterprise")]
+            MetasrvWalConfig::ObjectStore(_) => None,
             MetasrvWalConfig::Kafka(config) => Some(config),
         }
     }
@@ -117,6 +128,8 @@ impl From<MetasrvWalConfig> for DatanodeWalConfig {
     fn from(config: MetasrvWalConfig) -> Self {
         match config {
             MetasrvWalConfig::RaftEngine => Self::RaftEngine(RaftEngineConfig::default()),
+            #[cfg(feature = "enterprise")]
+            MetasrvWalConfig::ObjectStore(config) => Self::ObjectStore(config),
             MetasrvWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
                 connection: config.connection,
                 kafka_topic: config.kafka_topic,
@@ -140,6 +153,33 @@ mod tests {
     use crate::TopicSelectorType;
     use crate::config::object_store::{AckMode, CorruptedSegmentAction};
     use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
+
+    #[test]
+    fn test_metasrv_object_store_feature_gate() {
+        let input = r#"provider = "experimental_object_store"
+prefix = "cluster/wal"
+storage_provider = "s3"
+max_batch_bytes = "4MB"
+"#;
+        #[cfg(not(feature = "enterprise"))]
+        assert!(toml::from_str::<MetasrvWalConfig>(input).is_err());
+        #[cfg(feature = "enterprise")]
+        {
+            let config: MetasrvWalConfig = toml::from_str(input).unwrap();
+            let datanode: DatanodeWalConfig = toml::from_str(input).unwrap();
+            assert_eq!(
+                MetasrvWalConfig::try_from(datanode.clone()).unwrap(),
+                config
+            );
+            assert_eq!(DatanodeWalConfig::from(config.clone()), datanode);
+            assert!(!config.enable_active_wal_pruning());
+            assert!(config.remote_wal_options().is_none());
+            assert_eq!(
+                toml::from_str::<MetasrvWalConfig>(&toml::to_string(&config).unwrap()).unwrap(),
+                config
+            );
+        }
+    }
 
     #[test]
     fn test_toml_raft_engine() {
@@ -299,6 +339,7 @@ mod tests {
         assert_eq!(config.max_unpersisted_age, Duration::from_secs(8));
         assert_eq!(config.on_corrupted_segment, CorruptedSegmentAction::Skip);
         assert!(!config.accept_missing_history);
+        #[cfg(not(feature = "enterprise"))]
         assert!(matches!(
             MetasrvWalConfig::try_from(datanode_wal_config).unwrap_err(),
             Error::UnsupportedWalProvider { .. }

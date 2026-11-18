@@ -15,6 +15,7 @@ workspace = true
 backtrace = "0.3"
 common-base.workspace = true
 common-error.workspace = true
+common-macro.workspace = true
 common-version.workspace = true
 console-subscriber = { version = "0.1", optional = true }
 greptime-proto.workspace = true
@@ -31,6 +32,7 @@ parking_lot.workspace = true
 prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+snafu.workspace = true
 tokio.workspace = true
 tracing = "0.1"
 tracing-appender.workspace = true
@@ -39,4 +41,5 @@ tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+log = "0.4"
 tempfile.workspace = true

@@ -209,6 +209,20 @@ pub fn new_downgrade_region_reply(
     exist: bool,
     error: Option<String>,
 ) -> MailboxMessage {
+    new_downgrade_regions_reply(
+        id,
+        vec![DowngradeRegionReply {
+            region_id: RegionId::new(0, 0),
+            last_entry_id,
+            metadata_last_entry_id: None,
+            exists: exist,
+            error: legacy_instruction_error(error),
+        }],
+    )
+}
+
+/// Generates a [InstructionReply::DowngradeRegions] reply for a batch of regions.
+pub fn new_downgrade_regions_reply(id: u64, replies: Vec<DowngradeRegionReply>) -> MailboxMessage {
     MailboxMessage {
         id,
         subject: "mock".to_string(),
@@ -217,13 +231,7 @@ pub fn new_downgrade_region_reply(
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::DowngradeRegions(
-                DowngradeRegionsReply::new(vec![DowngradeRegionReply {
-                    region_id: RegionId::new(0, 0),
-                    last_entry_id,
-                    metadata_last_entry_id: None,
-                    exists: exist,
-                    error: legacy_instruction_error(error),
-                }]),
+                DowngradeRegionsReply::new(replies),
             ))
             .unwrap(),
         )),

@@ -33,6 +33,7 @@ common-datasource.workspace = true
 common-error.workspace = true
 common-event-recorder.workspace = true
 common-grpc.workspace = true
+common-memory-manager.workspace = true
 common-meta.workspace = true
 common-procedure.workspace = true
 common-query.workspace = true
@@ -110,6 +111,7 @@ operator = { workspace = true, features = ["testing"] }
 otel-arrow-rust.workspace = true
 paste.workspace = true
 plugins.workspace = true
+promql = { workspace = true, features = ["test-utils"] }
 prost.workspace = true
 rand.workspace = true
 rskafka.workspace = true

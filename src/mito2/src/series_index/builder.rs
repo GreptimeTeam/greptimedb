@@ -35,6 +35,7 @@ use crate::series_index::bucket::SeriesBucket;
 use crate::series_index::catalog::{
     RangeIndexEntry, SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
 };
+use crate::series_index::format::SeriesIndexFormat;
 use crate::series_index::purger::{IndexFilePurger, IndexFileType, file_operation};
 use crate::series_index::version::SeriesIndexFileHandle;
 use crate::series_index::{SeriesIndexWriter, SeriesIndexWriterOptions};
@@ -130,6 +131,7 @@ pub(crate) async fn build_series_index(
     metadata: &RegionMetadataRef,
     bucket: &SeriesBucket,
     entry: &SeriesIndexEntry,
+    backend: Option<&dyn SeriesIndexFormat>,
     purger: &IndexFilePurger,
 ) -> Result<SeriesIndexFileHandle> {
     let mut sources = Vec::<BoxedRecordBatchStream>::new();
@@ -137,7 +139,13 @@ pub(crate) async fn build_series_index(
     let schema = mapper.input_arrow_schema(false);
     for file in &bucket.files {
         let Some((context, mut selection)) = reader_input(region, file.clone()).await? else {
-            continue;
+            return UnexpectedSnafu {
+                reason: format!(
+                    "series-index source SST {} has no readable input",
+                    file.file_id()
+                ),
+            }
+            .fail();
         };
         let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
         sources.push(Box::pin(try_stream! {
@@ -180,6 +188,35 @@ pub(crate) async fn build_series_index(
         )
     };
     // TODO(yingwen): Deduplicate update-mode rows before series indexes are used by queries.
+    if let Some(backend) = backend {
+        let mut writer = backend
+            .writer(metadata.clone(), store.clone(), entry)
+            .await?;
+        let result: Result<()> = async {
+            while let Some(batch) = visible.try_next().await? {
+                writer.write(&batch).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if let Err(cleanup_error) = writer.abort().await {
+                warn!(cleanup_error; "Failed to abort series-index artifact build");
+            }
+            return Err(error);
+        }
+        let artifact = writer.finish().await?;
+        file_operation(IndexFileType::Series, "build", "success");
+        return Ok(SeriesIndexFileHandle::new(
+            region.region_id,
+            SeriesIndexEntry {
+                file_size: artifact.file_size,
+                artifact: Some(artifact),
+                ..entry.clone()
+            },
+            purger.clone(),
+        ));
+    }
     let path = series_index_path(region.region_id, entry.index_uuid);
     let mut writer = SeriesIndexWriter::try_new(
         metadata.clone(),
@@ -214,6 +251,196 @@ pub(crate) async fn build_series_index(
     ))
 }
 
+/// UTC day for any supported timestamp unit, including timestamps before the epoch.
+pub(crate) fn sample_day(timestamp: common_time::Timestamp) -> i64 {
+    use common_time::timestamp::TimeUnit;
+    let value = timestamp.value();
+    let unit = timestamp.unit();
+    value.div_euclid(match unit {
+        TimeUnit::Second => 86_400,
+        TimeUnit::Millisecond => 86_400_000,
+        TimeUnit::Microsecond => 86_400_000_000,
+        TimeUnit::Nanosecond => 86_400_000_000_000,
+    })
+}
+
+/// Retires completed daily outputs if building the remaining days fails or is cancelled.
+#[derive(Default)]
+struct UnpublishedSamples(Vec<crate::series_index::artifact::SamplesFileHandle>);
+
+impl Drop for UnpublishedSamples {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.mark_deleted();
+        }
+    }
+}
+
+/// Reads a bounded, pinned source group once and routes its rows into nonempty daily outputs.
+/// The existing sample writer bounds both blocks and output file sizes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_sample_windows(
+    store: &ObjectStore,
+    region: &MitoRegionRef,
+    metadata: &RegionMetadataRef,
+    files: &[FileHandle],
+    backend: &dyn crate::series_index::format::SamplesFormat,
+    purger: &IndexFilePurger,
+) -> Result<Vec<crate::series_index::artifact::SamplesFileHandle>> {
+    use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
+    use crate::sst::file::RegionFileId;
+    use datatypes::arrow::array::BooleanArray;
+    use datatypes::arrow::compute::filter_record_batch;
+    use datatypes::timestamp::timestamp_array_to_primitive;
+
+    let mapper = FlatProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())?;
+    let schema = mapper.input_arrow_schema(false);
+    let timestamp_name = metadata.time_index_column().column_schema.name.clone();
+    let coverage = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+        store_api::storage::FileId,
+        std::collections::BTreeSet<i64>,
+    >::new()));
+    let mut sources = Vec::<BoxedRecordBatchStream>::new();
+    for file in files {
+        let (context, mut selection) = region
+            .access_layer
+            .read_sst(file.clone())
+            .build_reader_input(&mut ReaderMetrics::default())
+            .await?
+            .context(UnexpectedSnafu {
+                reason: "daily samples source has no readable input",
+            })?;
+        let context = Arc::new(context);
+        let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
+        let timestamp_name = timestamp_name.clone();
+        let coverage = coverage.clone();
+        let source_id = file.file_id().file_id();
+        sources.push(Box::pin(try_stream! {
+            while let Some((row_group, selection)) = selection.pop_first() {
+                let parquet = context.reader_builder().build(context.build_context(row_group, Some(selection), None)).await?;
+                let mut reader = FlatPruneReader::new_with_row_group_reader(
+                    context.clone(), FlatRowGroupReader::new(context.clone(), parquet),
+                    context.pre_filter_mode().skip_fields());
+                while let Some(batch) = reader.next_batch().await? {
+                    let batch = match &compat { Some(compat) => compat.compat(batch)?, None => batch };
+                    let column = batch.column_by_name(&timestamp_name).context(UnexpectedSnafu { reason: "missing daily sample timestamp" })?;
+                    let (values, unit) = timestamp_array_to_primitive(column).context(UnexpectedSnafu { reason: "invalid daily sample timestamp" })?;
+                    // Keep the lock and its possible poison error outside the stream's awaits.
+                    (|| -> Result<()> {
+                        let mut coverage = coverage.lock().map_err(|_| UnexpectedSnafu {
+                            reason: "daily coverage lock poisoned",
+                        }.build())?;
+                        coverage.entry(source_id).or_default().extend(values.values().iter()
+                            .map(|v| sample_day(common_time::Timestamp::new(*v, unit.into()))));
+                        Ok(())
+                    })()?;
+                    yield batch;
+                }
+            }
+        }));
+    }
+    let mut merged = Box::pin(
+        FlatMergeReader::new(schema, sources, 8192, None)
+            .await?
+            .into_stream(),
+    );
+    let mut writers = std::collections::BTreeMap::<
+        i64,
+        (
+            store_api::storage::FileId,
+            Box<dyn crate::series_index::format::FormatWriter>,
+        ),
+    >::new();
+    let result: Result<()> = async {
+        while let Some(batch) = merged.try_next().await? {
+            let column = batch
+                .column_by_name(&timestamp_name)
+                .context(UnexpectedSnafu {
+                    reason: "missing daily sample timestamp",
+                })?;
+            let (values, unit) = timestamp_array_to_primitive(column).context(UnexpectedSnafu {
+                reason: "invalid daily sample timestamp",
+            })?;
+            let days: Vec<_> = values
+                .values()
+                .iter()
+                .map(|v| sample_day(common_time::Timestamp::new(*v, unit.into())))
+                .collect();
+            for day in days
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                if let std::collections::btree_map::Entry::Vacant(entry) = writers.entry(day) {
+                    let generation = store_api::storage::FileId::random();
+                    let prefix = crate::series_index::samples::samples_prefix(
+                        region.region_id.as_u64(),
+                        generation,
+                    );
+                    let writer = backend
+                        .writer(
+                            metadata.clone(),
+                            store.clone(),
+                            &prefix,
+                            generation,
+                            generation,
+                        )
+                        .await?;
+                    entry.insert((generation, writer));
+                }
+                let mask = BooleanArray::from(days.iter().map(|d| *d == day).collect::<Vec<_>>());
+                let batch = filter_record_batch(&batch, &mask).map_err(|e| {
+                    UnexpectedSnafu {
+                        reason: e.to_string(),
+                    }
+                    .build()
+                })?;
+                if let Some((_, writer)) = writers.get_mut(&day) {
+                    writer.write(&batch).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        for (_, (_, writer)) in writers {
+            if let Err(cleanup) = writer.abort().await {
+                warn!(cleanup; "Failed to abort daily samples build");
+            }
+        }
+        return Err(error);
+    }
+    let mut source_windows: std::collections::HashMap<_, Vec<_>> = coverage
+        .lock()
+        .map_err(|_| {
+            UnexpectedSnafu {
+                reason: "daily coverage lock poisoned",
+            }
+            .build()
+        })?
+        .iter()
+        .map(|(id, days)| (*id, days.iter().copied().collect()))
+        .collect();
+    let mut handles = UnpublishedSamples::default();
+    for (day, (generation, writer)) in writers {
+        // Finished generations remain unpublished until the complete source group succeeds.
+        let artifact = writer.finish().await?;
+        handles.0.push(SamplesFileHandle::new(
+            RegionFileId::new(region.region_id, generation),
+            SamplesEntry {
+                file_id: generation,
+                artifact,
+                source_file_ids: files.iter().map(|f| f.file_id().file_id()).collect(),
+                window: Some(day),
+                source_windows: std::mem::take(&mut source_windows),
+            },
+            purger.clone(),
+        ));
+    }
+    Ok(std::mem::take(&mut handles.0))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap};
@@ -229,11 +456,34 @@ mod tests {
     use crate::region::version::VersionRef;
     use crate::series_index::bucket::{group_files_into_series_buckets, plan_series_indexes};
     use crate::series_index::catalog::{
-        SeriesIndexCatalog, load_version_control, series_catalog_path, store_catalog,
+        SeriesIndexCatalog, load_version_control, series_catalog_path, series_index_path,
+        store_catalog,
     };
     use crate::series_index::purger::series_index_channel;
     use crate::series_index::tests::prepare_region;
     use crate::test_util::TestEnv;
+
+    #[test]
+    fn daily_windows_floor_timestamps_in_every_unit() {
+        use common_time::timestamp::TimeUnit;
+        for (unit, ticks) in [
+            (TimeUnit::Second, 86_400),
+            (TimeUnit::Millisecond, 86_400_000),
+            (TimeUnit::Microsecond, 86_400_000_000),
+            (TimeUnit::Nanosecond, 86_400_000_000_000),
+        ] {
+            for (value, day) in [
+                (-ticks - 1, -2),
+                (-ticks, -1),
+                (-1, -1),
+                (0, 0),
+                (ticks - 1, 0),
+                (ticks, 1),
+            ] {
+                assert_eq!(sample_day(common_time::Timestamp::new(value, unit)), day);
+            }
+        }
+    }
 
     fn build_input(version: &VersionRef) -> (SeriesBucket, SeriesIndexEntry) {
         let files = version
@@ -322,6 +572,7 @@ mod tests {
             &version.metadata,
             &bucket,
             &entry,
+            None,
             &purger,
         )
         .await;
@@ -472,10 +723,17 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        let _handle =
-            build_series_index(&store, &region, &version.metadata, &bucket, &entry, &purger)
-                .await
-                .unwrap();
+        let _handle = build_series_index(
+            &store,
+            &region,
+            &version.metadata,
+            &bucket,
+            &entry,
+            None,
+            &purger,
+        )
+        .await
+        .unwrap();
         let bytes = store
             .read(&series_index_path(region.region_id, entry.index_uuid))
             .await
@@ -542,9 +800,17 @@ mod tests {
                 };
                 completed.push(entry.file_id);
             }
-            build_series_index(&store, &region, &version.metadata, &bucket, &entry, &purger)
-                .await
-                .map(Some)
+            build_series_index(
+                &store,
+                &region,
+                &version.metadata,
+                &bucket,
+                &entry,
+                None,
+                &purger,
+            )
+            .await
+            .map(Some)
         }
         .await;
         assert!(format!("{:?}", result.unwrap_err()).contains("injected index finish failure"));
@@ -748,9 +1014,17 @@ mod tests {
                 .map(|_| ())
         } else {
             let (purger, _receiver) = series_index_channel(store.clone());
-            build_series_index(&store, &region, &version.metadata, &bucket, &entry, &purger)
-                .await
-                .map(|_| ())
+            build_series_index(
+                &store,
+                &region,
+                &version.metadata,
+                &bucket,
+                &entry,
+                None,
+                &purger,
+            )
+            .await
+            .map(|_| ())
         };
         fail.store(false, Ordering::Relaxed);
         let error = result.unwrap_err();

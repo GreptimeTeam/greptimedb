@@ -32,7 +32,7 @@ use tokio::sync::Semaphore;
 use crate::error;
 use crate::statement::StatementExecutor;
 use crate::statement::database_copy::{
-    DatabaseExportFile, database_import_source, parse_parallelism_from_option_map,
+    database_import_source, parse_parallelism_from_option_map, prepare_database_export_files,
     validate_database_directory, validate_database_export_layout,
 };
 
@@ -49,10 +49,6 @@ impl StatementExecutor {
     ) -> error::Result<Output> {
         validate_database_export_layout(&req.with)?;
         validate_database_directory(&req.location)?;
-        build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
-            .await
-            .context(error::BuildBackendSnafu)?;
-
         let parallelism = parse_parallelism_from_option_map(&req.with);
         info!(
             "Copy database {}.{} to dir: {}, time: {:?}, parallelism: {}",
@@ -67,13 +63,23 @@ impl StatementExecutor {
             .context(error::ParseFileFormatSnafu)?
             .suffix();
 
+        let outputs = prepare_database_export_files(
+            &req.location,
+            tables.iter().map(|table| table.table_info().name.clone()),
+            suffix,
+            false,
+        )?;
+        build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
+            .await
+            .context(error::BuildBackendSnafu)?;
+
         let mut tasks = Vec::with_capacity(num_tables);
         let semaphore = Arc::new(Semaphore::new(parallelism));
 
-        for (i, table) in tables.into_iter().enumerate() {
+        for (i, (table, output)) in tables.into_iter().zip(outputs).enumerate() {
             let table_name = table.table_info().name.clone();
             let semaphore_moved = semaphore.clone();
-            let table_file = DatabaseExportFile::new(&req.location, &table_name, suffix)?.location;
+            let table_file = output.location;
             let table_no = i + 1;
             let moved_ctx = ctx.clone();
             let full_table_name =

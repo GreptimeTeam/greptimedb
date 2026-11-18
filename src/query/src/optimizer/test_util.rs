@@ -109,6 +109,7 @@ impl RegionEngine for MetaRegionEngine {
         _role: RegionRole,
         _sent_at: std::time::Instant,
         _deadline: std::time::Instant,
+        _candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
         unimplemented!()
     }

@@ -23,7 +23,7 @@ use common_datasource::file_format::Format;
 use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::parquet::stream_to_parquet;
-use common_datasource::object_store::build_backend_for_write_with_path;
+use common_datasource::object_store::{build_backend_for_write, build_backend_for_write_with_path};
 use common_datasource::packed_writer::PackedTableWriter;
 use common_datasource::parquet_writer::ParquetFileWriter;
 use common_query::Output;
@@ -224,26 +224,26 @@ impl StatementExecutor {
             _ => unreachable!(),
         };
 
-        let backend =
-            build_backend_for_write_with_path(location, connection, &self.local_file_access)
+        let (store, filename) = if packed.is_some() {
+            let store = build_backend_for_write(location, connection, &self.local_file_access)
                 .await
                 .context(error::BuildBackendSnafu)?;
-        let filename = backend.object_path.context(error::UnexpectedSnafu {
-            violated: format!("Expected filename, path: {location}"),
-        })?;
-        if let Some((budget, token)) = managed {
-            stream_to_managed_parquet_with_packed(
-                stream,
-                backend.object_store,
-                &filename,
-                budget,
-                token,
-                packed,
-            )
-            .await
+            (store, location.to_string())
         } else {
-            self.stream_to_file(stream, format, backend.object_store, &filename)
+            let backend =
+                build_backend_for_write_with_path(location, connection, &self.local_file_access)
+                    .await
+                    .context(error::BuildBackendSnafu)?;
+            let filename = backend.object_path.context(error::UnexpectedSnafu {
+                violated: format!("Expected filename, path: {location}"),
+            })?;
+            (backend.object_store, filename)
+        };
+        if let Some((budget, token)) = managed {
+            stream_to_managed_parquet_with_packed(stream, store, &filename, budget, token, packed)
                 .await
+        } else {
+            self.stream_to_file(stream, format, store, &filename).await
         }
     }
 }

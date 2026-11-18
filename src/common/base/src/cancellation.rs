@@ -104,6 +104,8 @@ where
 #[derive(Copy, Clone, Debug)]
 pub struct Cancelled;
 
+impl std::error::Error for Cancelled {}
+
 impl Display for Cancelled {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "Future has been cancelled")

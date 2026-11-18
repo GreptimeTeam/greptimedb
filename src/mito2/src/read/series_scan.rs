@@ -14,37 +14,54 @@
 
 //! Per-series scan implementation.
 
+mod prepared;
+mod raw;
+
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use api::v1::SemanticType;
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
+use common_query::native_histogram::is_native_histogram_value_type;
 use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::{self, Instrument};
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use datafusion::execution::memory_pool::MemoryPool;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
+use datafusion_common::tree_node::TreeNode;
+use datafusion_expr::{Expr, Volatility};
 use datatypes::arrow::array::BinaryArray;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
+use datatypes::series::SeriesOrdering;
+use datatypes::series::samples::{FieldSpec, SeriesSchema};
+use datatypes::types::TimestampType;
 use futures::{StreamExt, TryStreamExt};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScanner,
+    ScannerProperties, SendableRawSeriesStream,
 };
+use store_api::storage::consts::{ReservedColumnId, is_internal_column};
+use table::predicate::Predicate;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{
-    Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
-    ScanSeriesSnafu, TooManyFilesToReadSnafu,
+    Error, InvalidRecordBatchSnafu, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu,
+    Result, ScanMultiTimesSnafu, ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
 use crate::metrics::SCAN_MAX_CONCURRENT_FILES;
 use crate::read::ScannerMetrics;
@@ -64,6 +81,49 @@ use crate::sst::parquet::format::PrimaryKeyArray;
 /// Maximum number of candidate series retained before distributing assignments.
 const CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD: usize = 1_000_000;
 
+/// Test-only override of [`CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD`], where `0` means "use the
+/// production constant".
+///
+/// The production build compiles this static, the setter below and the private accessor out, so
+/// the shipped threshold is always the constant above.
+#[cfg(test)]
+static CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only number of candidate assignment rounds sent since the override was last set.
+///
+/// A round is one `send_assignments` call, so a partition that received more than one assignment
+/// sees `>= 2` rounds here. Increments are compiled out of production builds.
+#[cfg(test)]
+static CANDIDATE_ASSIGNMENT_ROUNDS: AtomicUsize = AtomicUsize::new(0);
+
+/// Returns the candidate-series assignment threshold, honouring the test-only override.
+fn candidate_series_assignment_threshold() -> usize {
+    #[cfg(test)]
+    {
+        let threshold = CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE.load(Ordering::Relaxed);
+        if threshold > 0 {
+            return threshold;
+        }
+    }
+    CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD
+}
+
+/// Test-only: overrides the candidate-series assignment threshold and resets the round counter.
+///
+/// Pass `0` to restore the production threshold. Tests must reset the override before they
+/// return; a scope guard in `engine::scan_test` does that even on panic.
+#[cfg(test)]
+pub(crate) fn set_candidate_series_assignment_threshold(threshold: usize) {
+    CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE.store(threshold, Ordering::Relaxed);
+    CANDIDATE_ASSIGNMENT_ROUNDS.store(0, Ordering::Relaxed);
+}
+
+/// Test-only: returns the number of assignment rounds sent since the override was last set.
+#[cfg(test)]
+pub(crate) fn candidate_assignment_rounds() -> usize {
+    CANDIDATE_ASSIGNMENT_ROUNDS.load(Ordering::Relaxed)
+}
+
 /// Legacy data receivers for output partitions.
 type LegacyReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
 
@@ -72,6 +132,19 @@ type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
 
 /// Candidate assignment senders for output partitions.
 type CandidateSenderList = Vec<Option<mpsc::UnboundedSender<Result<SeriesReaderInput>>>>;
+
+#[derive(Clone)]
+struct RawScanPreparation {
+    schema: Arc<SeriesSchema>,
+    fields: Vec<(usize, ConcreteDataType)>,
+    predicates: Vec<Arc<dyn PhysicalExpr>>,
+}
+
+/// Memoized raw-scan preflight: the label binding it was computed for, and its answer.
+///
+/// The answer carries the preparation together with whether its data comes from the columnar
+/// prepared source; `None` means the raw path is unavailable for this scan.
+type PreflightCache = Option<(RawLabelSource, Option<(RawScanPreparation, bool)>)>;
 
 struct CandidateReceiver {
     receiver: mpsc::UnboundedReceiver<Result<SeriesReaderInput>>,
@@ -121,6 +194,7 @@ impl SeriesScanMode {
 pub struct SeriesScan {
     /// Implementation used by this scan.
     mode: SeriesScanMode,
+    prepared: Arc<prepared::Preparation>,
     /// Properties of the scanner.
     properties: ScannerProperties,
     /// Context of streams.
@@ -134,6 +208,19 @@ pub struct SeriesScan {
     /// Metrics for each partition.
     /// The scanner only sets in query and keeps it empty during compaction.
     metrics_list: Arc<PartitionMetricsList>,
+    /// Memoized result of [`Self::prepare_raw_scan`] for the label binding it was computed for.
+    ///
+    /// Preflight only reads pinned scanner state, and one execution asks for it once per output
+    /// partition, so the first answer serves the rest. Errors are never stored, and every entry
+    /// that mutates the state the answer depends on clears the entry. The guard is taken and
+    /// released inside a synchronous call, so it never spans an await.
+    preflight: Mutex<PreflightCache>,
+    /// Test-only number of preflight computations performed by this scanner.
+    ///
+    /// A cached answer does not increment it, so a test can prove that a repeated preflight over
+    /// the same pinned state is served from [`Self::preflight`].
+    #[cfg(test)]
+    preflight_runs: AtomicUsize,
 }
 
 impl SeriesScan {
@@ -170,13 +257,372 @@ impl SeriesScan {
 
         Self {
             mode,
+            prepared: Arc::new(prepared::Preparation::default()),
             properties,
             stream_ctx,
             pruner,
             legacy_receivers: Mutex::new(Vec::new()),
             candidate_receivers: Mutex::new(Vec::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
+            preflight: Mutex::new(None),
+            #[cfg(test)]
+            preflight_runs: AtomicUsize::new(0),
         }
+    }
+
+    /// Returns the number of preflight computations this scanner has run.
+    ///
+    /// Test-only: a memoized preflight does not count, so a test can distinguish a cache hit from a
+    /// recomputation.
+    #[cfg(test)]
+    pub(crate) fn preflight_runs(&self) -> usize {
+        self.preflight_runs.load(Ordering::Relaxed)
+    }
+
+    /// Drops the memoized preflight.
+    ///
+    /// Every entry point that mutates state the preflight reads calls this, so a stale answer can
+    /// never outlive the state it was derived from.
+    fn clear_preflight_cache(&self) {
+        *self.preflight.lock().unwrap() = None;
+    }
+
+    /// Returns the memoized preflight, if it was computed for the same label binding.
+    ///
+    /// A binding only matches when its immutable identity matches as well: the preflight validates
+    /// the pinned metadata snapshot and the label binding, so an answer for another binding must
+    /// never be reused even when the labels look alike.
+    fn cached_preflight(
+        &self,
+        label_source: &RawLabelSource,
+    ) -> Option<Option<(RawScanPreparation, bool)>> {
+        let cache = self.preflight.lock().unwrap();
+        let (cached_source, cached) = cache.as_ref()?;
+        if !prepared::same_labels(cached_source, label_source) {
+            return None;
+        }
+        Some(cached.clone())
+    }
+
+    fn uses_columnar(&self) -> bool {
+        self.stream_ctx
+            .input
+            .series_index
+            .as_ref()
+            .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
+    }
+
+    /// Whether every selected *field* is a `Float64`, which is all the columnar prepared reader
+    /// serves.
+    ///
+    /// Only field columns count: the projection also carries tags and the time index, and those are
+    /// no part of the samples the prepared reader hands over. Checking them here would send an
+    /// ordinary `Float64` query down the ordinary scan just because it projects a timestamp.
+    fn columnar_fields_supported(&self) -> bool {
+        let metadata = self.stream_ctx.input.mapper.metadata();
+        let selected = self.stream_ctx.input.mapper.output_schema();
+        selected
+            .column_schemas()
+            .iter()
+            .filter(|output| {
+                metadata.column_metadatas.iter().any(|column| {
+                    column.column_schema.name == output.name
+                        && column.semantic_type == SemanticType::Field
+                })
+            })
+            .all(|output| output.data_type == ConcreteDataType::float64_datatype())
+    }
+
+    /// Returns whether raw series come from the columnar prepared source.
+    ///
+    /// Derived only from the pinned series index version and every configured partition range, so
+    /// preflight, the partition reader and scanner-wide preparation agree.
+    /// `false` means the stored sources are read by the ordinary scan.
+    fn uses_prepared_columnar(&self) -> Result<bool, BoxedError> {
+        if !self.uses_columnar() {
+            return Ok(false);
+        }
+        let ranges = self
+            .properties
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)
+    }
+
+    /// Prepares the raw scan and reports whether its data comes from the columnar prepared source.
+    ///
+    /// The answer only depends on pinned scanner state plus the label binding, and an execution
+    /// asks for it once per output partition, so it is memoized per binding. Only successful
+    /// answers are stored: a rejected binding must fail on every call, not replay a rejection or
+    /// hide a later one.
+    fn prepare_raw_scan(
+        &self,
+        label_source: &RawLabelSource,
+    ) -> Result<Option<(RawScanPreparation, bool)>, BoxedError> {
+        if let Some(cached) = self.cached_preflight(label_source) {
+            return Ok(cached);
+        }
+        let computed = self.prepare_raw_scan_uncached(label_source)?;
+        // Both sides of the cache are cheap to clone, and callers own their copy: the merge schema
+        // helper rewrites the field indices and predicates of the preparation it is given, which
+        // must never reach the stored answer.
+        *self.preflight.lock().unwrap() = Some((label_source.clone(), computed.clone()));
+        Ok(computed)
+    }
+
+    /// Computes a fresh [`Self::prepare_raw_scan`] answer from the pinned scanner state.
+    fn prepare_raw_scan_uncached(
+        &self,
+        label_source: &RawLabelSource,
+    ) -> Result<Option<(RawScanPreparation, bool)>, BoxedError> {
+        #[cfg(test)]
+        self.preflight_runs.fetch_add(1, Ordering::Relaxed);
+        let input = &self.stream_ctx.input;
+        let metadata = input.mapper.metadata();
+        match label_source {
+            RawLabelSource::PrimaryKey {
+                physical_metadata,
+                logical_tags,
+                ..
+            } => {
+                if !Arc::ptr_eq(metadata, physical_metadata) {
+                    debug!(
+                        "Raw series scan preflight rejected metadata snapshot: region_id={}, physical_region_id={}, schema_version={}, physical_schema_version={}",
+                        metadata.region_id,
+                        physical_metadata.region_id,
+                        metadata.schema_version,
+                        physical_metadata.schema_version,
+                    );
+                    return Err(BoxedError::new(
+                        InvalidRecordBatchSnafu {
+                            reason: "raw label source metadata does not match scanner snapshot"
+                                .to_string(),
+                        }
+                        .build(),
+                    ));
+                }
+                let mut ids = HashSet::new();
+                let mut names = HashSet::new();
+                for tag in logical_tags.iter() {
+                    let column = metadata.column_by_id(tag.column_id).filter(|column| {
+                        column.semantic_type == SemanticType::Tag
+                            && metadata.primary_key.contains(&tag.column_id)
+                    });
+                    let valid = column.is_some_and(|column| {
+                        column.column_schema.name == tag.name.as_ref()
+                            && tag.name.as_ref() != "__name__"
+                            && !is_internal_column(tag.name.as_ref())
+                            && !is_metric_engine_internal_column(tag.name.as_ref())
+                            && !ReservedColumnId::is_reserved(tag.column_id)
+                    });
+                    let unique_id = valid && ids.insert(tag.column_id);
+                    let unique_name = unique_id && names.insert(tag.name.as_ref());
+                    if !valid || !unique_id || !unique_name {
+                        debug!(
+                            "Raw series scan preflight rejected label binding: region_id={}, column_id={}, binding_valid={}, unique_id={}, unique_name={}",
+                            metadata.region_id, tag.column_id, valid, unique_id, unique_name,
+                        );
+                        return Err(BoxedError::new(
+                            InvalidRecordBatchSnafu {
+                                reason: "invalid raw label binding".to_string(),
+                            }
+                            .build(),
+                        ));
+                    }
+                }
+            }
+            RawLabelSource::Explicit => {
+                debug!(
+                    "Raw series scan preflight rejected explicit labels: region_id={}",
+                    metadata.region_id,
+                );
+                return Ok(None);
+            }
+        }
+        if self.uses_columnar() && !is_sparse_metric_metadata(metadata) {
+            return Ok(None);
+        }
+        let selected = input.mapper.output_schema();
+        let mut fields = Vec::new();
+        let mut specs = Vec::new();
+        // The columnar prepared reader serves `Float64` fields only. A selection carrying another
+        // kind the raw path supports - a native histogram struct, today - is read by the ordinary
+        // scan instead: the columnar samples are an artifact beside the SST rows, so the same
+        // sources are still reachable, and the frame schema and ordering follow the reader that
+        // actually answers.
+        let columnar_fields_supported = self.columnar_fields_supported();
+        for output in selected.column_schemas() {
+            let Some(column) = metadata.column_metadatas.iter().find(|column| {
+                column.column_schema.name == output.name
+                    && column.semantic_type == SemanticType::Field
+            }) else {
+                continue;
+            };
+            let Some((index, (_, data_type))) = input
+                .mapper
+                .batch_schema()
+                .iter()
+                .enumerate()
+                .find(|(_, (id, _))| *id == column.column_id)
+            else {
+                debug!(
+                    "Raw series scan preflight missing mapper field: region_id={}, column_id={}",
+                    metadata.region_id, column.column_id,
+                );
+                return Err(BoxedError::new(
+                    InvalidRecordBatchSnafu {
+                        reason: format!(
+                            "selected field {} is missing from mapper batch schema",
+                            output.name
+                        ),
+                    }
+                    .build(),
+                ));
+            };
+            // The raw converter casts a numeric field to `Float64` and converts a native histogram
+            // struct into histogram samples; nothing else has a raw representation.
+            if !data_type.is_numeric() && !is_native_histogram_value_type(data_type) {
+                debug!(
+                    "Raw series scan preflight rejected field type: region_id={}, column_id={}",
+                    metadata.region_id, column.column_id,
+                );
+                return Ok(None);
+            }
+            fields.push((index, data_type.clone()));
+            specs.push(FieldSpec {
+                name: Arc::from(output.name.as_str()),
+            });
+        }
+        let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
+        if fields.is_empty()
+            || input.append_mode
+            || input.series_row_selector.is_some()
+            || !time_is_millis
+        {
+            debug!(
+                "Raw series scan preflight rejected scan options: region_id={}, selected_fields={}, append_mode={}, row_selector={}, time_is_millis={}",
+                metadata.region_id,
+                fields.len(),
+                input.append_mode,
+                input.series_row_selector.is_some(),
+                time_is_millis,
+            );
+            return Ok(None);
+        }
+        // Structural eligibility errors still reject the raw path; ordinary scans cover sources
+        // without columnar artifacts, so missing coverage is not an error here.
+        let prepared_columnar = self.uses_prepared_columnar()? && columnar_fields_supported;
+        let schema = Arc::new(SeriesSchema {
+            fields: specs.into(),
+            eval_grid: None,
+        });
+        let typed_schema = input.mapper.input_arrow_schema(false);
+        let mut predicates = Vec::new();
+        let predicate = if prepared_columnar {
+            input.predicate_group().predicate()
+        } else {
+            // The ordinary scan applies region predicates before this residual filtering.
+            input.predicate_group().predicate_without_region()
+        };
+        if let Some(predicate) = predicate {
+            if !predicate.dyn_filters().is_empty() {
+                debug!(
+                    "Raw series scan preflight rejected dynamic predicate filters: region_id={}",
+                    metadata.region_id,
+                );
+                return Ok(None);
+            }
+            for expr in predicate.exprs() {
+                // Fresh execution properties cannot preserve Stable or query-dependent semantics.
+                if expr
+                    .exists(|node| {
+                        Ok(matches!(node, Expr::ScalarFunction(function)
+                            if function.func.signature().volatility != Volatility::Immutable)
+                            || matches!(node, Expr::ScalarVariable(..)))
+                    })
+                    .unwrap_or(true)
+                {
+                    debug!(
+                        "Raw series scan preflight rejected predicate volatility or variable: region_id={}",
+                        metadata.region_id,
+                    );
+                    return Ok(None);
+                }
+                // Evaluate residuals with original types before raw conversion to Float64.
+                let Ok(physical) = Predicate::to_physical_expr(expr, &typed_schema) else {
+                    debug!(
+                        "Raw series scan preflight failed predicate compilation: region_id={}",
+                        metadata.region_id,
+                    );
+                    return Ok(None);
+                };
+                if !matches!(
+                    physical.data_type(&typed_schema),
+                    Ok(ArrowDataType::Boolean | ArrowDataType::Null)
+                ) {
+                    debug!(
+                        "Raw series scan preflight rejected predicate type: region_id={}",
+                        metadata.region_id,
+                    );
+                    return Ok(None);
+                }
+                predicates.push(physical);
+            }
+        }
+        Ok(Some((
+            RawScanPreparation {
+                schema,
+                fields,
+                predicates,
+            },
+            prepared_columnar,
+        )))
+    }
+
+    /// Starts scanner-wide preparation from the preflight already performed by the caller.
+    fn prepare_series_with_raw(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        label_source: &RawLabelSource,
+        preparation: Result<Option<(RawScanPreparation, bool)>, BoxedError>,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
+    > {
+        let state = self.prepared.clone();
+        let stream_ctx = self.stream_ctx.clone();
+        let ranges = self
+            .properties
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let labels = label_source.clone();
+        let metrics = new_partition_metrics(
+            &self.stream_ctx,
+            ctx.explain_verbose,
+            metrics_set,
+            0,
+            &self.metrics_list,
+        );
+        Box::pin(async move {
+            let Some((preparation, prepared_columnar)) = preparation? else {
+                return Ok(None);
+            };
+            if !prepared_columnar {
+                // Known unsupported coverage: the caller keeps the ordinary scan instead.
+                return Ok(None);
+            }
+            state
+                .prepare(stream_ctx, ranges, labels, preparation, metrics)
+                .await
+                .map(Some)
+        })
     }
 
     fn supports_two_phase(input: &ScanInput) -> bool {
@@ -569,7 +1015,125 @@ impl RegionScanner for SeriesScan {
             .map_err(BoxedError::new)
     }
 
+    fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
+        // Both prepared-columnar and ordinary (legacy or two-phase) scans guarantee key/time order.
+        Ok(SeriesOrdering::KeyThenTime)
+    }
+
+    fn raw_series_schema(
+        &self,
+        label_source: &RawLabelSource,
+    ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
+        Ok(self
+            .prepare_raw_scan(label_source)?
+            .map(|(preparation, _)| preparation.schema))
+    }
+
+    fn raw_series_has_explicit_labels(&self, labels: &RawLabelSource) -> Result<bool, BoxedError> {
+        let Some((mut raw, columnar)) = self.prepare_raw_scan(labels)? else {
+            return Ok(false);
+        };
+        Ok(columnar
+            && prepared::sample_merge_schema(&self.stream_ctx, &mut raw)
+                .map_err(BoxedError::new)?
+                .is_some())
+    }
+
+    fn scan_series_partition(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+        label_source: &RawLabelSource,
+    ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
+        let Some((preparation, prepared_columnar)) = self.prepare_raw_scan(label_source)? else {
+            return Ok(None);
+        };
+        if prepared_columnar {
+            let partitions = self.properties.num_partitions().max(1);
+            if partition >= partitions {
+                return Err(BoxedError::new(
+                    PartitionOutOfRangeSnafu {
+                        given: partition,
+                        all: partitions,
+                    }
+                    .build(),
+                ));
+            }
+            // Preflight needs the declaration before the stream is polled, while preparation
+            // needs the original field indices and predicates to derive its own merge schema.
+            let explicit_labels =
+                prepared::sample_merge_schema(&self.stream_ctx, &mut preparation.clone())
+                    .map_err(BoxedError::new)?
+                    .is_some();
+            let schema = preparation.schema.clone();
+            let preparation = self
+                .check_scan_limit()
+                .map_err(BoxedError::new)
+                .map(|_| Some((preparation, prepared_columnar)));
+            let future = self.prepare_series_with_raw(ctx, metrics_set, label_source, preparation);
+            let labels = label_source.clone();
+            let stream = async_stream::try_stream! {
+                let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
+                let n = source.num_series() as u128;
+                let start = (n * partition as u128 / partitions as u128) as usize;
+                let end = (n * (partition + 1) as u128 / partitions as u128) as usize;
+                let mut reader = source.read_series(start..end)?;
+                while let Some(chunk) = reader.try_next().await? { yield chunk; }
+            };
+            return Ok(Some(raw::from_stream(
+                schema,
+                labels,
+                SeriesOrdering::KeyThenTime,
+                explicit_labels,
+                Box::pin(stream),
+            )));
+        }
+        // Stored sources without columnar artifacts (memtables, unindexed SSTs) are read by the
+        // ordinary scan, so the raw path stays available.
+        let metrics = new_partition_metrics(
+            &self.stream_ctx,
+            ctx.explain_verbose,
+            metrics_set,
+            partition,
+            &self.metrics_list,
+        );
+        let batches = self
+            .scan_batch_in_partition(ctx, partition, metrics.clone(), metrics_set)
+            .map_err(BoxedError::new)?;
+        Ok(Some(raw::make_stream(
+            batches,
+            preparation.schema,
+            label_source.clone(),
+            preparation.fields,
+            metrics,
+            preparation.predicates,
+            SeriesOrdering::KeyThenTime,
+        )))
+    }
+
+    fn prepare_series(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        label_source: &RawLabelSource,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
+    > {
+        if !self.uses_columnar() {
+            return Box::pin(async { Ok(None) });
+        }
+        let preparation = self
+            .check_scan_limit()
+            .map_err(BoxedError::new)
+            .and_then(|_| self.prepare_raw_scan(label_source));
+        self.prepare_series_with_raw(ctx, metrics_set, label_source, preparation)
+    }
+
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.prepared = Arc::new(prepared::Preparation::default());
+        self.clear_preflight_cache();
         self.properties.prepare(request);
 
         self.check_scan_limit().map_err(BoxedError::new)?;
@@ -590,10 +1154,15 @@ impl RegionScanner for SeriesScan {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
-        self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
+        let matched = self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs);
+        // The added filters change the predicate group the preflight inspects.
+        self.clear_preflight_cache();
+        matched
     }
 
     fn reset_state(&mut self) {
+        self.prepared = Arc::new(prepared::Preparation::default());
+        self.clear_preflight_cache();
         self.stream_ctx.input.predicate.clear_dyn_filters();
         let num_workers = common_stat::get_total_cpu_cores().max(1);
         self.pruner = match self.mode {
@@ -900,7 +1469,7 @@ impl SeriesCandidateDistributor {
                 return Ok(());
             }
             collector.push(batch);
-            if collector.len() >= CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD {
+            if collector.len() >= candidate_series_assignment_threshold() {
                 chunked = true;
                 self.send_assignments(collector.finish(false), &partition_pruner);
                 if !self.should_fetch_candidates() {
@@ -924,6 +1493,9 @@ impl SeriesCandidateDistributor {
         assignments: Vec<AssignedSeriesBatch>,
         partition_pruner: &Arc<PartitionPruner>,
     ) {
+        // One round of candidate collection; a partition that receives two assignments sees two.
+        #[cfg(test)]
+        CANDIDATE_ASSIGNMENT_ROUNDS.fetch_add(1, Ordering::Relaxed);
         for (partition, assigned_series) in assignments.into_iter().enumerate() {
             if assigned_series.series().is_empty() {
                 continue;
@@ -957,7 +1529,10 @@ impl SeriesCandidateDistributor {
     }
 }
 
-/// Batches of the same series.
+/// Batches of complete series.
+///
+/// A package may hold rows of more than one series, and every series in it is complete: no later
+/// package of the same stream holds more rows of those series.
 #[derive(Debug)]
 pub enum SeriesBatch {
     Flat(FlatSeriesBatch),

@@ -22,7 +22,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
-use datafusion_common::{Column, ScalarValue};
+use datafusion_common::{Column, DFSchema, ScalarValue};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
@@ -38,7 +38,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::SeriesDivide;
+use promql::extension_plan::{FusedSeries, SeriesDivide};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -108,8 +108,10 @@ impl ExtensionOptions for DistPlannerOptions {
     }
 }
 
-#[derive(Debug)]
-pub struct DistPlannerAnalyzer;
+/// Rewrites a logical plan into a distributed plan: the part above a merge scan runs on the
+/// frontend, and every `MergeScan` carries the sub-plan that runs in a region.
+#[derive(Debug, Default)]
+pub struct DistPlannerAnalyzer {}
 
 impl AnalyzerRule for DistPlannerAnalyzer {
     fn name(&self) -> &str {
@@ -268,9 +270,11 @@ impl DistPlannerAnalyzer {
         // nested scalar subqueries left in place by DataFusion 55's
         // `enable_physical_uncorrelated_scalar_subquery`) are visited at every
         // depth and their table scans get wrapped in `MergeScan`.
-        let plan = plan.transform_with_subqueries(&Self::inspect_plan_with_subquery)?;
-        let mut rewriter = PlanRewriter::new(&plan.data);
-        let result = plan.data.rewrite(&mut rewriter)?.data;
+        let plan =
+            plan.transform_with_subqueries(&|plan| Self::inspect_plan_with_subquery(plan))?;
+        let plan = rewrite_hybrid_binary_operands(plan.data)?;
+        let mut rewriter = PlanRewriter::new(&plan);
+        let result = plan.rewrite(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
 
@@ -291,7 +295,7 @@ impl DistPlannerAnalyzer {
         let exprs = plan
             .expressions_consider_join()
             .into_iter()
-            .map(|e| e.transform(&Self::transform_subquery).map(|x| x.data))
+            .map(|e| e.transform(Self::transform_subquery).map(|x| x.data))
             .collect::<DfResult<Vec<_>>>()?;
 
         // Some plans that are special treated (should not call `with_new_exprs` on them)
@@ -412,8 +416,7 @@ enum RewriterStatus {
 
 #[derive(Debug, Default)]
 struct PlanRewriter {
-    /// Whether the whole plan this rewriter walks can be encoded to Substrait.
-    /// Used by [`PlanRewriter::should_expand`] to skip the per-node encoding check.
+    /// Whether the whole plan encodes, allowing per-node checks to be skipped.
     whole_plan_encodable: bool,
     /// Current level in the tree
     level: usize,
@@ -470,14 +473,69 @@ struct PlanRewriter {
     new_child_plan: Option<LogicalPlan>,
 }
 
+fn native_operand_wrapper_child(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+    match plan {
+        LogicalPlan::SubqueryAlias(alias) => Some(alias.input.as_ref()),
+        LogicalPlan::Projection(projection) => Some(projection.input.as_ref()),
+        LogicalPlan::Filter(filter) => Some(filter.input.as_ref()),
+        LogicalPlan::Window(window) => Some(window.input.as_ref()),
+        _ => None,
+    }
+}
+
+fn native_operand_fused(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+    let mut node = plan;
+    while let Some(child) = native_operand_wrapper_child(node) {
+        node = child;
+    }
+    (is_fused_series_plan(node) && matches!(node.inputs().as_slice(), [LogicalPlan::TableScan(_)]))
+        .then_some(node)
+}
+
+fn is_native_operand_subtree(plan: &LogicalPlan) -> bool {
+    native_operand_fused(plan).is_some()
+}
+
+fn rewrite_hybrid_binary_operands(plan: LogicalPlan) -> DfResult<LogicalPlan> {
+    plan.transform_up(|plan| {
+        let LogicalPlan::Join(join) = &plan else {
+            return Ok(Transformed::no(plan));
+        };
+        if !is_native_operand_subtree(&join.left) || !is_native_operand_subtree(&join.right) {
+            return Ok(Transformed::no(plan));
+        }
+        fn rewrite_side(side: &LogicalPlan) -> DfResult<LogicalPlan> {
+            if let Some(child) = native_operand_wrapper_child(side) {
+                let rewritten_child = rewrite_side(child)?;
+                return side
+                    .clone()
+                    .with_new_exprs(side.expressions(), vec![rewritten_child]);
+            }
+            let mut rw = PlanRewriter::new(side);
+            Ok(side.clone().rewrite(&mut rw)?.data)
+        }
+        let left = rewrite_side(&join.left)?;
+        let right = rewrite_side(&join.right)?;
+        let mut rebuilt = LogicalPlan::Join(join.clone());
+        rebuilt = rebuilt.with_new_exprs(rebuilt.expressions(), vec![left, right])?;
+        Ok(Transformed::yes(rebuilt))
+    })
+    .map(|transformed| transformed.data)
+}
+
+fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<FusedSeries>())
+}
+
 impl PlanRewriter {
     /// `plan` must be the root of the tree that is about to be rewritten, otherwise
     /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
     fn new(plan: &LogicalPlan) -> Self {
+        let whole_plan_encodable = DFLogicalSubstraitConvertor
+            .encode(plan, DefaultSerializer)
+            .is_ok();
         Self {
-            whole_plan_encodable: DFLogicalSubstraitConvertor
-                .encode(plan, DefaultSerializer)
-                .is_ok(),
+            whole_plan_encodable,
             ..Default::default()
         }
     }
@@ -509,6 +567,7 @@ impl PlanRewriter {
         // is the dominant cost on deep PromQL plans.
         // When the root does not encode, the plan holds at least one node that has to stay
         // on the frontend and only the per-node check locates it.
+        //
         if !self.whole_plan_encodable
             && let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer)
         {
@@ -767,17 +826,23 @@ impl PlanRewriter {
             // if there is a new child plan, use it as the new root
             on_node = new_child_plan;
         }
+        // Requirements are carried into the region with the plan that will satisfy them; they are
+        // never dropped. When nothing requires a column of this subtree the enforced rewrite is a
+        // no-op, so the shape of the subtree - how many inputs a node has included - only matters
+        // once a requirement actually has to travel through it.
         let mut rewriter = EnforceDistRequirementRewriter::new(
             std::mem::take(&mut self.column_requirements),
             self.level,
         );
-        debug!(
-            "PlanRewriter: enforce column requirements for node: {on_node} with rewriter: {rewriter:?}"
-        );
-        on_node = on_node.rewrite(&mut rewriter)?.data;
-        debug!(
-            "PlanRewriter: after enforced column requirements with rewriter: {rewriter:?} for node:\n{on_node}"
-        );
+        if rewriter.has_applicable_requirements() {
+            debug!(
+                "PlanRewriter: enforce column requirements for node: {on_node} with rewriter: {rewriter:?}"
+            );
+            on_node = on_node.rewrite(&mut rewriter)?.data;
+            debug!(
+                "PlanRewriter: after enforced column requirements with rewriter: {rewriter:?} for node:\n{on_node}"
+            );
+        }
 
         debug!(
             "PlanRewriter: expand on node: {on_node} with partition col alias mapping: {:?}",
@@ -803,6 +868,24 @@ impl PlanRewriter {
         }
         self.set_expanded();
 
+        // Extra columns introduced for distributed operations may need to be removed. A complete
+        // frame that already has the required schema must not go through column projection: its
+        // declaration is schema metadata. Ordinary SQL keeps its existing identity projection.
+        let has_frame_metadata = |schema: &DFSchema| {
+            schema
+                .metadata()
+                .keys()
+                .any(|key| key.starts_with("greptime.series."))
+        };
+        if node.schema() == &schema && has_frame_metadata(schema.as_ref()) {
+            return Ok(node);
+        }
+        if has_frame_metadata(schema.as_ref()) || has_frame_metadata(node.schema().as_ref()) {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "distributed schema recovery cannot project a series frame".into(),
+            ));
+        }
+
         // recover the schema, this make sure after expand the schema is the same as old node
         // because after expand the raw top node might have extra columns i.e. sorting columns for `Sort` node
         let node = LogicalPlanBuilder::from(node)
@@ -822,6 +905,13 @@ impl PlanRewriter {
 /// - Enforce column requirements for `LogicalPlan::Projection` nodes. Makes sure the
 ///   required columns are available in the sub plan.
 ///
+/// The rewrite is requirement-driven. A requirement names columns of the plan that made it, so
+/// enforcing it means following the lineage from that plan down to the node that has to publish the
+/// column. Nothing else is rewritten: a subtree no requirement reaches is left exactly as it is,
+/// however many inputs its nodes have. Lineage is recorded per visited node rather than per depth,
+/// because two nodes at one depth are two branches and one branch must never stand in for another's
+/// origin. A requirement that would have to travel through a branch point has an ambiguous lineage,
+/// and this rewriter refuses then instead of picking a branch.
 #[derive(Debug)]
 struct EnforceDistRequirementRewriter {
     /// only enforce column requirements after the expanding node in question,
@@ -839,7 +929,23 @@ struct EnforceDistRequirementRewriter {
     /// when on `Projection` node, we don't need to apply the column requirements of `Aggregate` node
     /// because the `Projection` node is not in the scope of the `Aggregate` node
     cur_level: usize,
-    plan_per_level: BTreeMap<usize, LogicalPlan>,
+    /// Every node visited so far, in visit order, so a requirement can find the plan that made it
+    /// and the plans below it without one depth standing in for another branch.
+    visited: Vec<VisitedNode>,
+    /// Indices into [`Self::visited`] of the nodes from the rewritten node down to the node being
+    /// visited, top down.
+    path: Vec<usize>,
+}
+
+/// One node [`EnforceDistRequirementRewriter`] has visited.
+#[derive(Debug)]
+struct VisitedNode {
+    /// Depth of the node, in the same coordinates as the levels of `column_requirements`.
+    depth: usize,
+    /// The node one level up on the path this node was visited on, `None` for the rewritten root.
+    parent: Option<usize>,
+    /// The node as it now stands, including whatever enforcement already happened below it.
+    plan: LogicalPlan,
 }
 
 impl EnforceDistRequirementRewriter {
@@ -851,8 +957,62 @@ impl EnforceDistRequirementRewriter {
         Self {
             column_requirements,
             cur_level,
-            plan_per_level: BTreeMap::new(),
+            visited: Vec::new(),
+            path: Vec::new(),
         }
+    }
+
+    /// Whether a requirement reaches this rewrite at all.
+    ///
+    /// A requirement made above the rewritten node is not in this rewrite's scope, and a node
+    /// nothing requires a column of is left as it is, whatever its shape.
+    fn has_applicable_requirements(&self) -> bool {
+        self.column_requirements
+            .iter()
+            .any(|(_, level)| *level >= self.cur_level)
+    }
+
+    /// The plan that made the requirement registered at `level`, when it is reachable from `node`.
+    ///
+    /// Reachable means on the path from the rewritten node down to `node`, `node` included, or
+    /// inside `node`'s own subtree. A plan on a sibling branch is not reachable, and a requirement
+    /// it made says nothing about `node`. Two reachable plans at `level` below `node` are two
+    /// branches the column could come from, which is exactly the ambiguity this refuses to resolve.
+    fn original_plan_at(&self, node: usize, level: usize) -> DfResult<Option<&LogicalPlan>> {
+        let mut ancestor = Some(node);
+        while let Some(candidate) = ancestor {
+            if self.visited[candidate].depth == level {
+                return Ok(Some(&self.visited[candidate].plan));
+            }
+            ancestor = self.visited[candidate].parent;
+        }
+
+        let mut found = None;
+        for (id, visited) in self.visited.iter().enumerate() {
+            if visited.depth != level || !self.is_descendant_of(id, node) {
+                continue;
+            }
+            if found.is_some() {
+                return Err(datafusion_common::DataFusionError::Internal(format!(
+                    "EnforceDistRequirementRewriter: column requirement at level {level} has more than one candidate plan below, so which branch it refers to is ambiguous: {}",
+                    self.visited[node].plan,
+                )));
+            }
+            found = Some(id);
+        }
+        Ok(found.map(|id| &self.visited[id].plan))
+    }
+
+    /// Whether the node at `node` was visited inside the subtree of the node at `ancestor`.
+    fn is_descendant_of(&self, node: usize, ancestor: usize) -> bool {
+        let mut current = node;
+        while let Some(parent) = self.visited[current].parent {
+            if parent == ancestor {
+                return true;
+            }
+            current = parent;
+        }
+        false
     }
 
     /// Return a mapping from (original column, level) to aliased columns in current node of all
@@ -860,6 +1020,7 @@ impl EnforceDistRequirementRewriter {
     /// i.e. only column requirements with level >= `cur_level` will be considered
     fn get_current_applicable_column_requirements(
         &self,
+        node_id: usize,
         node: &LogicalPlan,
     ) -> DfResult<BTreeMap<(Column, usize), BTreeSet<Column>>> {
         let col_req_per_level = self
@@ -875,7 +1036,7 @@ impl EnforceDistRequirementRewriter {
             return Ok(Default::default());
         };
         for (col_req, level) in col_req_per_level {
-            if let Some(original) = self.plan_per_level.get(level) {
+            if let Some(original) = self.original_plan_at(node_id, *level)? {
                 // query for alias in current plan
                 let aliased_cols =
                     aliased_columns_for(&col_req.iter().cloned().collect(), node, Some(original))?;
@@ -914,30 +1075,20 @@ impl EnforceDistRequirementRewriter {
     }
 }
 
-impl TreeNodeRewriter for EnforceDistRequirementRewriter {
-    type Node = LogicalPlan;
-
-    fn f_down(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
-        // check that node doesn't have multiple children, i.e. join/subquery
-        if node.inputs().len() > 1 {
-            return Err(datafusion_common::DataFusionError::Internal(
-                "EnforceDistRequirementRewriter: node with multiple inputs is not supported"
-                    .to_string(),
-            ));
-        }
-        self.plan_per_level.insert(self.cur_level, node.clone());
-        self.cur_level += 1;
-        Ok(Transformed::no(node))
-    }
-
-    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
-        self.cur_level -= 1;
-        // first get all applicable column requirements
-
+impl EnforceDistRequirementRewriter {
+    /// Add the columns `node` requires to the projection `node`, if it has to publish any.
+    ///
+    /// Only a projection is repaired here: it is the one node whose output can grow without
+    /// changing what it computes, which is what lets the node above it keep a column it asked for.
+    fn enforce_column_requirements(
+        &mut self,
+        node_id: usize,
+        node: LogicalPlan,
+    ) -> DfResult<Transformed<LogicalPlan>> {
         // make sure all projection applicable scope has the required columns
         if let LogicalPlan::Projection(ref projection) = node {
             let mut applicable_column_requirements =
-                self.get_current_applicable_column_requirements(&node)?;
+                self.get_current_applicable_column_requirements(node_id, &node)?;
 
             debug!(
                 "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
@@ -977,12 +1128,43 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
             );
 
             // update plan for later use
-            self.plan_per_level.insert(self.cur_level, new_node.clone());
+            self.visited[node_id].plan = new_node.clone();
 
             // still need to continue for next projection if applicable
             return Ok(Transformed::yes(new_node));
         }
         Ok(Transformed::no(node))
+    }
+}
+
+impl TreeNodeRewriter for EnforceDistRequirementRewriter {
+    type Node = LogicalPlan;
+
+    fn f_down(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        let id = self.visited.len();
+        self.visited.push(VisitedNode {
+            depth: self.cur_level,
+            parent: self.path.last().copied(),
+            plan: node.clone(),
+        });
+        self.path.push(id);
+        self.cur_level += 1;
+        Ok(Transformed::no(node))
+    }
+
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        self.cur_level -= 1;
+        let node_id = *self.path.last().ok_or_else(|| {
+            datafusion_common::DataFusionError::Internal(
+                "EnforceDistRequirementRewriter: f_up without a matching f_down".to_string(),
+            )
+        })?;
+        // The children may have been rewritten below this node.
+        self.visited[node_id].plan = node.clone();
+
+        let transformed = self.enforce_column_requirements(node_id, node)?;
+        self.path.pop();
+        Ok(transformed)
     }
 }
 
