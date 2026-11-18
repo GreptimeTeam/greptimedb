@@ -47,7 +47,7 @@ use mito2::sst::file_ref::FileReferenceManager;
 use moka::future::CacheBuilder;
 use object_store::manager::ObjectStoreManager;
 use object_store::util::normalize_dir;
-use query::optimizer::parallelize_scan::ParallelizeScan;
+use query::optimizer::parallelize_scan::assign_partition_ranges;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use sqlparser::ast::ExprWithAlias as SqlExprWithAlias;
@@ -995,8 +995,7 @@ impl ScanbenchCommand {
                 let all_ranges: Vec<_> = original_partitions.into_iter().flatten().collect();
 
                 // Distribute ranges across partitions
-                let mut partitions =
-                    ParallelizeScan::assign_partition_range(all_ranges, self.parallelism);
+                let mut partitions = assign_partition_ranges(all_ranges, self.parallelism);
 
                 // Sort ranges within each partition by start time ascending
                 for partition in &mut partitions {

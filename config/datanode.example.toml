@@ -333,6 +333,7 @@ overwrite_entry_start_id = false
 
 ## The query engine options.
 [query]
+
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
@@ -556,6 +557,9 @@ compress_manifest = false
 ## Under development; do not enable. Whether to enable series indexes.
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
+
+## Under development. Select legacy Parquet indexes or paired columnar series and samples.
+#+ experimental_series_index_format = "legacy"
 
 ## Approximate series and range index size limit in open regions, shared across workers.
 ## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation

@@ -274,6 +274,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             .build();
 
         let inner = EngineInner {
+            series_cache_namespace: store_api::storage::FileId::random(),
             workers,
             config,
             wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
@@ -888,6 +889,9 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
+    /// Identifies this engine's series store across region closes/reopens. A new
+    /// engine may use a different store even with the same region/generation IDs.
+    series_cache_namespace: store_api::storage::FileId,
     /// Config of the engine.
     config: Arc<MitoConfig>,
     /// The Wal raw entry reader. `None` once the engine is stopped, so that it no longer holds
@@ -1220,6 +1224,22 @@ impl EngineInner {
         // in the query's older SST snapshot.
         let series_index = region.series_index_store.as_ref().map(|store| {
             crate::series_index::SeriesIndexReadContext {
+                cache_namespace: self.series_cache_namespace,
+                format: if region
+                    .series_index_version_control
+                    .formats
+                    .read()
+                    .unwrap()
+                    .index
+                    .as_ref()
+                    .is_some_and(|format| {
+                        format.format()
+                            == crate::series_index::artifact::ArtifactFormat::ColumnarSeries
+                    }) {
+                    crate::config::SeriesIndexFormat::Columnar
+                } else {
+                    crate::config::SeriesIndexFormat::Legacy
+                },
                 store: store.clone(),
                 version: region.series_index_version(),
             }
@@ -1892,6 +1912,7 @@ impl MitoEngine {
             .build();
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
+                series_cache_namespace: store_api::storage::FileId::random(),
                 workers: WorkerGroup::start_for_test(
                     data_home,
                     config.clone(),

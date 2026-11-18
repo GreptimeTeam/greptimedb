@@ -16,17 +16,30 @@
 //!
 //! Under development. Index files are currently stored on the local filesystem.
 
+pub(crate) mod artifact;
+mod artifact_writer;
 mod bucket;
 mod builder;
 mod catalog;
+pub(crate) mod columnar;
+pub(crate) mod format;
+#[cfg(test)]
+mod format_tests;
+pub(crate) mod identity;
 mod maintenance;
 mod purger;
+pub(crate) mod samples;
 mod searcher;
 mod task;
 #[cfg(test)]
 mod tests;
 mod version;
 mod writer;
+
+#[cfg(test)]
+pub(crate) use maintenance::reconcile_series_indexes_with_mode;
+#[cfg(test)]
+pub(crate) use tests::prepare_region_with_metadata;
 
 use std::sync::Arc;
 
@@ -56,6 +69,8 @@ pub use crate::series_index::writer::{
 /// Index storage and pinned catalog snapshot for a query.
 #[derive(Clone)]
 pub(crate) struct SeriesIndexReadContext {
+    pub(crate) cache_namespace: store_api::storage::FileId,
+    pub(crate) format: crate::config::SeriesIndexFormat,
     pub(crate) store: ObjectStore,
     pub(crate) version: Arc<SeriesIndexVersion>,
 }
@@ -66,7 +81,9 @@ pub(crate) const ROW_COUNT_COLUMN: &str = "__series_row_count";
 pub(crate) const METRIC_SERIES_ID_BATCH_SIZE: usize = 500;
 
 /// Identifies one series in a physical metric region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct MetricSeriesId {
     /// Logical table ID inside the physical metric region.
     pub table_id: u32,
