@@ -75,6 +75,15 @@ use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
 
 #[tokio::test]
 async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
+    check_sparse_upsert_after_adding_nullable_tag("flat").await
+}
+
+#[tokio::test]
+async fn test_narthex_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
+    check_sparse_upsert_after_adding_nullable_tag("narthex").await
+}
+
+async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> WhateverResult<()> {
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::ColumnMetadata;
     use store_api::region_request::AddColumn;
@@ -86,7 +95,18 @@ async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
         .tag_num(1)
         .field_num(1)
         .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", format)
         .build();
+    if format == "narthex" {
+        for (key, value) in [
+            ("memtable.type", "bulk"),
+            ("memtable.bulk.merge_threshold", "2"),
+            ("memtable.bulk.encode_row_threshold", "1"),
+            ("memtable.bulk.encode_bytes_threshold", "1"),
+        ] {
+            request.options.insert(key.into(), value.into());
+        }
+    }
     let reserved = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
     request
         .column_metadatas
@@ -94,6 +114,7 @@ async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
     request
         .primary_key
         .splice(0..0, reserved.primary_key.into_iter().take(2));
+    let table_dir = request.table_dir.clone();
     let schema = test_util::rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
@@ -109,6 +130,38 @@ async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
         ])],
     };
     test_util::put_rows(&engine, region_id, rows.clone()).await;
+    if format == "narthex" {
+        test_util::put_rows(&engine, region_id, rows.clone()).await;
+        for memtable in engine
+            .find_region(region_id)
+            .unwrap()
+            .version()
+            .memtables
+            .list_memtables()
+        {
+            memtable.compact(false)?;
+            let ranges = memtable.ranges(None, crate::memtable::RangesOptions::default())?;
+            assert_eq!(ranges.ranges.len(), 1);
+            let range = ranges.ranges.values().next().unwrap();
+            // Two input parts were merged and encoded, but narthex parts cannot
+            // use the Parquet direct-upload shortcut.
+            assert!(range.encoded().is_none());
+            let decoded = range
+                .build_record_batch_iter(None, None)?
+                .collect::<crate::error::Result<Vec<_>>>()?;
+            assert_eq!(
+                decoded.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                1
+            );
+        }
+    }
+    if format == "narthex" {
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await?;
+        let batches = RecordBatches::try_collect(stream).await?;
+        assert!(batches.pretty_print()?.contains("1.0"));
+    }
     test_util::flush_region(&engine, region_id, None).await;
     engine
         .handle_request(
@@ -156,6 +209,156 @@ async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
 | api   | 2.0     | 1970-01-01T00:00:01 |      |
 +-------+---------+---------------------+------+";
         assert_eq!(batches.pretty_print()?, expected);
+    }
+    if format == "narthex" {
+        let unindexed = RecordBatches::try_collect(
+            engine
+                .scan_to_stream(region_id, ScanRequest::default())
+                .await?,
+        )
+        .await?
+        .pretty_print()?;
+        let region = engine.find_region(region_id).unwrap();
+        assert!(
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files.values())
+                .all(|file| matches!(
+                    file.meta_ref().format,
+                    crate::sst::file::FileFormat::NarthexSamples(_)
+                ))
+        );
+        let sources: Vec<_> = region
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values().cloned())
+            .collect();
+        let flat = crate::compaction::CompactionSstReaderBuilder {
+            metadata: region.metadata(),
+            sst_layer: region.access_layer.clone(),
+            cache: engine.cache_manager(),
+            inputs: &sources,
+            append_mode: true,
+            filter_deleted: false,
+            time_range: None,
+            merge_mode: crate::region::options::MergeMode::LastRow,
+            read_parallelism: 1,
+        }
+        .build_flat_sst_reader()
+        .await?;
+        let index = crate::sst::narthex::write_series(
+            &region.access_layer,
+            region.metadata(),
+            &sources,
+            flat,
+        )
+        .await?;
+        let index_id = index.file_id;
+        engine
+            .edit_region(
+                region_id,
+                crate::manifest::action::RegionEdit {
+                    series_indexes_to_add: vec![index],
+                    ..Default::default()
+                },
+            )
+            .await?;
+        reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+        let region = engine.find_region(region_id).unwrap();
+        assert!(
+            region
+                .version()
+                .ssts
+                .series_indexes()
+                .contains_key(&index_id)
+        );
+        let indexed = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await?;
+        assert_eq!(
+            RecordBatches::try_collect(indexed).await?.pretty_print()?,
+            unindexed
+        );
+        let old_index = crate::series_index::SeriesIndexFileHandle::from_narthex(
+            region.version().ssts.series_indexes()[&index_id].clone(),
+        )?;
+        let index_reader = crate::series_index::columnar::reader::ColumnarReader::open(
+            region.access_layer.object_store().clone(),
+            old_index,
+        )
+        .await?;
+        let old_samples = region
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .next()
+            .unwrap()
+            .clone();
+        let samples_reader = crate::series_index::samples::reader::SamplesReader::open(
+            region.access_layer.object_store().clone(),
+            crate::series_index::artifact::SamplesFileHandle::from_narthex(old_samples)?,
+        )
+        .await?;
+        let inputs: std::collections::HashSet<_> = region
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.keys().copied())
+            .collect();
+        assert_eq!(inputs.len(), 2);
+        crate::engine::compaction_test::compact(&engine, region_id).await;
+        let outputs: Vec<_> = region
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values().cloned())
+            .collect();
+        assert!(!outputs.is_empty());
+        assert!(region.version().ssts.series_indexes().is_empty());
+        use crate::series_index::format::{FormatReader, SamplesFormatReader};
+        let mut old_series = index_reader.read(crate::series_index::format::SeriesReadRequest {
+            projection: index_reader
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect(),
+            ..Default::default()
+        })?;
+        use futures::TryStreamExt;
+        assert!(old_series.try_next().await?.is_some());
+        assert!(
+            samples_reader
+                .read(Default::default())?
+                .try_next()
+                .await?
+                .is_some()
+        );
+
+        assert!(
+            outputs
+                .iter()
+                .all(|file| !inputs.contains(&file.meta_ref().file_id))
+        );
+        assert!(outputs.iter().all(|file| matches!(
+            file.meta_ref().format,
+            crate::sst::file::FileFormat::NarthexSamples(_)
+        )));
+        reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await?;
+        let batches = RecordBatches::try_collect(stream).await?;
+        assert_eq!(batches.pretty_print()?, unindexed);
     }
     engine.stop().await?;
     Ok(())
@@ -3151,6 +3354,8 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
     // sequence fails closed in `files_allow_exact_sequence_range`, covered by
     // the unit test.)
     let edit = RegionEdit {
+        series_indexes_to_add: Vec::new(),
+        series_indexes_to_remove: Vec::new(),
         files_to_add: vec![FileMeta {
             region_id,
             file_id: FileId::random(),
@@ -3239,6 +3444,8 @@ async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
         .edit_region(
             region_id,
             RegionEdit {
+                series_indexes_to_add: Vec::new(),
+                series_indexes_to_remove: Vec::new(),
                 files_to_add: vec![FileMeta {
                     region_id: RegionId::new(1, 2),
                     file_id: FileId::random(),
@@ -4361,6 +4568,8 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input(
         .edit_region(
             region_id,
             RegionEdit {
+                series_indexes_to_add: Vec::new(),
+                series_indexes_to_remove: Vec::new(),
                 files_to_add: vec![unmarked],
                 files_to_remove: vec![],
                 timestamp_ms: None,

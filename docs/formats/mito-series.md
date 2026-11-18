@@ -1,4 +1,34 @@
-# Mito columnar series format
+# Narthex format: series index
+
+The **Narthex format**, selected by `sst_format = 'narthex'`, is optimized
+for Prometheus-style metric data. It separates series identities and string tags
+from timestamped numeric samples. `native` and `metrics` remain accepted as
+legacy option aliases.
+
+The format has two artifact roles: `NarthexSamples` owns sample data, and
+`NarthexSeriesIndex` indexes series and references the samples it covers.
+Region manifests serialize these roles as `narthex_samples` and
+`narthex_series_index`, accepting the former `native`/`native_series` and
+`metrics_samples`/`metrics_series_index` names on read. This naming change does not
+change file magic, codec identifiers,
+artifact format identifiers (`columnar-series` and `columnar-samples`), or encoded
+part payloads.
+
+## Authoritative storage and derived sidecars
+
+With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
+`<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
+`part-<n>.series` objects. The region manifest records object paths and sizes;
+series indexes reference region-qualified sample file IDs without owning those
+samples. Both artifact types use ordinary SST lifetimes and reclamation.
+Existing `native/<file_id>/` paths remain readable and are not relocated.
+
+The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
+paths, source-SST coverage, daily consolidation, and local-cache rollout described
+below apply to that sidecar mode. They do not make authoritative Narthex samples
+rebuildable or subject them to local-cache eviction.
+
+## Wire specification
 
 This document specifies the version 1 on-disk layout, encodings, ordering rules,
 and validation limits for series-index artifacts. The version number stays 1: the
@@ -12,7 +42,7 @@ number and may contain an already merged row that cannot be told apart from a
 complete one; nothing else in the artifact distinguishes them. A manifest that
 does not carry `identity_encoding` is therefore rejected, and its artifact rebuilt
 from SSTs; there is no dual reader. For samples, see
-[Mito columnar samples format](mito-samples.md).
+[Narthex samples format](mito-samples.md).
 
 ## Artifact manifest
 
@@ -93,8 +123,8 @@ order are not wire contracts. Reject trailing bytes in decoded structures.
 
 ### Column payloads
 
-An artifact indexes the series in one Mito series-index bucket. Authoritative
-data remains in Parquet SSTs; these indexes can be rebuilt. Each record contains:
+An artifact indexes the series in one Mito series-index bucket. In sidecar mode, authoritative
+data remains in Parquet SSTs and these indexes can be rebuilt. Each record contains:
 
 | Logical column | Type | Storage |
 | --- | --- | --- |

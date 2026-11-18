@@ -531,7 +531,7 @@ impl MitoEngine {
     }
 
     /// Edit region's metadata by [RegionEdit] directly. Use with care.
-    /// Now we only allow adding files or removing files from region (the [RegionEdit] struct can only contain a non-empty "files_to_add" or "files_to_remove" field).
+    /// Allows adding/removing data files and narthex series indexes.
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
@@ -869,7 +869,10 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    (!edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty())
+    (!edit.files_to_add.is_empty()
+        || !edit.files_to_remove.is_empty()
+        || !edit.series_indexes_to_add.is_empty()
+        || !edit.series_indexes_to_remove.is_empty())
         && matches!(
             edit,
             RegionEdit {

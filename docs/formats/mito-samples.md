@@ -1,4 +1,34 @@
-# Mito columnar samples format
+# Narthex format: samples
+
+The **Narthex format**, selected by `sst_format = 'narthex'`, is optimized
+for Prometheus-style metric data. It separates series identities and string tags
+from timestamped numeric samples. `native` and `metrics` remain accepted as
+legacy option aliases.
+
+The format has two artifact roles: `NarthexSamples` owns sample data, and
+`NarthexSeriesIndex` indexes series and references the samples it covers.
+Region manifests serialize these roles as `narthex_samples` and
+`narthex_series_index`, accepting the former `native`/`native_series` and
+`metrics_samples`/`metrics_series_index` names on read. This naming change does not
+change file magic, codec identifiers,
+artifact format identifiers (`columnar-series` and `columnar-samples`), or encoded
+part payloads.
+
+## Authoritative storage and derived sidecars
+
+With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
+`<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
+`part-<n>.series` objects. The region manifest records object paths and sizes;
+series indexes reference region-qualified sample file IDs without owning those
+samples. Both artifact types use ordinary SST lifetimes and reclamation.
+Existing `native/<file_id>/` paths remain readable and are not relocated.
+
+The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
+paths, source-SST coverage, daily consolidation, and local-cache rollout described
+below apply to that sidecar mode. They do not make authoritative Narthex samples
+rebuildable or subject them to local-cache eviction.
+
+## Wire specification
 
 This document specifies the version 1 on-disk layout, encodings, ordering rules,
 and validation limits for samples artifacts. The version number stays 1: the
@@ -17,7 +47,7 @@ applies to an artifact of the earlier layout of this format, whose keys sat insi
 the block descriptors: its `identity_encoding` value is the older
 `exact-sparse-key`, so it is refused when the manifest is opened rather than when a
 part is first read. It shares artifact conventions with
-[Mito columnar series format](mito-series.md).
+[Narthex series-index format](mito-series.md).
 
 Samples store nullable Float64 fields, timestamps, sequences, and operation types
 in single-series blocks bounded by rows and decoded bytes.

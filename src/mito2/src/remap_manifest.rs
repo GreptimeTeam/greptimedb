@@ -161,6 +161,21 @@ impl RemapManifest {
         target_manifest: &mut RegionManifest,
     ) -> Result<()> {
         for (file_id, file_meta) in &source_manifest.files {
+            if let Some(existing) = target_manifest.files.get(file_id)
+                && (existing.format.narthex_objects().is_some()
+                    || file_meta.format.narthex_objects().is_some())
+            {
+                // Admission sequences may differ by logical region; physical
+                // ownership and object inventory must still agree in all builds.
+                ensure!(
+                    existing.region_id == file_meta.region_id
+                        && existing.format.narthex_objects() == file_meta.format.narthex_objects(),
+                    error::InconsistentFileSnafu {
+                        file_id: *file_id,
+                        reason: "narthex samples identity mismatch",
+                    }
+                );
+            }
             let file_meta_clone = file_meta.clone();
 
             // Insert or merge into target manifest
@@ -180,6 +195,21 @@ impl RemapManifest {
             }
         }
 
+        // Remap creates references, not physical copies: retain index owner,
+        // inventory and exact source identities together with the samples.
+        for (id, index) in &source_manifest.series_indexes {
+            if let Some(existing) = target_manifest.series_indexes.get(id) {
+                ensure!(
+                    existing == index,
+                    error::InconsistentFileSnafu {
+                        file_id: *id,
+                        reason: "narthex series identity mismatch",
+                    }
+                );
+            } else {
+                target_manifest.series_indexes.insert(*id, index.clone());
+            }
+        }
         Ok(())
     }
 

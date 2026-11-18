@@ -971,19 +971,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
     let region_id = region.region_id;
-    snafu::ensure!(
-        edit.series_indexes_to_add.is_empty()
-            && edit.series_indexes_to_remove.is_empty()
-            && edit
-                .files_to_add
-                .iter()
-                .chain(&edit.files_to_remove)
-                .all(|file| matches!(file.format, file::FileFormat::Parquet)),
-        crate::error::InvalidRequestSnafu {
-            region_id,
-            reason: "Importing authoritative Narthex artifacts is unsupported",
-        }
-    );
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
     let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;
@@ -1044,7 +1031,7 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
             .iter()
             .all(|file| existing_sequence(file).is_some());
     let sequence =
-        if same_import {
+        if same_import || (edit.files_to_add.is_empty() && edit.files_to_remove.is_empty()) {
             None
         } else {
             let sequence = current.last_sequence.checked_add(1).context(
@@ -1057,6 +1044,9 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
             NonZeroU64::new(sequence)
         };
     for file in &mut edit.files_to_add {
+        if let file::FileFormat::NarthexSamples(narthex) = &mut file.format {
+            narthex.use_file_sequence = true;
+        }
         file.sequence = existing_sequence(file).or(sequence);
         file.preserve_row_sequence = false;
     }
@@ -1073,10 +1063,62 @@ async fn edit_region(
     preload_sst_cache: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
+    for file in edit.files_to_add.iter().chain(&edit.series_indexes_to_add) {
+        if let Some(objects) = file.format.narthex_objects() {
+            let region_dir = region.access_layer.build_region_dir(file.region_id);
+            let canonical = location::narthex_file_dir(&region_dir, file.file_id);
+            let prototype =
+                location::narthex_file_dir(&location::legacy_native_dir(&region_dir), file.file_id);
+            snafu::ensure!(
+                region.version_control.current().version.options.sst_format
+                    == Some(crate::sst::FormatType::Narthex)
+                    && file.region_id.table_id() == region_id.table_id()
+                    && file.valid_inventory()
+                    && objects.iter().all(|object| {
+                        location::parent_dir(&object.path)
+                            .is_some_and(|parent| parent == canonical || parent == prototype)
+                    }),
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Invalid Narthex artifact for destination region"
+                }
+            );
+        }
+    }
+    for samples in &edit.files_to_add {
+        if matches!(samples.format, file::FileFormat::NarthexSamples(_)) {
+            use crate::series_index::format::SamplesFormatReader;
+            let handle = file::FileHandle::new(samples.clone(), region.file_purger.clone());
+            let handle = crate::series_index::artifact::SamplesFileHandle::from_narthex(handle)?;
+            let reader = crate::series_index::samples::reader::SamplesReader::open(
+                region.access_layer.object_store().clone(),
+                handle,
+            )
+            .await?;
+            crate::series_index::format::validate_sample_schema(
+                &reader.schema(),
+                &region.metadata(),
+            )?;
+        }
+    }
+    for index in &edit.series_indexes_to_add {
+        let handle = file::FileHandle::new(index.clone(), region.file_purger.clone());
+        let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(handle)?;
+        use crate::series_index::format::FormatReader;
+        let reader = crate::series_index::columnar::reader::ColumnarReader::open(
+            region.access_layer.object_store().clone(),
+            handle,
+        )
+        .await?;
+        crate::series_index::format::validate_series_schema(&reader.schema(), &region.metadata())?;
+    }
     if let Some(write_cache) = cache_manager.write_cache()
         && preload_sst_cache
     {
         for file_meta in &edit.files_to_add {
+            if matches!(file_meta.format, file::FileFormat::NarthexSamples(_)) {
+                continue;
+            }
             let write_cache = write_cache.clone();
             let layer = region.access_layer.clone();
             let listener = listener.clone();

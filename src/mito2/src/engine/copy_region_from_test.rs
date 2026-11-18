@@ -677,3 +677,386 @@ async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
         "source exact range should return rows with sequence 3..=7"
     );
 }
+
+#[rstest::rstest]
+#[case::samples_only(false, false, false)]
+#[case::physical_copy(false, true, false)]
+#[case::remap_references(true, true, false)]
+#[case::copy_retry(false, true, true)]
+#[tokio::test]
+async fn test_narthex_copy_and_remap(
+    #[case] remap: bool,
+    #[case] with_index: bool,
+    #[case] fail_copy: bool,
+) {
+    use crate::manifest::action::RegionEdit;
+    use crate::sst::file::FileFormat;
+    use crate::test_util::sst_util::sst_region_metadata_with_encoding;
+    use crate::test_util::{flush_region, reopen_region};
+    use api::v1::helper::row;
+    use api::v1::value::ValueData;
+    use datatypes::value::Value;
+    use partition::expr::col;
+    use std::collections::HashMap;
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::region_engine::{RemapManifestsRequest, SettableRegionRoleState};
+    use store_api::region_request::{
+        ApplyStagingManifestRequest, EnterStagingRequest, RegionDropRequest,
+        StagingPartitionDirective,
+    };
+
+    let mut env = TestEnv::new().await.with_file_ref_manager(Arc::new(
+        crate::sst::file_ref::FileReferenceManager::with_gc_enabled(None, true),
+    ));
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            gc: crate::gc::GcConfig {
+                enable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+    let source = RegionId::new(2, 1);
+    // Different decimal width exercises the rewritten manifest's byte counts.
+    let target = RegionId::new(2, u32::MAX);
+    let mut request = CreateRequestBuilder::new()
+        .tag_num(1)
+        .field_num(1)
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", "narthex")
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let reserved = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    request
+        .column_metadatas
+        .extend(reserved.column_metadatas.into_iter().take(2));
+    request
+        .primary_key
+        .splice(0..0, reserved.primary_key.into_iter().take(2));
+    for region in [source, target] {
+        engine
+            .handle_request(region, RegionRequest::Create(request.clone()))
+            .await
+            .unwrap();
+    }
+    for (label, tsid) in [("api", 7), ("worker", 8)] {
+        put_rows(
+            &engine,
+            source,
+            Rows {
+                schema: rows_schema(&request),
+                rows: vec![row(vec![
+                    ValueData::StringValue(label.into()),
+                    ValueData::F64Value(1.0),
+                    ValueData::TimestampMillisecondValue(1000),
+                    ValueData::U32Value(42),
+                    ValueData::U64Value(tsid),
+                ])],
+            },
+        )
+        .await;
+        flush_region(&engine, source, None).await;
+    }
+    let owner = engine.get_region(source).unwrap();
+    let sources: Vec<_> = owner
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values().cloned())
+        .collect();
+    if with_index {
+        let batches = crate::compaction::CompactionSstReaderBuilder {
+            metadata: owner.metadata(),
+            sst_layer: owner.access_layer.clone(),
+            cache: engine.cache_manager(),
+            inputs: &sources,
+            append_mode: true,
+            filter_deleted: false,
+            time_range: None,
+            merge_mode: crate::region::options::MergeMode::LastRow,
+            read_parallelism: 1,
+        }
+        .build_flat_sst_reader()
+        .await
+        .unwrap();
+        let index = crate::sst::narthex::write_series(
+            &owner.access_layer,
+            owner.metadata(),
+            &sources,
+            batches,
+        )
+        .await
+        .unwrap();
+        engine
+            .edit_region(
+                source,
+                RegionEdit {
+                    series_indexes_to_add: vec![index],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let before = owner.manifest_ctx.manifest().await;
+    if fail_copy {
+        let missing = before
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .format
+            .narthex_objects()
+            .unwrap()[0]
+            .path
+            .clone();
+        let store = owner.access_layer.object_store();
+        let saved = store.read(&missing).await.unwrap().to_bytes();
+        store.delete(&missing).await.unwrap();
+        assert!(
+            engine
+                .copy_region_from(
+                    target,
+                    MitoCopyRegionFromRequest {
+                        source_region_id: source,
+                        parallelism: 2,
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let destination = engine.get_region(target).unwrap();
+        let failed = destination.manifest_ctx.manifest().await;
+        assert!(failed.files.is_empty());
+        assert!(failed.series_indexes.is_empty());
+        let from = owner.access_layer.build_region_dir(source);
+        let to = owner.access_layer.build_region_dir(target);
+        for object in before
+            .all_files()
+            .flat_map(|file| file.format.narthex_objects().unwrap())
+        {
+            let target_path = format!("{to}{}", object.path.strip_prefix(&from).unwrap());
+            assert!(
+                !store.exists(&target_path).await.unwrap(),
+                "partial copy leaked {target_path}"
+            );
+        }
+        for file in before.all_files() {
+            let dir = crate::sst::location::narthex_file_dir(&to, file.file_id);
+            assert!(
+                !store.exists(&dir).await.unwrap(),
+                "partial copy leaked {dir}"
+            );
+        }
+        store.write(&missing, saved).await.unwrap();
+    }
+    if remap {
+        engine
+            .set_region_role_state_gracefully(source, SettableRegionRoleState::StagingLeader)
+            .await
+            .unwrap();
+        let partition_expr = col("tag_0")
+            .eq(Value::String("api".into()))
+            .as_json_str()
+            .unwrap();
+        let result = engine
+            .remap_manifests(RemapManifestsRequest {
+                region_id: source,
+                input_regions: vec![source],
+                region_mapping: HashMap::from([(source, vec![target])]),
+                new_partition_exprs: HashMap::from([(target, partition_expr.clone())]),
+            })
+            .await
+            .unwrap();
+        engine
+            .handle_request(
+                target,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                        partition_expr.clone(),
+                    ),
+                }),
+            )
+            .await
+            .unwrap();
+        engine
+            .handle_request(
+                target,
+                RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                    partition_expr,
+                    central_region_id: source,
+                    manifest_path: result.manifest_paths[&target].clone(),
+                }),
+            )
+            .await
+            .unwrap();
+    } else {
+        for _ in 0..2 {
+            let response = engine
+                .copy_region_from(
+                    target,
+                    MitoCopyRegionFromRequest {
+                        source_region_id: source,
+                        parallelism: 2,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.copied_file_ids.len(), 2);
+        }
+    }
+    let destination = engine.get_region(target).unwrap();
+    let after = destination.manifest_ctx.manifest().await;
+    assert_eq!(after.files.len(), 2);
+    assert_eq!(after.series_indexes.len(), usize::from(with_index));
+    let physical_owner = if remap { source } else { target };
+    for meta in after.all_files() {
+        assert_eq!(meta.region_id, physical_owner);
+        let prefix = crate::sst::location::narthex_file_dir(
+            &destination.access_layer.build_region_dir(physical_owner),
+            meta.file_id,
+        );
+        assert!(
+            meta.format
+                .narthex_objects()
+                .unwrap()
+                .iter()
+                .all(|object| object.path.starts_with(&prefix))
+        );
+        for object in meta.format.narthex_objects().unwrap() {
+            let actual = destination
+                .access_layer
+                .object_store()
+                .stat(&object.path)
+                .await
+                .unwrap();
+            assert_eq!(actual.content_length(), object.file_size);
+        }
+        if let FileFormat::NarthexSeriesIndex(index) = &meta.format {
+            assert_eq!(index.sources.len(), 2);
+            assert!(
+                index
+                    .sources
+                    .iter()
+                    .all(|id| id.region_id() == physical_owner)
+            );
+            if remap {
+                assert_eq!(meta, &before.series_indexes[&meta.file_id]);
+            }
+        }
+    }
+    // Physical copies survive complete deletion of their source. Remaps retain
+    // source-owned objects via references and use the partial-drop contract.
+    drop(sources);
+    drop(owner);
+    engine
+        .handle_request(
+            source,
+            RegionRequest::Drop(RegionDropRequest {
+                partial_drop: remap,
+                fast_path: false,
+                force: false,
+            }),
+        )
+        .await
+        .unwrap();
+    if !remap {
+        let paths: Vec<_> = before
+            .all_files()
+            .flat_map(|file| file.format.narthex_objects().unwrap())
+            .map(|object| object.path.clone())
+            .collect();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let mut exists = false;
+                for path in &paths {
+                    exists |= destination
+                        .access_layer
+                        .object_store()
+                        .exists(path)
+                        .await
+                        .unwrap();
+                }
+                if !exists {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    reopen_region(
+        &engine,
+        target,
+        request.table_dir.clone(),
+        true,
+        request.options.clone(),
+    )
+    .await;
+    let stream = engine
+        .scan_to_stream(
+            target,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        if remap { 1 } else { 2 }
+    );
+    let text = batches.pretty_print().unwrap();
+    assert!(text.contains("api"));
+    assert_eq!(text.contains("worker"), !remap);
+    assert_eq!(
+        engine
+            .get_region(target)
+            .unwrap()
+            .version()
+            .ssts
+            .series_indexes()
+            .len(),
+        usize::from(with_index)
+    );
+    crate::engine::compaction_test::compact(&engine, target).await;
+    let compacted = engine.get_region(target).unwrap();
+    assert!(compacted.version().ssts.series_indexes().is_empty());
+    assert!(
+        compacted
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .all(|file| file.meta_ref().region_id == target
+                && matches!(file.meta_ref().format, FileFormat::NarthexSamples(_)))
+    );
+    let result = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(
+                target,
+                ScanRequest {
+                    memtable_min_sequence: Some(0),
+                    memtable_max_sequence: Some(1),
+                    exact_sequence_range: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.pretty_print().unwrap(), text);
+    engine.stop().await.unwrap();
+}

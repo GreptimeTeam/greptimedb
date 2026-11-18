@@ -69,6 +69,16 @@ pub(crate) struct ColumnarWriter {
     failed: bool,
 }
 impl ColumnarWriter {
+    #[cfg(test)]
+    pub(crate) fn with_prefix(mut self, prefix: String) -> Result<Self> {
+        require(
+            prefix.ends_with('/') && !prefix.split('/').any(|part| part == ".."),
+            "invalid narthex series prefix",
+        )?;
+        self.manifest.prefix = Some(prefix);
+        Ok(self)
+    }
+
     pub(crate) fn new(
         options: ColumnarSeriesFormat,
         metadata: RegionMetadataRef,
@@ -89,6 +99,7 @@ impl ColumnarWriter {
         coverage.file_size = 0;
         coverage.artifact = None;
         let manifest = Manifest {
+            prefix: None,
             format: ArtifactFormat::ColumnarSeries,
             version: VERSION,
             identity_encoding: IdentityEncoding::CURRENT_SERIES_INDEX,

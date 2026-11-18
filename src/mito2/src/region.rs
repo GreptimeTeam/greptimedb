@@ -72,7 +72,7 @@ use crate::request::{OnFailure, OptionOutputTx};
 use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
 use crate::sst::file::{self, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::location::{index_file_path, sst_file_path};
+use crate::sst::location::index_file_path;
 use crate::time_provider::TimeProviderRef;
 
 /// This is the approximate factor to estimate the size of wal.
@@ -939,6 +939,7 @@ impl MitoRegion {
         let region_options = serde_json::to_string(&version.options)
             .unwrap_or_else(|err| serde_json::json!({ "error": err.to_string() }).to_string());
         let sst_format = match version.options.sst_format.unwrap_or_default() {
+            crate::sst::FormatType::Narthex => "narthex",
             crate::sst::FormatType::PrimaryKey => "primary_key",
             crate::sst::FormatType::Flat => "flat",
         }
@@ -1008,7 +1009,7 @@ impl MitoRegion {
                 let file_path = OnceCell::new();
                 if !filters.matches(|column| match column {
                     sst_entry::FILE_PATH => Some(file_path.get_or_init(|| {
-                        ScalarValue::Utf8(Some(sst_file_path(table_dir, meta.file_id(), path_type)))
+                        ScalarValue::Utf8(Some(meta.file_path(table_dir, path_type)))
                     })),
                     _ => None,
                 }) {
@@ -1031,7 +1032,7 @@ impl MitoRegion {
                 let file_path = if projection.file_path {
                     match file_path.into_inner() {
                         Some(ScalarValue::Utf8(Some(path))) => path,
-                        _ => sst_file_path(table_dir, meta.file_id(), path_type),
+                        _ => meta.file_path(table_dir, path_type),
                     }
                 } else {
                     String::new()
@@ -2964,8 +2965,64 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_manifest_narthex_file_path_filter() {
+        use common_recordbatch::filter::MetadataFilter;
+        use datafusion_expr::{col, lit};
+        use futures::StreamExt;
+
+        use super::ManifestSstProjection;
+        use crate::sst::file::{FileFormat, FileMeta, NarthexObjectMeta, NarthexSamplesMeta};
+
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let path = "shared/native/00000000-0000-0000-0000-000000000001/manifest.json";
+        let mut edit = empty_edit();
+        edit.files_to_add.push(FileMeta {
+            file_id: crate::sst::location::parse_narthex_file_id(path).unwrap(),
+            file_size: 2,
+            format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+                use_file_sequence: false,
+                manifest: NarthexObjectMeta {
+                    path: path.to_string(),
+                    file_size: 1,
+                },
+                parts: vec![crate::sst::file::NarthexSamplesPart {
+                    part_id: 0,
+                    object: NarthexObjectMeta {
+                        path: path.replace("manifest.json", "part-0.samples"),
+                        file_size: 1,
+                    },
+                }],
+            })),
+            ..Default::default()
+        });
+        region
+            .manifest_ctx
+            .manifest_manager
+            .write()
+            .await
+            .update(
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit)),
+                false,
+            )
+            .await
+            .unwrap();
+
+        for filters in [
+            MetadataFilter::new(&[]),
+            MetadataFilter::new(&[col("file_path").eq(lit(path))]),
+        ] {
+            let mut stream = region.manifest_sst_stream(filters, ManifestSstProjection::new(None));
+            assert_eq!(stream.next().await.unwrap().file_path, path);
+            assert!(stream.next().await.is_none());
+        }
+    }
+
     fn empty_edit() -> RegionEdit {
         RegionEdit {
+            series_indexes_to_add: Vec::new(),
+            series_indexes_to_remove: Vec::new(),
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),
             timestamp_ms: None,

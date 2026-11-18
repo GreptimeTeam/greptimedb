@@ -27,6 +27,48 @@ use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest};
 use crate::sst::file::RegionFileId;
 
+/// Legacy codec coverage descriptor derived from immutable narthex metadata.
+/// Narthex admission and scan selection use the region-qualified `sources` instead.
+pub(crate) fn narthex_series_entry(
+    file: &crate::sst::file::FileMeta,
+) -> crate::error::Result<SeriesIndexEntry> {
+    use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
+    let crate::sst::file::FileFormat::NarthexSeriesIndex(index) = &file.format else {
+        return Err(crate::series_index::columnar::invalid(
+            "expected narthex series metadata",
+        ));
+    };
+    Ok(SeriesIndexEntry {
+        artifact: Some(ArtifactMetadata {
+            format: ArtifactFormat::ColumnarSeries,
+            generation: file.file_id,
+            objects: index
+                .parts
+                .iter()
+                .chain(std::iter::once(&index.manifest))
+                .map(|object| ArtifactObject {
+                    path: object.path.clone(),
+                    file_size: object.file_size,
+                })
+                .collect(),
+            file_size: file.file_size,
+        }),
+        file_size: file.file_size,
+        index_uuid: file.file_id,
+        bucket_start: file.time_range.0,
+        bucket_end: file.time_range.1,
+        source_file_ids: index
+            .sources
+            .iter()
+            .map(|source| source.file_id())
+            .collect(),
+        min_file_sequence: 0,
+        max_file_sequence: 0,
+        compaction_window_secs: 0,
+        window_sequences: Default::default(),
+    })
+}
+
 /// A reference-counted series-index file with deferred deletion semantics.
 #[derive(Clone)]
 pub(crate) struct SeriesIndexFileHandle {
@@ -53,9 +95,36 @@ impl SeriesIndexFileHandle {
                 file_id: RegionFileId::new(region_id, entry.index_uuid),
                 entry,
                 deleted: AtomicBool::new(false),
-                purger,
+                purger: Some(purger),
+                narthex_file: None,
             }),
         }
+    }
+
+    pub(crate) fn from_narthex(file: crate::sst::file::FileHandle) -> crate::error::Result<Self> {
+        let entry = narthex_series_entry(file.meta_ref())?;
+        Ok(Self {
+            inner: Arc::new(SeriesIndexFileHandleInner {
+                file_id: file.file_id(),
+                entry,
+                deleted: AtomicBool::new(false),
+                purger: None,
+                narthex_file: Some(file),
+            }),
+        })
+    }
+
+    pub(crate) fn manifest_path(&self) -> String {
+        if let Some(file) = &self.inner.narthex_file
+            && let crate::sst::file::FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format
+        {
+            return index.manifest.path.clone();
+        }
+        format!(
+            "{}/series/{}/manifest.json",
+            self.file_id().region_id().as_u64(),
+            self.inner.entry.index_uuid
+        )
     }
 
     /// Returns the region and file identity used for storage and deletion.
@@ -76,14 +145,17 @@ struct SeriesIndexFileHandleInner {
     file_id: RegionFileId,
     entry: SeriesIndexEntry,
     deleted: AtomicBool,
-    purger: IndexFilePurger,
+    purger: Option<IndexFilePurger>,
+    narthex_file: Option<crate::sst::file::FileHandle>,
 }
 
 impl Drop for SeriesIndexFileHandleInner {
     fn drop(&mut self) {
-        if self.deleted.load(Ordering::Acquire) {
+        if let Some(purger) = &self.purger
+            && self.deleted.load(Ordering::Acquire)
+        {
             if let Some(artifact) = &self.entry.artifact {
-                self.purger.purge_objects(
+                purger.purge_objects(
                     self.file_id,
                     artifact
                         .objects
@@ -92,7 +164,7 @@ impl Drop for SeriesIndexFileHandleInner {
                         .collect(),
                 );
             } else {
-                self.purger.purge(PurgeRequest {
+                purger.purge(PurgeRequest {
                     file_id: self.file_id,
                     objects: None,
                 });

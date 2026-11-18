@@ -47,6 +47,7 @@ pub mod file_purger;
 pub mod file_ref;
 pub mod index;
 pub mod location;
+pub(crate) mod narthex;
 pub mod parquet;
 pub(crate) mod primary_key;
 pub mod range_index;
@@ -69,6 +70,10 @@ pub enum FormatType {
     PrimaryKey,
     /// Flat Parquet format.
     Flat,
+    /// Narthex samples and optional series indexes.
+    #[serde(alias = "native", alias = "metrics")]
+    #[strum(serialize = "narthex", serialize = "metrics", serialize = "native")]
+    Narthex,
 }
 
 /// Iceberg-compatible column field ID key stored in Parquet column metadata.
@@ -525,6 +530,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn test_narthex_format_name_and_legacy_alias() {
+        for name in ["narthex", "metrics", "native"] {
+            assert_eq!(name.parse::<FormatType>().unwrap(), FormatType::Narthex);
+            let options = crate::region::options::RegionOptions::try_from_options(
+                store_api::storage::RegionId::new(0, 0),
+                &HashMap::from([("sst_format".to_string(), name.to_string())]),
+            )
+            .unwrap();
+            assert_eq!(options.sst_format, Some(FormatType::Narthex));
+            assert_eq!(
+                serde_json::from_value::<FormatType>(json!(name)).unwrap(),
+                FormatType::Narthex
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(FormatType::Narthex).unwrap(),
+            json!("narthex")
+        );
+    }
 
     fn new_flat_record_batch(timestamps: &[i64]) -> RecordBatch {
         // Flat format has: [fields..., time_index, __primary_key, __sequence, __op_type]

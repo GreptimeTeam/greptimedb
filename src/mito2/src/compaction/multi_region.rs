@@ -161,6 +161,20 @@ pub async fn compact_regions(
 
 fn validate_plan(plan: &MultiRegionCompactionPlan) -> Result<RegionMetadataRef> {
     ensure!(
+        plan.sources
+            .iter()
+            .all(|file| matches!(file.format, crate::sst::file::FileFormat::Parquet))
+            && plan.targets.values().all(|target| target.options.sst_format
+                != Some(crate::sst::FormatType::Narthex)
+                && target
+                    .inputs
+                    .values()
+                    .all(|file| matches!(file.format, crate::sst::file::FileFormat::Parquet))),
+        InvalidMultiRegionCompactionSnafu {
+            reason: "Table compaction does not support Narthex storage"
+        }
+    );
+    ensure!(
         !plan.sources.is_empty(),
         InvalidMultiRegionCompactionSnafu {
             reason: "sources must not be empty"

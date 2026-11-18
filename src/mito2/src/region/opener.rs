@@ -394,7 +394,7 @@ impl RegionOpener {
             FormatType::PrimaryKey
         };
         ensure_json2_uses_flat_format(&metadata, &options)?;
-        options.validate_column_compression(&metadata)?;
+        options.validate_schema(&metadata)?;
         // Validate explicit new-region configuration before creating its manifest.
         // Opening an existing manifest above does not require its optional providers.
         if let Some(registry) = &self.index_registry {
@@ -596,7 +596,7 @@ impl RegionOpener {
         // Updates the region options with the manifest.
         sanitize_region_options(&manifest, &mut region_options);
         ensure_json2_uses_flat_format(&metadata, &region_options)?;
-        region_options.validate_column_compression(&metadata)?;
+        region_options.validate_schema(&metadata)?;
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
@@ -875,8 +875,15 @@ pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut R
             manifest.metadata.region_id,
         );
     }
+    // The manifest owns the physical encoding for authoritative regions.
+    if manifest.sst_format == FormatType::Narthex || options.sst_format == Some(FormatType::Narthex)
+    {
+        options.sst_format = Some(manifest.sst_format);
+    }
     options.primary_key_encoding = Some(manifest.metadata.primary_key_encoding);
-    if manifest.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+    if manifest.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
+        && options.sst_format.unwrap_or(manifest.sst_format) != FormatType::Narthex
+    {
         options.sst_format = Some(FormatType::Flat);
     }
     // Caller options take precedence over the manifest, except JSON2 always requires flat output.
