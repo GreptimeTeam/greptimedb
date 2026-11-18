@@ -1,0 +1,37 @@
+src/meta-srv/src/procedure/repartition/group/update_metadata.rs
+  s_17057bba187655::t_2fc64894de3603 56-57,79-147
+src/meta-srv/src/procedure/repartition/allocate_region.rs
+  s_17057bba187655::t_2fc64894de3603 319-323,638-666
+src/meta-srv/src/procedure/repartition.rs
+  s_17057bba187655::t_2fc64894de3603 1213,1217,1224,2175-2182,2560-2567
+src/query/src/dist_plan/planner.rs
+  s_17057bba187655::t_2fc64894de3603 17,276,279-296,351-362,567-569,572,690-703,757,792,796-850
+src/partition/src/manager.rs
+  s_17057bba187655::t_2fc64894de3603 123-145
+src/meta-srv/src/procedure/repartition/group.rs
+  s_17057bba187655::t_2fc64894de3603 474,476-482
+tests/compatibility/metadata/repartition_readiness/README.md
+  s_17057bba187655::t_2fc64894de3603 1-15
+src/meta-srv/src/procedure/repartition/group/update_metadata/apply_staging_region.rs
+  s_17057bba187655::t_2fc64894de3603 60-61,143,172-173,191-193
+src/common/meta/src/rpc/router.rs
+  s_17057bba187655::t_2fc64894de3603 231-233,235-252,465-504
+tests/compatibility/metadata/repartition_readiness/route.json
+  s_17057bba187655::t_2fc64894de3603 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e833ce3bb8de1a9390148d858766c69dbf47ac17",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
