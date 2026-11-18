@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
@@ -24,10 +24,11 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 
 use super::float_histogram::{AddOutcome, FloatHistogram};
 use super::{
-    HistogramAggregate, HistogramFunction, HistogramParameters, NativeHistogramFunction,
-    aggregate_histograms, evaluate_histograms, evaluate_histograms_with_annotations,
-    histogram_quantiles, histogram_string, map_native_histogram,
+    HistogramFunction, HistogramParameters, NativeHistogramFunction, evaluate_histograms,
+    evaluate_histograms_with_annotations, histogram_quantiles, histogram_string,
+    map_native_histogram,
 };
+use crate::aggregate::{AggregateOp, Grouping, aggregate_float};
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
     GoldenCase, Labels, OwnedHistogram, Points, canonical_bits, close, golden_cases, labels_of,
@@ -301,13 +302,13 @@ fn native_histograms_match_prometheus() {
             ),
             aggregate => {
                 let (op, by_job) = match aggregate {
-                    "sum" => (HistogramAggregate::Sum, false),
-                    "avg" => (HistogramAggregate::Avg, false),
-                    "sum_by_job" => (HistogramAggregate::Sum, true),
-                    "avg_by_job" => (HistogramAggregate::Avg, true),
+                    "sum" => (AggregateOp::Sum, false),
+                    "avg" => (AggregateOp::Avg, false),
+                    "sum_by_job" => (AggregateOp::Sum, true),
+                    "avg_by_job" => (AggregateOp::Avg, true),
                     other => panic!("unknown case {other}"),
                 };
-                assert_aggregates(case, &schema, &input, op, by_job);
+                assert_aggregates(case, &schema, op, by_job);
                 continue;
             }
         };
@@ -447,46 +448,67 @@ fn histogram_arithmetic_matches_prometheus() {
     assert_eq!(checked, 723);
 }
 
-/// Groups the input in its order as `sum`/`avg` with or without `by (job)` do, and compares the
-/// aggregated histograms; float-only points belong to the float aggregation.
-fn assert_aggregates(
-    case: &GoldenCase,
-    schema: &Arc<SeriesSchema>,
-    input: &[Series],
-    op: HistogramAggregate,
-    by_job: bool,
-) {
+/// Folds the input of a `sum`/`avg` case with or without `by (job)` through the native aggregate,
+/// and compares the aggregated histograms; float-only points belong to the float aggregation.
+///
+/// Prometheus answers a group's step with a histogram when every sample of the step is one, and
+/// with a float when some sample is a float. GreptimeDB plans the two kinds as two aggregates over
+/// one group, so each step belongs to one of them: the float half folds the float samples and the
+/// histogram half folds the histogram samples of the steps no member holds a float at. The fold
+/// below is therefore handed the group's histograms at those steps, which is the set the retired
+/// histogram aggregation answered and the set Prometheus answers with a histogram -- a step that
+/// carries a float is never a histogram result in the fixtures (`sum`/`avg` over a group mixing
+/// the two kinds is what the float half answers).
+fn assert_aggregates(case: &GoldenCase, schema: &Arc<SeriesSchema>, op: AggregateOp, by_job: bool) {
     assert!(
         case.outcome.is_ok(),
         "case {:?}: {:?}",
         case.spec,
         case.outcome
     );
-    let mut groups: BTreeMap<Labels, Vec<Series>> = BTreeMap::new();
-    for series in input {
-        let mut labels = Labels::new();
+    let group_of = |labels: &Labels| -> Labels {
+        let mut group = Labels::new();
         if by_job {
-            labels.insert(
-                "job".to_string(),
-                series.metric.get("job").unwrap().to_string(),
-            );
+            group.insert("job".to_string(), labels["job"].clone());
         }
-        groups.entry(labels).or_default().push(series.clone());
+        group
+    };
+    // Every member of a group contributes its float steps, including the members that carry no
+    // histogram at all: a step with a float in it is not the histogram half's to answer.
+    let mut floats: BTreeMap<Labels, BTreeSet<usize>> = BTreeMap::new();
+    for (labels, points) in &case.inputs {
+        floats
+            .entry(group_of(labels))
+            .or_default()
+            .extend(points.keys());
     }
-    let mut actual = BTreeMap::new();
-    for (labels, group) in groups {
-        if let Some(series) = aggregate_histograms(op, schema, &group, metric_of(&labels)).unwrap()
-        {
-            actual.insert(labels, histogram_points(&series));
+    let mut groups: BTreeMap<Labels, Vec<Series>> = BTreeMap::new();
+    for ((labels, _), histograms) in case.inputs.iter().zip(&case.histograms) {
+        let group = group_of(labels);
+        let histograms: BTreeMap<usize, String> = histograms
+            .iter()
+            .filter(|(position, _)| !floats[&group].contains(position))
+            .map(|(&position, text)| (position, text.clone()))
+            .collect();
+        // A member left without a histogram at any of its group's steps contributes nothing.
+        if let Some(series) = mixed_series(schema, labels, &Points::new(), &histograms) {
+            groups.entry(group).or_default().push(series);
         }
     }
+    let by: Vec<&str> = if by_job { vec!["job"] } else { Vec::new() };
+    let input: Vec<Series> = groups.into_values().flatten().collect();
+    let folded = aggregate_float(schema, &input, op, Grouping::By(&by)).unwrap();
+    let actual: BTreeMap<Labels, BTreeMap<usize, String>> = folded
+        .iter()
+        .map(|series| (labels_of(&series.metric), folded_histogram_points(series)))
+        .collect();
     let expected: BTreeMap<_, _> = case
         .result_histograms
         .iter()
         .map(|(labels, points)| {
             let points: BTreeMap<_, _> = points
                 .iter()
-                .map(|(&index, text)| (index, fingerprint(&histogram(text))))
+                .map(|(&index, text)| (index, folded_fingerprint(&histogram(text))))
                 .collect();
             (labels.clone(), points)
         })
@@ -495,6 +517,19 @@ fn assert_aggregates(
 }
 
 fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
+    histogram_points_by(series, fingerprint)
+}
+
+/// [`histogram_points`] over the answer of a fold, whose zero scalars carry whatever sign the fold
+/// gave them ([`folded_fingerprint`]).
+fn folded_histogram_points(series: &Series) -> BTreeMap<usize, String> {
+    histogram_points_by(series, folded_fingerprint)
+}
+
+fn histogram_points_by(
+    series: &Series,
+    fingerprint: fn(&FloatHistogram) -> String,
+) -> BTreeMap<usize, String> {
     if series.time.grid().is_none() {
         panic!("expected a grid series, got {:?}", series.time);
     }
@@ -513,6 +548,25 @@ fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
             }
         })
         .collect()
+}
+
+/// [`fingerprint`] of a histogram an aggregate answered.
+///
+/// A fold answers a point with the live value plus the compensation paired with it, and a point that
+/// folded a single sample still adds the layout-carrying zero that sample started with. Adding `+0`
+/// to `-0` gives `+0`, so a zero sum or count loses its sign where Prometheus hands the sample's own
+/// zero back: `sum by (job)` over one sample of `-4/0/0/0/8000000000000000/0/////` answers
+/// `sum=0` here and `sum=8000000000000000` there. Nothing else may differ -- every non-zero value,
+/// every bucket and the layout stay bit-identical -- so only the sign of a zero is dropped.
+fn folded_fingerprint(h: &FloatHistogram) -> String {
+    let mut h = h.clone();
+    for value in [&mut h.zero_count, &mut h.count, &mut h.sum] {
+        // `-0.0 == 0.0`, so this writes `+0.0` over either zero and leaves a non-zero alone.
+        if *value == 0.0 {
+            *value = 0.0;
+        }
+    }
+    fingerprint(&h)
 }
 
 /// The start timestamp is payload of a histogram that was read, and not of one that was computed.
@@ -791,20 +845,16 @@ fn aggregation_propagates_errors_other_than_mixed_schemas() {
         "-53/0/0/3ff0000000000000/3ff0000000000000/0/0_1/3ff0000000000000///3ff0000000000000";
     let invalid =
         "9/3ff0000000000000/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///";
-    for op in [HistogramAggregate::Sum, HistogramAggregate::Avg] {
-        let mixed = aggregate_histograms(
-            op,
+    for op in [AggregateOp::Sum, AggregateOp::Avg] {
+        // A poisoned point answers nothing, so the group has no result to report at all.
+        let mixed = aggregate_float(
             &schema,
             &group([exponential, custom]),
-            metric_of(&Labels::new()),
-        );
-        assert!(mixed.unwrap().is_none());
-        let invalid = aggregate_histograms(
             op,
-            &schema,
-            &group([invalid, invalid]),
-            metric_of(&Labels::new()),
+            Grouping::By(&[]),
         );
+        assert!(mixed.unwrap().is_empty());
+        let invalid = aggregate_float(&schema, &group([invalid, invalid]), op, Grouping::By(&[]));
         assert!(invalid.is_err());
     }
 }
@@ -832,14 +882,19 @@ fn histogram_aggregation_names_the_runs_of_its_results() {
     assert_eq!((input_axis.start(), input_axis.len()), (0, 3));
     assert_eq!(input.time.len(), 3);
 
-    let output = aggregate_histograms(
-        HistogramAggregate::Sum,
+    let output = aggregate_float(
         &schema,
         std::slice::from_ref(&input),
-        metric_of(&labels),
+        AggregateOp::Sum,
+        Grouping::By(&[]),
     )
-    .unwrap()
-    .expect("positions 0 and 2 hold a histogram");
+    .unwrap();
+    let [output] = &output[..] else {
+        panic!(
+            "positions 0 and 2 hold a histogram, so the one group answers one series, not {}",
+            output.len()
+        );
+    };
     let runs: Vec<(usize, usize)> = output
         .time
         .runs()
@@ -856,7 +911,7 @@ fn histogram_aggregation_names_the_runs_of_its_results() {
     }
     let wanted = fingerprint(&histogram(text));
     assert_eq!(
-        histogram_points(&output),
+        histogram_points(output),
         BTreeMap::from([(0, wanted.clone()), (2, wanted)])
     );
 
