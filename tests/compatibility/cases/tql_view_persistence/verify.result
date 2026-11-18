@@ -1,0 +1,28 @@
+-- Instant evaluation at 1000s honours the 10m lookback stored in the persisted view
+-- plan: 41 is 399.999s old but still selected, 12 sits exactly on the grid point.
+SELECT ts, series, val FROM tql_view_instant ORDER BY series;
+
++---------------------+-------------------------+------+
+| ts                  | series                  | val  |
++---------------------+-------------------------+------+
+| 1970-01-01T00:16:40 | at_eval                 | 12.0 |
+| 1970-01-01T00:16:40 | beyond_default_lookback | 41.0 |
++---------------------+-------------------------+------+
+
+SHOW CREATE VIEW tql_view_instant;
+
++------------------+----------------------------------------------------------------------------------------+
+| View             | Create View                                                                            |
++------------------+----------------------------------------------------------------------------------------+
+| tql_view_instant | CREATE VIEW tql_view_instant AS TQL EVAL ('1000', '1000', '1s', '10m') tql_view_source |
++------------------+----------------------------------------------------------------------------------------+
+
+-- The range view binds its own 2s window, so only the sample at the evaluation point
+-- survives; the column names come from the plan persisted by the old binary.
+SELECT * FROM tql_view_range;
+
++---------------------+----------------------------------+---------+
+| ts                  | prom_max_over_time(ts_range,val) | series  |
++---------------------+----------------------------------+---------+
+| 1970-01-01T00:16:40 | 12.0                             | at_eval |
++---------------------+----------------------------------+---------+
