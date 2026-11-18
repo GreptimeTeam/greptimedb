@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use api::region::RegionResponse;
 use api::v1::{Mutation, OpType, Rows, WalEntry};
 use async_trait::async_trait;
 use common_base::Plugins;
@@ -44,7 +45,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     PathType, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest, RegionDropRequest,
-    RegionFlushRequest, RegionRequest, RegionTruncateRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -480,6 +481,70 @@ impl TestRegion {
         let request = RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id });
         let response = self.engine.handle_request(self.region_id, request).await?;
         Ok(response.affected_rows)
+    }
+
+    /// Flushes this node's rows, records a listed tail of [REMOTE_NODE_ID] whose bound lies
+    /// above every entry of both nodes, loses that node's WAL and makes the region writable, so
+    /// the replay keeps failing. Returns the bound.
+    async fn start_lost_listed_tail(&self) -> EntryId {
+        // Rows of the region stay readable after a reopen from a flushed entry id at the bound.
+        flush_region(&self.engine, self.region_id, None).await;
+        self.write_remote_rows(self.region_id, 6, 9).await;
+        // A listed bound may name no entry. It lies many objects above every entry, so later
+        // writes of this node reach it only once its sequence floor is raised past it.
+        let upto = self.remote_listed_bound().await.max(self.entries[1]) + (1 << 30);
+        self.reopen_with_tails(vec![remote_tail(0, upto, UptoKind::Listed)])
+            .await;
+        self.delete_remote_objects().await;
+        self.catchup().await;
+        wait_until(|| self.listener.failed()).await;
+        upto
+    }
+
+    /// Stops the engine and its log store as a crash of the process would, then opens the
+    /// region on a new engine over a new log store on the same storage.
+    async fn crash_and_open(self) -> Result<RegionResponse, BoxedError> {
+        let TestRegion {
+            mut env,
+            wal_store,
+            log_store,
+            engine,
+            region_id,
+            table_dir,
+            ..
+        } = self;
+        log_store.crash().await;
+        engine.stop().await.unwrap();
+        drop(engine);
+        let released = Arc::downgrade(&log_store);
+        drop(log_store);
+        wait_until(|| released.strong_count() == 0).await;
+        let log_store = ObjectStoreLogStore::try_new(
+            wal_store,
+            &wal_config(),
+            NODE_ID,
+            FIXED_DIRECTORY_GENERATION,
+        )
+        .await
+        .unwrap();
+        let engine = env
+            .create_engine_with_log_store_and_time(
+                MitoConfig::default(),
+                log_store,
+                Arc::new(StdTimeProvider),
+                None,
+            )
+            .await;
+        let request = RegionRequest::Open(RegionOpenRequest {
+            engine: String::new(),
+            table_dir,
+            options: wal_options(),
+            skip_wal_replay: false,
+            path_type: PathType::Bare,
+            checkpoint: None,
+            requirements: Default::default(),
+        });
+        engine.handle_request(region_id, request).await
     }
 
     fn version(&self) -> VersionRef {
@@ -2114,18 +2179,7 @@ async fn test_discard_own_tails_releases_their_wal() {
 #[tokio::test]
 async fn test_discard_listed_tail_raises_flushed_entry_id_to_its_bound() {
     let region = TestRegion::new("tail-discard-listed", false, None).await;
-    // Rows of the region stay readable after a reopen from the raised flushed entry id.
-    flush_region(&region.engine, region.region_id, None).await;
-    region.write_remote_rows(region.region_id, 6, 9).await;
-    // A listed bound above every entry of both nodes, which names no entry.
-    let upto = region.remote_listed_bound().await.max(region.entries[1]) + (1 << 20);
-    region
-        .reopen_with_tails(vec![remote_tail(0, upto, UptoKind::Listed)])
-        .await;
-    // The source WAL is lost, so the replay keeps failing.
-    region.delete_remote_objects().await;
-    region.catchup().await;
-    wait_until(|| region.listener.failed()).await;
+    let upto = region.start_lost_listed_tail().await;
 
     assert_eq!(
         1,
@@ -2427,4 +2481,47 @@ async fn test_conditional_discard_over_uncertain_replay_reloads_region() {
     assert!(!region.has_pending_tails());
     region.listener.hold_from(0);
     assert_eq!(9, count_rows(&region.engine, region.region_id).await);
+}
+
+/// A discard raises the flushed entry id to a listed tail's bound. After a crash, the region
+/// opens only if this node's WAL durably holds history past the bound, as whoever records the
+/// tail ensures.
+#[rstest]
+#[case::history_past_bound(true)]
+#[case::history_below_bound(false)]
+#[tokio::test]
+async fn test_discard_reopens_after_crash_with_history_past_bound(
+    #[case] history_past_bound: bool,
+) {
+    let region = TestRegion::new("tail-discard-crash", false, None).await;
+    let upto = region.start_lost_listed_tail().await;
+    if history_past_bound {
+        // Moves this node's next entry id past the bound and makes an entry there durable.
+        let provider = region
+            .engine
+            .get_region(region.region_id)
+            .unwrap()
+            .provider
+            .clone();
+        region
+            .log_store
+            .obsolete(&provider, region.region_id, upto)
+            .await
+            .unwrap();
+        let schema = rows_schema(&CreateRequestBuilder::new().build());
+        put_range(&region.engine, region.region_id, &schema, 9, 10).await;
+    }
+    assert_eq!(
+        1,
+        region.discard_pending_tails(REMOTE_NODE_ID).await.unwrap()
+    );
+
+    let opened = region.crash_and_open().await;
+
+    if history_past_bound {
+        opened.unwrap();
+    } else {
+        let error = format!("{:?}", opened.unwrap_err());
+        assert!(error.contains("does not hold the history"), "{error}");
+    }
 }

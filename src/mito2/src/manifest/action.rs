@@ -271,6 +271,9 @@ impl RegionManifest {
     /// Entries of the node in `(after, upto]` of one of its tails belong to that tail.
     /// Whoever adds a tail ensures that every entry id the node allocates afterwards is
     /// above the tail's `upto`, so no later write of the node falls in a skipped range.
+    /// It also ensures that the node's WAL durably holds history past `upto`: a tail commit
+    /// or discard can raise the flushed entry id to it, and an open after a crash checks the
+    /// WAL history up to the flushed entry id, so it would otherwise fail that check.
     pub(crate) fn wal_replay_start(&self, node_id: Option<u64>) -> EntryId {
         let floor = node_id.and_then(|node_id| self.handoff_floors.get(&node_id).copied());
         self.pending_tails
