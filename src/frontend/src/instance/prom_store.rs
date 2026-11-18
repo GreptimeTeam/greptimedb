@@ -810,8 +810,6 @@ impl Instance {
         .map_err(BoxedError::new)
         .context(error::ExecuteGrpcQuerySnafu)?;
         create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
-        // Retention hints apply only when this physical table is created.
-        // `ttl=instant` stays on the logical table.
         apply_retention_ttl_hint(&mut create_table_expr.table_options, &ctx);
         fill_metric_physical_table_options(&mut create_table_expr.table_options);
 

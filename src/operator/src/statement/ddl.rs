@@ -62,7 +62,7 @@ use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
-use common_time::{Timestamp, Timezone};
+use common_time::{TimeToLive, Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
 use datafusion_expr::logical_plan::Distinct;
@@ -124,7 +124,6 @@ use crate::error::{
     TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
-use crate::insert::{is_retention_ttl, strip_retention_ttl_from_logical_table_options};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 use crate::utils::{to_executor_context, to_executor_context_with_origin_frontend};
@@ -427,7 +426,7 @@ impl StatementExecutor {
                     err_msg: "batch requires explicit Metric logical CREATE TABLE statements"
                 }
             );
-            let mut expr = self.prepare_create_table(&statement, &ctx).await?;
+            let expr = self.prepare_create_table(&statement, &ctx).await?;
             let key = (
                 expr.catalog_name.clone(),
                 expr.schema_name.clone(),
@@ -446,7 +445,7 @@ impl StatementExecutor {
                     err_msg: "duplicate target in logical-table batch"
                 }
             );
-            self.validate_logical_create(&mut expr, statement.partitions.as_ref(), &ctx)
+            self.validate_logical_create(&expr, statement.partitions.as_ref(), &ctx)
                 .await?;
             expressions.push(expr);
         }
@@ -457,14 +456,11 @@ impl StatementExecutor {
 
     async fn validate_logical_create(
         &self,
-        expr: &mut CreateTableExpr,
+        expr: &CreateTableExpr,
         partitions: Option<&Partitions>,
         ctx: &QueryContextRef,
     ) -> Result<()> {
         ensure_table_definition_writable(&expr.schema_name, &expr.table_name)?;
-        // Retention TTL belongs on the physical table; strip legacy values on
-        // create (e.g. snapshots exported before SHOW CREATE omitted them).
-        strip_retention_ttl_from_logical_table_options(&mut expr.table_options);
         if let Some(partitions) = partitions
             && !partitions.exprs.is_empty()
         {
@@ -706,8 +702,27 @@ impl StatementExecutor {
             }
         );
 
+        // Retention is enforced on the physical table only. Drop it from logical
+        // creates (ingest hints, DDL exported by older versions), but keep
+        // `ttl=instant`: the inserter reads it from the logical table to forward
+        // rows to flows without persisting them.
+        let create_table_exprs = create_table_exprs
+            .iter()
+            .cloned()
+            .map(|mut create| {
+                if create
+                    .table_options
+                    .get(TTL_KEY)
+                    .is_some_and(|ttl| is_retention_ttl(ttl))
+                {
+                    create.table_options.remove(TTL_KEY);
+                }
+                create
+            })
+            .collect::<Vec<_>>();
+
         // Check table names
-        for create_table in create_table_exprs {
+        for create_table in &create_table_exprs {
             ensure!(
                 NAME_PATTERN_REG.is_match(&create_table.table_name),
                 InvalidTableNameSnafu {
@@ -2165,20 +2180,20 @@ impl StatementExecutor {
 
             (req, invalidate_keys)
         } else {
-            // This is logical table. Annotation alters only rewrite its own
-            // metadata; `AlterLogicalTablesProcedure` only handles column adds.
-            // Reject retention TTL SET here; UNSET and other ttl alters are
-            // handled by `AlterLogicalTablesProcedure`.
-            let alters_retention_ttl = expr.kind.as_ref().is_some_and(|kind| match kind {
-                Kind::SetTableOptions(options) => options
-                    .table_options
-                    .iter()
-                    .any(|option| option.key == TTL_KEY && is_retention_ttl(&option.value)),
-                _ => false,
-            });
-            if alters_retention_ttl {
-                return RetentionTtlOnLogicalTableSnafu.fail();
+            // This is logical table. Retention lives on the physical table;
+            // reject it here with an error that says so, instead of the
+            // procedure's generic "only add columns" error.
+            if let Some(Kind::SetTableOptions(options)) = &expr.kind {
+                ensure!(
+                    !options
+                        .table_options
+                        .iter()
+                        .any(|option| option.key == TTL_KEY && is_retention_ttl(&option.value)),
+                    RetentionTtlOnLogicalTableSnafu
+                );
             }
+            // Annotation alters only rewrite the logical table's own metadata;
+            // `AlterLogicalTablesProcedure` only handles column adds.
             let annotation_alter = match expr.kind.as_ref() {
                 Some(kind) => common_grpc_expr::annotation_alter_family(kind)
                     .context(AlterExprToRequestSnafu)?
@@ -2651,6 +2666,12 @@ pub fn verify_alter(
     validate_json2_primary_keys(&new_meta.schema, &new_meta.primary_key_indices)?;
 
     Ok(true)
+}
+
+/// Returns whether `ttl` is a retention period, i.e. a valid TTL other than
+/// `instant`. Invalid values return false so they fail normal option validation.
+pub(crate) fn is_retention_ttl(ttl: &str) -> bool {
+    TimeToLive::from_humantime_or_str(ttl).is_ok_and(|ttl| !ttl.is_instant())
 }
 
 pub fn create_table_info(

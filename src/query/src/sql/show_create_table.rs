@@ -561,12 +561,11 @@ WITH(
     }
 
     #[test]
-    fn test_logical_metric_show_create_omits_retention_ttl() {
-        use common_meta::SchemaOptions;
-        use common_time::ttl::{DatabaseTimeToLive, TimeToLive};
+    fn test_show_create_omits_stored_retention_ttl_on_logical_table() {
         use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
-        use table::requests::TTL_KEY;
 
+        // Logical tables created before retention was moved to the physical
+        // table still carry it in their metadata.
         let schema = SchemaRef::new(Schema::new(vec![
             ColumnSchema::new(
                 "ts",
@@ -575,51 +574,24 @@ WITH(
             )
             .with_time_index(true),
         ]));
-        let logical_meta = |ttl: Option<TimeToLive>| {
-            let mut options = TableOptions {
-                ttl,
-                ..Default::default()
-            };
-            options
-                .extra_options
-                .insert(LOGICAL_TABLE_METADATA_KEY.to_string(), "phy".to_string());
-            TableMetaBuilder::empty()
-                .schema(schema.clone())
-                .primary_key_indices(vec![])
-                .engine(METRIC_ENGINE_NAME.to_string())
-                .next_column_id(1)
-                .options(options)
-                .created_on(Default::default())
-                .build()
-                .unwrap()
-        };
-
-        let retention = super::create_sql_options(
-            &logical_meta(Some(Duration::from_secs(86_400).into())),
-            None,
-        );
-        assert!(retention.get(TTL_KEY).is_none());
-
-        let instant = super::create_sql_options(&logical_meta(Some(TimeToLive::Instant)), None);
-        assert_eq!(instant.get(TTL_KEY), Some("instant"));
-
-        let schema_options = SchemaOptions {
-            ttl: Some(DatabaseTimeToLive::Duration(Duration::from_secs(86_400))),
+        let mut options = TableOptions {
+            ttl: Some(Duration::from_secs(86_400).into()),
             ..Default::default()
         };
-        let fallback = super::create_sql_options(&logical_meta(None), Some(schema_options.clone()));
-        assert!(fallback.get(TTL_KEY).is_none());
-
-        let physical_meta = TableMetaBuilder::empty()
+        options
+            .extra_options
+            .insert(LOGICAL_TABLE_METADATA_KEY.to_string(), "phy".to_string());
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![])
             .engine(METRIC_ENGINE_NAME.to_string())
             .next_column_id(1)
-            .options(TableOptions::default())
+            .options(options)
             .created_on(Default::default())
             .build()
             .unwrap();
-        let physical = super::create_sql_options(&physical_meta, Some(schema_options));
-        assert!(physical.get(TTL_KEY).is_some());
+
+        let options = create_sql_options(&meta, None);
+        assert!(options.get(TTL_KEY).is_none());
     }
 }
