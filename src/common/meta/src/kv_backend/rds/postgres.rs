@@ -737,25 +737,16 @@ impl KvQueryExecutor<PgClient> for PgStore {
         keys.dedup();
 
         let chunk_size = *RDS_BATCH_SIZE;
-        let mut params = Vec::with_capacity(keys.len().min(chunk_size));
-        let mut kvs = Vec::new();
-        for keys in keys.chunks(chunk_size) {
-            let query = self.sql_template_set.generate_batch_get_query(keys.len());
-            params.clear();
-            params.extend(keys.iter());
-            let chunk = crate::record_rds_sql_execute_elapsed!(
-                query_executor.query(&query, &params).await,
-                PG_STORE_NAME,
-                RDS_STORE_OP_BATCH_GET,
-                ""
-            )?;
-            if kvs.is_empty() {
-                kvs = chunk;
-            } else {
-                kvs.extend(chunk);
-            }
+        if keys.len() > chunk_size
+            && let ExecutorImpl::Default(client) = query_executor
+        {
+            // Keep all chunks in one serializable transaction, as for batch writes.
+            let mut transaction = ExecutorImpl::Txn(client.txn_executor().await?);
+            let response = self.get_chunks(&mut transaction, &keys, chunk_size).await?;
+            transaction.commit().await?;
+            return Ok(response);
         }
-        Ok(BatchGetResponse { kvs })
+        self.get_chunks(query_executor, &keys, chunk_size).await
     }
 
     async fn delete_range_with_query_executor(
@@ -909,6 +900,33 @@ impl PgStore {
 }
 
 impl PgStore {
+    async fn get_chunks(
+        &self,
+        query_executor: &mut ExecutorImpl<'_, PgClient>,
+        keys: &[Vec<u8>],
+        chunk_size: usize,
+    ) -> Result<BatchGetResponse> {
+        let mut params = Vec::with_capacity(keys.len().min(chunk_size));
+        let mut kvs = Vec::new();
+        for keys in keys.chunks(chunk_size) {
+            let query = self.sql_template_set.generate_batch_get_query(keys.len());
+            params.clear();
+            params.extend(keys.iter());
+            let chunk = crate::record_rds_sql_execute_elapsed!(
+                query_executor.query(&query, &params).await,
+                PG_STORE_NAME,
+                RDS_STORE_OP_BATCH_GET,
+                ""
+            )?;
+            if kvs.is_empty() {
+                kvs = chunk;
+            } else {
+                kvs.extend(chunk);
+            }
+        }
+        Ok(BatchGetResponse { kvs })
+    }
+
     async fn put_chunks(
         &self,
         executor: &mut ExecutorImpl<'_, PgClient>,
@@ -970,7 +988,8 @@ mod tests {
     use super::*;
     use crate::kv_backend::KvBackend;
     use crate::kv_backend::test::{
-        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
+        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix,
+        test_kv_batch_get_concurrent_updates, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
         test_simple_kv_range, test_txn_compare_equal, test_txn_compare_greater,
@@ -1271,6 +1290,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pg_batch_get_concurrent_updates() {
+        maybe_skip_postgres_integration_test!();
+        let backend = build_pg_kv_backend("batch_get_consistent").await.unwrap();
+        test_kv_batch_get_concurrent_updates(&backend, *RDS_BATCH_SIZE + 1).await;
+    }
+
+    #[tokio::test]
     async fn test_pg_batch_get_chunks() {
         maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("batch_get_chunks-test").await.unwrap();
@@ -1491,6 +1517,16 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            let mut inside = backend
+                .batch_get_with_query_executor(
+                    &mut transaction,
+                    BatchGetRequest { keys: keys.clone() },
+                )
+                .await
+                .unwrap()
+                .kvs;
+            inside.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(inside, kvs);
             // The helper must leave commit ownership to its caller.
         }
         assert!(

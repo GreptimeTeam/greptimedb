@@ -294,14 +294,16 @@ impl Executor for MySqlClient {
     async fn txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>> {
         // sqlx has no isolation level support for now, so we have to set it manually.
         // TODO(CookiePie): Waiting for https://github.com/launchbadge/sqlx/pull/3614 and remove this.
+        let mut connection = self.acquire().await.context(MySqlExecutionSnafu {
+            sql: "acquire transaction connection",
+        })?;
         sqlx::query("SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-            .execute(&**self)
+            .execute(&mut *connection)
             .await
             .context(MySqlExecutionSnafu {
                 sql: "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
             })?;
-        let txn = self
-            .begin()
+        let txn = MySqlTransaction::begin(connection, None)
             .await
             .context(MySqlExecutionSnafu { sql: "begin" })?;
         Ok(MySqlTxnClient(txn))
@@ -435,20 +437,17 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         let mut keys = req.keys;
         keys.sort_unstable();
         keys.dedup();
-        let mut kvs = Vec::new();
-        let mut params = Vec::with_capacity(keys.len().min(*RDS_BATCH_SIZE));
-        for keys in keys.chunks(*RDS_BATCH_SIZE) {
-            let query = self.sql_template_set.generate_batch_get_query(keys.len());
-            params.clear();
-            params.extend(keys);
-            kvs.extend(crate::record_rds_sql_execute_elapsed!(
-                query_executor.query(&query, &params).await,
-                MYSQL_STORE_NAME,
-                RDS_STORE_OP_BATCH_GET,
-                ""
-            )?);
+        let chunk_size = *RDS_BATCH_SIZE;
+        if keys.len() > chunk_size
+            && let ExecutorImpl::Default(client) = query_executor
+        {
+            // Keep all chunks in one serializable transaction, as for batch writes.
+            let mut transaction = ExecutorImpl::Txn(client.txn_executor().await?);
+            let response = self.get_chunks(&mut transaction, &keys, chunk_size).await?;
+            transaction.commit().await?;
+            return Ok(response);
         }
-        Ok(BatchGetResponse { kvs })
+        self.get_chunks(query_executor, &keys, chunk_size).await
     }
 
     async fn delete_range_with_query_executor(
@@ -514,6 +513,28 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
 }
 
 impl MySqlStore {
+    async fn get_chunks(
+        &self,
+        query_executor: &mut ExecutorImpl<'_, MySqlClient>,
+        keys: &[Vec<u8>],
+        chunk_size: usize,
+    ) -> Result<BatchGetResponse> {
+        let mut kvs = Vec::new();
+        let mut params = Vec::with_capacity(keys.len().min(chunk_size));
+        for keys in keys.chunks(chunk_size) {
+            let query = self.sql_template_set.generate_batch_get_query(keys.len());
+            params.clear();
+            params.extend(keys);
+            kvs.extend(crate::record_rds_sql_execute_elapsed!(
+                query_executor.query(&query, &params).await,
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_GET,
+                ""
+            )?);
+        }
+        Ok(BatchGetResponse { kvs })
+    }
+
     async fn put_chunks(
         &self,
         executor: &mut ExecutorImpl<'_, MySqlClient>,
@@ -700,7 +721,8 @@ mod tests {
 
     use super::*;
     use crate::kv_backend::test::{
-        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
+        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix,
+        test_kv_batch_get_concurrent_updates, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
         test_simple_kv_range, test_txn_compare_equal, test_txn_compare_greater,
@@ -918,6 +940,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mysql_batch_get_concurrent_updates() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("batch_get_consistent");
+        let backend = build_mysql_kv_backend(&table).await.unwrap();
+        test_kv_batch_get_concurrent_updates(&backend, *RDS_BATCH_SIZE + 1).await;
+        drop_table(&backend.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_transaction_isolation_uses_same_connection() {
+        maybe_skip_mysql_integration_test!();
+        ensure_rustls_crypto_provider_installed().unwrap();
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .min_connections(2)
+            .max_connections(2)
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&std::env::var("GT_MYSQL_ENDPOINTS").unwrap())
+            .await
+            .unwrap();
+        let mut client = Arc::new(pool);
+        for _ in 0..4 {
+            let mut txn = client.txn_executor().await.unwrap();
+            // MySQL 5.7 and 8 use different names for this session variable.
+            let row = sqlx::query(
+                "SHOW SESSION VARIABLES WHERE Variable_name IN ('transaction_isolation', 'tx_isolation')",
+            )
+            .fetch_one(&mut *txn.0)
+            .await
+            .unwrap();
+            let isolation: String = row.get(1);
+            assert_eq!(isolation, "SERIALIZABLE");
+            txn.commit().await.unwrap();
+        }
+        client.close().await;
+    }
+
+    #[tokio::test]
     async fn test_mysql_batch_get_deduplicates_keys_before_chunking() {
         maybe_skip_mysql_integration_test!();
         let table = new_test_table_name("get_duplicate_keys");
@@ -959,7 +1025,7 @@ mod tests {
         let table = new_test_table_name("existing_chunk_transaction");
         let store = build_mysql_kv_backend(&table).await.unwrap();
         let mut client = store.executor_factory.default_executor().await.unwrap();
-        let kvs: Vec<_> = (0..=(*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS))
+        let kvs: Vec<_> = (0..=*RDS_BATCH_SIZE)
             .map(|index| KeyValue {
                 key: format!("key-{index:06}").into_bytes(),
                 value: b"value".to_vec(),
