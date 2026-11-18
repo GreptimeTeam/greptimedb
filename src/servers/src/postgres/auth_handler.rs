@@ -88,6 +88,38 @@ impl PgUserProviderSource {
         Self { user_provider }
     }
 
+    /// Authorizes a request that changes the connection's catalog/schema
+    /// scope (a qualified COPY target). Denials are metered and logged
+    /// like startup authorization, minus the client address which is not
+    /// reachable here, and surface as their SQLSTATE-mapped pg error
+    /// (`42501` insufficient privilege for access denials) instead of an
+    /// internal error.
+    pub(crate) async fn authorize_database(
+        &self,
+        catalog: &str,
+        schema: &str,
+        user_info: &UserInfoRef,
+    ) -> PgWireResult<()> {
+        match self
+            .user_provider
+            .authorize(catalog, schema, user_info)
+            .await
+        {
+            Err(e) => {
+                record_auth_failure(e.status_code());
+                if e.status_code().should_log_error() {
+                    error!(e; user = user_info.username(), protocol = "postgres", catalog = %catalog,
+                        schema = %schema, reason = %e.status_code(), "COPY target authorization failed");
+                } else {
+                    warn!(user = user_info.username(), protocol = "postgres", catalog = %catalog,
+                        schema = %schema, reason = %e.status_code(), "COPY target authorization denied");
+                }
+                Err(convert_err(AuthSnafu.into_error(e)))
+            }
+            Ok(()) => Ok(()),
+        }
+    }
+
     /// (user, catalog, schema) of this login. Catalog/schema are parsed from
     /// the `database` startup parameter. Existence is checked after authorization.
     fn resolve(login: &WireLoginInfo<'_>) -> Option<(String, String, String)> {
@@ -484,4 +516,31 @@ where
     };
     send_error(client, PgErrorCode::Ec3D000.to_err_info(error)).await?;
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_authorize_database() {
+        let source = PgUserProviderSource::new(Arc::new(::auth::tests::MockUserProvider {
+            catalog: "greptime".to_string(),
+            schema: "allowed".to_string(),
+            username: "greptime".to_string(),
+        }));
+        let user = userinfo_by_name(Some("greptime".to_string()));
+        source
+            .authorize_database("greptime", "allowed", &user)
+            .await
+            .unwrap();
+        for (catalog, schema) in [("greptime", "denied"), ("other", "allowed")] {
+            assert!(
+                source
+                    .authorize_database(catalog, schema, &user)
+                    .await
+                    .is_err()
+            );
+        }
+    }
 }
