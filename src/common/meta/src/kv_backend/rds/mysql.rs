@@ -295,9 +295,19 @@ impl Executor for MySqlClient {
         // MySQL requires SET TRANSACTION separately from BEGIN. Execute both on
         // the connection acquired by begin_with so the isolation level applies.
         let txn = self
-            .begin_with("SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN")
+            .begin_with("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN")
             .await
             .context(MySqlTransactionSnafu { operation: "begin" })?;
+        Ok(MySqlTxnClient(txn))
+    }
+
+    async fn read_only_txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>> {
+        let txn = self
+            .begin_with("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY; BEGIN")
+            .await
+            .context(MySqlTransactionSnafu {
+                operation: "begin read-only",
+            })?;
         Ok(MySqlTxnClient(txn))
     }
 }
@@ -433,8 +443,8 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         if keys.len() > chunk_size
             && let ExecutorImpl::Default(client) = query_executor
         {
-            // Keep all chunks in one serializable transaction, as for batch writes.
-            let mut transaction = ExecutorImpl::Txn(client.txn_executor().await?);
+            // Share one snapshot without serializable read conflicts or row locks.
+            let mut transaction = ExecutorImpl::Txn(client.read_only_txn_executor().await?);
             let response = self.get_chunks(&mut transaction, &keys, chunk_size).await?;
             transaction.commit().await?;
             return Ok(response);
@@ -712,6 +722,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::kv_backend::KvBackend;
     use crate::kv_backend::test::{
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix,
         test_kv_batch_get_concurrent_updates, test_kv_batch_get_with_prefix,
@@ -941,12 +952,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mysql_transaction_isolation_uses_same_connection() {
+    async fn test_mysql_transaction_isolation_preserves_session_defaults() {
         maybe_skip_mysql_integration_test!();
         ensure_rustls_crypto_provider_installed().unwrap();
+        // A single connection forces every subsequent borrower to reuse it.
         let pool = sqlx::mysql::MySqlPoolOptions::new()
-            .min_connections(2)
-            .max_connections(2)
+            .max_connections(1)
             .after_connect(|connection, _| {
                 Box::pin(async move {
                     sqlx::query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
@@ -958,21 +969,166 @@ mod tests {
             .connect(&std::env::var("GT_MYSQL_ENDPOINTS").unwrap())
             .await
             .unwrap();
-        let mut client = Arc::new(pool);
-        for _ in 0..4 {
-            let mut txn = client.txn_executor().await.unwrap();
-            // MySQL 5.7 and 8 use different names for this session variable.
-            let row = sqlx::query(
-                "SHOW SESSION VARIABLES WHERE Variable_name IN ('transaction_isolation', 'tx_isolation')",
-            )
-            .fetch_one(&mut *txn.0)
+        let table = new_test_table_name("transaction_scope");
+        let backend = build_mysql_kv_backend(&table).await.unwrap();
+        let mut writer = backend.executor_factory.pool.acquire().await.unwrap();
+        sqlx::query("SET SESSION innodb_lock_wait_timeout = 1")
+            .execute(&mut *writer)
             .await
             .unwrap();
-            let isolation: String = row.get(1);
-            assert_eq!(isolation, "SERIALIZABLE");
-            txn.commit().await.unwrap();
+        let reset = format!(
+            "INSERT INTO `{table}` (k,v) VALUES ('a','old') ON DUPLICATE KEY UPDATE v='old'"
+        );
+        let update = format!("UPDATE `{table}` SET v='new' WHERE k='a'");
+        let select = backend.sql_template_set.generate_batch_get_query(1);
+        let key = b"a".to_vec();
+        let mut client = Arc::new(pool);
+        for read_only in [false, true] {
+            for finish in ["commit", "rollback", "drop"] {
+                sqlx::query(AssertSqlSafe(reset.as_str()))
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+                let mut txn = if read_only {
+                    client.read_only_txn_executor().await.unwrap()
+                } else {
+                    client.txn_executor().await.unwrap()
+                };
+                assert_eq!(txn.query(&select, &[&key]).await.unwrap()[0].value, b"old");
+                let write = sqlx::query(AssertSqlSafe(update.as_str()))
+                    .execute(&mut *writer)
+                    .await;
+                if read_only {
+                    // RR permits the writer to commit, but retains the first snapshot.
+                    write.unwrap();
+                    assert_eq!(txn.query(&select, &[&key]).await.unwrap()[0].value, b"old");
+                    let error = sqlx::query(AssertSqlSafe(update.as_str()))
+                        .execute(&mut *txn.0)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        error.as_database_error().unwrap().code().as_deref(),
+                        Some("25006")
+                    );
+                } else {
+                    // SERIALIZABLE plain reads hold locks; a session-default RC
+                    // transaction would let this update succeed.
+                    let error = write.unwrap_err();
+                    assert_eq!(
+                        error
+                            .as_database_error()
+                            .unwrap()
+                            .downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+                            .number(),
+                        1205
+                    );
+                }
+                match finish {
+                    "commit" => txn.0.commit().await.unwrap(),
+                    "rollback" => txn.0.rollback().await.unwrap(),
+                    "drop" => drop(txn),
+                    _ => unreachable!(),
+                }
+                let mut borrowed = client.acquire().await.unwrap();
+                let row = sqlx::query(
+                    "SHOW SESSION VARIABLES WHERE Variable_name IN ('transaction_isolation', 'tx_isolation')",
+                ).fetch_one(&mut *borrowed).await.unwrap();
+                assert_eq!(row.get::<String, _>(1), "READ-COMMITTED");
+                drop(borrowed);
+
+                // Verify the next ordinary transaction inherits RC and read/write
+                // access, rather than either override used above.
+                let mut next = client.begin().await.unwrap();
+                sqlx::query(AssertSqlSafe(reset.as_str()))
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+                let first = sqlx::query(AssertSqlSafe(select.as_str()))
+                    .bind(&key)
+                    .fetch_one(&mut *next)
+                    .await
+                    .unwrap();
+                assert_eq!(first.get::<Vec<u8>, _>(1), b"old");
+                sqlx::query(AssertSqlSafe(update.as_str()))
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+                let second = sqlx::query(AssertSqlSafe(select.as_str()))
+                    .bind(&key)
+                    .fetch_one(&mut *next)
+                    .await
+                    .unwrap();
+                assert_eq!(second.get::<Vec<u8>, _>(1), b"new");
+                sqlx::query(AssertSqlSafe(reset.as_str()))
+                    .execute(&mut *next)
+                    .await
+                    .unwrap();
+                next.rollback().await.unwrap();
+            }
         }
+        drop(writer);
+        drop_table(&backend.executor_factory.pool, &table).await;
         client.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_batch_get_does_not_wait_for_uncommitted_write() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("snapshot_locked_writer");
+        let mut backend = build_mysql_kv_backend(&table).await.unwrap();
+        // Force the reader to time out quickly if it accidentally uses locking reads.
+        let reader_pool = sqlx::mysql::MySqlPoolOptions::new()
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET SESSION innodb_lock_wait_timeout = 1")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&std::env::var("GT_MYSQL_ENDPOINTS").unwrap())
+            .await
+            .unwrap();
+        let writer_pool = backend.executor_factory.pool.clone();
+        backend.executor_factory.pool = Arc::new(reader_pool);
+        let kvs = vec![
+            KeyValue {
+                key: b"a".to_vec(),
+                value: b"old".to_vec(),
+            },
+            KeyValue {
+                key: b"z".to_vec(),
+                value: b"old".to_vec(),
+            },
+        ];
+        backend
+            .batch_put(BatchPutRequest {
+                kvs: kvs.clone(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        let mut writer = writer_pool.begin().await.unwrap();
+        let update = format!("UPDATE `{table}` SET v='new' WHERE k='z'");
+        sqlx::query(AssertSqlSafe(update.as_str()))
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let mut keys = vec![b"a".to_vec()];
+        keys.extend((0..*RDS_BATCH_SIZE - 1).map(|i| format!("m{i:06}").into_bytes()));
+        keys.push(b"z".to_vec());
+        let mut actual = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            backend.batch_get(BatchGetRequest { keys }),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .kvs;
+        actual.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(actual, kvs);
+        writer.rollback().await.unwrap();
+        drop_table(&writer_pool, &table).await;
     }
 
     #[tokio::test]

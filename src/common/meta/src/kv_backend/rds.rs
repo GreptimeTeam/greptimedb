@@ -112,6 +112,9 @@ pub trait Executor: Send + Sync {
     }
 
     async fn txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>>;
+
+    /// Starts a read-only transaction whose plain reads share one snapshot.
+    async fn read_only_txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>>;
 }
 
 /// Transaction query executor for rds. It can execute queries in transaction or commit the transaction.

@@ -344,6 +344,20 @@ impl Executor for PgClient {
             })?;
         Ok(PgTxnClient(txn))
     }
+
+    async fn read_only_txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>> {
+        let txn = self
+            .0
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await
+            .context(PostgresTransactionSnafu {
+                operation: "begin read-only".to_string(),
+            })?;
+        Ok(PgTxnClient(txn))
+    }
 }
 
 #[async_trait::async_trait]
@@ -740,8 +754,8 @@ impl KvQueryExecutor<PgClient> for PgStore {
         if keys.len() > chunk_size
             && let ExecutorImpl::Default(client) = query_executor
         {
-            // Keep all chunks in one serializable transaction, as for batch writes.
-            let mut transaction = ExecutorImpl::Txn(client.txn_executor().await?);
+            // Share one snapshot without serializable read conflicts or row locks.
+            let mut transaction = ExecutorImpl::Txn(client.read_only_txn_executor().await?);
             let response = self.get_chunks(&mut transaction, &keys, chunk_size).await?;
             transaction.commit().await?;
             return Ok(response);
@@ -1294,6 +1308,98 @@ mod tests {
         maybe_skip_postgres_integration_test!();
         let backend = build_pg_kv_backend("batch_get_consistent").await.unwrap();
         test_kv_batch_get_concurrent_updates(&backend, *RDS_BATCH_SIZE + 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_read_only_snapshot_avoids_serialization_failure() {
+        maybe_skip_postgres_integration_test!();
+        let backend = build_pg_kv_backend("read_snapshot_dependencies")
+            .await
+            .unwrap();
+        let initial = vec![
+            KeyValue {
+                key: b"a".to_vec(),
+                value: b"old".to_vec(),
+            },
+            KeyValue {
+                key: b"b".to_vec(),
+                value: b"old".to_vec(),
+            },
+        ];
+        backend
+            .batch_put(BatchPutRequest {
+                kvs: initial.clone(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        let mut first_client = backend.executor_factory.default_executor().await.unwrap();
+        let mut second_client = backend.executor_factory.default_executor().await.unwrap();
+        let mut reader_client = backend.executor_factory.default_executor().await.unwrap();
+        let mut first = ExecutorImpl::Txn(first_client.txn_executor().await.unwrap());
+        let a = vec![b"a".to_vec()];
+        let b = vec![b"b".to_vec()];
+        assert_eq!(
+            backend.get_chunks(&mut first, &a, 1).await.unwrap().kvs,
+            vec![initial[0].clone()]
+        );
+        let mut second = ExecutorImpl::Txn(second_client.txn_executor().await.unwrap());
+        backend
+            .batch_put_with_query_executor(
+                &mut second,
+                BatchPutRequest {
+                    kvs: vec![KeyValue {
+                        key: a[0].clone(),
+                        value: b"new".to_vec(),
+                    }],
+                    prev_kv: false,
+                },
+            )
+            .await
+            .unwrap();
+        second.commit().await.unwrap();
+        let mut reader = ExecutorImpl::Txn(reader_client.read_only_txn_executor().await.unwrap());
+        assert_eq!(
+            backend.get_chunks(&mut reader, &a, 1).await.unwrap().kvs,
+            vec![KeyValue {
+                key: a[0].clone(),
+                value: b"new".to_vec()
+            }]
+        );
+        backend
+            .batch_put_with_query_executor(
+                &mut first,
+                BatchPutRequest {
+                    kvs: vec![KeyValue {
+                        key: b[0].clone(),
+                        value: b"new".to_vec(),
+                    }],
+                    prev_kv: false,
+                },
+            )
+            .await
+            .unwrap();
+        first.commit().await.unwrap();
+        // SERIALIZABLE fails here with 40001: the reader sees the second
+        // writer but not the first writer on which it depended. RR may read
+        // this committed snapshot without requiring a serial execution order.
+        assert_eq!(
+            backend.get_chunks(&mut reader, &b, 1).await.unwrap().kvs,
+            vec![initial[1].clone()]
+        );
+        reader.commit().await.unwrap();
+        let read_only = reader_client.read_only_txn_executor().await.unwrap();
+        let error = read_only
+            .0
+            .execute("DELETE FROM read_snapshot_dependencies", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            Some(&tokio_postgres::error::SqlState::READ_ONLY_SQL_TRANSACTION)
+        );
+        read_only.0.rollback().await.unwrap();
+        unprepare_kv(&backend, b"").await;
     }
 
     #[tokio::test]
