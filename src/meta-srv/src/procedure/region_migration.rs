@@ -893,6 +893,7 @@ impl RegionMigrationProcedure {
         // Regions whose route was switched to the target before the procedure aborted.
         let mut switched_regions = Vec::new();
         let mut cleared_downgrading = false;
+        let mut failure = None;
         for (table_id, regions) in table_regions {
             let table_lock = TableLock::Write(table_id).into();
             let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
@@ -900,7 +901,10 @@ impl RegionMigrationProcedure {
                 Ok(table_route) => table_route,
                 // The table has been dropped meanwhile.
                 Err(error::Error::TableRouteNotFound { .. }) => continue,
-                Err(err) => return Err(err),
+                Err(err) => {
+                    failure = Some(err);
+                    break;
+                }
             };
             let region_routes = table_route.region_routes().unwrap();
             switched_regions.extend(
@@ -921,7 +925,7 @@ impl RegionMigrationProcedure {
                     "Rollbacking downgraded region leader table route, table: {table_id}, regions: {regions:?}"
                 );
                 let table_metadata_manager = &ctx.table_metadata_manager;
-                table_metadata_manager
+                let cleared = table_metadata_manager
                     .update_leader_region_status(table_id, &table_route, |route| {
                         if regions.contains(&route.region.id) {
                             Some(None)
@@ -934,13 +938,21 @@ impl RegionMigrationProcedure {
                     .map_err(BoxedError::new)
                     .with_context(|_| error::RetryLaterWithSourceSnafu {
                         reason: format!("Failed to update the table route during the rollback downgraded leader region: {regions:?}"),
-                    })?;
+                    });
+                if let Err(err) = cleared {
+                    failure = Some(err);
+                    break;
+                }
                 cleared_downgrading = true;
             }
         }
-        // Clients may have cached the routes that carried the cleared marks.
+        // Clients may have cached the routes that carried the cleared marks, also when a later
+        // table failed: a retry finds those marks gone and clears nothing.
         if cleared_downgrading {
             ctx.invalidate_table_cache().await?;
+        }
+        if let Some(err) = failure {
+            return Err(err);
         }
         self.context
             .deregister_failure_detectors_for_candidate_regions()
@@ -1064,8 +1076,11 @@ mod tests {
 
     use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::instruction::Instruction;
+    use common_meta::key::MetadataKey;
+    use common_meta::key::table_route::TableRouteKey;
     use common_meta::key::test_utils::{new_test_table_info, new_test_table_info_with_name};
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use common_meta::rpc::store::PutRequest;
 
     use super::*;
     use crate::handler::HeartbeatMailbox;
@@ -1080,6 +1095,79 @@ mod tests {
 
     fn new_persistent_context() -> PersistentContext {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
+    }
+
+    #[tokio::test]
+    async fn test_rollback_broadcasts_cleared_marks_before_a_later_table_fails() {
+        // The rollback visits the tables of a batch in the order of a `HashMap` with a random
+        // hasher, so the attempt is repeated until the table that fails comes after the one
+        // whose mark is cleared; all 64 attempts miss with probability 2^-64.
+        let cleared = RegionId::new(1024, 1);
+        let failing = RegionId::new(1025, 1);
+        for _ in 0..64 {
+            let mut env = TestingEnv::new();
+            for region_id in [cleared, failing] {
+                let table_id = region_id.table_id();
+                let table_info =
+                    new_test_table_info_with_name(table_id, &format!("table_{table_id}"));
+                let region_routes = vec![RegionRoute {
+                    region: Region::new_test(region_id),
+                    leader_peer: Some(Peer::empty(1)),
+                    leader_state: (region_id == cleared).then_some(LeaderState::Downgrading),
+                    ..Default::default()
+                }];
+                env.create_physical_table_metadata(table_info, region_routes)
+                    .await;
+            }
+            // The route of the second table cannot be read.
+            let route_key = TableRouteKey::new(failing.table_id()).to_bytes();
+            let kv_backend = env.table_metadata_manager().kv_backend().clone();
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(route_key.clone())
+                        .with_value(b"x".to_vec()),
+                )
+                .await
+                .unwrap();
+            let mut persistent_ctx = new_persistent_context();
+            persistent_ctx.region_ids = vec![cleared, failing];
+            let mut procedure =
+                RegionMigrationProcedure::new(persistent_ctx, env.context_factory(), vec![]);
+            let mut rx = env.frontend_receiver().await;
+
+            procedure
+                .rollback_inner(&new_procedure_context())
+                .await
+                .unwrap_err();
+
+            let table_route = env
+                .table_metadata_manager()
+                .table_route_manager()
+                .table_route_storage()
+                .get(cleared.table_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if table_route.region_routes().unwrap()[0]
+                .leader_state
+                .is_some()
+            {
+                // The failing table came first and nothing was cleared.
+                assert!(rx.try_recv().is_err());
+                continue;
+            }
+            assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
+            // The retry clears nothing and broadcasts nothing.
+            kv_backend.delete(&route_key, false).await.unwrap();
+            procedure
+                .rollback_inner(&new_procedure_context())
+                .await
+                .unwrap();
+            assert!(rx.try_recv().is_err());
+            return;
+        }
+        panic!("In 64 attempts the failing table never came after the cleared one");
     }
 
     #[tokio::test]
