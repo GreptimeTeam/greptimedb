@@ -2951,7 +2951,6 @@ dependencies = [
  "tracing-log",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]

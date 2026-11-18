@@ -47,7 +47,6 @@ use snafu::{ResultExt, ensure};
 use sql::dialect::MySqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
-use table::requests::redact_connection_in_text;
 use tokio::io::AsyncWrite;
 
 use crate::SqlPlan;
@@ -342,14 +341,10 @@ impl MysqlInstanceShim {
                 };
                 debug!(
                     "do_execute Replacing with Params: {:?}, Original Query: {}",
-                    param_strs,
-                    redact_connection_in_text(&query)
+                    param_strs, query
                 );
                 let query = replace_params(param_strs, stmt, query)?;
-                debug!(
-                    "Mysql execute replaced query: {}",
-                    redact_connection_in_text(&query)
-                );
+                debug!("Mysql execute replaced query: {}", query);
                 self.do_query(&query, query_ctx.clone()).await
             }
             _ => {

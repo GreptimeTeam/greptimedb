@@ -37,7 +37,6 @@ tracing-appender.workspace = true
 tracing-log = "0.2"
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
-url.workspace = true
 
 [dev-dependencies]
 log = "0.4"

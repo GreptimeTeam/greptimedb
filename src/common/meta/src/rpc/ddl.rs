@@ -769,8 +769,9 @@ impl fmt::Debug for CreateTableTask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut create_table = self.create_table.clone();
         for (key, value) in create_table.table_options.iter_mut() {
-            let redacted = table::requests::redact_option_value(key, value.as_str());
-            *value = redacted;
+            if let Some(redacted) = table::requests::redact_option_value(key, value.as_str()) {
+                *value = redacted;
+            }
         }
         f.debug_struct("CreateTableTask")
             .field("create_table", &create_table)

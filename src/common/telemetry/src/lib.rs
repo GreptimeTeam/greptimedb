@@ -16,7 +16,6 @@ pub mod logging;
 mod macros;
 pub mod metric;
 mod panic_hook;
-pub mod redact;
 pub mod tracing_context;
 mod tracing_sampler;
 
@@ -27,6 +26,5 @@ pub use logging::{
 };
 pub use metric::dump_metrics;
 pub use panic_hook::set_panic_hook;
-pub use redact::redact_connection_in_text;
 pub use tracing;
 pub use tracing_subscriber;

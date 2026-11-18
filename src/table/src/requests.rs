@@ -101,8 +101,6 @@ pub fn redact_connection(connection: &str) -> String {
     }
 }
 
-pub use common_telemetry::redact_connection_in_text;
-
 pub fn redact_relational_options(encoded: &str) -> String {
     serde_json::from_str::<RelationalOptions>(encoded)
         .ok()
@@ -110,13 +108,13 @@ pub fn redact_relational_options(encoded: &str) -> String {
         .unwrap_or_else(|| REDACTED_OPTION_VALUE.to_string())
 }
 
-pub fn redact_option_value(key: &str, value: &str) -> String {
+pub fn redact_option_value(key: &str, value: &str) -> Option<String> {
     if is_credential_option(key) {
-        REDACTED_OPTION_VALUE.to_string()
+        Some(REDACTED_OPTION_VALUE.to_string())
     } else if key == RELATIONAL_META_KEY {
-        redact_relational_options(value)
+        Some(redact_relational_options(value))
     } else {
-        value.to_string()
+        None
     }
 }
 
@@ -413,7 +411,7 @@ impl fmt::Display for TableOptions {
         // Sort by key so `create_options` is stable across queries; `HashMap` order is not.
         let extra_options: BTreeMap<_, _> = self.extra_options.iter().collect();
         for (k, v) in extra_options {
-            let value = redact_option_value(k, v);
+            let value = redact_option_value(k, v).unwrap_or_else(|| v.clone());
             key_vals.push(format!("{}={}", k, value));
         }
 
@@ -426,7 +424,10 @@ impl fmt::Debug for TableOptions {
         let extra_options = self
             .extra_options
             .iter()
-            .map(|(key, value)| (key.clone(), redact_option_value(key, value)))
+            .map(|(key, value)| {
+                let redacted = redact_option_value(key, value).unwrap_or_else(|| value.clone());
+                (key.clone(), redacted)
+            })
             .collect::<HashMap<_, _>>();
         f.debug_struct("TableOptions")
             .field("write_buffer_size", &self.write_buffer_size)
