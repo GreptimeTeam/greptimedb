@@ -1,0 +1,23 @@
+Cargo.lock
+  s_8b40584f3081c3::t_d67360eb36b7f7 15514
+tests-integration/Cargo.toml
+  s_8b40584f3081c3::t_14e3c9ea75bc4a 112
+tests-integration/tests/repartition.rs
+  s_8b40584f3081c3::t_f53f3c6a284b52 15,30,35-36,43,52-71,137-153,1553-1559,1594-1600,1607-1609,1611-1613,1634-1652,1668-1685,1693,1696,1746-1794,1798-1812,1870-1962,2016-2017
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b0f7b461232b0a788ec41d20a240420817383591",
+  "prompts": {},
+  "sessions": {
+    "s_8b40584f3081c3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e458-dc8c-79a1-af2d-f222c3933c62",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
