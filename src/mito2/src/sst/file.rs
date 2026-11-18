@@ -285,6 +285,8 @@ pub struct NarthexSeriesIndexMeta {
     pub manifest_size: u64,
     /// Parts in part-ID order, starting at zero.
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
+    /// Source sample files recorded by the experimental builder. Publication does
+    /// not certify that the index contains every series from those files.
     pub sources: Vec<RegionFileId>,
 }
 
