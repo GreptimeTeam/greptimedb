@@ -692,45 +692,6 @@ impl RegionManifestManager {
             .await
     }
 
-    fn validate_series_actions(
-        &self,
-        base: &RegionManifest,
-        actions: &[RegionMetaAction],
-    ) -> Result<()> {
-        let needs_validation = actions.iter().any(|action| {
-            let RegionMetaAction::Edit(edit) = action else {
-                return false;
-            };
-            !edit.series_indexes_to_add.is_empty()
-                || edit.files_to_add.iter().any(|file| {
-                    !matches!(file.format, file::FileFormat::Parquet)
-                        || base.series_indexes.contains_key(&file.file_id)
-                        || base
-                            .files
-                            .get(&file.file_id)
-                            .is_some_and(|old| !matches!(old.format, file::FileFormat::Parquet))
-                })
-        });
-        if !needs_validation {
-            return Ok(());
-        }
-        let mut view = RegionManifestBuilder::from_shared_manifest(
-            Some(base.clone()),
-            self.file_metadata_interner.clone(),
-        );
-        for action in actions {
-            if let RegionMetaAction::Edit(edit) = action {
-                edit.validate_narthex_series(&view)?;
-            }
-            self.apply_actions(
-                &mut view,
-                self.last_version(),
-                std::iter::once(action.clone()),
-            );
-        }
-        Ok(())
-    }
-
     /// Saves `bytes`, the encoded `actions`, as the next version and applies the actions.
     async fn commit(
         &mut self,
@@ -739,13 +700,17 @@ impl RegionManifestManager {
         mut allow_checkpoint: bool,
         must_verify: impl FnOnce() -> bool,
     ) -> Result<ManifestVersion> {
-        self.validate_series_actions(&self.manifest, &actions)?;
         let conditional = self.store.is_conditional_publication();
-        let version = if conditional {
-            self.last_version() + 1
-        } else {
-            self.increase_version()
-        };
+        let version = self.last_version() + 1;
+        let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
+            Some(self.manifest.as_ref().clone()),
+            self.file_metadata_interner.clone(),
+        );
+        self.apply_actions(&mut manifest_builder, version, actions)?;
+        let new_manifest = manifest_builder.try_build()?;
+        if !conditional {
+            self.set_version(version);
+        }
         self.store.save(version, bytes).await?;
         if conditional {
             if must_verify() {
@@ -755,12 +720,6 @@ impl RegionManifestManager {
             self.set_version(version);
         }
 
-        let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
-            Some(self.manifest.as_ref().clone()),
-            self.file_metadata_interner.clone(),
-        );
-        self.apply_actions(&mut manifest_builder, version, actions);
-        let new_manifest = manifest_builder.try_build()?;
         new_manifest
             .removed_files
             .update_file_removed_cnt_to_stats(&self.stats);
@@ -835,7 +794,6 @@ impl RegionManifestManager {
         }
 
         let base = self.staged.view.as_ref().unwrap_or(&self.manifest);
-        self.validate_series_actions(base, &action_list.actions)?;
         let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
             Some(base.as_ref().clone()),
             self.file_metadata_interner.clone(),
@@ -844,7 +802,7 @@ impl RegionManifestManager {
             &mut manifest_builder,
             self.last_version(),
             action_list.actions.iter().cloned(),
-        );
+        )?;
         self.staged.view = Some(Arc::new(manifest_builder.try_build()?));
         self.staged.actions.actions.extend(action_list.actions);
         Ok(())
@@ -856,7 +814,7 @@ impl RegionManifestManager {
         manifest_builder: &mut RegionManifestBuilder,
         version: ManifestVersion,
         actions: impl IntoIterator<Item = RegionMetaAction>,
-    ) {
+    ) -> Result<()> {
         for action in actions {
             match action {
                 RegionMetaAction::Change(action) => {
@@ -866,6 +824,7 @@ impl RegionManifestManager {
                     manifest_builder.apply_partition_expr_change(version, action);
                 }
                 RegionMetaAction::Edit(action) => {
+                    action.validate_file_metadata(manifest_builder)?;
                     manifest_builder.apply_edit(version, action);
                 }
                 RegionMetaAction::Remove(_) => {
@@ -879,6 +838,7 @@ impl RegionManifestManager {
                 }
             }
         }
+        Ok(())
     }
 
     /// Clears the staged actions.
@@ -933,12 +893,6 @@ impl RegionManifestManager {
     /// `ManifestContext::installed_version_if_updated` does not hold while it lists.
     pub async fn has_update(&self) -> Result<bool> {
         self.store.has_version_after(self.last_version()).await
-    }
-
-    /// Increases last version and returns the increased version.
-    fn increase_version(&mut self) -> ManifestVersion {
-        let previous = self.last_version.fetch_add(1, Ordering::Relaxed);
-        previous + 1
     }
 
     /// Sets the last version.

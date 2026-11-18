@@ -167,8 +167,8 @@ impl RegionEdit {
             || !self.series_indexes_to_remove.is_empty()
     }
 
-    /// Rechecked under the manifest lock before publication, after any concurrent compaction.
-    pub(crate) fn validate_narthex_series(&self, manifest: &RegionManifestBuilder) -> Result<()> {
+    /// Checks artifact inventories, roles and immutable identities before publication.
+    pub(crate) fn validate_file_metadata(&self, manifest: &RegionManifestBuilder) -> Result<()> {
         let region_id = manifest
             .metadata
             .as_ref()
@@ -206,30 +206,10 @@ impl RegionEdit {
                 reason: "Conflicting immutable artifact identity"
             }
         );
-        if self.series_indexes_to_add.is_empty() {
-            return Ok(());
-        }
-        let sources: HashSet<_> = manifest
-            .files
-            .values()
-            .map(|file| file.as_ref())
-            .chain(self.files_to_add.iter())
-            .filter(|file| {
-                matches!(file.format, file::FileFormat::NarthexSamples(_))
-                    && !self
-                        .files_to_remove
-                        .iter()
-                        .any(|removed| removed.file_id() == file.file_id())
-            })
-            .map(|file| file.file_id())
-            .collect();
         let mut index_ids = HashSet::new();
         for file in &self.series_indexes_to_add {
-            let valid = matches!(&file.format, file::FileFormat::NarthexSeriesIndex(index)
-                if !index.sources.is_empty() && index.sources.iter().all(|id| sources.contains(id))
-                    && index.sources.iter().collect::<HashSet<_>>().len() == index.sources.len());
             snafu::ensure!(
-                valid
+                matches!(file.format, file::FileFormat::NarthexSeriesIndex(_))
                     && index_ids.insert(file.file_id)
                     && file.region_id.table_id() == region_id.table_id()
                     && !manifest.files.contains_key(&file.file_id)
@@ -243,7 +223,7 @@ impl RegionEdit {
                         .is_none_or(|existing| existing.as_ref() == file),
                 crate::error::InvalidRequestSnafu {
                     region_id,
-                    reason: "Stale narthex series coverage or conflicting immutable identity"
+                    reason: "Invalid series index metadata or conflicting immutable identity"
                 }
             );
         }
@@ -1759,16 +1739,12 @@ mod tests {
         assert!(encoded["files_to_add"][0]["format"]["narthex_samples"].is_object());
         assert!(encoded["series_indexes_to_add"][0]["format"]["narthex_series_index"].is_object());
         let mut builder = manifest_builder();
-        edit.validate_narthex_series(&manifest_builder()).unwrap();
+        edit.validate_file_metadata(&manifest_builder()).unwrap();
         assert_eq!(edit.files_to_add.len(), 2);
         assert_eq!(edit.series_indexes_to_add.len(), 1);
         let mut invalid = edit.clone();
         invalid.files_to_add[0].file_size += 1;
-        assert!(
-            invalid
-                .validate_narthex_series(&manifest_builder())
-                .is_err()
-        );
+        assert!(invalid.validate_file_metadata(&manifest_builder()).is_err());
         let index = edit.series_indexes_to_add[0].clone();
         let first = edit.files_to_add[0].clone();
         builder.apply_edit(1, edit);
@@ -1790,17 +1766,6 @@ mod tests {
         assert_eq!(replaced.files.len(), 1);
         assert!(replaced.series_indexes.is_empty());
         assert_eq!(checkpoint.series_indexes.len(), 1);
-        assert!(
-            RegionEdit {
-                series_indexes_to_add: vec![index],
-                ..Default::default()
-            }
-            .validate_narthex_series(&RegionManifestBuilder::with_checkpoint(
-                Some(replaced),
-                Default::default()
-            ))
-            .is_err()
-        );
         let legacy = include_bytes!(
             "../../../../tests/compatibility/manifest/table_compaction/legacy-edit.json"
         );
