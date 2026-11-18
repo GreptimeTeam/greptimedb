@@ -56,7 +56,9 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::logical_expr::{
+    EmptyRelation, Expr, LogicalPlan, Union, UserDefinedLogicalNodeCore,
+};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
@@ -4484,6 +4486,59 @@ fn logical_source_indexes_must_match_dense_children() {
             .is_err(),
             "{name} must be refused without allocating by source index"
         );
+    }
+}
+
+/// A `SeriesFrame` node over a union of explicit-label frames constructs without a bound name.
+///
+/// This is the shape a nameless selector that discovery expands into several metrics compiles to:
+/// the presence read keeps `__name__` among the tags, the node's one child is the union of one
+/// explicit-label frame per discovered metric, and the binding names no metric because each frame
+/// names its own. Only a bare region scan needs the binding's name - a scan is asked for the series
+/// of one metric - so construction accepts this combination instead of requiring a name it cannot
+/// use.
+#[test]
+fn a_series_frame_over_a_union_of_frames_needs_no_bound_metric_name() {
+    let tree = window_tree_of(RangeFunction::LastOverTime);
+    let binding = FusedSeriesBinding {
+        metric_name: None,
+        ..binding_of(
+            &tree,
+            raw_schema(),
+            vec![HOST.to_string(), NAME.to_string()],
+        )
+    };
+    assert_eq!(vec![HOST.to_string(), NAME.to_string()], binding.tags);
+    // Two discovered metrics, one raw source each: each source's frames name the series it read.
+    let union = LogicalPlan::Union(
+        Union::try_new(vec![
+            Arc::new(input_plan(frame_schema())),
+            Arc::new(input_plan(frame_schema())),
+        ])
+        .expect("the two frames are one layout"),
+    );
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding,
+        vec![union],
+        canonical_frame_schema(&tree),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("an explicit-label child needs no bound name");
+    assert!(node.binding().metric_name.is_none());
+    assert_eq!(1, node.children().len());
+    let LogicalPlan::Union(union) = &node.children()[0] else {
+        panic!(
+            "the child is the union of the discovered frames: {:?}",
+            node.children()[0]
+        );
+    };
+    assert_eq!(2, union.inputs.len());
+    for input in &union.inputs {
+        let declaration = SeriesFrameDeclaration::parse(input.schema().as_arrow())
+            .expect("each discovered metric answers an explicit-label frame");
+        assert_eq!(FrameLabelMode::Explicit, declaration.labels());
     }
 }
 

@@ -1070,17 +1070,20 @@ impl PromPlanner {
         let Some((mut prepared, logical_ids_differ, statement_kind)) = preparation? else {
             return Ok(None);
         };
-        // `absent_over_time` reads its window through a fold that keeps the metric name, so the segment that
-        // runs it reports names across a boundary. A nameless selector that discovery expands into more
-        // than one metric binds no single name for that boundary, and the fused node refuses a tree
-        // declaring `__name__` without one. A fold that dropped the name would plan, but it would read two
-        // metrics sharing their ordinary labels as one series, so the route declines.
+        // `absent_over_time` reads its window through a fold that keeps the metric name, which the fused
+        // node hands over in a frame's labels. Only the bare-scan arm of that node needs the binding's own
+        // name: it asks a region scan for the series of one metric, and that is exactly the shape with a
+        // name to ask for. A nameless selector that discovery expands into several metric tables never
+        // reaches that arm, because its prepared input is the `Union` of one `RawSeriesSource` per
+        // discovered metric, and each source names its own metric, so the node is handed explicit-label
+        // frames instead. So the case declined here is a nameless input that is *not* sourced, which is the
+        // one shape where a tree keeping `__name__` would meet a scan that has no name to bind.
         //
-        // A selector that matched no table is not that shape: its typed empty input holds no series.
+        // A selector that matched no table is not that shape either: its typed empty input holds no series.
         if reads_presence(prom_expr)
-            && prepared
-                .iter()
-                .any(|(scan, _, metric, ..)| !is_empty_discovered_input(scan) && metric.is_none())
+            && prepared.iter().any(|(scan, _, metric, ..)| {
+                !is_empty_discovered_input(scan) && metric.is_none() && !is_sourced_plan(scan)
+            })
         {
             return Ok(None);
         }
@@ -1386,15 +1389,6 @@ impl PromPlanner {
         let children = prepared
             .into_iter()
             .map(|(scan, schema, metric, _, tags, _, split_series)| {
-                // A discovered selector already carries its own sources: a single metric is one
-                // `RawSeriesSource`, several are a `Union` of them, and each names the metric it
-                // reads. Wrapping either again would nest a source in a source.
-                let already_sourced = matches!(&scan, LogicalPlan::Union(_))
-                    || matches!(
-                        &scan,
-                        LogicalPlan::Extension(extension)
-                            if extension.node.as_any().is::<RawSeriesSource>()
-                    );
                 // The typed empty frame of a selector that matched no table is already the input: it reads
                 // no region and has no metric to bind, so it stays itself on both routes.
                 if is_empty_discovered_input(&scan) {
@@ -1404,8 +1398,9 @@ impl PromPlanner {
                 // reads every input through a raw source: the source names each region's half and
                 // reconciles the fragments of a series several regions hold. A partition that splits one
                 // series across regions has to be read through a raw source even where no split is
-                // planned, since a bare scan would hand a region only its own fragment.
-                if (!per_source_inputs && !split_series) || already_sourced {
+                // planned, since a bare scan would hand a region only its own fragment. A selector that
+                // already carries its own sources stays as it is; see [`is_sourced_plan`].
+                if (!per_source_inputs && !split_series) || is_sourced_plan(&scan) {
                     return Ok(scan);
                 }
                 let Some(metric) = metric else {
@@ -1860,6 +1855,21 @@ fn reads_presence(expr: &PromExpr) -> bool {
     let mut presence = Presence::default();
     let _ = promql_parser::util::walk_expr(&mut presence, expr);
     presence.0
+}
+
+/// Whether a prepared selector already carries its own raw sources, and so hands the fused node
+/// explicit-label frames rather than a bare region scan.
+///
+/// A discovered selector is that shape: a single metric is one [`RawSeriesSource`], several are a
+/// `Union` of them, and each names the metric it reads. Wrapping either again would nest a source in
+/// a source.
+fn is_sourced_plan(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Union(_))
+        || matches!(
+            plan,
+            LogicalPlan::Extension(extension)
+                if extension.node.as_any().is::<RawSeriesSource>()
+        )
 }
 
 /// The moment `millis` milliseconds from the Unix epoch, on whichever side of it that lands.
