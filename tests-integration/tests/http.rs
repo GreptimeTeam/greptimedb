@@ -7386,7 +7386,7 @@ pub async fn test_remote_write_v2_histogram_avg_native_partitions(store_type: St
         .iter()
         .find(|node| !Arc::ptr_eq(node, consumer))
         .expect("the partial producer");
-    let metrics = producer.metrics().expect("producer metrics");
+    let metrics = node_metric_set(producer);
     let mut partitions: BTreeMap<usize, usize> = BTreeMap::new();
     for metric in metrics.iter() {
         if metric.value().name() == "native.root.output_values"
