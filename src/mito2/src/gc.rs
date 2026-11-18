@@ -425,6 +425,13 @@ impl LocalGcWorker {
         region: Option<MitoRegionRef>,
         tmp_ref_files: &HashSet<FileRef>,
     ) -> Result<RegionGcOutcome> {
+        #[cfg(feature = "enterprise")]
+        if crate::compaction::compactor::experiment::enabled(region_id) {
+            return Ok(RegionGcOutcome {
+                removed_files: vec![],
+                extension_cleanup_failed: false,
+            });
+        }
         let mode = if self.full_file_listing {
             "full_listing"
         } else {

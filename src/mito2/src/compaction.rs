@@ -17,6 +17,8 @@ pub mod compactor;
 mod json2;
 mod last_non_null;
 pub mod memory_manager;
+#[cfg(feature = "enterprise")]
+pub mod multi_region;
 mod overlap;
 pub mod picker;
 mod reader;

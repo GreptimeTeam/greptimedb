@@ -135,7 +135,7 @@ pub struct TwcsPicker {
 }
 
 impl TwcsPicker {
-    /// Picks at most one compaction input per window and schedules them across
+    /// Picks disjoint active L1 groups, retaining one closed-window pick, across
     /// windows by [`PickClass`], newer windows first within a class.
     async fn build_output(
         &self,
@@ -186,7 +186,7 @@ impl TwcsPicker {
                 let time_windows = time_windows.clone();
                 let primary_key_mapper = primary_key_mapper.clone();
                 handles.push(common_runtime::spawn_blocking_compact(move || {
-                    let pick = time_windows.get(&window).and_then(|files| {
+                    let pick = time_windows.get(&window).map_or_else(Vec::new, |files| {
                         picker.pick_window(
                             region_id,
                             files,
@@ -194,6 +194,7 @@ impl TwcsPicker {
                             time_window_size,
                             region_sequence,
                             &primary_key_mapper,
+                            max_outputs,
                         )
                     });
                     (window, pick)
@@ -202,7 +203,7 @@ impl TwcsPicker {
             }
             for result in futures::future::join_all(handles).await {
                 let (window, pick) = result.context(JoinSnafu)?;
-                picks.extend(pick.map(|pick| (window, pick)));
+                picks.extend(pick.into_iter().map(|pick| (window, pick)));
             }
             // Windows are visited newest first, so older windows cannot displace
             // a full set of picks of the first class.
@@ -256,7 +257,7 @@ impl TwcsPicker {
         Ok(output)
     }
 
-    /// Picks the compaction inputs of one window, or `None` if it needs none.
+    /// Picks inputs of one window; closed-window overlap rules stay unchanged.
     fn pick_window(
         &self,
         region_id: RegionId,
@@ -265,7 +266,8 @@ impl TwcsPicker {
         time_window_size: Option<i64>,
         region_sequence: u64,
         mapper: &PrimaryKeyRangeMapper,
-    ) -> Option<WindowPick> {
+        max_outputs: usize,
+    ) -> Vec<WindowPick> {
         let mut files: Vec<_> = window.files().cloned().collect();
         let quiet = is_quiet_window(&files, region_sequence);
 
@@ -290,11 +292,11 @@ impl TwcsPicker {
         let (l0_files, l1_files): (Vec<_>, Vec<_>) =
             files.into_iter().partition(|file| file.level() == 0);
         if !self.all_windows_inactive && active_window == Some(window.time_window) {
-            self.pick_active_window(l0_files, l1_files, mapper)
+            self.pick_active_window(l0_files, l1_files, mapper, max_outputs)
         } else if window.files.len() < self.inactive_window_trigger_file_num
             && l1_files.len() < self.inactive_window_l1_merge_trigger
         {
-            None
+            Vec::new()
         } else {
             let settling = !self.all_windows_inactive
                 && is_settling_window(window.time_window, active_window, time_window_size);
@@ -316,6 +318,8 @@ impl TwcsPicker {
                         found_runs: pick.units,
                     })
                 })
+                .into_iter()
+                .collect()
         }
     }
 
@@ -334,7 +338,8 @@ impl TwcsPicker {
         l0_files: Vec<FileHandle>,
         l1_files: Vec<FileHandle>,
         mapper: &PrimaryKeyRangeMapper,
-    ) -> Option<WindowPick> {
+        max_outputs: usize,
+    ) -> Vec<WindowPick> {
         if l0_files.len() >= self.trigger_file_num {
             let (inputs, found_runs) = pick_candidate_files(
                 l0_files,
@@ -343,24 +348,34 @@ impl TwcsPicker {
                 mapper,
             );
             if !inputs.is_empty() {
-                return Some(WindowPick {
+                return vec![WindowPick {
                     class: PickClass::L0Merge,
                     branch: "active:pick_count_first",
                     inputs,
                     found_runs,
-                });
+                }];
             }
         }
         if l1_files.len() < self.active_window_l1_merge_trigger {
-            return None;
+            return Vec::new();
         }
-        let pick = units::pick_active_l1(&l1_files, mapper, self.pick_limits())?;
-        Some(WindowPick {
-            class: PickClass::FileReduction,
-            branch: "active:pick_l1_file_reduction",
-            inputs: pick.inputs,
-            found_runs: pick.units,
-        })
+        // LastNonNull requires its existing overlap closure. LastRow groups
+        // may share key ranges but never input files; full-window tombstone
+        // checks below retain markers needed by sibling groups.
+        let limit = if self.merge_mode == MergeMode::LastRow {
+            max_outputs
+        } else {
+            1
+        };
+        units::pick_active_l1_many(&l1_files, mapper, self.pick_limits(), limit)
+            .into_iter()
+            .map(|pick| WindowPick {
+                class: PickClass::FileReduction,
+                branch: "active:pick_l1_file_reduction",
+                inputs: pick.inputs,
+                found_runs: pick.units,
+            })
+            .collect()
     }
 
     /// An inactive window should converge at a bounded rewrite cost:
@@ -3377,6 +3392,87 @@ mod tests {
             .unwrap();
 
         assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_active_l1_many_same_window_preserves_deletes() {
+        let files = (0..128)
+            .map(|idx| {
+                new_file_handle_with_size_and_sequence(FileId::random(), 0, 999, 1, idx + 1, 100)
+            })
+            .collect::<Vec<_>>();
+        let windows = assign_to_windows(files.iter(), 1);
+        let active = windows.keys().next().copied();
+        let picker = TwcsPicker {
+            trigger_file_num: 16,
+            active_window_l1_merge_trigger: 8,
+            inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
+            time_window_seconds: Some(1),
+            max_output_file_size: None,
+            append_mode: false,
+            merge_mode: MergeMode::LastRow,
+            max_background_tasks: Some(8),
+            time_range: None,
+            all_windows_inactive: false,
+        };
+        let outputs = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, active, None)
+            .await
+            .unwrap();
+        assert_eq!(8, outputs.len());
+        let mut seen = HashSet::new();
+        for output in outputs {
+            assert_eq!(16, output.inputs.len());
+            // Sibling groups still contain old versions and deletion markers.
+            assert!(!output.filter_deleted);
+            for file in output.inputs {
+                assert!(seen.insert(file.file_id()));
+            }
+        }
+        assert_eq!(128, seen.len());
+    }
+
+    #[tokio::test]
+    async fn test_active_l1_many_keeps_l0_priority_and_last_non_null() {
+        let l1 = (0..128)
+            .map(|idx| {
+                new_file_handle_with_size_and_sequence(FileId::random(), 0, 999, 1, idx + 1, 100)
+            })
+            .collect::<Vec<_>>();
+        let mut picker = TwcsPicker {
+            trigger_file_num: 2,
+            active_window_l1_merge_trigger: 8,
+            inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
+            time_window_seconds: Some(1),
+            max_output_file_size: None,
+            append_mode: false,
+            merge_mode: MergeMode::LastRow,
+            max_background_tasks: Some(8),
+            time_range: None,
+            all_windows_inactive: false,
+        };
+        let mut mixed = l1.clone();
+        mixed.extend((0..2).map(|_| {
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 999, 0, 1000, 100)
+        }));
+        let windows = assign_to_windows(mixed.iter(), 1);
+        let active = windows.keys().next().copied();
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, active, None)
+            .await
+            .unwrap();
+        assert_eq!(1, output.len());
+        assert!(output[0].inputs.iter().all(|f| f.level() == 0));
+        picker.merge_mode = MergeMode::LastNonNull;
+        let windows = assign_to_windows(l1.iter(), 1);
+        let active = windows.keys().next().copied();
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, active, None)
+            .await
+            .unwrap();
+        assert_eq!(1, output.len());
     }
 
     #[tokio::test]

@@ -175,6 +175,79 @@ fn pick_active_l1_with_budget(
     pick_reducing_interval(&mut units, l1_files, options)
 }
 
+/// Picks disjoint input groups in one search for an active L1 window.
+/// The original reduction and rewrite-cost rules apply to every group. Output
+/// overlap is allowed for LastRow; tombstone filtering still uses the full
+/// original window in TwcsPicker, including the other selected groups.
+pub(crate) fn pick_active_l1_many(
+    files: &[FileHandle],
+    mapper: &PrimaryKeyRangeMapper,
+    options: PickLimits,
+    max_picks: usize,
+) -> Vec<UnitPick> {
+    if max_picks == 0 {
+        return Vec::new();
+    }
+    if max_picks == 1 {
+        return pick_active_l1(files, mapper, options).into_iter().collect();
+    }
+    let extents = extents_of(files, mapper);
+    let index = ExtentIndex::new(&extents);
+    let mut units = conflict_units(files, &extents, &index, CONFLICT_GRAPH_BUDGET)
+        .unwrap_or_else(|| single_file_units(files, &extents));
+    split_oversized_units(&mut units, files, &extents, options.max_input_files);
+    let picks = pick_reducing_intervals(&mut units, files, options, max_picks);
+    if !picks.is_empty() || units.len() == files.len() {
+        return picks;
+    }
+    // Retain the original fallback when a large peer prevents an entire unit
+    // from satisfying the reduction cost, but smaller files can be merged.
+    split_oversized_units(&mut units, files, &extents, 1);
+    pick_reducing_intervals(&mut units, files, options, max_picks)
+}
+
+fn pick_reducing_intervals(
+    units: &mut [Unit],
+    files: &[FileHandle],
+    options: PickLimits,
+    max_picks: usize,
+) -> Vec<UnitPick> {
+    sort_units(units);
+    let mut candidates = Vec::new();
+    for_each_interval(units, &[], options.max_input_files, |range, stats| {
+        let reduction = stats
+            .num_files
+            .saturating_sub(options.predicted_outputs(stats));
+        if stats.num_files >= 2
+            && reduction > 0
+            && options.within_reduction_cost(stats.size, reduction)
+            && stats.largest_file_size <= stats.size - stats.largest_file_size
+        {
+            candidates.push((Reverse(reduction), stats.size, range));
+        }
+    });
+    // Stable ordering preserves the original best pick when scores tie.
+    candidates.sort_by_key(|(reduction, size, _)| (*reduction, *size));
+    let mut selected = vec![false; units.len()];
+    let mut picks = Vec::new();
+    for (_, _, range) in candidates {
+        if selected[range.clone()].iter().any(|used| *used) {
+            continue;
+        }
+        selected[range.clone()].fill(true);
+        picks.push(UnitPick {
+            inputs: collect_inputs(&units[range], files),
+            reduces_files: true,
+            units: units.len(),
+            dense_fallback: false,
+        });
+        if picks.len() == max_picks {
+            break;
+        }
+    }
+    picks
+}
+
 /// Picks the interval of `units` that removes the most files within the
 /// rewrite budget, then rewrites the fewest bytes.
 fn pick_reducing_interval(
@@ -1184,6 +1257,112 @@ mod tests {
     };
 
     const MAX_OUTPUT: u64 = 16;
+
+    fn uniform_l1_files(count: usize) -> Vec<FileHandle> {
+        (0..count).map(|_| file(0, 100, b"a", b"z", 2)).collect()
+    }
+
+    #[test]
+    fn test_active_l1_many_owns_each_file_once() {
+        let files = uniform_l1_files(128);
+        let mapper = primary_key_mapper_for_test();
+        let picks = pick_active_l1_many(&files, &mapper, limits(512), 8);
+        assert_eq!(8, picks.len());
+        let mut seen = HashSet::new();
+        for pick in picks {
+            assert_eq!(16, pick.inputs.len());
+            assert!(pick.reduces_files);
+            for file in pick.inputs {
+                assert!(
+                    seen.insert(file.file_id().file_id()),
+                    "same input in two groups"
+                );
+            }
+        }
+        assert_eq!(ids(&files), seen);
+    }
+
+    #[test]
+    fn test_active_l1_many_matches_original_first_pick_and_limit() {
+        let files = uniform_l1_files(128);
+        let mapper = primary_key_mapper_for_test();
+        let first = pick_active_l1(&files, &mapper, limits(512)).unwrap();
+        for count in [1, 2, 4, 8] {
+            let picks = pick_active_l1_many(&files, &mapper, limits(512), count);
+            assert_eq!(count, picks.len());
+            assert_eq!(ids(&first.inputs), ids(&picks[0].inputs));
+        }
+        assert!(pick_active_l1_many(&files, &mapper, limits(512), 0).is_empty());
+    }
+
+    #[test]
+    fn test_active_l1_many_keeps_unmergeable_tail_and_large_peer() {
+        let mapper = primary_key_mapper_for_test();
+        let files = uniform_l1_files(33);
+        let picks = pick_active_l1_many(&files, &mapper, limits(512), 8);
+        assert_eq!(2, picks.len());
+        assert_eq!(32, picks.iter().map(|p| p.inputs.len()).sum::<usize>());
+        let mut files = vec![file(0, 1000, b"a", b"z", 1 << 20)];
+        files.extend(uniform_l1_files(32));
+        let picks = pick_active_l1_many(&files, &mapper, limits(512), 8);
+        assert_eq!(2, picks.len());
+        assert!(
+            picks
+                .iter()
+                .flat_map(|p| &p.inputs)
+                .all(|f| f.file_id() != files[0].file_id())
+        );
+    }
+
+    #[test]
+    fn test_active_l1_many_rejects_nonreducing_files() {
+        let mapper = primary_key_mapper_for_test();
+        let files = (0..32)
+            .map(|_| file(0, 100, b"a", b"z", 1024))
+            .collect::<Vec<_>>();
+        assert!(pick_active_l1_many(&files, &mapper, limits(512), 8).is_empty());
+    }
+
+    #[test]
+    fn test_active_l1_many_random_windows_reduce_file_count() {
+        let mapper = primary_key_mapper_for_test();
+        let mut rng = Rng(731);
+        let mut total_groups = 0;
+        for _ in 0..100 {
+            let mut files = oversized_window(&mut rng);
+            loop {
+                let handles = files.iter().map(|f| f.handle.clone()).collect::<Vec<_>>();
+                let picks = pick_active_l1_many(&handles, &mapper, limits(MAX_OUTPUT), 8);
+                if picks.is_empty() {
+                    break;
+                }
+                assert!(picks.len() <= 8);
+                let old_count = files.len();
+                let mut selected = HashSet::new();
+                let mut outputs = Vec::new();
+                for pick in picks {
+                    assert!((2..=16).contains(&pick.inputs.len()));
+                    let input_ids = ids(&pick.inputs);
+                    for id in &input_ids {
+                        assert!(selected.insert(*id));
+                    }
+                    let inputs = files
+                        .iter()
+                        .filter(|f| input_ids.contains(&f.handle.file_id().file_id()))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let group_outputs = merge(&inputs, &mut rng);
+                    assert!(group_outputs.len() < inputs.len());
+                    outputs.extend(group_outputs);
+                    total_groups += 1;
+                }
+                files.retain(|f| !selected.contains(&f.handle.file_id().file_id()));
+                files.extend(outputs);
+                assert!(files.len() < old_count);
+            }
+        }
+        assert!(total_groups > 0);
+    }
 
     fn file(start: i64, end: i64, min: &[u8], max: &[u8], size: u64) -> FileHandle {
         new_file_handle_with_size_sequence_and_primary_key_range(

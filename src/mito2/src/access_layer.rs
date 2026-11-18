@@ -349,6 +349,29 @@ impl AccessLayer {
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
+        self.write_sst_inner(request, write_opts, metrics, None)
+            .await
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) async fn write_sst_with_guard(
+        &self,
+        request: SstWriteRequest,
+        write_opts: &WriteOptions,
+        metrics: &mut Metrics,
+        guard: Arc<dyn crate::sst::parquet::writer::SstWriteGuard>,
+    ) -> Result<SstInfoArray> {
+        self.write_sst_inner(request, write_opts, metrics, Some(guard))
+            .await
+    }
+
+    async fn write_sst_inner(
+        &self,
+        request: SstWriteRequest,
+        write_opts: &WriteOptions,
+        metrics: &mut Metrics,
+        guard: Option<Arc<dyn crate::sst::parquet::writer::SstWriteGuard>>,
+    ) -> Result<SstInfoArray> {
         let op_type = request.op_type;
         let region_id = request.metadata.region_id;
         let region_metadata = request.metadata.clone();
@@ -359,7 +382,9 @@ impl AccessLayer {
             request.max_sequence
         };
 
-        let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
+        let sst_info = if let Some(write_cache) = cache_manager.write_cache()
+            && guard.is_none()
+        {
             // Write to the write cache.
             write_cache
                 .write_and_upload_sst(
@@ -405,7 +430,13 @@ impl AccessLayer {
                 metrics,
             )
             .await
-            .with_file_cleaner(cleaner);
+            .with_file_cleaner(cleaner)
+            .with_write_concurrency(if guard.is_some() {
+                1
+            } else {
+                crate::sst::DEFAULT_WRITE_CONCURRENCY
+            })
+            .with_write_guard(guard);
             match request.sst_write_format {
                 FormatType::PrimaryKey => {
                     writer

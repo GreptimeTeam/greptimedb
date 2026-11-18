@@ -154,7 +154,7 @@ impl Indexer {
             return true;
         };
 
-        let Err(err) = creator.update_flat(batch).await else {
+        let Err(err) = profile_flat!("inverted", creator.update_flat(batch)) else {
             return true;
         };
 
@@ -179,7 +179,7 @@ impl Indexer {
             return true;
         };
 
-        let Err(err) = creator.update_flat(batch).await else {
+        let Err(err) = profile_flat!("fulltext", creator.update_flat(batch)) else {
             return true;
         };
 
@@ -204,7 +204,7 @@ impl Indexer {
             return true;
         };
 
-        let Err(err) = creator.update_flat(batch).await else {
+        let Err(err) = profile_flat!("bloom", creator.update_flat(batch)) else {
             return true;
         };
 

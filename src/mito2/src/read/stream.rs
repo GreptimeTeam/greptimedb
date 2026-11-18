@@ -35,6 +35,19 @@ use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_scan::SeriesBatch;
 
+macro_rules! pipeline_time {
+    ($name:expr, $future:expr) => {{
+        #[cfg(all(test, target_os = "linux"))]
+        {
+            crate::sst::index::pipeline_profile::measure($name, $future).await
+        }
+        #[cfg(not(all(test, target_os = "linux")))]
+        {
+            $future.await
+        }
+    }};
+}
+
 /// All kinds of [`Batch`]es to produce in scanner.
 pub enum ScanBatch {
     Series(SeriesBatch),
@@ -140,11 +153,12 @@ pub(crate) fn spawn_compact_stream(
     semaphore: Option<Arc<Semaphore>>,
 ) -> BoxedRecordBatchStream {
     let (sender, mut receiver) = mpsc::channel(capacity);
+    let read_source = semaphore.is_some();
     let task = common_runtime::spawn_compact(async move {
         loop {
             // Releases the permit before sending, so a full channel never holds it.
             let permit = match &semaphore {
-                Some(semaphore) => match semaphore.acquire().await {
+                Some(semaphore) => match pipeline_time!("read_slot_wait", semaphore.acquire()) {
                     Ok(permit) => Some(permit),
                     Err(e) => {
                         let reason = format!("Failed to acquire a stream permit: {e}");
@@ -154,14 +168,31 @@ pub(crate) fn spawn_compact_stream(
                 },
                 None => None,
             };
-            let next = stream.next().await;
+            let next = pipeline_time!(
+                if read_source {
+                    "read_produce"
+                } else {
+                    "merge_produce"
+                },
+                stream.next()
+            );
             drop(permit);
             let Some(result) = next else {
                 break;
             };
             // Stops after forwarding the first error or once the consumer is gone.
             let failed = result.is_err();
-            if sender.send(result).await.is_err() || failed {
+            if pipeline_time!(
+                if read_source {
+                    "read_send_wait"
+                } else {
+                    "merge_send_wait"
+                },
+                sender.send(result)
+            )
+            .is_err()
+                || failed
+            {
                 break;
             }
         }
@@ -170,7 +201,9 @@ pub(crate) fn spawn_compact_stream(
     let abort = AbortOnDrop(task.abort_handle());
     Box::pin(try_stream! {
         let _abort = abort;
-        while let Some(batch) = receiver.recv().await {
+        while let Some(batch) = pipeline_time!(
+            if read_source { "merge_receive_input" } else { "writer_receive_merged" },
+            receiver.recv()) {
             yield batch?;
         }
         task.await.context(JoinSnafu)?;

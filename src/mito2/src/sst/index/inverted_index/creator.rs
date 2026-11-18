@@ -239,9 +239,7 @@ impl InvertedIndexer {
                     .index_creator
                     .push_with_name_n(target_key, value, count)
                 {
-                    self.index_creator
-                        .spill()
-                        .await
+                    profile_flat!("inverted_spill", self.index_creator.spill())
                         .context(PushIndexValueSnafu)?;
                 }
             }
@@ -263,9 +261,7 @@ impl InvertedIndexer {
                         .index_creator
                         .push_with_name_n(target_key, value, count)
                     {
-                        self.index_creator
-                            .spill()
-                            .await
+                        profile_flat!("inverted_spill", self.index_creator.spill())
                             .context(PushIndexValueSnafu)?;
                     }
                 }

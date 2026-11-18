@@ -12,6 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod flat_profile;
+
+macro_rules! profile_flat {
+    ($name:expr, $future:expr) => {{
+        #[cfg(all(test, target_os = "linux"))]
+        {
+            crate::sst::index::flat_profile::measure($name, $future).await
+        }
+        #[cfg(not(all(test, target_os = "linux")))]
+        {
+            $future.await
+        }
+    }};
+}
+
 pub(crate) mod bloom_filter;
 mod column;
 #[cfg(test)]
@@ -341,8 +357,11 @@ impl Indexer {
 
     /// Updates the index with the given flat format RecordBatch.
     pub async fn update_flat(&mut self, batch: &RecordBatch) {
-        self.do_update_flat(batch).await;
+        profile_flat!("update_flat", self.do_update_flat(batch));
 
+        #[cfg(all(test, target_os = "linux"))]
+        flat_profile::sync("flush_mem_metrics", || self.flush_mem_metrics());
+        #[cfg(not(all(test, target_os = "linux")))]
         self.flush_mem_metrics();
     }
 
@@ -3071,3 +3090,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod pipeline_profile;

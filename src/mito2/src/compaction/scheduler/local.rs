@@ -211,6 +211,13 @@ impl CompactionScheduler {
 
     /// Accepts an edit from any current unit that has started committing and is not finished.
     pub(crate) fn can_apply_unit(&self, region_id: RegionId, id: u64) -> bool {
+        #[cfg(feature = "enterprise")]
+        if super::hybrid::is_shared_plan(id) && !self.shared_lane {
+            return self
+                .shared
+                .as_ref()
+                .is_some_and(|s| s.can_apply_unit(region_id, id));
+        }
         self.region_status.get(&region_id).is_some_and(|status| {
             matches!(&status.active.phase, CompactionPhase::Units(local)
                 if local.can_apply(id))
@@ -224,6 +231,13 @@ impl CompactionScheduler {
         id: u64,
         result: std::result::Result<bool, Arc<Error>>,
     ) {
+        #[cfg(feature = "enterprise")]
+        if super::hybrid::is_shared_plan(id) && !self.shared_lane {
+            if let Some(s) = &mut self.shared {
+                s.on_unit_finished(region_id, id, result);
+            }
+            return;
+        }
         if let Some(local) = self.local_units_mut(region_id) {
             local.finish(id, result);
         }
@@ -231,6 +245,27 @@ impl CompactionScheduler {
 
     /// Accounts for task exit, starts pending units, and checks request completion.
     pub(crate) async fn on_unit_released(
+        &mut self,
+        region_id: RegionId,
+        id: u64,
+        manifest: &ManifestContextRef,
+        schemas: SchemaMetadataManagerRef,
+    ) -> CompactionTransition {
+        #[cfg(feature = "enterprise")]
+        if super::hybrid::is_shared_plan(id) && !self.shared_lane {
+            let Some(shared) = self.shared.as_mut() else {
+                return CompactionTransition::NoAction;
+            };
+            let transition = shared
+                .on_unit_released_inner(region_id, id, manifest, schemas.clone())
+                .await;
+            return self.after_shared_event(region_id, manifest, schemas, transition);
+        }
+        self.on_unit_released_inner(region_id, id, manifest, schemas)
+            .await
+    }
+
+    async fn on_unit_released_inner(
         &mut self,
         region_id: RegionId,
         id: u64,

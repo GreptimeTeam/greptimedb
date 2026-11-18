@@ -47,6 +47,19 @@ use crate::sst::parquet::flat_format::{
 };
 use crate::sst::parquet::format::{FIXED_POS_COLUMN_NUM, PrimaryKeyArray};
 
+macro_rules! pipeline_time {
+    ($name:expr, $future:expr) => {{
+        #[cfg(all(test, target_os = "linux"))]
+        {
+            crate::sst::index::pipeline_profile::measure($name, $future).await
+        }
+        #[cfg(not(all(test, target_os = "linux")))]
+        {
+            $future.await
+        }
+    }};
+}
+
 /// Checks whether interleaving the selected rows from byte columns would overflow
 /// i32 offsets. Similar to arrow-rs `interleave_bytes()`, accumulates offsets and
 /// returns an error if the capacity exceeds `i32::MAX`.
@@ -361,6 +374,8 @@ impl BatchBuilder {
     ///
     /// Returns `None` if no pending rows
     pub fn build_record_batch(&mut self) -> Result<Option<RecordBatch>> {
+        #[cfg(all(test, target_os = "linux"))]
+        let _timing = crate::sst::index::pipeline_profile::SyncScope::new("merge_materialize");
         if self.is_empty() {
             return Ok(None);
         }
@@ -797,12 +812,33 @@ impl FlatMergeIterator {
         iters: Vec<BoxedRecordBatchIterator>,
         batch_size: usize,
     ) -> Result<Self> {
+        Self::build(schema, iters, batch_size, |_| 0)
+    }
+
+    /// Breaks equal row keys by input order, preserving source order across batches.
+    /// Callers performing multiple merge passes must supply contiguous source intervals.
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn new_stable(
+        schema: SchemaRef,
+        iters: Vec<BoxedRecordBatchIterator>,
+        batch_size: usize,
+    ) -> Result<Self> {
+        Self::build(schema, iters, batch_size, |index| index)
+    }
+
+    fn build(
+        schema: SchemaRef,
+        iters: Vec<BoxedRecordBatchIterator>,
+        batch_size: usize,
+        source_rank: fn(usize) -> usize,
+    ) -> Result<Self> {
         let mut in_progress = BatchBuilder::new(schema, iters.len(), batch_size);
         let mut nodes = Vec::with_capacity(iters.len());
         // Initialize nodes and the buffer.
         for (node_index, iter) in iters.into_iter().enumerate() {
             let mut node = IterNode {
                 node_index,
+                stable_rank: source_rank(node_index),
                 iter,
                 cursor: None,
             };
@@ -944,6 +980,25 @@ impl FlatMergeReader {
         batch_size: usize,
         metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
     ) -> Result<Self> {
+        Self::with_source_rank(schema, iters, batch_size, metrics_reporter, |_| 0).await
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) async fn new_stable(
+        schema: SchemaRef,
+        iters: Vec<BoxedRecordBatchStream>,
+        batch_size: usize,
+    ) -> Result<Self> {
+        Self::with_source_rank(schema, iters, batch_size, None, |n| n).await
+    }
+
+    async fn with_source_rank(
+        schema: SchemaRef,
+        iters: Vec<BoxedRecordBatchStream>,
+        batch_size: usize,
+        metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
+        rank: fn(usize) -> usize,
+    ) -> Result<Self> {
         let start = Instant::now();
         let metrics = MergeMetrics::default();
         let mut in_progress = BatchBuilder::new(schema, iters.len(), batch_size);
@@ -952,6 +1007,7 @@ impl FlatMergeReader {
         for (node_index, iter) in iters.into_iter().enumerate() {
             let mut node = StreamNode {
                 node_index,
+                stable_rank: rank(node_index),
                 iter,
                 cursor: None,
             };
@@ -1010,7 +1066,7 @@ impl FlatMergeReader {
     /// Converts the reader into a stream.
     pub fn into_stream(mut self) -> impl Stream<Item = Result<RecordBatch>> {
         try_stream! {
-            while let Some(batch) = self.next_batch().await? {
+            while let Some(batch) = pipeline_time!("merge_kernel", self.next_batch())? {
                 yield batch;
             }
         }
@@ -1105,6 +1161,8 @@ impl Drop for FlatMergeReader {
 struct GenericNode<T> {
     /// Index of the node.
     node_index: usize,
+    /// Optional source-order tie breaker; zero retains the original comparison.
+    stable_rank: usize,
     /// Iterator of this `Node`.
     iter: T,
     /// Current batch to be read. The node should ensure the batch is not empty (The
@@ -1140,7 +1198,7 @@ impl<T> NodeCmp for GenericNode<T> {
 
 impl<T> PartialEq for GenericNode<T> {
     fn eq(&self, other: &GenericNode<T>) -> bool {
-        self.cursor == other.cursor
+        self.cursor == other.cursor && self.stable_rank == other.stable_rank
     }
 }
 
@@ -1156,7 +1214,10 @@ impl<T> Ord for GenericNode<T> {
     fn cmp(&self, other: &GenericNode<T>) -> Ordering {
         // The std binary heap is a max heap, but we want the nodes are ordered in
         // ascend order, so we compare the nodes in reverse order.
-        other.cursor.cmp(&self.cursor)
+        other
+            .cursor
+            .cmp(&self.cursor)
+            .then_with(|| other.stable_rank.cmp(&self.stable_rank))
     }
 }
 
@@ -1236,7 +1297,7 @@ impl GenericNode<BoxedRecordBatchStream> {
 
     /// Fetches a non-empty batch from the iter.
     async fn advance_inner_iter(&mut self) -> Result<Option<RecordBatch>> {
-        while let Some(batch) = self.iter.try_next().await? {
+        while let Some(batch) = pipeline_time!("merge_input_next", self.iter.try_next())? {
             if batch.num_rows() > 0 {
                 return Ok(Some(batch));
             }

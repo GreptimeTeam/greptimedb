@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub(crate) mod experiment;
+
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
@@ -434,6 +437,26 @@ impl CompactionContext {
         &self,
         merge_output: MergeOutput,
     ) -> Result<(RegionEdit, ManifestVersion)> {
+        #[cfg(feature = "enterprise")]
+        let shared_stats = if experiment::enabled(self.region_id)
+            && experiment::shared_inputs(merge_output.files_to_remove.iter())
+        {
+            Some((
+                merge_output.files_to_add.len(),
+                merge_output
+                    .files_to_add
+                    .iter()
+                    .map(|f| f.num_rows)
+                    .sum::<u64>(),
+                merge_output
+                    .files_to_add
+                    .iter()
+                    .map(|f| f.file_size)
+                    .sum::<u64>(),
+            ))
+        } else {
+            None
+        };
         let edit = RegionEdit {
             files_to_add: merge_output.files_to_add,
             files_to_remove: merge_output.files_to_remove,
@@ -452,6 +475,18 @@ impl CompactionContext {
             .update_manifest_for_compaction(action_list)
             .await?;
 
+        #[cfg(feature = "enterprise")]
+        if let Some((files, rows, bytes)) = shared_stats {
+            experiment::record_publication(self, &edit.files_to_remove).await?;
+            common_telemetry::info!(
+                "hybrid_shared_published region={} files={} rows={} bytes={} manifest={}",
+                self.region_id,
+                files,
+                rows,
+                bytes,
+                manifest_version
+            );
+        }
         Ok((edit, manifest_version))
     }
 }
@@ -772,6 +807,12 @@ impl<M: SstMerger> DefaultCompactor<M> {
         context: &CompactionContext,
         unit: &CompactionUnit,
     ) -> Result<MergeOutput> {
+        #[cfg(feature = "enterprise")]
+        if experiment::enabled(context.region_id)
+            && experiment::shared_inputs(unit.inputs.iter().map(|f| f.meta_ref()))
+        {
+            return experiment::merge(context, unit, self.cancel_handle.clone()).await;
+        }
         let mut result = MergeOutput {
             files_to_remove: unit.inputs.iter().map(|f| f.meta_ref().clone()).collect(),
             compaction_time_window: Some(unit.time_window_size),
@@ -857,9 +898,36 @@ where
             let context = context.clone();
             let uncommitted = self.uncommitted.clone();
             let fut = async move {
+                let region_id = context.region_id;
+                let group = output
+                    .inputs
+                    .first()
+                    .map(|f| f.file_id().to_string())
+                    .unwrap_or_default();
+                let rows = output
+                    .inputs
+                    .iter()
+                    .map(|f| f.meta_ref().num_rows)
+                    .sum::<u64>();
+                let started = std::time::Instant::now();
+                common_telemetry::info!(
+                    "testbed_l1_group_start region={} group={} files={} rows={} encode_parallelism={}",
+                    region_id.as_u64(),
+                    group,
+                    output.inputs.len(),
+                    rows,
+                    write_opts.encode_parallelism
+                );
                 let result = merger
                     .merge_single_output(context, output, write_opts)
                     .await;
+                common_telemetry::info!(
+                    "testbed_l1_group_end region={} group={} elapsed_us={} success={}",
+                    region_id.as_u64(),
+                    group,
+                    started.elapsed().as_micros(),
+                    result.is_ok()
+                );
                 if let (Some(uncommitted), Ok((_, infos))) = (&uncommitted, &result) {
                     uncommitted.track(infos);
                 }
@@ -1599,14 +1667,26 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::successful_outputs(false)]
-    #[case::join_error(true)]
+    #[case::successful_outputs(false, 2)]
+    #[case::join_error(true, 2)]
+    #[case::ordinary_eight(false, 8)]
+    #[case::scanner_sixteen(false, 16)]
+    #[case::scanner_twenty_four(false, 24)]
     #[tokio::test]
-    async fn test_merge_ssts_cancellation_waits_for_encoders(#[case] panic_merge: bool) {
+    async fn test_merge_ssts_cancellation_waits_for_encoders(
+        #[case] panic_merge: bool,
+        #[case] parallelism: usize,
+    ) {
+        // The fixture blocks every encoder before release; all cases need
+        // enough threads to reach their gates concurrently.
+        common_runtime::init_global_runtimes(&common_runtime::global::RuntimeOptions {
+            compact_rt_max_blocking_threads: 32,
+            ..Default::default()
+        });
         let mut region = new_test_compaction_region().await;
-        region.max_parallelism = 2;
+        region.max_parallelism = parallelism;
         region.region_options.compaction_output_parallelism = Some(2);
-        let inputs: Vec<_> = (0..3).map(|_| dummy_file_meta()).collect();
+        let inputs: Vec<_> = (0..parallelism + 1).map(|_| dummy_file_meta()).collect();
         let picker_output = PickerOutput {
             outputs: inputs
                 .iter()
@@ -1638,7 +1718,7 @@ mod tests {
         });
         assert!(futures::poll!(merge.as_mut()).is_pending());
         let mut encoders = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..parallelism {
             encoders.push(
                 timeout(Duration::from_secs(10), started_rx.recv())
                     .await

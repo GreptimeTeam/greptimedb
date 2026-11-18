@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+mod hybrid;
 mod local;
 mod planning;
 mod state;
@@ -35,6 +37,7 @@ use tokio::sync::mpsc::Sender;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::memory_manager::CompactionMemoryManager;
+#[cfg(not(feature = "enterprise"))]
 use crate::compaction::task::MAX_PARALLEL_COMPACTION;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -100,6 +103,12 @@ pub(crate) struct CompactionScheduler {
     /// Scheduler-wide generation counter for compaction plans and executions.
     /// It outlives region statuses so close/reopen cannot reuse an old identity.
     next_plan_id: u64,
+    #[cfg(feature = "enterprise")]
+    shared: Option<Box<CompactionScheduler>>,
+    #[cfg(feature = "enterprise")]
+    shared_lane: bool,
+    #[cfg(feature = "enterprise")]
+    ddl_blocked: std::collections::HashSet<RegionId>,
 }
 
 /// Describes the immediate action produced by a compaction terminal transition.
@@ -172,6 +181,12 @@ impl CompactionScheduler {
             listener,
             plugins,
             next_plan_id: 0,
+            #[cfg(feature = "enterprise")]
+            shared: None,
+            #[cfg(feature = "enterprise")]
+            shared_lane: false,
+            #[cfg(feature = "enterprise")]
+            ddl_blocked: Default::default(),
         }
     }
 
@@ -182,6 +197,11 @@ impl CompactionScheduler {
         access_layer: &AccessLayerRef,
     ) {
         let region_id = version_control.region_id();
+        #[cfg(feature = "enterprise")]
+        if !self.shared_lane && crate::compaction::compactor::experiment::enabled(region_id) {
+            self.shared_scheduler()
+                .register_region(version_control, access_layer);
+        }
         if let Some(status) = self.region_status.get_mut(&region_id) {
             if Arc::ptr_eq(&status.version_control, version_control) {
                 return;
@@ -224,7 +244,21 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Result<bool> {
-        self.schedule_compaction(
+        #[cfg(feature = "enterprise")]
+        let shared_started = if !self.shared_lane
+            && crate::compaction::compactor::experiment::enabled(version_control.region_id())
+        {
+            self.shared_scheduler().schedule_automatic_compaction(
+                compact_options.clone(),
+                version_control,
+                access_layer,
+                manifest_ctx,
+                schema_metadata_manager.clone(),
+            )?
+        } else {
+            false
+        };
+        let started = self.schedule_compaction(
             CompactionTrigger::Automatic,
             compact_options,
             version_control,
@@ -232,9 +266,26 @@ impl CompactionScheduler {
             OptionOutputTx::none(),
             manifest_ctx,
             schema_metadata_manager,
-            1, // Default for automatic compaction
+            {
+                #[cfg(feature = "enterprise")]
+                {
+                    crate::compaction::compactor::experiment::automatic_parallelism()
+                }
+                #[cfg(not(feature = "enterprise"))]
+                {
+                    1
+                }
+            },
             None,
-        )
+        )?;
+        #[cfg(feature = "enterprise")]
+        {
+            return Ok(started || shared_started);
+        }
+        #[cfg(not(feature = "enterprise"))]
+        {
+            Ok(started)
+        }
     }
 
     /// Accepts a manual compaction request for a region.
@@ -266,6 +317,21 @@ impl CompactionScheduler {
         max_parallelism: usize,
         time_range: Option<TimestampRange>,
     ) -> Result<bool> {
+        #[cfg(feature = "enterprise")]
+        if !self.shared_lane
+            && crate::compaction::compactor::experiment::enabled(version_control.region_id())
+        {
+            return self.shared_scheduler().schedule_manual_compaction(
+                compact_options,
+                version_control,
+                access_layer,
+                waiter,
+                manifest_ctx,
+                schema_metadata_manager,
+                max_parallelism,
+                time_range,
+            );
+        }
         self.schedule_compaction(
             CompactionTrigger::Manual,
             compact_options,
@@ -299,6 +365,38 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> CompactionTransition {
+        #[cfg(feature = "enterprise")]
+        if hybrid::is_shared_plan(finished.plan_id) && !self.shared_lane {
+            let region_id = finished.region_id;
+            let retry = matches!(
+                &finished.result,
+                planning::CompactionPlanningResult::RetryShared
+            );
+            let Some(shared) = self.shared.as_mut() else {
+                return CompactionTransition::NoAction;
+            };
+            let transition = shared
+                .handle_compaction_pick_finished_inner(
+                    finished,
+                    manifest_ctx,
+                    schema_metadata_manager.clone(),
+                )
+                .await;
+            if retry
+                && !self
+                    .region_status
+                    .get(&region_id)
+                    .is_some_and(|s| s.has_ddl())
+            {
+                return transition;
+            }
+            return self.after_shared_event(
+                region_id,
+                manifest_ctx,
+                schema_metadata_manager,
+                transition,
+            );
+        }
         self.handle_compaction_pick_finished_inner(finished, manifest_ctx, schema_metadata_manager)
             .await
     }
@@ -422,6 +520,10 @@ impl CompactionScheduler {
     ///
     /// The owning worker must invoke this after truncate completes.
     pub(crate) fn on_region_truncated(&mut self, region_id: RegionId) {
+        #[cfg(feature = "enterprise")]
+        if let Some(shared) = &mut self.shared {
+            shared.on_region_truncated(region_id);
+        }
         self.fail_compaction(
             region_id,
             Arc::new(RegionTruncatedSnafu { region_id }.build()),
@@ -453,7 +555,23 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return Err((sender, request));
         };
-        if !status.is_compacting() {
+        #[cfg(feature = "enterprise")]
+        let shared_running = self.shared.as_mut().is_some_and(|shared| {
+            let running = shared
+                .region_status
+                .get(&region_id)
+                .is_some_and(CompactionStatus::is_compacting);
+            if running || status.is_compacting() {
+                shared.ddl_blocked.insert(region_id);
+                if let Some(s) = shared.region_status.get_mut(&region_id) {
+                    s.request_cancel();
+                }
+            }
+            running
+        });
+        #[cfg(not(feature = "enterprise"))]
+        let shared_running = false;
+        if !status.is_compacting() && !shared_running {
             return Err((sender, request));
         }
         status.request_cancel();
@@ -509,6 +627,11 @@ impl CompactionScheduler {
             return Ok(false);
         }
         let region_id = version_control.region_id();
+        #[cfg(feature = "enterprise")]
+        if self.ddl_blocked.contains(&region_id) {
+            waiter.send(CompactionCancelledSnafu.fail());
+            return Ok(false);
+        }
         let status = self.region_status.entry(region_id).or_insert_with(|| {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone())
         });
@@ -686,6 +809,10 @@ impl CompactionScheduler {
         if self.disable_compaction {
             return false;
         }
+        #[cfg(feature = "enterprise")]
+        if self.ddl_blocked.contains(&region_id) {
+            return false;
+        }
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
         };
@@ -697,7 +824,16 @@ impl CompactionScheduler {
             manifest_ctx,
             self.listener.clone(),
             schema_metadata_manager,
-            MAX_PARALLEL_COMPACTION,
+            {
+                #[cfg(feature = "enterprise")]
+                {
+                    crate::compaction::compactor::experiment::automatic_parallelism()
+                }
+                #[cfg(not(feature = "enterprise"))]
+                {
+                    MAX_PARALLEL_COMPACTION
+                }
+            },
         );
         // Bump the counter through a disjoint field borrow so the `status`
         // borrow stays alive; nothing could have removed the status since it
@@ -763,6 +899,13 @@ impl CompactionScheduler {
 
     /// Unregisters a closed or dropped region and fails its queued requests.
     fn remove_region(&mut self, region_id: RegionId, err: Arc<Error>) {
+        #[cfg(feature = "enterprise")]
+        {
+            self.ddl_blocked.remove(&region_id);
+            if let Some(shared) = &mut self.shared {
+                shared.remove_region(region_id, err.clone());
+            }
+        }
         if let Some(mut status) = self.region_status.remove(&region_id) {
             status.on_failure(err);
         }
@@ -772,6 +915,10 @@ impl CompactionScheduler {
     fn fail_compaction(&mut self, region_id: RegionId, err: Arc<Error>) {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             status.on_failure(err);
+        }
+        #[cfg(feature = "enterprise")]
+        if let Some(shared) = &mut self.shared {
+            shared.ddl_blocked.remove(&region_id);
         }
     }
 
@@ -794,6 +941,17 @@ impl CompactionScheduler {
             .is_empty()
         {
             return None;
+        }
+        #[cfg(feature = "enterprise")]
+        if self.shared_running(region_id) {
+            // This lane has terminated; the other lane will hand off the DDL.
+            if let Some(status) = self.region_status.get_mut(&region_id) {
+                for waiter in status.take_waiters() {
+                    waiter.send(CompactionCancelledSnafu.fail());
+                }
+                status.become_idle();
+            }
+            return Some(Vec::new());
         }
         Some(self.finish_compaction_on_cancel(region_id))
     }
@@ -877,6 +1035,10 @@ impl CompactionScheduler {
             && ddl.complete(generation, request_index)
         {
             status.executing_ddl = None;
+            #[cfg(feature = "enterprise")]
+            if let Some(shared) = &mut self.shared {
+                shared.ddl_blocked.remove(&region_id);
+            }
         }
     }
 }

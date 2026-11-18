@@ -163,6 +163,10 @@ impl LocalFilePurger {
 
     /// Deletes the file(and it's index, if any) from cache and storage.
     fn delete_file(&self, file_meta: FileMeta) {
+        #[cfg(feature = "enterprise")]
+        if crate::compaction::compactor::experiment::enabled(file_meta.region_id) {
+            return;
+        }
         let sst_layer = self.sst_layer.clone();
         let cache_manager = self.cache_manager.clone();
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {

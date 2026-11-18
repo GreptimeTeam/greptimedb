@@ -21,6 +21,18 @@ includes = [
 ]
 
 excludes = [
+    "src/mito2/src/compaction/scheduler/hybrid.rs",
+    "src/mito2/src/compaction/compactor/experiment/parallelism.rs",
+    "src/mito2/src/compaction/multi_region/worker.rs",
+    "src/mito2/src/compaction/multi_region/spill.rs",
+    "src/mito2/src/compaction/multi_region/source.rs",
+    "src/mito2/src/compaction/multi_region/streaming.rs",
+    "src/mito2/src/compaction/multi_region/tests.rs",
+    "src/mito2/src/compaction/multi_region/writer.rs",
+    "src/mito2/src/compaction/multi_region/streaming/writer_block.rs",
+    "src/mito2/src/compaction/multi_region.rs",
+    "src/mito2/src/compaction/compactor/experiment.rs",
+    "src/mito2/src/compaction/compactor/experiment/batch_window.rs",
     # copied sources
     "src/common/base/src/readable_size.rs",
     "src/common/base/src/secrets.rs",

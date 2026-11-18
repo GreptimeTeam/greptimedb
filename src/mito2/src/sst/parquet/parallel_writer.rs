@@ -32,6 +32,19 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
 
+macro_rules! pipeline_time {
+    ($name:expr, $future:expr) => {{
+        #[cfg(all(test, target_os = "linux"))]
+        {
+            crate::sst::index::pipeline_profile::measure($name, $future).await
+        }
+        #[cfg(not(all(test, target_os = "linux")))]
+        {
+            $future.await
+        }
+    }};
+}
+
 /// Runtime whose blocking pool encodes the columns of a writer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EncodeRuntime {
@@ -209,8 +222,19 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
             .map(|fields| {
                 let batches = batches.clone();
                 let schema = self.arrow_schema.clone();
-                self.runtime
-                    .spawn(move || encode_fields(&schema, &batches, fields))
+                #[cfg(all(test, target_os = "linux"))]
+                let submitted = Instant::now();
+                self.runtime.spawn(move || {
+                    #[cfg(all(test, target_os = "linux"))]
+                    crate::sst::index::pipeline_profile::queue_wait(
+                        "encode_queue_wait",
+                        submitted.elapsed(),
+                    );
+                    #[cfg(all(test, target_os = "linux"))]
+                    let _timing =
+                        crate::sst::index::pipeline_profile::SyncScope::new("encode_task");
+                    encode_fields(&schema, &batches, fields)
+                })
             })
             .collect();
         Ok(())
@@ -224,8 +248,7 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
         let mut chunks = Vec::with_capacity(self.leaf_fields.len());
         let mut tasks = mem::take(&mut self.encoding).into_iter();
         while let Some(task) = tasks.next() {
-            let encoded = task
-                .await
+            let encoded = pipeline_time!("encode_join_wait", task)
                 .map_err(|e| ParquetError::External(Box::new(e)))
                 .and_then(|encoded| encoded);
             let (task_chunks, costs) = match encoded {
@@ -240,12 +263,17 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
                 self.field_costs[field] = cost;
             }
         }
+        #[cfg(all(test, target_os = "linux"))]
+        let assembly_timing =
+            crate::sst::index::pipeline_profile::SyncScope::new("encode_assemble");
         chunks.sort_unstable_by_key(|(leaf, _)| *leaf);
         let mut row_group = self.file_writer.next_row_group()?;
         for (_, chunk) in chunks {
             chunk.append_to_row_group(&mut row_group)?;
         }
         row_group.close()?;
+        #[cfg(all(test, target_os = "linux"))]
+        drop(assembly_timing);
         self.write_buffered_bytes().await
     }
 
@@ -255,7 +283,10 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
         if bytes.is_empty() {
             return Ok(());
         }
-        self.async_writer.write(Bytes::from(bytes)).await
+        pipeline_time!(
+            "sst_output_write",
+            self.async_writer.write(Bytes::from(bytes))
+        )
     }
 }
 
@@ -310,6 +341,10 @@ fn encode_fields(
     let mut chunks = Vec::new();
     let mut costs = Vec::with_capacity(fields.len());
     for (field, mut writers) in fields {
+        #[cfg(all(test, target_os = "linux"))]
+        let _timing = crate::sst::index::pipeline_profile::SyncScope::new(
+            crate::sst::index::pipeline_profile::field_stage(field),
+        );
         let start = Instant::now();
         for batch in batches {
             let leaves = compute_leaves(schema.field(field), batch.column(field))?;

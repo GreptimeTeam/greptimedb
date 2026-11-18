@@ -79,6 +79,9 @@ impl CompactionRequest {
 pub(crate) enum CompactionPlanningResult {
     Prepared(PreparedCompaction),
     NoPlan,
+    /// A shared roster/readiness miss while a full batch remains registered.
+    #[cfg(feature = "enterprise")]
+    RetryShared,
     Error(Arc<Error>),
 }
 
@@ -90,6 +93,8 @@ impl fmt::Debug for CompactionPlanningResult {
                 .field(&prepared.compaction_region.region_id)
                 .finish(),
             Self::NoPlan => f.write_str("NoPlan"),
+            #[cfg(feature = "enterprise")]
+            Self::RetryShared => f.write_str("RetryShared"),
             Self::Error(err) => f.debug_tuple("Error").field(err).finish(),
         }
     }
@@ -131,6 +136,8 @@ impl CompactionScheduler {
                 max_background_compactions,
                 time_range,
                 trigger,
+                #[cfg(feature = "enterprise")]
+                super::hybrid::is_shared_plan(plan_id),
             );
             Self::notify_planning_result(region_id, plan_id, request_sender, planning).await;
         });
@@ -185,6 +192,7 @@ impl CompactionScheduler {
         max_background_compactions: usize,
         time_range: Option<TimestampRange>,
         trigger: CompactionTrigger,
+        #[cfg(feature = "enterprise")] shared_lane: bool,
     ) -> CompactionPlanningResult {
         let region_id = request.region_id();
         let (dynamic_compaction_opts, ttl) = find_dynamic_options(
@@ -253,12 +261,46 @@ impl CompactionScheduler {
         let _pick_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["pick"])
             .start_timer();
-        let picker_output = match picker.pick(&compaction_region).await {
+        #[cfg(feature = "enterprise")]
+        let picked = if crate::compaction::compactor::experiment::enabled(region_id) {
+            if shared_lane {
+                crate::compaction::compactor::experiment::pick(&compaction_region).await
+            } else {
+                let mut local_only = compaction_region.clone();
+                local_only.current_version.ssts =
+                    Arc::new(local_only.current_version.ssts.without_shared_l0());
+                picker.pick(&local_only).await
+            }
+        } else {
+            picker.pick(&compaction_region).await
+        };
+        #[cfg(not(feature = "enterprise"))]
+        let picked = picker.pick(&compaction_region).await;
+        let picker_output = match picked {
             Ok(output) => output,
             Err(err) => return CompactionPlanningResult::Error(Arc::new(err)),
         };
 
         let Some(picker_output) = picker_output else {
+            #[cfg(feature = "enterprise")]
+            if shared_lane
+                && crate::compaction::compactor::experiment::has_pending_shared_batch(
+                    &compaction_region.current_version.ssts,
+                )
+            {
+                // Remain in Picking, so writes coalesce and close/DDL retain the
+                // existing generation/cancellation handling. No compaction slot
+                // or SST snapshot is held during the delay.
+                drop(compaction_region);
+                drop(current_version);
+                drop(_pick_timer);
+                common_telemetry::debug!(
+                    "hybrid_shared_ready_retry region={} delay_ms=500",
+                    region_id
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                return CompactionPlanningResult::RetryShared;
+            }
             return CompactionPlanningResult::NoPlan;
         };
 
@@ -302,6 +344,19 @@ impl CompactionScheduler {
         }
 
         match finished.result {
+            #[cfg(feature = "enterprise")]
+            CompactionPlanningResult::RetryShared => {
+                if let Some(status) = self.region_status.get_mut(&region_id) {
+                    status.mark_automatic_trigger();
+                }
+                self.finish_compaction_planning(
+                    region_id,
+                    None,
+                    manifest_ctx,
+                    schema_metadata_manager,
+                )
+                .await
+            }
             CompactionPlanningResult::Prepared(mut prepared) => {
                 let current = status.version_control.current().version;
                 let Some(picker_output) =
@@ -444,11 +499,38 @@ impl CompactionScheduler {
             ttl,
         } = prepared;
         let region_id = compaction_region.region_id;
-        let dynamic_compaction_opts = &compaction_region.region_options.compaction;
 
         // If specified to run compaction remotely, we schedule the compaction job remotely.
         // It will fall back to local compaction if there is no remote job scheduler.
-        let waiters = if dynamic_compaction_opts.remote_compaction() {
+        #[cfg(feature = "enterprise")]
+        let shared_local = crate::compaction::compactor::experiment::enabled(region_id)
+            && crate::compaction::compactor::experiment::shared_inputs(
+                picker_output
+                    .outputs
+                    .iter()
+                    .flat_map(|o| o.inputs.iter().map(|f| f.meta_ref())),
+            );
+        #[cfg(not(feature = "enterprise"))]
+        let shared_local = false;
+        #[cfg(feature = "enterprise")]
+        let compaction_region = {
+            let mut region = compaction_region;
+            region.max_parallelism = crate::compaction::compactor::experiment::merge_parallelism(
+                region_id,
+                shared_local,
+                region.max_parallelism,
+            );
+            common_telemetry::info!(
+                "hybrid_parallelism region={} shared={} max_parallelism={} outputs={}",
+                region_id,
+                shared_local,
+                region.max_parallelism,
+                picker_output.outputs.len()
+            );
+            region
+        };
+        let dynamic_compaction_opts = &compaction_region.region_options.compaction;
+        let waiters = if dynamic_compaction_opts.remote_compaction() && !shared_local {
             if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
                 let execution = CompactionExecution::new(plan_id, files.clone());
                 let remote_compaction_job = CompactionJob {

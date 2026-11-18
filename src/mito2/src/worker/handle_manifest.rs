@@ -686,6 +686,10 @@ async fn edit_region(
         && preload_sst_cache
     {
         for file_meta in &edit.files_to_add {
+            #[cfg(feature = "enterprise")]
+            if crate::compaction::compactor::experiment::enabled(region_id) {
+                continue;
+            }
             let write_cache = write_cache.clone();
             let layer = region.access_layer.clone();
             let listener = listener.clone();

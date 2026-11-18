@@ -59,6 +59,17 @@ impl SstVersion {
         self.levels.as_ref()
     }
 
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn without_shared_l0(&self) -> Self {
+        let mut filtered = self.clone();
+        for level in Arc::make_mut(&mut filtered.levels) {
+            level
+                .files
+                .retain(|_, f| !crate::compaction::compactor::experiment::is_shared(f.meta_ref()));
+        }
+        filtered
+    }
+
     /// Returns the current handle matching the selected file's identity in its immutable level.
     pub(crate) fn file_for_compaction(&self, selected: &FileHandle) -> Option<&FileHandle> {
         let current = self
