@@ -521,11 +521,75 @@ impl ExecutionPlan for Scripted {
 
 /// A task context whose memory pool is `pool`, so what the node charges can be read afterwards.
 fn task_context(pool: &Arc<GreedyMemoryPool>) -> Arc<TaskContext> {
+    context_over(Arc::clone(pool) as Arc<dyn MemoryPool>)
+}
+
+/// A task context over `pool`, for a test that keeps its own pool to read it afterwards.
+fn context_over(pool: Arc<dyn MemoryPool>) -> Arc<TaskContext> {
     let runtime = RuntimeEnvBuilder::new()
-        .with_memory_pool(Arc::clone(pool) as Arc<dyn MemoryPool>)
+        .with_memory_pool(pool)
         .build()
         .expect("the runtime environment builds");
     Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
+}
+
+/// A pool that counts the consumers registered with it, so a test can see how many entries the node
+/// adds whatever the input carries.
+#[derive(Debug)]
+struct RegistrationCountingPool {
+    inner: GreedyMemoryPool,
+    registrations: AtomicUsize,
+}
+
+impl RegistrationCountingPool {
+    fn new(bytes: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: GreedyMemoryPool::new(bytes),
+            registrations: AtomicUsize::new(0),
+        })
+    }
+
+    /// How many consumers were registered with the pool, in total.
+    fn registrations(&self) -> usize {
+        self.registrations.load(Ordering::SeqCst)
+    }
+}
+
+impl fmt::Display for RegistrationCountingPool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "registration counting test pool")
+    }
+}
+
+impl MemoryPool for RegistrationCountingPool {
+    fn name(&self) -> &str {
+        "registration counting test pool"
+    }
+
+    fn register(&self, consumer: &MemoryConsumer) {
+        self.registrations.fetch_add(1, Ordering::SeqCst);
+        self.inner.register(consumer);
+    }
+
+    fn unregister(&self, consumer: &MemoryConsumer) {
+        self.inner.unregister(consumer);
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.inner.grow(reservation, additional);
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        self.inner.shrink(reservation, shrink);
+    }
+
+    fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> DataFusionResult<()> {
+        self.inner.try_grow(reservation, additional)
+    }
+
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
 }
 
 /// The node over `child` routing into `outputs` partitions.
@@ -2692,6 +2756,42 @@ async fn single_fragment_large_identity_fits_finite_payload_budget() {
     );
 }
 
+/// Each identity used to register a pool consumer of its own, so the pool's bookkeeping grew with
+/// the number of series an output routed. The stream registers once per output stream now, and the
+/// identity's descriptor, an owner's merge workspace and a raw owner's reconstruction are
+/// reservations split off it: more identities must not mean more entries, and the bytes each of
+/// them holds are still released.
+#[tokio::test]
+async fn pool_entries_follow_output_streams_not_identities() {
+    let registrations = |identities: usize| async move {
+        let steps: Vec<Step> = (0..identities)
+            .map(|index| Step::chunk(chunk(labels(&format!("h{index:03}")), 1, 1, true)))
+            .collect();
+        let pool = RegistrationCountingPool::new(1 << 20);
+        let context = context_over(Arc::clone(&pool) as Arc<dyn MemoryPool>);
+        let plan: Arc<dyn ExecutionPlan> = node(Scripted::plan(vec![steps]), 1);
+        let outputs = drain(&plan, &context).await;
+        let chunks = outputs
+            .into_iter()
+            .flat_map(|output| output.expect("the output routes every identity"))
+            .collect::<Vec<_>>();
+        assert_eq!(identities, chunks.len(), "each identity is published once");
+        assert_eq!(0, pool.reserved(), "every charge is released with the read");
+        pool.registrations()
+    };
+
+    let few = registrations(1).await;
+    let many = registrations(16).await;
+    assert_eq!(
+        few, many,
+        "the entries the node registers follow the identities: {few} for one and {many} for sixteen"
+    );
+    assert!(
+        few <= 4,
+        "{few} pool entries for one input and one output stream"
+    );
+}
+
 /// An input EOF already consumed still counts when a different input first contributes an identity.
 #[tokio::test]
 async fn eof_before_first_identity_contribution_makes_group_ready() {
@@ -4185,6 +4285,83 @@ async fn owner_rejects_conflicting_values_at_same_identity_and_position() {
     assert!(
         outputs[0].is_err(),
         "conflicting populated cell is an error"
+    );
+}
+
+/// The owner merges the histogram pieces of one label set that its inputs hold.
+///
+/// A canonical boundary hands one label set to a single owner, and that owner is where the pieces the
+/// producer's partitions collected meet: here two inputs hold complementary positions of one label
+/// set and each piece carries its own histogram payload, so the merge rebuilds one field over the
+/// union of the positions with every row still naming the payload it came from. The pieces are closed
+/// as they arrive, so the merged series is also what proves the closing chunk of a chain survives the
+/// merge.
+#[tokio::test]
+async fn owner_merges_histogram_pieces_of_one_label_set_across_inputs() {
+    let metric = labels("histogram-pieces");
+    let (first, closing) = histogram_rows_chunk_with_sum(metric.clone(), 0, 1, 10.0);
+    let (second, _) = histogram_rows_chunk_with_sum(metric.clone(), 8, 1, 20.0);
+    let child = Scripted::plan(vec![
+        vec![Step::Chunk(first, closing)],
+        vec![Step::chunk((second, true))],
+    ]);
+    let plan: Arc<dyn ExecutionPlan> = node(child, 2);
+    let outputs = drain(&plan, &SessionContext::default().task_ctx()).await;
+    let owner = Routing::new(2).output(&metric);
+    let chunks = outputs[owner].as_ref().expect("the owner output decodes");
+    assert_output_contract(chunks, &[(metric.clone(), vec![0, 8])]);
+    assert_eq!(1, chunks.iter().filter(|(_, closed)| *closed).count());
+    // One row per valued position, in order, each holding the payload of the piece that pushed it: a
+    // merge that rebuilt the field without reindexing the payloads would answer one payload twice.
+    let merged = chunks
+        .iter()
+        .flat_map(|(series, _)| {
+            let field = series.fields.get(0).expect("one field");
+            series.time.positions().map(move |(position, row)| {
+                let datatypes::series::samples::SampleRef::Histogram(view) = field.sample(row)
+                else {
+                    panic!("position {position} of the merged series is not a histogram");
+                };
+                (position, view.sum, view.count)
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![(0, 10.0, 4.0), (8, 20.0, 4.0)],
+        merged,
+        "the merged histograms are not the ones the pieces carried"
+    );
+}
+
+/// Two histogram pieces of one label set at one position fail the merge.
+///
+/// The pieces were routed to one owner because they are one label set, so a position both of them
+/// fill would carry two values of one field. The kernel reports that the way it does for floats, and
+/// the histogram payload makes no difference to it.
+#[tokio::test]
+async fn owner_rejects_two_histogram_pieces_at_one_position() {
+    let metric = labels("histogram-conflict");
+    let (first, _) = histogram_rows_chunk_with_sum(metric.clone(), 4, 1, 10.0);
+    let (second, _) = histogram_rows_chunk_with_sum(metric.clone(), 4, 1, 20.0);
+    let child = Scripted::plan(vec![
+        vec![Step::chunk((first, true))],
+        vec![Step::chunk((second, true))],
+    ]);
+    let plan: Arc<dyn ExecutionPlan> = node(child, 1);
+    let outputs = drain(&plan, &SessionContext::default().task_ctx()).await;
+    let error = outputs[0]
+        .as_ref()
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "two histogram pieces of one label set at one position were merged: {:?}",
+                outputs[0].as_ref().map(|chunks| summaries(chunks))
+            )
+        })
+        .to_string();
+    assert!(
+        error.contains("cannot contain metrics with the same labelset"),
+        "the failure does not name the shared label set: {error}"
     );
 }
 
