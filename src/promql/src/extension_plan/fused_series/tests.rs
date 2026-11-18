@@ -268,6 +268,88 @@ fn canonical_rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
     .expect("a merge over a window on a grid is a legal tree")
 }
 
+/// A canonical merge on the aggregate's input side runs inside the partial half of the split.
+///
+/// The merge is a `merge_same_labelset` over the pieces one scan returned, so it stays below the cut:
+/// each partition collects the pieces its own scan handed out, groups them and folds them, and only
+/// the state crosses to the final half. That is what lets a metadata drop the canonical pass had to
+/// collect - the `{job=NULL}` / `{job=''}` pair on a nullable key - keep the split a histogram fold
+/// needs, instead of sending `sum(rate(h[5m]))` back to the existing plan.
+///
+/// The cost this records: two colliding series whose values at one grid point reach two *different*
+/// partitions are each collected apart, so the final half adds their states rather than reporting
+/// `vector cannot contain metrics with the same labelset`. That is the answer the existing planner
+/// gives for this shape - it inserts no merge at all - and one per-partition collection is all the
+/// split can promise.
+#[test]
+fn a_canonical_merge_below_the_aggregate_runs_inside_the_partial() {
+    let merged = canonical_rate_tree_of(raw_schema());
+    let output = merged.root().output.clone();
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(merged.root().clone()),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::Without(Arc::from([])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: output.clone(),
+    })
+    .expect("an aggregate over a collected window on a grid is a legal tree");
+    let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME)
+        .unwrap_or_else(|error| panic!("a merge below the aggregate must split, not fail: {error}"))
+        .unwrap_or_else(|| panic!("a merge below the aggregate must split: {tree}"));
+    assert!(
+        matches!(
+            &partial.root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+        ),
+        "the partial half folds the collected pieces: {partial}"
+    );
+    // The merge is the partial's own: one collection per partition, under that partition's fold.
+    let NativeExpr::Aggregate { input, .. } = &partial.root().expr else {
+        unreachable!("the partial root is the cut aggregate")
+    };
+    assert!(
+        matches!(input.expr, NativeExpr::Merge { .. }),
+        "the collected drop stays inside the partial: {partial}"
+    );
+    assert!(
+        matches!(&final_tree.root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final),
+        "the final half only folds the states: {final_tree}"
+    );
+    // Nothing above the cut collects: the merge did its work below it.
+    assert!(
+        !final_tree
+            .root()
+            .any(&|node| matches!(node.expr, NativeExpr::Merge { .. })),
+        "the merge must not cross the cut: {final_tree}"
+    );
+
+    // A merge *above* the aggregate is the other shape: applying it to the merged state is what no
+    // arm of the split carries, so the split declines rather than dropping it.
+    let above = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(tree.root().clone()),
+        },
+        output,
+    })
+    .expect("a merge over an aggregate on a grid is a legal tree");
+    let fields = crate::native::split::prefix_fields(&above).expect("the prefix fields are bound");
+    let error = match crate::native::split::split(above.root(), &fields, TIME) {
+        Ok(_) => panic!("a merge above the aggregate has no arm that carries it: {above}"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("an aggregate under a canonical merge"),
+        "{error}"
+    );
+}
+
 /// `left + right` on one grid, both operands reading the one actual source.
 fn binary_tree(left_schema: Arc<SeriesSchema>, right_schema: Arc<SeriesSchema>) -> NativeTree {
     binary_tree_over_sources(BinaryOp::Add, left_schema, right_schema, 0, 0)

@@ -11054,7 +11054,6 @@ async fn native_histogram_plan(query: &str) -> String {
 #[tokio::test]
 async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     for query in [
-        "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
         "sum(some_metric or some_metric)",
         "sum(some_metric and some_metric)",
     ] {
@@ -11085,6 +11084,36 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
             pending.extend(node.inputs());
         }
     }
+    // `sum(label_replace(...))` is no longer one of the shapes above: the rewrite collapses every
+    // series onto one `tag_0`, so the canonical pass collects it with a `Merge` above the window -
+    // and a split that declined across that merge is what used to keep the legacy histogram
+    // aggregate here. The merge stands on the aggregate's own input side, so the split carries it:
+    // the partial half collects each partition's pieces and folds them, and only the state crosses.
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+        true,
+        table_provider,
+    )
+    .await;
+    let display = plan.display_indent_schema().to_string();
+    let final_node = find_final_split(&plan).unwrap_or_else(|| {
+        panic!("the collected histogram fold kept the legacy aggregate: {display}")
+    });
+    assert!(
+        partial_below(final_node).is_some(),
+        "the collected histogram fold lost its partial half: {display}"
+    );
+    let partial = partial_below(final_node).expect("the split's partial half");
+    assert!(
+        partial
+            .tree()
+            .to_string()
+            .contains("Merge: canonical label-set merge"),
+        "the collection runs below the cut, inside the partial: {display}"
+    );
+
     // A float-producing window still answers on the route: its count, not the input histogram,
     // reaches the fold. The name `count_over_time` drops is the one every series of a single-metric
     // scan shares, and these tables' key columns always decode a value, so the labels are the whole
@@ -11528,6 +11557,40 @@ async fn presence_and_order_aggregates_fold_histograms_natively() {
             find_fused_series(&plan).is_none(),
             "{query} ran a native fold over histograms: {}",
             plan.display_indent_schema()
+        );
+        // The two-aggregate cut declines the split, and a tree that folds histogram state has no
+        // segment execution here, so this is the refusal that answers it - recorded, not silent.
+        assert_eq!(
+            Some("histogram_state_above_a_segment_boundary"),
+            take_reported_decline(),
+            "{query}: {}",
+            plan.display_indent_schema()
+        );
+    }
+}
+
+/// The split a histogram fold needs is planned over a table whose keys always decode a value too.
+///
+/// The other fixture (`a_histogram_sum_or_avg_folds_natively`) states the nullable key, where the
+/// canonical pass inserts the merge the split now carries; this one states the table where nothing
+/// is collected, so a regression on either side is told apart from the other.
+#[tokio::test]
+async fn a_histogram_sum_over_stable_keys_keeps_its_split() {
+    for query in ["sum(some_metric)", "sum(rate(some_metric[5m]))"] {
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let final_node = find_final_split(&plan)
+            .unwrap_or_else(|| panic!("{query} kept the existing plan: {display}"));
+        assert!(
+            partial_below(final_node).is_some(),
+            "{query} lost the partial half of its split: {display}"
+        );
+        assert_eq!(
+            None,
+            take_reported_decline(),
+            "{query} declined although its split is planned: {display}"
         );
     }
 }
@@ -16680,8 +16743,11 @@ async fn a_histogram_sum_or_avg_folds_natively() {
         "sum(rate(some_metric[5m]))",
         "avg by (tag_0) (some_metric)",
     ] {
-        let table_provider =
-            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+        // The metric-engine table every drop over it collects for: its `le` tag is nullable, so
+        // the canonical pass inserts a `Merge` above the window and the split has to carry one.
+        // This is the fixture the regression this test guards appeared on: a split that declined
+        // across that merge sent `sum(rate(h[5m]))` back to the existing plan.
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         let final_node = find_final_split(&plan)
@@ -16917,20 +16983,38 @@ async fn a_histogram_aggregate_the_split_declines_keeps_the_existing_plan() {
 /// execution: a canonical merge carrying histograms.
 #[tokio::test]
 async fn histogram_state_stays_out_of_the_shapes_it_cannot_cross() {
-    // A canonical merge inside the tree routes whole label sets, and the pieces of one set arrive in
-    // different partitions: the merge would carry histogram frames through that boundary.
-    for query in [
+    // A `Merge` on the aggregate's own input side stays inside the partial half of the split: each
+    // partition collects the pieces of one label set its scan returned and folds them, so the frames
+    // the merge carries never cross the cut. This is the shape a metadata drop the canonical pass
+    // had to collect produces, and it keeps its split.
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
         "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+        true,
+        table_provider,
+    )
+    .await;
+    let display = plan.display_indent_schema().to_string();
+    let final_node = find_final_split(&plan)
+        .unwrap_or_else(|| panic!("the collected histogram fold left the route: {display}"));
+    assert!(
+        partial_below(final_node).is_some(),
+        "the collected histogram fold lost its partial half: {display}"
+    );
+    // Two aggregates are two cuts, which this split still cannot carry: the inner one would have to
+    // be replanned as its own pair above the outer one's answer.
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
         "sum(sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
-    ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
-        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
-        assert!(
-            find_fused_series(&plan).is_none(),
-            "{query} carried histograms through a canonical merge: {}",
-            plan.display_indent_schema()
-        );
-    }
+        true,
+        table_provider,
+    )
+    .await;
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "the two-aggregate shape ran a native fold: {}",
+        plan.display_indent_schema()
+    );
     // Two histogram tables are a multi-input tree, but each fold is its own subtree: the binary
     // above them combines two already-folded histograms, so no aggregate state crosses the pairing
     // and the statement runs. The state gate is about an aggregate reading several inputs, not

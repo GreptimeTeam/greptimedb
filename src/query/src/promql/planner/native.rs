@@ -1800,15 +1800,14 @@ impl PromPlanner {
                 )));
             }
             // A tree that folds native histograms anywhere and whose split declined keeps the
-            // existing plan instead of being segmented. Segmentation cuts the tree into segments
-            // that each fold their own samples and appends the pieces above them, so a group whose
-            // contributions are spread over partitions would be folded once per segment - which for
-            // a histogram sum means merging histograms that never met, and for a histogram average
-            // means a mean of means. `cut_as_segment` returning false only declines to cut that
-            // subtree and the collectors recurse into its children, so the refusal is here, at the
-            // point the segment decision is made.
+            // existing plan instead of being segmented. A segment reads the frames a boundary above
+            // it assembles - the canonical merge's collected pieces, or a region-local producer's
+            // frames - and this route has no execution that folds a histogram state out of those:
+            // every histogram fold it runs today reads its own scan. Until one is covered, the
+            // statement keeps the plan that already answers it rather than publishing a column
+            // nothing here can fill.
             if binds_histogram_state_anywhere(root) {
-                return Ok(None);
+                return Ok(declined("histogram_state_above_a_segment_boundary"));
             }
         }
         // A segment of a plan split over regions keeps the raw source as its input rather than a
