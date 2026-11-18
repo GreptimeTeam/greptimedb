@@ -15,7 +15,23 @@ Dashboards run the same aggregation every few seconds over a window that slides 
 
 GreptimeDB has no cache that covers this. The query layer has no result cache. The mito range result cache stores scanned rows, not aggregation results, and only for scans with tag filters. Flow can maintain the aggregate continuously, but it has to be declared ahead of time for each query shape, and ad hoc dashboards are not declared.
 
-OpenObserve caches merged partial aggregation states per time partition. It does not invalidate them on writes: a window that ends within `cache_delay_secs` (300 seconds by default) of now is not reused, and data that arrives later than that for a cached window is not reflected until the entry is evicted or explicitly cleared. We want the reuse without that staleness window.
+# Prior Art
+
+Observability and analytics systems cache along two axes: what they cache, and how they keep it fresh.
+
+| System | What is cached | Freshness |
+|---|---|---|
+| VictoriaMetrics | Result series of a query expression, extended as the range moves | Data newer than `-search.cacheTimestampOffset` (5 minutes) is not cached. Single-node resets the whole cache when it ingests a sample older than that; otherwise the cache is reset through an API. |
+| Grafana Mimir | Query-frontend results, split by `-query-frontend.split-queries-by-interval` (24 hours) | Results newer than `-query-frontend.max-cache-freshness` (10 minutes) are not cached; entries expire after a TTL (1 week, 10 minutes inside the out-of-order window). |
+| ClickHouse | Final result of a `SELECT` | Expires after `query_cache_ttl` (60 seconds); inserts do not invalidate it. |
+| OpenObserve | Merged partial aggregation states per time partition | Windows ending within `ZO_CACHE_DELAY_SECS` (300 seconds) of now are not reused; later data for a cached window is not reflected until the entry is evicted or cleared. |
+| Elasticsearch | Aggregation results per shard (requests with `size=0`) | Invalidated whenever the shard refreshes. |
+| Apache Druid | Partial results per immutable segment | Valid as long as the segment does not change; real-time segments are always computed. |
+| StarRocks | Partial aggregation results per tablet, keyed with the tablet version | When the version moves on, it reads only the rowsets added since and merges them with the cached result (tables without a primary key). |
+
+Time-based freshness is the common choice for metrics and log systems. It needs no help from storage, but a late write inside a cached range is missed until the entry expires, or clears the whole cache. Elasticsearch drops a shard's entries at every refresh, so a shard that receives writes continuously keeps losing them. Druid and StarRocks tie the cache to immutable storage units and their versions, which gives exact results.
+
+This RFC follows the Druid and StarRocks approach on the GreptimeDB storage model. SST files are immutable like Druid segments. But TWCS files do not line up with dashboard windows, and compaction replaces them, so the cache unit is a time slice, and its version is the set of files overlapping it.
 
 # Goals
 
@@ -123,8 +139,9 @@ Drawbacks:
 # Alternatives
 
 - **Cache final results per query.** Simpler, but only an identical query hits. A window that slides by 5 minutes misses every time, which is the main dashboard pattern.
-- **Invalidate by time, as OpenObserve does.** Do not reuse slices newer than a delay, and accept late data being ignored. It avoids the engine contract, but returns wrong results for late data, and the delay has to be tuned against ingestion lag.
-- **Invalidate per region instead of per range.** Use the region's manifest version or committed sequence as the fingerprint. It is simpler and needs no per-file reasoning, but any write, flush or compaction anywhere in the region invalidates every slice, so a region that receives writes continuously would almost never hit.
+- **Invalidate by time, as VictoriaMetrics, Mimir and OpenObserve do.** Do not cache data newer than a delay. It avoids the engine contract, but late data inside a cached range is missed until the entry expires, or clears the whole cache, and the delay has to be tuned against ingestion lag.
+- **Invalidate per region instead of per range,** like the Elasticsearch shard request cache. Use the region's manifest version or committed sequence as the fingerprint. It is simpler and needs no per-file reasoning, but any write, flush or compaction anywhere in the region invalidates every slice, so a region that receives writes continuously would almost never hit.
+- **Cache per SST file,** like Druid per segment. Compaction replaces files, so every compaction drops the cache for its inputs, and a query window rarely covers whole files.
 - **Cache at the frontend.** The frontend would have to learn which regions and files back each slice, which needs new information in the region protocol. The datanode already has the region version.
 - **Extend the range result cache.** It caches scanned rows, so a hit still pays for aggregation, and its key requires tag filters. The fingerprint is the part worth sharing.
 - **Use Flow.** Flow keeps an aggregate up to date continuously and is the better choice for a fixed, known query. It does not help queries nobody declared ahead of time.
@@ -139,8 +156,15 @@ Drawbacks:
 
 - PromQL range queries, caching per-step results keyed by the same fingerprint.
 - Caching slices from the current hour once flushed data covers part of it, by splitting at the memtable's minimum timestamp.
+- Incremental refresh, as StarRocks does for tablets: when a slice's files only gained new ones since its entry was computed, aggregate the new files and merge them into the cached states instead of recomputing the slice.
 
 # References
 
+- VictoriaMetrics rollup result cache: `app/vmselect/promql/rollup_result_cache.go`, [VictoriaMetrics/VictoriaMetrics](https://github.com/VictoriaMetrics/VictoriaMetrics); [documentation](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#rollup-result-cache).
+- Grafana Mimir query-frontend flags: `-query-frontend.split-queries-by-interval`, `-query-frontend.max-cache-freshness`, `-query-frontend.results-cache-ttl`, in `cmd/mimir/help-all.txt.tmpl`, [grafana/mimir](https://github.com/grafana/mimir).
+- [ClickHouse query cache](https://clickhouse.com/docs/operations/query-cache).
 - OpenObserve streaming aggregation cache: `src/search/src/datafusion/physical_optimizer/stream_aggregate.rs` and `ZO_CACHE_DELAY_SECS` in `src/config/src/config.rs`, [openobserve/openobserve](https://github.com/openobserve/openobserve).
+- [Elasticsearch shard request cache](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/shard-request-cache).
+- [Apache Druid query caching](https://druid.apache.org/docs/latest/querying/caching/).
+- StarRocks query cache: `be/src/exec/query_cache/cache_operator.cpp`, [StarRocks/starrocks](https://github.com/StarRocks/starrocks).
 - DataFusion aggregation modes: [`AggregateMode`](https://docs.rs/datafusion/latest/datafusion/physical_plan/aggregates/enum.AggregateMode.html).
