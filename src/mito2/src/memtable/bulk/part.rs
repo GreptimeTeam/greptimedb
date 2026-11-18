@@ -1342,7 +1342,6 @@ impl EncodedBulkPart {
             .max()
             .unwrap_or(0);
         Some(SstInfo {
-            format: Default::default(),
             file_id,
             time_range: (
                 Timestamp::new(self.metadata.min_timestamp, unit),
@@ -1355,6 +1354,7 @@ impl EncodedBulkPart {
             file_metadata: Some(parquet_metadata.clone()),
             index_metadata: IndexOutput::default(),
             num_series: self.metadata.num_series,
+            format: Default::default(),
         })
     }
 

@@ -1423,8 +1423,8 @@ mod tests {
         }));
         for (format, extension) in [(samples, "samples"), (series, "series")] {
             let meta = FileMeta {
-                format,
                 file_size: 23,
+                format,
                 ..Default::default()
             };
             assert!(meta.valid_inventory());

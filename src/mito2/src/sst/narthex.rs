@@ -134,11 +134,6 @@ pub(crate) async fn write_samples(
     })?;
     let unit = request.metadata.time_index_type().unit();
     Ok(smallvec::smallvec![SstInfo {
-        format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
-            use_file_sequence: false,
-            manifest_size: manifest.file_size,
-            part_sizes: parts.iter().map(|part| part.file_size).collect()
-        })),
         file_id: id,
         time_range: (
             common_time::Timestamp::new(lower, unit),
@@ -151,6 +146,11 @@ pub(crate) async fn write_samples(
         max_row_group_uncompressed_size: 0,
         file_metadata: None,
         index_metadata: Default::default(),
+        format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+            use_file_sequence: false,
+            manifest_size: manifest.file_size,
+            part_sizes: parts.iter().map(|part| part.file_size).collect()
+        })),
     }])
 }
 

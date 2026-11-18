@@ -2450,9 +2450,9 @@ async fn narthex_file_reader_pins_sst_lifetime() {
     let file_meta = FileMeta {
         region_id: meta.region_id,
         file_id: id,
-        format: FileFormat::NarthexSamples(Box::new(narthex)),
         file_size: artifact.file_size,
         num_rows: rows.len() as u64,
+        format: FileFormat::NarthexSamples(Box::new(narthex)),
         ..Default::default()
     };
     let restored: FileMeta =

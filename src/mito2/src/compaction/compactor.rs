@@ -582,7 +582,6 @@ impl CompactionContext {
 /// `num_rows` may read `0` for legacy `FileMeta`s where the count is unknown.
 fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
     SstInfo {
-        format: meta.format.clone(),
         file_id: meta.file_id,
         time_range: meta.time_range,
         file_size: meta.file_size,
@@ -590,6 +589,7 @@ fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
         num_rows: meta.num_rows as usize,
         num_row_groups: meta.num_row_groups,
         num_series: meta.num_series,
+        format: meta.format.clone(),
         ..Default::default()
     }
 }
@@ -896,7 +896,6 @@ impl DefaultSstMerger {
                 };
 
                 Ok(FileMeta {
-                    format: sst_info.format.clone(),
                     region_id,
                     file_id: sst_info.file_id,
                     time_range: sst_info.time_range,
@@ -915,6 +914,7 @@ impl DefaultSstMerger {
                     primary_key_min,
                     primary_key_max,
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
+                    format: sst_info.format.clone(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
