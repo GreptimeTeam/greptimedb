@@ -55,8 +55,8 @@ impl SstVersion {
         purger: FilePurgerRef,
         files: impl Iterator<Item = impl Into<FileMetaRef>>,
     ) {
-        let indexes = Arc::make_mut(&mut self.series_indexes);
         for file in files {
+            let indexes = Arc::make_mut(&mut self.series_indexes);
             let file = file.into();
             indexes
                 .entry(file.file_id)
@@ -65,8 +65,8 @@ impl SstVersion {
     }
 
     pub(crate) fn remove_series_indexes(&mut self, ids: impl Iterator<Item = file::RegionFileId>) {
-        let indexes = Arc::make_mut(&mut self.series_indexes);
         for id in ids {
+            let indexes = Arc::make_mut(&mut self.series_indexes);
             if indexes
                 .get(&id.file_id())
                 .is_some_and(|file| file.file_id() == id)
@@ -158,21 +158,28 @@ impl SstVersion {
     /// # Panics
     /// Panics if the level of [FileMeta] has no storage slot.
     pub(crate) fn remove_files(&mut self, files_to_remove: impl Iterator<Item = FileMeta>) {
-        let files_to_remove: Vec<_> = files_to_remove.collect();
-        Arc::make_mut(&mut self.series_indexes).retain(|_, file| {
-            let retire = matches!(&file.meta_ref().format, file::FileFormat::NarthexSeriesIndex(index)
-                if index.sources.iter().any(|source| files_to_remove.iter().any(|removed| removed.file_id() == *source)));
-            if retire { file.mark_deleted(); }
-            !retire
-        });
+        let mut retired = std::collections::HashSet::new();
         let levels = Arc::make_mut(&mut self.levels);
         for file in files_to_remove {
+            if !self.series_indexes.is_empty() {
+                retired.insert(file.file_id());
+            }
             let Some(slot) = file::level_slot(file.level) else {
                 panic!("Unsupported SST level {}", file.level);
             };
             if let Some(handle) = levels[slot].files.remove(&file.file_id) {
                 handle.mark_deleted();
             }
+        }
+        if !retired.is_empty() {
+            Arc::make_mut(&mut self.series_indexes).retain(|_, handle| {
+                let covered = matches!(&handle.meta_ref().format, file::FileFormat::NarthexSeriesIndex(index)
+                    if index.sources.iter().any(|id| retired.contains(id)));
+                if covered {
+                    handle.mark_deleted();
+                }
+                !covered
+            });
         }
     }
 
@@ -254,20 +261,18 @@ impl SstVersion {
 
     /// Returns the space occupied by SST index files owned by `region_id`.
     pub(crate) fn owned_index_usage(&self, region_id: RegionId) -> u64 {
-        self.levels
+        let parquet = self
+            .levels
             .iter()
-            .map(|level_meta| {
-                level_meta
-                    .files
-                    .values()
-                    .filter(|file_handle| file_handle.region_id() == region_id)
-                    .map(|file_handle| {
-                        let meta = file_handle.meta_ref();
-                        meta.index_file_size
-                    })
-                    .sum::<u64>()
-            })
-            .sum()
+            .flat_map(|level| level.files.values())
+            .filter(|handle| handle.region_id() == region_id)
+            .map(|handle| handle.meta_ref().index_file_size);
+        let series = self
+            .series_indexes()
+            .values()
+            .filter(|handle| handle.region_id() == region_id)
+            .map(|handle| handle.meta_ref().file_size);
+        parquet.chain(series).sum()
     }
 }
 

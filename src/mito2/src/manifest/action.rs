@@ -175,6 +175,29 @@ impl RegionEdit {
                 reason: "Series indexes cannot be data SSTs"
             }
         );
+        snafu::ensure!(
+            self.files_to_add
+                .iter()
+                .chain(&self.series_indexes_to_add)
+                .all(FileMeta::valid_inventory),
+            crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: "Invalid Narthex artifact inventory"
+            }
+        );
+        snafu::ensure!(
+            self.files_to_add.iter().all(|file| !manifest
+                .series_indexes
+                .contains_key(&file.file_id)
+                && manifest
+                    .files
+                    .get(&file.file_id)
+                    .is_none_or(|previous| previous.format == file.format)),
+            crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: "Conflicting immutable artifact identity"
+            }
+        );
         if self.series_indexes_to_add.is_empty() {
             return Ok(());
         }
@@ -192,12 +215,14 @@ impl RegionEdit {
             })
             .map(|file| file.file_id())
             .collect();
+        let mut index_ids = HashSet::new();
         for file in &self.series_indexes_to_add {
             let valid = matches!(&file.format, file::FileFormat::NarthexSeriesIndex(index)
                 if !index.sources.is_empty() && index.sources.iter().all(|id| sources.contains(id))
                     && index.sources.iter().collect::<HashSet<_>>().len() == index.sources.len());
             snafu::ensure!(
                 valid
+                    && index_ids.insert(file.file_id)
                     && file.region_id.table_id() == region_id.table_id()
                     && !manifest.files.contains_key(&file.file_id)
                     && !self
@@ -328,6 +353,10 @@ pub struct RegionManifest {
 }
 
 impl RegionManifest {
+    pub(crate) fn all_files(&self) -> impl Iterator<Item = &FileMetaRef> {
+        self.files.values().chain(self.series_indexes.values())
+    }
+
     /// Returns the entry id after which node `node_id` replays its WAL when it opens
     /// the region. Entries up to it are flushed, left to the pending tails, or below
     /// the handoff floor of the node.
@@ -417,6 +446,13 @@ impl RegionManifestBuilder {
     }
 
     fn removed_file(&self, file: &FileMeta) -> RemovedFile {
+        if self
+            .files
+            .get(&file.file_id)
+            .is_some_and(|meta| !matches!(meta.format, file::FileFormat::Parquet))
+        {
+            return RemovedFile::Narthex(file.file_id);
+        }
         let index_version = self
             .files
             .get(&file.file_id)
@@ -554,7 +590,7 @@ impl RegionManifestBuilder {
         let samples: HashSet<_> = samples.iter().map(FileMeta::file_id).collect();
         self.series_indexes.extract_if(|_, file| {
             indexes.contains(&file.file_id()) || matches!(&file.format, file::FileFormat::NarthexSeriesIndex(index) if index.sources.iter().any(|id| samples.contains(id)))
-        }).map(|(id, _)| RemovedFile::File(id, None)).collect()
+        }).map(|(id, _)| RemovedFile::Narthex(id)).collect()
     }
 
     pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
@@ -571,7 +607,13 @@ impl RegionManifestBuilder {
                     self.files
                         .values()
                         .chain(self.series_indexes.values())
-                        .map(|f| RemovedFile::File(f.file_id, f.index_version()))
+                        .map(|f| {
+                            if matches!(f.format, file::FileFormat::Parquet) {
+                                RemovedFile::File(f.file_id, f.index_version())
+                            } else {
+                                RemovedFile::Narthex(f.file_id)
+                            }
+                        })
                         .collect(),
                     truncate
                         .timestamp_ms
@@ -685,6 +727,7 @@ pub struct RemovedFiles {
 /// A removed file, which can be a data file(optional paired with a index file) or an outdated index file.
 #[derive(Serialize, Hash, Clone, Debug, PartialEq, Eq)]
 pub enum RemovedFile {
+    Narthex(FileId),
     File(FileId, Option<IndexVersion>),
     Index(FileId, IndexVersion),
 }
@@ -706,6 +749,7 @@ impl<'de> Deserialize<'de> for RemovedFile {
 
         #[derive(Deserialize)]
         enum RemovedFileEnum {
+            Narthex(FileId),
             File(FileId, Option<IndexVersion>),
             Index(FileId, IndexVersion),
         }
@@ -714,6 +758,7 @@ impl<'de> Deserialize<'de> for RemovedFile {
         match compat {
             CompatRemovedFile::FileId(file_id) => Ok(RemovedFile::File(file_id, None)),
             CompatRemovedFile::Enum(e) => match e {
+                RemovedFileEnum::Narthex(id) => Ok(RemovedFile::Narthex(id)),
                 RemovedFileEnum::File(file_id, version) => Ok(RemovedFile::File(file_id, version)),
                 RemovedFileEnum::Index(file_id, version) => {
                     Ok(RemovedFile::Index(file_id, version))
@@ -726,13 +771,14 @@ impl<'de> Deserialize<'de> for RemovedFile {
 impl RemovedFile {
     pub fn file_id(&self) -> FileId {
         match self {
-            RemovedFile::File(file_id, _) => *file_id,
+            RemovedFile::Narthex(file_id) | RemovedFile::File(file_id, _) => *file_id,
             RemovedFile::Index(file_id, _) => *file_id,
         }
     }
 
     pub fn index_version(&self) -> Option<IndexVersion> {
         match self {
+            RemovedFile::Narthex(_) => None,
             RemovedFile::File(_, index_version) => *index_version,
             RemovedFile::Index(_, index_version) => Some(*index_version),
         }
@@ -1725,6 +1771,13 @@ mod tests {
         edit.validate_narthex_series(&manifest_builder()).unwrap();
         assert_eq!(edit.files_to_add.len(), 2);
         assert_eq!(edit.series_indexes_to_add.len(), 1);
+        let mut invalid = edit.clone();
+        invalid.files_to_add[0].file_size += 1;
+        assert!(
+            invalid
+                .validate_narthex_series(&manifest_builder())
+                .is_err()
+        );
         let index = edit.series_indexes_to_add[0].clone();
         let first = edit.files_to_add[0].clone();
         builder.apply_edit(1, edit);

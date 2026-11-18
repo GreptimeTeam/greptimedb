@@ -581,6 +581,7 @@ where
                 .unwrap_or(0);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
+                format: Default::default(),
                 file_id: self.current_file,
                 time_range,
                 file_size,

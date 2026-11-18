@@ -1329,6 +1329,7 @@ impl EncodedBulkPart {
             .max()
             .unwrap_or(0);
         SstInfo {
+            format: Default::default(),
             file_id,
             time_range: (
                 Timestamp::new(self.metadata.min_timestamp, unit),

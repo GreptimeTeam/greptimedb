@@ -215,6 +215,7 @@ async fn wal_recovery_records_survive_reopen(#[case] checkpoint_distance: u64) {
                 entry_id: 30,
             }),
         },
+        ..Default::default()
     };
     manager
         .update(

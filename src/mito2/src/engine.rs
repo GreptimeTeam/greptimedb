@@ -2092,6 +2092,7 @@ mod tests {
                 pending_tails: Some(vec![]),
                 handoff_floor: None,
             },
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
     }

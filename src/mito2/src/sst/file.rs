@@ -14,7 +14,7 @@
 
 //! Structures to describe metadata of files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
@@ -249,9 +249,9 @@ pub enum FileFormat {
     #[default]
     Parquet,
     #[serde(alias = "native", alias = "metrics_samples")]
-    NarthexSamples(NarthexSamplesMeta),
+    NarthexSamples(Box<NarthexSamplesMeta>),
     #[serde(alias = "native_series", alias = "metrics_series_index")]
-    NarthexSeriesIndex(NarthexSeriesIndexMeta),
+    NarthexSeriesIndex(Box<NarthexSeriesIndexMeta>),
 }
 
 impl FileFormat {
@@ -531,6 +531,57 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
+    /// Checks that a Narthex inventory describes one complete immutable artifact.
+    pub(crate) fn valid_inventory(&self) -> bool {
+        fn valid_parts<'a>(
+            file: &FileMeta,
+            manifest: &NarthexObjectMeta,
+            parts: impl Iterator<Item = &'a NarthexObjectMeta>,
+        ) -> bool {
+            let Some((dir, "manifest.json")) = manifest.path.rsplit_once('/') else {
+                return false;
+            };
+            if location::parse_narthex_file_id(&manifest.path) != Some(file.file_id)
+                || dir
+                    .split('/')
+                    .any(|component| matches!(component, "." | ".."))
+            {
+                return false;
+            }
+            let mut paths = HashSet::new();
+            let mut size = manifest.file_size;
+            for part in parts {
+                if location::parent_dir(&part.path) != location::parent_dir(&manifest.path)
+                    || location::parse_narthex_file_id(&part.path) != Some(file.file_id)
+                    || part.path == manifest.path
+                    || !paths.insert(&part.path)
+                {
+                    return false;
+                }
+                let Some(total) = size.checked_add(part.file_size) else {
+                    return false;
+                };
+                size = total;
+            }
+            !paths.is_empty() && size == file.file_size
+        }
+        match &self.format {
+            FileFormat::Parquet => true,
+            FileFormat::NarthexSamples(meta) => {
+                let mut ids = HashSet::new();
+                meta.parts.iter().all(|part| ids.insert(part.part_id))
+                    && valid_parts(
+                        self,
+                        &meta.manifest,
+                        meta.parts.iter().map(|part| &part.object),
+                    )
+            }
+            FileFormat::NarthexSeriesIndex(meta) => {
+                valid_parts(self, &meta.manifest, meta.parts.iter())
+            }
+        }
+    }
+
     /// Returns whether this file's row sequences are trusted in the target region.
     ///
     /// Foreign files use their target-local sequence barrier; local files require
@@ -1105,6 +1156,12 @@ pub async fn delete_files(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum UncommittedFile {
+    Parquet { index_version: u64, has_index: bool },
+    Narthex,
+}
+
 /// Tracks SSTs from creation until their manifest edit is committed.
 ///
 /// Flush and local compaction jobs use this to remove files that were written successfully but
@@ -1112,7 +1169,7 @@ pub async fn delete_files(
 #[derive(Clone)]
 pub(crate) struct UncommittedSsts {
     region_id: RegionId,
-    files: Arc<Mutex<HashMap<FileId, (u64, bool)>>>,
+    files: Arc<Mutex<HashMap<FileId, UncommittedFile>>>,
     access_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
 }
@@ -1146,14 +1203,26 @@ impl UncommittedSsts {
         for sst in ssts {
             files.insert(
                 sst.file_id,
-                (sst.index_metadata.version, sst.index_metadata.file_size > 0),
+                match sst.format {
+                    FileFormat::Parquet => UncommittedFile::Parquet {
+                        index_version: sst.index_metadata.version,
+                        has_index: sst.index_metadata.file_size > 0,
+                    },
+                    _ => UncommittedFile::Narthex,
+                },
             );
         }
     }
 
     /// Tracks an SST before it is uploaded, so a cancelled upload is still removed.
     pub(crate) fn track_before_upload(&self, file_id: FileId, with_index: bool) {
-        self.files.lock().unwrap().insert(file_id, (0, with_index));
+        self.files.lock().unwrap().insert(
+            file_id,
+            UncommittedFile::Parquet {
+                index_version: 0,
+                has_index: with_index,
+            },
+        );
     }
 
     /// Disarms cleanup after the manifest edit has committed or may have committed.
@@ -1182,11 +1251,30 @@ impl UncommittedSsts {
             return Ok(());
         }
 
-        let delete_index = files.values().any(|(_, exists_index)| *exists_index);
-        let file_ids = files
-            .into_iter()
-            .map(|(file_id, (index_version, _))| (file_id, index_version))
-            .collect::<Vec<_>>();
+        let mut delete_index = false;
+        let mut file_ids = Vec::new();
+        let mut failure = None;
+        for (id, file) in files {
+            match file {
+                UncommittedFile::Parquet {
+                    index_version,
+                    has_index,
+                } => {
+                    file_ids.push((id, index_version));
+                    delete_index |= has_index;
+                }
+                UncommittedFile::Narthex => {
+                    if let Err(error) = self
+                        .access_layer
+                        .delete_narthex_artifact(self.region_id, id)
+                        .await
+                    {
+                        self.files.lock().unwrap().insert(id, file);
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
         delete_files(
             self.region_id,
             &file_ids,
@@ -1194,7 +1282,8 @@ impl UncommittedSsts {
             &self.access_layer,
             &self.cache_manager,
         )
-        .await
+        .await?;
+        failure.map_or(Ok(()), Err)
     }
 
     #[cfg(test)]

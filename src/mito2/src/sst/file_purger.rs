@@ -185,6 +185,12 @@ impl LocalFilePurger {
                     return;
                 }
             }
+            if !matches!(file_meta.format, file::FileFormat::Parquet) {
+                if let Err(error) = sst_layer.delete_narthex_artifact(file_meta.region_id, file_meta.file_id).await {
+                    error!(error; "Failed to delete Narthex artifact {}", file_meta.file_id());
+                }
+                return;
+            }
             if let Err(e) = delete_files(
                 file_meta.region_id,
                 &[(file_meta.file_id, file_meta.index_id().version)],
@@ -375,6 +381,70 @@ mod tests {
                 .unwrap();
             rx.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn test_narthex_reader_pins_are_independent() {
+        use crate::manifest::action::RegionMetaActionList;
+        let env = PurgeTestEnv::new().await;
+        let purger = Arc::new(LocalFilePurger::new(
+            env.scheduler.clone(),
+            env.layer.clone(),
+            None,
+        ));
+        let (_, _, edit) = RegionMetaActionList::decode(include_bytes!(
+            "../../../../tests/compatibility/manifest/native_metric_storage/narthex-delta.json"
+        ))
+        .unwrap()
+        .split_region_change_and_edit();
+        let mut files = Vec::new();
+        for file in edit
+            .files_to_add
+            .into_iter()
+            .chain(edit.series_indexes_to_add)
+        {
+            let dir = location::narthex_file_dir(
+                &env.layer.build_region_dir(file.region_id),
+                file.file_id,
+            );
+            let paths = [format!("{dir}manifest.json"), format!("{dir}part-0")];
+            for path in &paths {
+                env.layer
+                    .object_store()
+                    .write(path, "pinned")
+                    .await
+                    .unwrap();
+            }
+            let handle = FileHandle::new(file, purger.clone());
+            handle.mark_deleted();
+            files.push((Some(handle), paths));
+        }
+        // Release one covered sample, then the index, then the other sample.
+        for released in [1, 2, 0] {
+            drop(files[released].0.take());
+            env.wait_for_purges().await;
+            for (reader, paths) in &files {
+                for path in paths {
+                    assert_eq!(
+                        env.layer.object_store().exists(path).await.unwrap(),
+                        reader.is_some()
+                    );
+                    if reader.is_some() {
+                        assert_eq!(
+                            env.layer
+                                .object_store()
+                                .read(path)
+                                .await
+                                .unwrap()
+                                .to_bytes()
+                                .as_ref(),
+                            b"pinned"
+                        );
+                    }
+                }
+            }
+        }
+        env.scheduler.stop(true).await.unwrap();
     }
 
     #[rstest::rstest]

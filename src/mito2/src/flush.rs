@@ -987,7 +987,7 @@ impl MemtableSstWriter {
             None => (None, None),
         };
         Ok(FileMeta {
-            format: Default::default(),
+            format: sst_info.format.clone(),
             region_id,
             file_id: sst_info.file_id,
             time_range: sst_info.time_range,

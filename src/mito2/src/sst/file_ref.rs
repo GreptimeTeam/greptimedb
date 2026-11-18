@@ -113,11 +113,7 @@ impl FileReferenceManager {
 
         for (dst_region, src_regions) in &dst_region_to_src_regions {
             let manifest = dst_region.manifest_ctx.manifest().await;
-            for meta in manifest
-                .files
-                .values()
-                .chain(manifest.series_indexes.values())
-            {
+            for meta in manifest.all_files() {
                 if src_regions.contains(&meta.region_id) {
                     cross_region_refs
                         .entry(meta.region_id)

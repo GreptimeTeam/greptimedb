@@ -697,7 +697,21 @@ impl RegionManifestManager {
         base: &RegionManifest,
         actions: &[RegionMetaAction],
     ) -> Result<()> {
-        if !actions.iter().any(|action| matches!(action, RegionMetaAction::Edit(edit) if !edit.series_indexes_to_add.is_empty() || edit.files_to_add.iter().any(|f| matches!(f.format, file::FileFormat::NarthexSeriesIndex(_))))) {
+        let needs_validation = actions.iter().any(|action| {
+            let RegionMetaAction::Edit(edit) = action else {
+                return false;
+            };
+            !edit.series_indexes_to_add.is_empty()
+                || edit.files_to_add.iter().any(|file| {
+                    !matches!(file.format, file::FileFormat::Parquet)
+                        || base.series_indexes.contains_key(&file.file_id)
+                        || base
+                            .files
+                            .get(&file.file_id)
+                            .is_some_and(|old| !matches!(old.format, file::FileFormat::Parquet))
+                })
+        });
+        if !needs_validation {
             return Ok(());
         }
         let mut view = RegionManifestBuilder::from_shared_manifest(
