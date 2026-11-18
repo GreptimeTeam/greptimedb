@@ -17,11 +17,12 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use common_error::ext::BoxedError;
 use common_query::WriteProgress;
+use operator::batcher::PendingRowsPermit;
 use operator::error::Error;
 use session::context::QueryContextRef;
 use snafu::IntoError;
 use table::metadata::TableInfoRef;
-use tokio::sync::{OwnedSemaphorePermit, oneshot};
+use tokio::sync::oneshot;
 
 /// One complete input and its completion/admission ownership.
 pub(in crate::batcher::table) struct PendingBatch {
@@ -29,7 +30,7 @@ pub(in crate::batcher::table) struct PendingBatch {
     pub batch: RecordBatch,
     pub ctx: QueryContextRef,
     pub response_tx: oneshot::Sender<WriteProgress>,
-    pub _permit: Arc<OwnedSemaphorePermit>,
+    pub _permit: PendingRowsPermit,
     pub _completion: Option<session::write_progress::PendingWrite>,
 }
 

@@ -23,6 +23,7 @@ use common_memory_manager::OnExhaustedPolicy;
 use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
+use common_time::timestamp::TimeUnit;
 use meta_client::{MetaClientOptions, MetaClientRef};
 use pipeline::PipelineOptions;
 use query::options::QueryOptions;
@@ -53,11 +54,20 @@ pub struct FrontendOptions {
     /// even if a request sets the `auto_create_table` hint to `true`. When `true`
     /// (default), the per-request hint still applies. Default: `true`.
     pub auto_create_table: bool,
-    /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+    /// Time index unit for physical metric tables created by auto table creation
+    /// (Prometheus remote write, OTLP metrics, and other metric-engine ingestion).
+    /// New logical tables created under such a physical table inherit its unit.
+    /// Options: "Second", "Millisecond" (default), "Microsecond", "Nanosecond".
+    pub auto_create_physical_table_timestamp_unit: TimeUnit,
+    /// Shared quota for write bodies/messages, retained decoder memory, and estimated
+    /// ordinary-table batch conversion memory. A batch must fit alongside its request's
+    /// existing reservations; only additional memory is acquired.
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
     /// Policy when write bytes quota is exhausted.
     /// Options: "wait" (default, 10s), "wait(<duration>)", "fail"
+    /// Table-batch conversion never waits for additional memory. Under a wait policy,
+    /// temporary contention returns a retryable error; requests that cannot fit are rejected.
     pub write_bytes_exhausted_policy: OnExhaustedPolicy,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
@@ -105,6 +115,7 @@ impl Default for FrontendOptions {
             default_timezone: None,
             default_column_prefix: None,
             auto_create_table: true,
+            auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),

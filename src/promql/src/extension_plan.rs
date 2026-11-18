@@ -14,13 +14,16 @@
 
 mod absent;
 mod empty_metric;
+mod fused_series;
 mod histogram_fold;
 mod instant_manipulate;
 mod normalize;
 mod planner;
 mod range_manipulate;
+mod raw_series_source;
 mod scalar_calculate;
 mod series_divide;
+mod series_repartition;
 #[cfg(test)]
 mod test_util;
 mod union_distinct_on;
@@ -37,6 +40,13 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::{Expr, Extension, LogicalPlan};
 use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
+#[cfg(feature = "test-utils")]
+pub use fused_series::is_canonical_producer_exec;
+pub use fused_series::{
+    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec,
+    FusedSeriesStream, InputLocality, input_locality, matching_operands_drop_key,
+    tree_source_fields,
+};
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
 };
@@ -44,8 +54,10 @@ pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantMa
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 pub use planner::PromExtensionPlanner;
 pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulateStream};
+pub use raw_series_source::{RawSeriesSource, RawSeriesSourceExec};
 pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
+pub use series_repartition::{IdentityCompletion, SeriesRepartitionExec, SeriesRouting};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;

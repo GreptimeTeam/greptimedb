@@ -63,6 +63,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Ok(0));
             return;
         }
+        if let Err(e) = region.version().ensure_no_pending_tails() {
+            sender.send(Err(e));
+            return;
+        }
 
         // Retain the compaction fence while the DDL later waits for flush.
         let (sender, partition_directive) = match self.compaction_scheduler.try_cancel_and_add_ddl(

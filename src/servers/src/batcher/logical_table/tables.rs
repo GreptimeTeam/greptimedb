@@ -94,8 +94,8 @@ impl LogicalTablePendingRowsBatcher {
 
         // New tables are created on the request's selected physical table;
         // their time index must use the physical table's unit (a missing
-        // physical table is auto-created as millisecond by the schema
-        // alterer, matching the default here).
+        // physical table is auto-created in the configured auto-create unit
+        // by the schema alterer, matching the fallback here).
         if !plan.tables_to_create.is_empty() {
             let physical_unit = self.physical_time_index_unit_or_default(ctx).await;
             for (_, request_schema) in &mut plan.tables_to_create {

@@ -85,6 +85,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to join a blocking task of the log store"))]
+    Join {
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Object store WAL I/O permit is already installed"))]
+    WalIoPermitAlreadyInstalled {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Log store not started yet"))]
     IllegalState {
         #[snafu(implicit)]
@@ -474,6 +488,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Object store WAL node lease is unavailable or expired"))]
+    ObjectStoreWalLeaseExpired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Object store WAL operation failed"))]
     ObjectStoreWal {
         source: Arc<Error>,
@@ -529,6 +549,7 @@ impl ErrorExt for Error {
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
+            | Join { .. }
             | IllegalState { .. }
             | NoMaxValue { .. }
             | Cast { .. }
@@ -547,11 +568,14 @@ impl ErrorExt for Error {
             | WalObjectConflict { .. }
             | WalObjectSequenceExhausted { .. }
             | WalEntryPositionExhausted { .. } => StatusCode::Unexpected,
-            WalObjectSequenceUnsettled { .. } => StatusCode::IllegalState,
+            WalObjectSequenceUnsettled { .. } | WalIoPermitAlreadyInstalled { .. } => {
+                StatusCode::IllegalState
+            }
 
             InvalidWalObject { source, .. } => source.status_code(),
             ObjectStoreWal { source, .. } => source.status_code(),
             ObjectStoreWalFailing { .. } => StatusCode::StorageUnavailable,
+            ObjectStoreWalLeaseExpired { .. } => StatusCode::RegionNotReady,
 
             // Object store related errors
             WalObjectStore { .. }
@@ -593,6 +617,7 @@ impl ErrorExt for Error {
             | StaleWalObject { .. }
             | UnconfirmedWalEpochStart { .. }
             | ObjectStoreWalFailing { .. } => RetryHint::Retryable,
+            ObjectStoreWalLeaseExpired { .. } => RetryHint::RetryAfterRouteRefresh,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)

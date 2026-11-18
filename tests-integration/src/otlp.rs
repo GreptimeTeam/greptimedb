@@ -1923,8 +1923,9 @@ WITH(
         }
     }
 
+    #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_exemplar_otlp_memory_wait_and_lifetime() {
+    async fn test_exemplar_otlp_memory_wait_and_lifetime(#[values(false, true)] gate_source: bool) {
         use common_memory_manager::OnExhaustedPolicy;
         use servers::request_memory_limiter::ServerMemoryLimiter;
 
@@ -2052,12 +2053,32 @@ WITH(
                 timeout: Duration::from_secs(10),
             },
         );
+        let mut request = exemplar_metric_request(2);
+        for (index, metric) in request.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter_mut()
+            .enumerate()
+        {
+            let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                unreachable!()
+            };
+            let point = &mut gauge.data_points[0];
+            point.time_unix_nano = 120_000_000_000;
+            point.exemplars[0].time_unix_nano = point.time_unix_nano;
+            if index == 1 {
+                point.exemplars.clear();
+            }
+        }
         let table = instance
             .catalog_manager()
             .table(
                 DEFAULT_CATALOG_NAME,
                 "public",
-                METRICS_EXEMPLARS_TABLE,
+                if gate_source {
+                    "exemplar_memory_0"
+                } else {
+                    METRICS_EXEMPLARS_TABLE
+                },
                 None,
             )
             .await
@@ -2071,6 +2092,7 @@ WITH(
             .region_routes[0]
             .region
             .id;
+        let region_id = RegionId::new(table.table_info().table_id(), region_id.region_number());
         for cancel in [false, true] {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
@@ -2109,6 +2131,18 @@ WITH(
             let released = limiter.acquire(limit).await.unwrap();
             drop(released);
             assert_eq!(limiter.used_bytes(), 0);
+            if gate_source {
+                for sql in [
+                    format!(
+                        "SELECT COUNT(*)=0 FROM {METRICS_EXEMPLARS_TABLE} WHERE CAST(greptime_timestamp AS BIGINT)=120000000000"
+                    ),
+                    "SELECT COUNT(*)=1 FROM exemplar_memory_1".into(),
+                ] {
+                    assert_trace_v2_query(&instance, &sql, ctx.clone())
+                        .await
+                        .unwrap();
+                }
+            }
         }
     }
 
@@ -2136,9 +2170,9 @@ WITH(
         let mut metrics = Vec::new();
         for (i, key) in [
             "greptime_metric",
-            "exemplar_labels",
+            "greptime_exemplar_labels",
             "greptime.metric",
-            "exemplar.labels",
+            "greptime.exemplar.labels",
         ]
         .into_iter()
         .enumerate()
@@ -2177,9 +2211,9 @@ WITH(
         assert_eq!(dropped.get(), before + 9);
         for (table, column) in [
             ("collision_0", "greptime_metric"),
-            ("collision_1", "exemplar_labels"),
+            ("collision_1", "greptime_exemplar_labels"),
             ("collision_2", "greptime_metric"),
-            ("collision_3", "exemplar_labels"),
+            ("collision_3", "greptime_exemplar_labels"),
             ("collision_default", "greptime_metric"),
         ] {
             assert_trace_v2_query(
@@ -3962,6 +3996,94 @@ WITH(
                 timestamp.as_primitive::<TimestampNanosecondType>().value(0)
             };
             assert_eq!(actual, expected);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_initial_write_auto_create_physical_timestamp_unit() {
+        use common_time::timestamp::TimeUnit as ConfigTimeUnit;
+
+        for (unit, arrow_unit, expected) in [
+            (ConfigTimeUnit::Second, TimeUnit::Second, 60),
+            (ConfigTimeUnit::Millisecond, TimeUnit::Millisecond, 60_123),
+            (
+                ConfigTimeUnit::Microsecond,
+                TimeUnit::Microsecond,
+                60_123_456,
+            ),
+            (
+                ConfigTimeUnit::Nanosecond,
+                TimeUnit::Nanosecond,
+                60_123_456_789,
+            ),
+        ] {
+            let standalone = GreptimeDbStandaloneBuilder::new(&format!("otlp_initial_{unit:?}"))
+                .with_auto_create_physical_table_timestamp_unit(unit)
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+
+            // No pre-created tables: preflight must accept the first point so
+            // ingestion can create both tables with the configured time index.
+            let outcome = instance
+                .metrics(
+                    metric_request(vec![gauge_metric(
+                        "initial_metric",
+                        &[(60_123_456_789, 1.0, None)],
+                    )]),
+                    ctx.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (outcome.accepted_data_points, outcome.rejected_data_points),
+                (1, 0),
+                "unit={unit:?}"
+            );
+
+            for table in ["greptime_physical_table", "initial_metric"] {
+                let output = instance
+                    .do_query(
+                        &format!("SELECT greptime_timestamp FROM {table}"),
+                        ctx.clone(),
+                    )
+                    .await
+                    .remove(0)
+                    .unwrap();
+                let OutputData::Stream(stream) = output.data else {
+                    panic!("expected stream")
+                };
+                let batches = RecordBatches::try_collect(stream).await.unwrap().take();
+                assert_eq!(
+                    batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                    1
+                );
+                let timestamp = batches[0].column(0);
+                assert_eq!(
+                    timestamp.data_type(),
+                    &DataType::Timestamp(arrow_unit, None)
+                );
+                let actual = match arrow_unit {
+                    TimeUnit::Second => timestamp.as_primitive::<TimestampSecondType>().value(0),
+                    TimeUnit::Millisecond => timestamp
+                        .as_primitive::<TimestampMillisecondType>()
+                        .value(0),
+                    TimeUnit::Microsecond => timestamp
+                        .as_primitive::<TimestampMicrosecondType>()
+                        .value(0),
+                    TimeUnit::Nanosecond => {
+                        timestamp.as_primitive::<TimestampNanosecondType>().value(0)
+                    }
+                };
+                assert_eq!(actual, expected, "unit={unit:?}, table={table}");
+            }
         }
     }
 

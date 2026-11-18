@@ -188,6 +188,7 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
     let mut options = IndexOptions::default();
     options.inverted_index.segment_row_count = 3;
     let builder = IndexerBuilderImpl {
+        index_build_inputs: None,
         build_type: IndexBuildType::Flush,
         metadata: metadata.clone(),
         puffin_manager: puffin.clone(),

@@ -24,7 +24,7 @@
 //!   (see [`SstFileInfo`] and the coverage footnote).
 //!
 //! - [`on_manifest_updated`]: Fires after a manifest write is committed to the **live**
-//!   (normal) manifest directory. Writes to the staging directory (enter staging,
+//!   (normal) manifest directory. Actions staged in memory (enter staging,
 //!   operations during staging, the intermediate apply-staging edit) are suppressed —
 //!   their effects are accumulated and delivered in a single notification when the
 //!   staged actions are promoted to the live manifest. Receives the full
@@ -43,32 +43,33 @@
 //! ## Coverage
 //!
 //! Only manifest writes to the **normal** (live) manifest directory trigger
-//! `on_manifest_updated`. Writes to the staging manifest directory (operations
+//! `on_manifest_updated`. Actions staged in memory (operations
 //! that happen while the region is in staging mode) are intentionally suppressed:
 //! their effects are accumulated and delivered in a single notification when
-//! the staged actions are promoted to the live manifest via `exit_staging_on_success`.
+//! the staged actions are committed to the live manifest via `end_staging_locked`.
 //!
 //! | Scenario                     | `on_sst_files_written` | `on_manifest_updated` |
 //! |------------------------------|:----------------------:|:---------------------:|
 //! | Flush (memtable → SST)       | ✅ Yes                 | ✅ Yes                |
 //! | Local compaction             | ✅ Yes                 | ✅ Yes                |
+//! | Pending WAL tail replay      | ✅ Yes                 | ✅ Yes                |
 //! | Remote compaction            | ✅ (compactor node) ¹     | ✅ (compactor node) ¹    |
 //! | RegionEdit / bulk ingestion  | ❌ (files pre-written)  | ✅ Yes                |
 //! | Copy region                  | ❌ (object-store copy)  | ✅ Yes                |
 //! | Apply staging (promote)      | ❌ (delegates to edit)  | ✅ Yes ²               |
 //! | Alter (schema change)        | ❌ (no SST files)       | ✅ Yes                |
 //! | Truncate                     | ❌ (removes files)      | ✅ Yes                |
-//! | Enter staging                | ❌ (no SST files)       | ❌ (staging dir)      |
-//! | Operations during staging    | N/A                    | ❌ (staging dir)      |
+//! | Enter staging                | ❌ (no SST files)       | ❌ (in memory)        |
+//! | Operations during staging    | N/A                    | ❌ (in memory)        |
 //! | Async index build            | ❌ (index files only)   | ✅ Yes                |
 //!
 //! ¹ Remote compaction runs on a dedicated compactor node via `CompactionRegionOpener::open()`;
 //!   pass plugins via `OpenCompactionRegionRequest` to enable hooks there. `sst_infos` is
 //!   `#[serde(skip)]` over the wire, so each [`SstInfo`] is rebuilt from [`FileMeta`] with
 //!   empty footer/index — see [`SstFileInfo`] for field-level detail.
-//! ² Apply staging fires `on_manifest_updated` once when `exit_staging_on_success` promotes
+//! ² Apply staging fires `on_manifest_updated` once when `end_staging_locked` commits
 //!   all staged manifest actions (including the SST file additions) into the live manifest.
-//!   The intermediate staging `RegionEdit` is written to the staging directory and does not
+//!   The intermediate staging `RegionEdit` is staged in memory and does not
 //!   fire the hook — its file list is included in the promote notification.
 //!
 //! The following paths do **not** trigger any hook:
@@ -116,8 +117,9 @@
 //!
 //! ## Invocation points
 //!
-//! `on_sst_files_written` is invoked at the SST write site (flush task or compaction task),
-//! immediately after SST files are written but **before** the manifest is committed.
+//! `on_sst_files_written` is invoked at the SST write site (flush task, compaction task or
+//! tail replay task), immediately after SST files are written but **before** the manifest
+//! is committed.
 //!
 //! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
 //! which calls the low-level [`RegionManifestManager::update_with_verification`]
@@ -157,6 +159,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parquet::file::metadata::ParquetMetaData;
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -175,10 +178,10 @@ use crate::sst::parquet::SstInfo;
 ///
 /// ## Staging suppression
 ///
-/// When `is_staging` is `true`, [`fire`](Self::fire) is a no-op — the write went to
-/// the staging manifest directory. The hook only observes writes to the live (normal)
+/// When `is_staging` is `true`, [`fire`](Self::fire) is a no-op — the actions were
+/// staged in memory. The hook only observes writes to the live (normal)
 /// manifest directory. Staging actions are accumulated and delivered in a single
-/// notification when `exit_staging_on_success` promotes them (`is_staging = false`).
+/// notification when `end_staging_locked` commits them (`is_staging = false`).
 #[must_use = "the region hook must be fired after releasing the manifest write lock"]
 pub(crate) struct PendingManifestHook {
     region_id: RegionId,
@@ -186,7 +189,7 @@ pub(crate) struct PendingManifestHook {
     action_list: Option<RegionMetaActionList>,
     version: ManifestVersion,
     hook: Option<RegionHookRef>,
-    /// Whether the manifest write went to the staging directory.
+    /// Whether the actions were staged in memory.
     /// When `true`, `fire()` is suppressed — the hook only observes live manifest writes.
     is_staging: bool,
 }
@@ -213,9 +216,9 @@ impl PendingManifestHook {
         self.version
     }
 
-    /// Fires the hook if one is registered, **unless** the write went to the staging
-    /// manifest directory (`is_staging = true`). Safe to call unconditionally:
-    /// it is a no-op when no hook is registered or when the write is staging-only.
+    /// Fires the hook if one is registered, **unless** the actions were staged in
+    /// memory (`is_staging = true`). Safe to call unconditionally:
+    /// it is a no-op when no hook is registered or when the actions were staged in memory.
     pub(crate) async fn fire(self) {
         if self.is_staging {
             return;
@@ -269,6 +272,13 @@ pub struct SstFileInfo<'a> {
     pub file_meta: &'a FileMeta,
 }
 
+/// Externally produced SST with its verified footer. Index-builder statistics
+/// are deliberately absent: they cannot be reconstructed from FileMeta.
+pub struct VerifiedSstFileInfo<'a> {
+    pub file_meta: &'a FileMeta,
+    pub footer: &'a Arc<ParquetMetaData>,
+}
+
 /// Hook for observing region mutations in mito2.
 ///
 /// Implementations can be registered via the `Plugins` system:
@@ -283,7 +293,8 @@ pub struct SstFileInfo<'a> {
 pub trait RegionHook: Send + Sync + Debug {
     /// Called after SST **data files** are physically written, before manifest commit.
     ///
-    /// This fires only when mito2 itself writes SST files (flush and compaction).
+    /// This fires only when mito2 itself writes SST files (flush, compaction and the replay
+    /// of pending WAL tails).
     /// It does **not** fire when SST files are pre-written externally (bulk ingestion,
     /// copy region) or when only index files are written (async index build).
     ///
@@ -315,12 +326,27 @@ pub trait RegionHook: Send + Sync + Debug {
         Ok(HashSet::new())
     }
 
+    /// Called for verified table-compaction outputs before manifest publication.
+    /// Unlike `on_sst_files_written`, this carries actual remote footers without
+    /// fabricating unavailable index-builder statistics. Retries may repeat it;
+    /// no manifest lock is held and implementations must be idempotent. Publication
+    /// may still fail after this callback; it is not a publication acknowledgement.
+    /// Use `on_manifest_updated` to observe a successful manifest commit.
+    async fn on_sst_files_verified(
+        &self,
+        region_id: RegionId,
+        region_metadata: &RegionMetadataRef,
+        files: &[VerifiedSstFileInfo<'_>],
+    ) {
+        let _ = (region_id, region_metadata, files);
+    }
+
     /// Called after the region manifest is successfully committed to the **live**
     /// (normal) manifest directory.
     ///
     /// Fires for: flush, compaction, region edit, copy region, alter, truncate,
-    /// async index build, and apply-staging promote. Does **not** fire for writes
-    /// to the staging manifest directory (enter staging, operations during staging,
+    /// async index build, and apply-staging promote. Does **not** fire for actions
+    /// staged in memory (enter staging, operations during staging,
     /// the intermediate apply-staging edit) — those are suppressed because their
     /// effects are accumulated and delivered in a single promote notification.
     ///

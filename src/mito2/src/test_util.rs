@@ -42,7 +42,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_telemetry::{debug, warn};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
-use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+use common_wal::config::object_store::{FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig};
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
 use datatypes::extension::json::{Json2ExtensionType, JsonExtensionType};
@@ -55,7 +55,8 @@ use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
 use object_store::ObjectStore;
 use object_store::layers::mock::{
-    Buffer, Deleter, Metadata, MockLayer, MockLayerBuilder, OpDelete, Result as MockResult, Writer,
+    Buffer, Deleter, Error as MockError, ErrorKind, Metadata, MockLayer, MockLayerBuilder,
+    OpDelete, Result as MockResult, Writer,
 };
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::{Fs, Memory};
@@ -105,6 +106,7 @@ pub(crate) fn nop_action() -> RegionMetaActionList {
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     })])
 }
 
@@ -248,6 +250,84 @@ impl object_store::layers::mock::Write for BlockingManifestWriter {
 
     async fn abort(&mut self) -> MockResult<()> {
         self.inner.abort().await
+    }
+}
+
+/// Injects faults into the next manifest delta write of a mock object store.
+#[derive(Clone, Default)]
+pub(crate) struct DeltaFaults {
+    /// Whether the next delta write lands but reports an error, like a lost response.
+    lose_response: Arc<AtomicBool>,
+    /// Whether the next delta write fails without landing.
+    fail_write: Arc<AtomicBool>,
+}
+
+impl DeltaFaults {
+    pub(crate) fn lose_next_response(&self) {
+        self.lose_response.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn fail_next_write(&self) {
+        self.fail_write.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn layer(&self) -> MockLayer {
+        let faults = self.clone();
+        MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _args, inner| {
+                if !is_delta_file(path.rsplit('/').next().unwrap_or_default()) {
+                    inner
+                } else if faults.fail_write.swap(false, Ordering::Relaxed) {
+                    Box::new(FailedWriter)
+                } else {
+                    Box::new(LostResponseWriter {
+                        inner,
+                        faults: faults.clone(),
+                    })
+                }
+            }))
+            .build()
+            .unwrap()
+    }
+}
+
+struct LostResponseWriter {
+    inner: Writer,
+    faults: DeltaFaults,
+}
+
+impl object_store::layers::mock::Write for LostResponseWriter {
+    async fn write(&mut self, bs: Buffer) -> MockResult<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        let metadata = self.inner.close().await?;
+        if self.faults.lose_response.swap(false, Ordering::Relaxed) {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock lost response"));
+        }
+        Ok(metadata)
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        self.inner.abort().await
+    }
+}
+
+/// A write that fails without touching the store.
+struct FailedWriter;
+
+impl object_store::layers::mock::Write for FailedWriter {
+    async fn write(&mut self, _: Buffer) -> MockResult<()> {
+        Err(MockError::new(ErrorKind::Unexpected, "mock failed write"))
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        Err(MockError::new(ErrorKind::Unexpected, "mock failed write"))
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        Ok(())
     }
 }
 
@@ -539,6 +619,17 @@ impl TestEnv {
         config: MitoConfig,
         log_store: Arc<S>,
     ) -> MitoEngine {
+        self.create_engine_with_log_store_and_plugins(config, log_store, Plugins::new())
+            .await
+    }
+
+    /// Creates a new engine with specific config and plugins on `log_store` under this env.
+    pub(crate) async fn create_engine_with_log_store_and_plugins<S: LogStore>(
+        &mut self,
+        config: MitoConfig,
+        log_store: Arc<S>,
+        plugins: Plugins,
+    ) -> MitoEngine {
         let object_store_manager = Arc::new(self.create_object_store_manager());
         self.object_store_manager = Some(object_store_manager.clone());
 
@@ -551,7 +642,33 @@ impl TestEnv {
             self.schema_metadata_manager.clone(),
             self.file_ref_manager.clone(),
             self.partition_expr_fetcher.clone(),
-            Plugins::new(),
+            plugins,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Creates an engine on the supplied WAL with a controllable periodic clock.
+    pub(crate) async fn create_engine_with_log_store_and_time<S: LogStore>(
+        &mut self,
+        config: MitoConfig,
+        log_store: Arc<S>,
+        time_provider: TimeProviderRef,
+        listener: Option<EventListenerRef>,
+    ) -> MitoEngine {
+        let object_store_manager = Arc::new(self.create_object_store_manager());
+        self.object_store_manager = Some(object_store_manager.clone());
+        MitoEngine::new_for_test(
+            &self.data_home().display().to_string(),
+            config,
+            log_store,
+            object_store_manager,
+            None,
+            listener,
+            time_provider,
+            self.schema_metadata_manager.clone(),
+            self.file_ref_manager.clone(),
+            self.partition_expr_fetcher.clone(),
         )
         .await
         .unwrap()
@@ -566,10 +683,14 @@ impl TestEnv {
         wal_config: &ObjectStoreWalConfig,
     ) -> (MitoEngine, Arc<ObjectStoreLogStore>) {
         let wal_object_store = ObjectStore::new(Memory::default()).unwrap();
-        let log_store =
-            ObjectStoreLogStore::try_new(wal_object_store, wal_config, 0, STANDALONE_GENERATION)
-                .await
-                .unwrap();
+        let log_store = ObjectStoreLogStore::try_new(
+            wal_object_store,
+            wal_config,
+            0,
+            FIXED_DIRECTORY_GENERATION,
+        )
+        .await
+        .unwrap();
         let engine = self
             .create_engine_with_log_store(config, log_store.clone())
             .await;
@@ -866,6 +987,7 @@ impl TestEnv {
         let manifest_dir = "/".to_string();
 
         let manifest_opts = RegionManifestOptions {
+            file_metadata_interner: Default::default(),
             manifest_dir,
             object_store,
             compress_type,

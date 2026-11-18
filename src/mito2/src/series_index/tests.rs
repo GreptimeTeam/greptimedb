@@ -63,15 +63,39 @@ pub(crate) async fn prepare_region_with_timestamps(
     .await
 }
 
-async fn prepare_region_with_config(
+pub(crate) async fn prepare_region_with_config(
     env: &mut TestEnv,
     timestamps: &[i64],
     config: MitoConfig,
 ) -> (MitoEngine, MitoRegionRef) {
+    prepare_region_with_metadata(
+        env,
+        timestamps,
+        config,
+        Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        )),
+    )
+    .await
+}
+
+pub(crate) async fn prepare_region_with_metadata(
+    env: &mut TestEnv,
+    timestamps: &[i64],
+    config: MitoConfig,
+    metadata: store_api::metadata::RegionMetadataRef,
+) -> (MitoEngine, MitoRegionRef) {
+    prepare_region_with_metadata_and_flush(env, timestamps, config, metadata, true).await
+}
+
+pub(crate) async fn prepare_region_with_metadata_and_flush(
+    env: &mut TestEnv,
+    timestamps: &[i64],
+    config: MitoConfig,
+    metadata: store_api::metadata::RegionMetadataRef,
+    flush_each: bool,
+) -> (MitoEngine, MitoRegionRef) {
     let engine = env.create_engine(config).await;
-    let metadata = Arc::new(sst_region_metadata_with_encoding(
-        PrimaryKeyEncoding::Sparse,
-    ));
     let region_id = RegionId::new(1, 1);
     let mut request = CreateRequestBuilder::new().build();
     request.column_metadatas = metadata.column_metadatas.clone();
@@ -90,7 +114,7 @@ async fn prepare_region_with_config(
         .insert("compaction.type".to_string(), "twcs".to_string());
     request.options.insert(
         "compaction.twcs.time_window".to_string(),
-        "100s".to_string(),
+        if flush_each { "100s" } else { "172800s" }.to_string(),
     );
     // Keep the source SSTs stable while tests reconcile multiple buckets.
     for window in ["active_window", "inactive_window"] {
@@ -129,7 +153,18 @@ async fn prepare_region_with_config(
                                 0,
                             )),
                             ValueData::TimestampMillisecondValue(ts),
-                            ValueData::U64Value(1),
+                            if metadata
+                                .field_columns()
+                                .next()
+                                .unwrap()
+                                .column_schema
+                                .data_type
+                                == datatypes::prelude::ConcreteDataType::float64_datatype()
+                            {
+                                ValueData::F64Value(1.0)
+                            } else {
+                                ValueData::U64Value(1)
+                            },
                         ])],
                     },
                     hint: Some(WriteHint {
@@ -140,6 +175,11 @@ async fn prepare_region_with_config(
             )
             .await
             .unwrap();
+        if flush_each {
+            flush_region(&engine, region_id, None).await;
+        }
+    }
+    if !flush_each {
         flush_region(&engine, region_id, None).await;
     }
     (engine, region)
@@ -294,6 +334,7 @@ async fn test_reconcile_range_index_disabled(
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }),
         &[],
         crate::test_util::new_noop_file_purger(),
@@ -403,6 +444,7 @@ async fn test_reconcile_range_only_build_and_removal() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }),
         &[],
         crate::test_util::new_noop_file_purger(),
@@ -455,6 +497,7 @@ async fn test_reconcile_replaces_whole_bucket_after_failure(#[case] failure: &st
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     };
     region.version_control.apply_edit(
         Some(edit(false)),
@@ -726,9 +769,17 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
                 .unwrap();
             ranges.insert(entry.file_id, entry);
         }
-        let handle = build_series_index(store, &region, &version.metadata, bucket, entry, purger)
-            .await
-            .unwrap();
+        let handle = build_series_index(
+            store,
+            &region,
+            &version.metadata,
+            bucket,
+            entry,
+            None,
+            purger,
+        )
+        .await
+        .unwrap();
         let reused_path = series_index_path(region.region_id, entry.index_uuid);
         region
             .series_index_version_control
@@ -891,6 +942,7 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     let store = ObjectStore::new(Memory::default()).unwrap();
     let region_id = RegionId::new(1, 1);
     let entry = SeriesIndexEntry {
+        artifact: None,
         file_size: 0,
         index_uuid: FileId::random(),
         bucket_start: Timestamp::new_second(0),

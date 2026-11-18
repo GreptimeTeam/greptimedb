@@ -24,13 +24,30 @@ use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::expr::NullTreatment;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
-    EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
+    EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, RawSeriesSource, SeriesDivide,
+    SeriesNormalize,
 };
+use promql::native::plan::{AggregateStage, NativeExpr, reads_across_series};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
+use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
+
+/// Whether `node` is a node the analyzer runs where the scan it reads is planned.
+///
+/// A region only ever runs a fused node over its own scan, and the analyzer puts one there by
+/// classifying it as commutative - which is also the only placement a node over a bare scan has,
+/// because a bare scan is never shipped across a region boundary. A planner that has to commit to
+/// a plan before the analyzer runs asks this to know whether that placement exists: `false` says
+/// every input of this node has to be a source that names its region.
+pub(crate) fn region_local_node(node: &dyn UserDefinedLogicalNode) -> bool {
+    matches!(
+        Categorizer::check_extension_plan(node, &AliasMapping::default()),
+        Commutativity::Commutative
+    )
+}
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -250,6 +267,65 @@ impl Categorizer {
 
                 Commutativity::Commutative
             }
+            name if name == FusedSeries::name() => {
+                let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
+                if fused.is_canonical_producer() {
+                    // A canonical producer merges the pieces of one label set that its own input
+                    // partitions hold, and its physical canonical router collects those pieces from
+                    // exactly those partitions. A region holds only part of a label set, so a
+                    // producer there would answer a label set from one region's share whenever the
+                    // pieces are spread. Nothing below the node changes that: a canonical cut wraps
+                    // its inputs in sources independently of how the scan was chosen, so the shape
+                    // is not a placement proof. The per-series rules below are not consulted: they
+                    // describe what a node computes, not where the pieces of a label set are.
+                    return Commutativity::NonCommutative;
+                }
+                // The raw-series reader supports one scan, or the narrow same-table multi-scan
+                // one-to-one case. This classification is for region-local execution only.
+                let children = fused.children();
+                if children.len() == 1 {
+                    if !matches!(children[0], LogicalPlan::TableScan(_)) {
+                        return Commutativity::NonCommutative;
+                    }
+                } else if !(same_table_scans(children)
+                    && independent_scan_pair(fused.tree().root()))
+                {
+                    return Commutativity::NonCommutative;
+                }
+                let binding = fused.binding();
+                if binding.metric_name.is_none() {
+                    return Commutativity::NonCommutative;
+                }
+                let root = fused.tree().root();
+                // A `Partial` root is safe below the region boundary only when its prefix itself
+                // reads per-series work. Do not rely on split admission here: hand-built trees can
+                // put a whole-vector operation below the aggregate. The `Final` half above the
+                // exchange is not classified here because its input is the exchange, not a scan.
+                let partial = matches!(
+                    &root.expr,
+                    NativeExpr::Aggregate { input, op }
+                        if op.stage == AggregateStage::Partial && !reads_across_series(input)
+                );
+                let per_series = pointwise_operand(root) || independent_scan_pair(root);
+                // A gather of one raw scan does not establish region-global ownership. Cross-series
+                // consumers need their existing split or frontend placement.
+                if reads_across_series(root) && !per_series && !partial {
+                    return Commutativity::NonCommutative;
+                }
+
+                // The multi-scan exception describes only in-process, same-table region-local
+                // execution. It is not a claim that matching is globally commutative across regions.
+                Commutativity::Commutative
+            }
+            // A region answers its own series of one table, which is what the node above the merge
+            // scans reads from every region.
+            name if name == RawSeriesSource::name() => {
+                if matches!(plan.inputs().as_slice(), [LogicalPlan::TableScan(_)]) {
+                    Commutativity::Commutative
+                } else {
+                    Commutativity::NonCommutative
+                }
+            }
             name if name == SeriesNormalize::name()
                 || name == InstantManipulate::name()
                 || name == RangeManipulate::name() =>
@@ -359,16 +435,41 @@ impl Categorizer {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::time::{Duration, UNIX_EPOCH};
 
+    use datafusion::arrow::datatypes::{
+        DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit,
+    };
+    use datafusion::common::{DFSchema, DFSchemaRef};
+    use datafusion::datasource::DefaultTableSource;
     use datafusion_common::Column;
+    use datafusion_common::config::ConfigOptions;
     use datafusion_expr::LogicalPlanBuilder;
     use datafusion_expr::expr::ScalarFunction;
+    use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
     use datafusion_functions::core::coalesce;
+    use datafusion_optimizer::analyzer::AnalyzerRule;
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use promql::extension_plan::FieldKind;
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding, RawSeriesSource};
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
     };
+    use promql::native::plan::{
+        AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, Grouping,
+        NativeExpr, NativeNode, NativeTree, NativeType,
+    };
+    use promql_parser::parser;
+    use store_api::storage::RegionId;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
     use super::*;
+    use crate::dist_plan::DistPlannerAnalyzer;
+    use crate::optimizer::test_util::mock_table_provider;
+    use crate::promql::native_compile::{compile, compile_selectors, statement_grid};
+    use crate::query_engine::DefaultSerializer;
 
     #[test]
     fn series_divide_by_tsid_is_commutative() {
@@ -402,6 +503,937 @@ mod tests {
                 Commutativity::Commutative
             ));
         }
+    }
+
+    /// The statement one `FusedSeries` test node is bound to.
+    fn native_statement() -> promql_parser::parser::EvalStmt {
+        promql_parser::parser::EvalStmt {
+            expr: parser::parse("some_metric").unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        }
+    }
+
+    /// A `FusedSeries` node over `input`, bound to the tree a bare selector compiles to.
+    ///
+    /// The tree is the simplest shape the compiler accepts, because what these tests change is
+    /// where the node may be placed, not what it computes.
+    fn fused_series_plan(input: LogicalPlan) -> LogicalPlan {
+        fused_series_plan_named(input, Some("some_metric"))
+    }
+
+    fn fused_pair_plan(left: LogicalPlan, right: LogicalPlan) -> LogicalPlan {
+        let mut stmt = native_statement();
+        stmt.expr =
+            parser::parse("some_metric{host=\"left\"} + on(host) some_metric{host=\"right\"}")
+                .unwrap();
+        let series_schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        });
+        let tree = compile_selectors(
+            &stmt,
+            &|_| Ok(Arc::clone(&series_schema)),
+            SeriesOrdering::Contiguous,
+            Some(FieldKind::Float),
+        )
+        .unwrap()
+        .tree;
+        let binding = FusedSeriesBinding {
+            grid: statement_grid(&stmt).unwrap(),
+            time_index: "ts".to_string(),
+            tags: vec!["host".to_string()],
+            metric_name: Some(Arc::from("some_metric")),
+        };
+        let output_schema: DFSchemaRef = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![(
+                    None,
+                    Arc::new(Field::new("v0", ArrowDataType::Float64, true)),
+                )],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new(
+                    Arc::from("some_metric{host=\"left\"} + on(host) some_metric{host=\"right\"}"),
+                    tree,
+                    binding,
+                    vec![left, right],
+                    output_schema,
+                )
+                .unwrap(),
+            ),
+        })
+    }
+
+    /// The same node, with the metric name it binds chosen by the caller.
+    fn fused_series_plan_named(input: LogicalPlan, metric_name: Option<&str>) -> LogicalPlan {
+        let stmt = native_statement();
+        let series_schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        });
+        let tree = compile(
+            &stmt,
+            Arc::clone(&series_schema),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let binding = FusedSeriesBinding {
+            grid: statement_grid(&stmt).unwrap(),
+            time_index: "ts".to_string(),
+            tags: Vec::new(),
+            metric_name: metric_name.map(Arc::from),
+        };
+        let output_schema: DFSchemaRef = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![
+                    (
+                        None,
+                        Arc::new(Field::new("v0", ArrowDataType::Float64, true)),
+                    ),
+                    (
+                        None,
+                        Arc::new(Field::new(
+                            "ts",
+                            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                            false,
+                        )),
+                    ),
+                ],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new(
+                    Arc::from("some_metric"),
+                    tree,
+                    binding,
+                    vec![input],
+                    output_schema,
+                )
+                .unwrap(),
+            ),
+        })
+    }
+
+    /// A canonical producer of `some_metric` over `input`.
+    ///
+    /// The tree says what the compiler says at a canonical boundary - one evaluated vector merged by
+    /// canonical label set - and the `Merge` root is what marks the node as the producer of that
+    /// collection. The children are exactly what the caller supplies, so a test can hand the node
+    /// the region's own scan and ask where such a node may run.
+    fn canonical_producer_plan(input: LogicalPlan) -> LogicalPlan {
+        let stmt = native_statement();
+        let grid = statement_grid(&stmt).unwrap();
+        let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: Some(Arc::clone(&grid)),
+        }));
+        let merge = NativeNode {
+            expr: NativeExpr::Merge {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        output: evaluated.clone(),
+                        source_index: 0,
+                        ordering: SeriesOrdering::KeyThenTime,
+                    }),
+                    output: evaluated.clone(),
+                }),
+            },
+            output: evaluated,
+        };
+        let binding = FusedSeriesBinding {
+            grid,
+            time_index: "ts".to_string(),
+            tags: Vec::new(),
+            metric_name: Some(Arc::from("some_metric")),
+        };
+        let tree = NativeTree::try_new(merge).unwrap();
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new_canonical_producer(
+                    Arc::from("some_metric"),
+                    tree,
+                    binding,
+                    vec![input],
+                )
+                .unwrap(),
+            ),
+        })
+    }
+
+    /// The region's own view of the metric's table: a scan whose provider is the region provider.
+    fn table_scan_plan() -> LogicalPlan {
+        let provider = mock_table_provider(RegionId::new(1, 1));
+        LogicalPlanBuilder::scan(
+            "some_metric",
+            Arc::new(DefaultTableSource::new(Arc::new(provider))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    fn table_scan_plan_with_filter(value: &str) -> LogicalPlan {
+        let LogicalPlan::TableScan(mut scan) = table_scan_plan() else {
+            unreachable!();
+        };
+        scan.filters
+            .push(datafusion_expr::col("k0").eq(datafusion_expr::lit(value)));
+        LogicalPlan::TableScan(scan)
+    }
+
+    fn holds_fused_series(plan: &LogicalPlan) -> bool {
+        if let LogicalPlan::Extension(extension) = plan
+            && extension.node.as_any().is::<FusedSeries>()
+        {
+            return true;
+        }
+        plan.inputs().into_iter().any(holds_fused_series)
+    }
+
+    /// An extension node with no `ExtensionSerializer` branch: neither one under its own name nor
+    /// one it shares, since the serializer lists names and not shapes. It stands in for the nodes
+    /// that cannot reach a region as bytes for their own reasons, which the encoding gate must keep
+    /// honouring. The categorizer refuses it, as it refuses every name it does not know.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct UnserializableNode {
+        input: LogicalPlan,
+        schema: DFSchemaRef,
+    }
+
+    impl PartialOrd for UnserializableNode {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            let ordering = self.input.partial_cmp(&other.input);
+            match ordering {
+                Some(std::cmp::Ordering::Equal) if self.schema != other.schema => None,
+                ordering => ordering,
+            }
+        }
+    }
+
+    impl UnserializableNode {
+        fn new(input: LogicalPlan) -> Self {
+            let schema = input.schema().clone();
+            Self { input, schema }
+        }
+    }
+
+    impl UserDefinedLogicalNodeCore for UnserializableNode {
+        fn name(&self) -> &str {
+            "UnserializableNode"
+        }
+
+        fn inputs(&self) -> Vec<&LogicalPlan> {
+            vec![&self.input]
+        }
+
+        fn schema(&self) -> &DFSchemaRef {
+            &self.schema
+        }
+
+        fn expressions(&self) -> Vec<Expr> {
+            vec![]
+        }
+
+        fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "UnserializableNode")
+        }
+
+        fn with_exprs_and_inputs(
+            &self,
+            _exprs: Vec<Expr>,
+            mut inputs: Vec<LogicalPlan>,
+        ) -> DfResult<Self> {
+            Ok(Self::new(inputs.swap_remove(0)))
+        }
+    }
+
+    /// The plan that node builds over `input`.
+    fn unserializable_plan(input: LogicalPlan) -> LogicalPlan {
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(UnserializableNode::new(input)),
+        })
+    }
+
+    fn holds_unserializable_node(plan: &LogicalPlan) -> bool {
+        if let LogicalPlan::Extension(extension) = plan
+            && extension.node.as_any().is::<UnserializableNode>()
+        {
+            return true;
+        }
+        plan.inputs().into_iter().any(holds_unserializable_node)
+    }
+
+    fn holds_table_scan(plan: &LogicalPlan) -> bool {
+        if matches!(plan, LogicalPlan::TableScan(_)) {
+            return true;
+        }
+        plan.inputs().into_iter().any(holds_table_scan)
+    }
+
+    /// The merge scan `plan` is, if it is one.
+    fn as_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
+        if let LogicalPlan::Extension(extension) = plan {
+            extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+        } else {
+            None
+        }
+    }
+
+    /// The first merge scan in `plan`'s visible tree. A merge scan's remote input is not one of its
+    /// children, so this does not look into one.
+    fn first_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
+        if let Some(merge_scan) = as_merge_scan(plan) {
+            return Some(merge_scan);
+        }
+        plan.inputs().into_iter().find_map(first_merge_scan)
+    }
+
+    fn analyze(analyzer: DistPlannerAnalyzer, plan: LogicalPlan) -> LogicalPlan {
+        analyzer.analyze(plan, &ConfigOptions::default()).unwrap()
+    }
+
+    fn analyzed(analyzer: DistPlannerAnalyzer, plan: LogicalPlan) -> DfResult<LogicalPlan> {
+        analyzer.analyze(plan, &ConfigOptions::default())
+    }
+
+    /// Whether the remote input of any merge scan in `plan` holds a node `wanted` accepts.
+    fn any_remote_input_holds(plan: &LogicalPlan, wanted: fn(&LogicalPlan) -> bool) -> bool {
+        let mut holds = false;
+        plan.apply(|node| {
+            if let Some(merge_scan) = as_merge_scan(node) {
+                holds |= wanted(merge_scan.input());
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        holds
+    }
+
+    #[test]
+    fn fused_series_over_its_scan_is_commutative() {
+        let plan = fused_series_plan(table_scan_plan());
+
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::Commutative
+        ));
+    }
+
+    /// The region builds the node from the scan's own raw-series entrypoint, so an input that is
+    /// not that scan leaves the node with nothing to read where it would be placed.
+    #[test]
+    fn fused_series_over_anything_but_a_scan_is_not_commutative() {
+        let scan = table_scan_plan();
+        let input = LogicalPlanBuilder::from(scan)
+            .filter(datafusion_expr::col("k0").eq(datafusion_expr::lit("a")))
+            .unwrap()
+            .build()
+            .unwrap();
+        let plan = fused_series_plan(input);
+
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    /// The region asks the scan for one named metric's series, so a node binding no name cannot
+    /// be built there.
+    #[test]
+    fn fused_series_that_binds_no_metric_name_is_not_commutative() {
+        let plan = fused_series_plan_named(table_scan_plan(), None);
+
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    /// A canonical producer never runs in a region, whatever its children look like: its router
+    /// collects the pieces of one label set from exactly the partitions the producer runs on, and a
+    /// region holds only part of a label set. A bare scan underneath does not on its own admit the
+    /// producer, so the node stays above the regions with its router.
+    #[test]
+    fn a_canonical_producer_is_not_commutative_even_over_a_bare_scan() {
+        let plan = canonical_producer_plan(table_scan_plan());
+        let LogicalPlan::Extension(extension) = &plan else {
+            unreachable!();
+        };
+        assert!(matches!(
+            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
+            Commutativity::NonCommutative
+        ));
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    /// A tree built by something other than the compiler can hold a node that folds several
+    /// series. The check is a property of the tree, so it is exercised on the node itself: the
+    /// compiler emits no such node today, and nothing else would build a tree containing one.
+    #[test]
+    fn a_tree_that_folds_across_series_is_not_per_series() {
+        let raw = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        }));
+        let input = NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                output: raw.clone(),
+                source_index: 0,
+                ordering: SeriesOrdering::KeyThenTime,
+            }),
+            output: raw,
+        };
+        let group = Grouping::By(Arc::from(["k0".into()]));
+        let aggregate = NativeNode {
+            expr: NativeExpr::Aggregate {
+                input: Box::new(input),
+                op: BoundAggregate {
+                    kind: AggregateKind::Sum,
+                    group: group.clone(),
+                    stage: AggregateStage::Partial,
+                    field_kind: FieldKind::Float,
+                },
+            },
+            output: NativeType::AggregateState(Arc::new(AggregateStateSchema {
+                group,
+                kind: AggregateStateKind::Sum,
+                components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+                accumulators: Arc::from([]),
+                grid: statement_grid(&native_statement()).unwrap(),
+            })),
+        };
+        assert!(reads_across_series(&aggregate));
+
+        // The same walk over what the compiler emits stays per-series.
+        let single_selector = compile(
+            &native_statement(),
+            Arc::new(SeriesSchema {
+                fields: Arc::from([FieldSpec { name: "v0".into() }]),
+                eval_grid: None,
+            }),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        assert!(!reads_across_series(single_selector.root()));
+    }
+
+    #[test]
+    fn same_table_two_scan_fused_pair_is_region_local_commutative() {
+        let pair = fused_pair_plan(table_scan_plan(), table_scan_plan());
+        let LogicalPlan::Extension(extension) = pair else {
+            unreachable!();
+        };
+        assert!(matches!(
+            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
+            Commutativity::Commutative
+        ));
+
+        let other_table = LogicalPlanBuilder::scan(
+            "other_metric",
+            Arc::new(DefaultTableSource::new(Arc::new(mock_table_provider(
+                RegionId::new(1, 1),
+            )))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let pair = fused_pair_plan(table_scan_plan(), other_table);
+        let LogicalPlan::Extension(extension) = pair else {
+            unreachable!();
+        };
+        assert!(matches!(
+            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    /// Two tables are two regions: the pair stays above them and each table's raw source rides
+    /// in a merge scan of its own.
+    #[test]
+    fn cross_table_pair_runs_above_one_merge_scan_per_table() {
+        let source = |scan: LogicalPlan, metric: &str| {
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(
+                    RawSeriesSource::try_new(
+                        Arc::from(metric),
+                        vec!["host".to_string()],
+                        vec!["v0".to_string()],
+                        scan,
+                    )
+                    .unwrap(),
+                ),
+            })
+        };
+        let other_table = LogicalPlanBuilder::scan(
+            "other_metric",
+            Arc::new(DefaultTableSource::new(Arc::new(mock_table_provider(
+                RegionId::new(2, 1),
+            )))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let pair = fused_pair_plan(
+            source(table_scan_plan(), "some_metric"),
+            source(other_table, "other_metric"),
+        );
+
+        let analyzed_plan = analyze(DistPlannerAnalyzer::default(), pair);
+        let LogicalPlan::Extension(root) = &analyzed_plan else {
+            panic!("the pair stays the root: {analyzed_plan}");
+        };
+        assert!(root.node.as_any().is::<FusedSeries>(), "{analyzed_plan}");
+        let remote_tables = root
+            .node
+            .inputs()
+            .into_iter()
+            .map(|input| {
+                let merge_scan = first_merge_scan(input).expect("each input is a merge scan");
+                let LogicalPlan::Extension(remote) = merge_scan.input() else {
+                    panic!("expected a raw source: {}", merge_scan.input());
+                };
+                let source = remote
+                    .node
+                    .as_any()
+                    .downcast_ref::<RawSeriesSource>()
+                    .expect("the region runs the raw source");
+                let [LogicalPlan::TableScan(scan)] = remote.node.inputs()[..] else {
+                    panic!("the raw source reads its scan: {}", merge_scan.input());
+                };
+                (
+                    source.metric_name().to_string(),
+                    scan.table_name.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vec![
+                ("some_metric".to_string(), "some_metric".to_string()),
+                ("other_metric".to_string(), "other_metric".to_string()),
+            ],
+            remote_tables
+        );
+    }
+
+    /// The number of merge scans in `plan`'s visible tree.
+    fn merge_scan_count(plan: &LogicalPlan) -> usize {
+        usize::from(as_merge_scan(plan).is_some())
+            + plan
+                .inputs()
+                .into_iter()
+                .map(merge_scan_count)
+                .sum::<usize>()
+    }
+
+    /// Asserts the same-table pair landed, whole, in one merge scan's region input.
+    ///
+    /// What the pair computes survives placement: both selectors still read their own scan, with
+    /// the filter each selector was built from, and the tree still names them by source index, so
+    /// the first selector reads the first child.
+    fn assert_pair_lands_in_one_region(plan: &LogicalPlan, label: &str) {
+        assert_eq!(1, merge_scan_count(plan), "{label}: {plan}");
+        let merge_scan = first_merge_scan(plan)
+            .unwrap_or_else(|| panic!("{label}: expected one merge scan in: {plan}"));
+        let remote = merge_scan.input();
+        let fused = first_fused_series(remote)
+            .unwrap_or_else(|| panic!("{label}: expected the pair in the region input: {remote}"));
+        let children = fused.children();
+        assert_eq!(
+            2,
+            children.len(),
+            "{label}: expected the pair over exactly its two scans, got: {remote}"
+        );
+        let [LogicalPlan::TableScan(left), LogicalPlan::TableScan(right)] = children else {
+            panic!("{label}: expected the pair to read two scans: {remote}");
+        };
+        assert_ne!(
+            left.filters, right.filters,
+            "{label}: each selector keeps its own filter: {remote}"
+        );
+
+        let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
+            panic!(
+                "{label}: expected a binary root: {:?}",
+                fused.tree().root().expr
+            );
+        };
+        let NativeExpr::Instant { input: left, .. } = &left.expr else {
+            panic!("{label}: expected a left selector: {:?}", left.expr);
+        };
+        let NativeExpr::Input(left) = &left.expr else {
+            panic!("{label}: expected a left source: {:?}", left.expr);
+        };
+        let NativeExpr::Instant { input: right, .. } = &right.expr else {
+            panic!("{label}: expected a right selector: {:?}", right.expr);
+        };
+        let NativeExpr::Input(right) = &right.expr else {
+            panic!("{label}: expected a right source: {:?}", right.expr);
+        };
+        assert_eq!(
+            (0, 1),
+            (left.source_index, right.source_index),
+            "{label}: the selectors keep their source indexes: {remote}"
+        );
+    }
+
+    /// The pair is placed by what the plan is.
+    ///
+    /// One same-table pair, one placement: the whole pair lands in one merge scan's region input, no
+    /// matter which wrappers a plan puts above it. The wrappers decide what the pair's input looks
+    /// like only in that each selector keeps its own filter and its own source index.
+    #[test]
+    fn a_same_table_pair_lands_whole_in_one_region() {
+        let pair = || {
+            fused_pair_plan(
+                table_scan_plan_with_filter("left"),
+                table_scan_plan_with_filter("right"),
+            )
+        };
+        let projection_over = |input: LogicalPlan| {
+            LogicalPlanBuilder::from(input)
+                .project(vec![datafusion_expr::col("v0")])
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let filter_over = |input: LogicalPlan| {
+            LogicalPlanBuilder::from(input)
+                .filter(datafusion_expr::col("v0").gt(datafusion_expr::lit(0.0f64)))
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let alias_over = |input: LogicalPlan| {
+            LogicalPlanBuilder::from(input)
+                .alias(datafusion_common::TableReference::bare("some_metric"))
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        // One way to put a node above the plan under test.
+        type Wrapper = fn(LogicalPlan) -> LogicalPlan;
+        let wrapped: [(&str, Wrapper); 4] = [
+            ("at the root", |pair| pair),
+            ("under a projection", projection_over),
+            ("under a filter", filter_over),
+            ("under an alias", alias_over),
+        ];
+
+        for (label, wrap) in wrapped {
+            let plan = wrap(pair());
+            let analyzed_plan = analyzed(DistPlannerAnalyzer::default(), plan)
+                .unwrap_or_else(|err| panic!("{label}: {err}"));
+            assert_pair_lands_in_one_region(&analyzed_plan, label);
+        }
+
+        // The same wrappers stacked are still one pair in one region.
+        let stacked = projection_over(filter_over(alias_over(pair())));
+        let analyzed_plan = analyzed(DistPlannerAnalyzer::default(), stacked)
+            .unwrap_or_else(|err| panic!("stacked: {err}"));
+        assert_pair_lands_in_one_region(&analyzed_plan, "stacked");
+    }
+
+    /// Ordinary fused producers are serializable, and where they may run is a placement decision
+    /// with no transport in it: the encoder carries the plan, the categorizer says if the region
+    /// may have it.
+    #[test]
+    fn fused_series_encoding_and_placement_are_independent() {
+        let plan = fused_series_plan(table_scan_plan());
+        let encoded = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .expect("FusedSeries uses its ordinary serializer");
+        assert!(!encoded.is_empty());
+
+        let in_process = analyze(DistPlannerAnalyzer::default(), plan.clone());
+        assert!(any_remote_input_holds(&in_process, holds_fused_series));
+
+        // A partial producer exports aggregate state, which the codec carries like any other
+        // frame; whether it may be pushed below a region boundary is decided by the analyzer's
+        // placement rules, not by the encoder.
+        let split = split_aggregate_plan(table_scan_plan());
+        let final_node = as_final_split(&split).expect("the split's final half");
+        let [producer] = final_node.children() else {
+            panic!("expected the final node to have one partial child: {split}")
+        };
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(producer, DefaultSerializer)
+                .is_ok(),
+            "a state-exporting producer encodes like any other node"
+        );
+        let placed = analyze(DistPlannerAnalyzer::default(), split);
+        assert!(as_final_split(&placed).is_some());
+        let child = placed.inputs();
+        let [child] = child.as_slice() else {
+            panic!("expected the final node's input: {placed}")
+        };
+        let scan = first_merge_scan(child).expect("merge scan below the final node");
+        let producer = first_fused_series(scan.input()).expect("partial producer in region input");
+        assert!(matches!(
+            &producer.tree().root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+        ));
+        assert!(matches!(
+            &producer.tree().root().output,
+            NativeType::AggregateState(_)
+        ));
+    }
+
+    /// A split aggregate over a scan and bound to `sum(some_metric)`.
+    ///
+    /// The compiler's tree is split into a `Partial` state-exporting node over the scan and a
+    /// `Final` node above it, matching the two halves a query plans.
+    fn split_aggregate_plan(input: LogicalPlan) -> LogicalPlan {
+        let stmt = promql_parser::parser::EvalStmt {
+            expr: parser::parse("sum(some_metric)").unwrap(),
+            ..native_statement()
+        };
+        let series_schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        });
+        let tree = compile(
+            &stmt,
+            Arc::clone(&series_schema),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let binding = FusedSeriesBinding {
+            grid: statement_grid(&stmt).unwrap(),
+            metric_name: Some(Arc::from("some_metric")),
+            time_index: "ts".to_string(),
+            tags: Vec::new(),
+        };
+        let output_schema: DFSchemaRef = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![
+                    (
+                        None,
+                        Arc::new(Field::new(
+                            "ts",
+                            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                            false,
+                        )),
+                    ),
+                    (
+                        None,
+                        Arc::new(Field::new("sum(v0)", ArrowDataType::Float64, true)),
+                    ),
+                ],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+
+        let (partial_tree, final_tree) =
+            FusedSeries::split_aggregate(&tree, "ts").unwrap().unwrap();
+        let partial = FusedSeries::try_new_state_export(
+            Arc::from("sum(some_metric)"),
+            partial_tree,
+            binding.clone(),
+            vec![input],
+        )
+        .unwrap();
+        let final_node = FusedSeries::try_new(
+            Arc::from("sum(some_metric)"),
+            final_tree,
+            binding,
+            vec![LogicalPlan::Extension(Extension {
+                node: Arc::new(partial),
+            })],
+            output_schema,
+        )
+        .unwrap();
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(final_node),
+        })
+    }
+
+    fn as_final_split(plan: &LogicalPlan) -> Option<&FusedSeries> {
+        if let LogicalPlan::Extension(extension) = plan {
+            extension
+                .node
+                .as_any()
+                .downcast_ref::<FusedSeries>()
+                .filter(|fused| fused.reads_aggregate_state())
+        } else {
+            None
+        }
+    }
+
+    /// The first fused producer in `plan`'s visible tree.
+    fn first_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
+        if let LogicalPlan::Extension(extension) = plan
+            && let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>()
+        {
+            return Some(fused);
+        }
+        plan.inputs().into_iter().find_map(first_fused_series)
+    }
+
+    /// The final half stays above the cut; only the partial half is commutative.
+    #[test]
+    fn a_split_aggregate_is_commutative_only_below_the_cut() {
+        let plan = split_aggregate_plan(table_scan_plan());
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::NonCommutative
+        ));
+
+        let final_node = as_final_split(&plan).unwrap();
+        let [partial] = final_node.children() else {
+            panic!("expected the final node to have one partial child: {plan}");
+        };
+        assert!(matches!(
+            Categorizer::check_plan(partial, None).unwrap(),
+            Commutativity::Commutative
+        ));
+    }
+
+    /// The final half stays on the frontend and the partial half rides inside the region scan, for
+    /// every deployment: the split aggregate's two halves are decided by what the plan is, so a
+    /// stand-alone deployment and a distributed frontend share the structure.
+    #[test]
+    fn a_split_aggregate_finalizes_above_the_region() {
+        let plan = split_aggregate_plan(table_scan_plan());
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_ok(),
+            "a split plan encodes like any other plan; where it may run is a placement decision"
+        );
+
+        let analyzed_plan = analyze(DistPlannerAnalyzer::default(), plan);
+        assert!(
+            as_final_split(&analyzed_plan).is_some(),
+            "the final node must stay on the frontend: {analyzed_plan}"
+        );
+        let final_node = as_final_split(&analyzed_plan).unwrap();
+        let [child] = final_node.children() else {
+            panic!("expected the final node to keep one input: {analyzed_plan}");
+        };
+        let merge_scan = first_merge_scan(child).unwrap_or_else(|| {
+            panic!("expected a merge scan below the final node: {analyzed_plan}")
+        });
+        let partial = first_fused_series(merge_scan.input()).unwrap_or_else(|| {
+            panic!("expected the partial node in the region input: {analyzed_plan}")
+        });
+        assert!(!partial.reads_aggregate_state());
+        assert!(matches!(
+            &partial.tree().root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+        ));
+        assert!(holds_table_scan(merge_scan.input()));
+        // The analyzer, not the codec, decides placement: a split aggregate's partial producer is
+        // region-local work and belongs below the boundary.
+        assert!(
+            any_remote_input_holds(&analyzed_plan, holds_fused_series),
+            "the analyzer keeps the partial producer below the region boundary: {analyzed_plan}"
+        );
+    }
+
+    /// The final half of `plan`, with its partial input replaced by `producer`.
+    fn final_over(plan: LogicalPlan, producer: LogicalPlan) -> LogicalPlan {
+        let LogicalPlan::Extension(extension) = &plan else {
+            panic!("a split aggregate is an extension node: {plan}");
+        };
+        let fused = extension
+            .node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .expect("a split aggregate's final half is a FusedSeries");
+        // Qualified: both `UserDefinedLogicalNode` and `UserDefinedLogicalNodeCore` declare this
+        // method, and only the latter's answer is the node itself.
+        let rebuilt =
+            UserDefinedLogicalNodeCore::with_exprs_and_inputs(fused, Vec::new(), vec![producer])
+                .expect("the final node holds the one input it is given");
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(rebuilt),
+        })
+    }
+
+    /// A state-exporting producer satisfies the node above it, and nothing else. An ordinary
+    /// values-producing fused child over the same scan travels with the plan the region runs, while
+    /// the final half still never crosses: the categorizer places each by its own shape, and the
+    /// encoder is not part of the decision.
+    #[test]
+    fn an_ordinary_producer_is_placed_by_encodability_not_by_the_state_exception() {
+        let scan = table_scan_plan();
+        let split = split_aggregate_plan(scan.clone());
+        let producer_placed = analyze(DistPlannerAnalyzer::default(), split.clone());
+        assert!(
+            any_remote_input_holds(&producer_placed, holds_fused_series),
+            "the split's partial producer rides inside the final node: {producer_placed}"
+        );
+
+        let values = fused_series_plan(scan);
+        let swapped = final_over(split, values);
+        let analyzed = analyze(DistPlannerAnalyzer::default(), swapped);
+        assert!(
+            as_final_split(&analyzed).is_some(),
+            "the final half never crosses the wire: {analyzed}"
+        );
+        assert!(
+            any_remote_input_holds(&analyzed, holds_fused_series),
+            "an ordinary fused node encodes, so the region may run it: {analyzed}"
+        );
+        assert!(
+            any_remote_input_holds(&analyzed, holds_table_scan),
+            "the region still reads the scan the producer reads: {analyzed}"
+        );
+    }
+
+    /// A node the categorizer refuses draws the boundary at itself, whatever the transport: being
+    /// unencodable is one more reason the region cannot run it, not the reason it stays above.
+    #[test]
+    fn a_plan_that_does_not_encode_for_another_reason_still_expands_at_that_node() {
+        let plan = unserializable_plan(table_scan_plan());
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_err(),
+            "the stand-in node has a serializer branch now, so it no longer proves anything"
+        );
+
+        let analyzed = analyze(DistPlannerAnalyzer::default(), plan);
+
+        assert!(
+            !any_remote_input_holds(&analyzed, holds_unserializable_node),
+            "the analyzer placed a node the categorizer refuses: {analyzed}"
+        );
+        let inputs = analyzed.inputs();
+        let [input] = inputs.as_slice() else {
+            panic!("expected the node to keep one input in: {analyzed}");
+        };
+        // `expand` keeps a projection over the merge scan to restore the schema of what it wrapped.
+        let merge_scan = first_merge_scan(input)
+            .unwrap_or_else(|| panic!("expected the boundary right below the node in: {analyzed}"));
+        assert!(
+            holds_table_scan(merge_scan.input()),
+            "expected the scan under the node to be the region input in: {analyzed}"
+        );
     }
 }
 

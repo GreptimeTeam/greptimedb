@@ -26,7 +26,7 @@ use crate::ddl::utils::table_info::{
 };
 use crate::error::{
     AlterLogicalTablesInvalidArgumentsSnafu, Result, TableInfoNotFoundSnafu,
-    TableRouteNotFoundSnafu,
+    TableRouteNotFoundSnafu, UnexpectedSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteManager, TableRouteValue};
@@ -36,13 +36,19 @@ use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 pub struct AlterLogicalTableValidator<'a> {
     physical_table_id: TableId,
     alters: Vec<&'a AlterTableExpr>,
+    expected_table_ids: &'a [TableId],
 }
 
 impl<'a> AlterLogicalTableValidator<'a> {
-    pub fn new(physical_table_id: TableId, alters: Vec<&'a AlterTableExpr>) -> Self {
+    pub fn new(
+        physical_table_id: TableId,
+        alters: Vec<&'a AlterTableExpr>,
+        expected_table_ids: &'a [TableId],
+    ) -> Self {
         Self {
             physical_table_id,
             alters,
+            expected_table_ids,
         }
     }
 
@@ -187,6 +193,14 @@ impl<'a> AlterLogicalTableValidator<'a> {
         let table_ids =
             get_all_table_ids_by_names(table_metadata_manager.table_name_manager(), &table_names)
                 .await?;
+        // Check before skipping completed ALTERs, while the procedure holds the pinned ID locks.
+        // Old persisted procedures have no pinned IDs and retain their previous behavior.
+        ensure!(
+            self.expected_table_ids.is_empty() || self.expected_table_ids == table_ids,
+            UnexpectedSnafu {
+                err_msg: "logical tables changed and are not covered by the procedure locks; retry the statement",
+            }
+        );
         let mut table_info_values = get_all_table_info_values_by_table_ids(
             table_metadata_manager.table_info_manager(),
             &table_ids,

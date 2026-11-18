@@ -31,20 +31,22 @@ use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
 use common_error::ext::BoxedError;
+use common_memory_manager::OnExhaustedPolicy;
 use common_query::{Output, WriteCompletion, WriteProgress};
-use operator::batcher::PendingRowsBatcher;
+use operator::batcher::{PendingRowsBatcher, PendingRowsPermit};
 use operator::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use operator::insert::Inserter;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 use table::metadata::TableInfoRef;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, oneshot};
+use tokio::sync::{Semaphore, broadcast, oneshot};
 
 use crate::batcher::pending_rows_batch_sync_enabled;
 use crate::batcher::table::flow_notifier::FlowNotifier;
 use crate::batcher::table::metrics::PENDING_WORKERS;
 use crate::batcher::table::pending_batch::PendingBatch;
 use crate::batcher::table::pending_worker::{PendingWorker, WorkerCommand, start_worker};
+use crate::request_memory_limiter::ServerMemoryLimiter;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct BatchKey {
@@ -72,6 +74,7 @@ pub struct TablePendingRowsBatcher {
     flush_policy: TimingFlushPolicy,
     flush_limiter: FlushLimiter,
     request_limiter: RequestLimiter,
+    memory_limiter: ServerMemoryLimiter,
     worker_channel_capacity: usize,
     pending_rows_batch_sync: bool,
     worker_idle_timeout: Duration,
@@ -82,6 +85,7 @@ pub struct TablePendingRowsBatcher {
 
 impl TablePendingRowsBatcher {
     /// Creates a shared timing batcher, rejecting disabled or unsupported limits.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         flush_interval: Duration,
         max_batch_rows: usize,
@@ -89,6 +93,7 @@ impl TablePendingRowsBatcher {
         worker_channel_capacity: usize,
         max_inflight_requests: usize,
         flow_notification_queue_capacity: NonZeroUsize,
+        memory_limiter: ServerMemoryLimiter,
         inserter: Arc<Inserter>,
     ) -> Option<Arc<Self>> {
         if worker_channel_capacity == 0
@@ -113,6 +118,7 @@ impl TablePendingRowsBatcher {
             flush_policy,
             flush_limiter,
             request_limiter,
+            memory_limiter,
             worker_channel_capacity,
             pending_rows_batch_sync: pending_rows_batch_sync_enabled(),
             worker_idle_timeout: flush_interval.checked_mul(3).unwrap_or(flush_interval),
@@ -154,15 +160,43 @@ impl Drop for TablePendingRowsBatcher {
 
 #[async_trait]
 impl PendingRowsBatcher for TablePendingRowsBatcher {
+    fn memory_limit_bytes(&self) -> u64 {
+        self.memory_limiter.limit_bytes()
+    }
+
     /// Acquires once per original request, before submitting any of its tables.
     /// Retain a clone in every submission until its flush has completed.
-    async fn acquire(&self) -> Result<Arc<OwnedSemaphorePermit>> {
-        self.request_limiter.acquire().await.map_err(|_| {
+    async fn acquire(&self, estimated_bytes: usize, held_bytes: u64) -> Result<PendingRowsPermit> {
+        let permit = self.request_limiter.acquire().await.map_err(|_| {
             UnexpectedSnafu {
                 violated: "batcher admission closed".to_string(),
             }
             .build()
-        })
+        })?;
+        if self.memory_limit_bytes() == 0 {
+            return Ok(permit);
+        }
+        let bytes = u64::try_from(estimated_bytes).unwrap_or(u64::MAX);
+        let reserve = || {
+            self.memory_limiter.check_request_fits(bytes, held_bytes)?;
+            self.memory_limiter.try_acquire(bytes).ok_or_else(|| {
+                let source = common_memory_manager::Error::MemoryLimitExceeded {
+                    requested_bytes: bytes,
+                    limit_bytes: self.memory_limit_bytes(),
+                };
+                // Remote Write senders must retry contention under the wait policy.
+                match self.memory_limiter.policy() {
+                    OnExhaustedPolicy::Wait { .. } => {
+                        crate::error::OtherSnafu.into_error(BoxedError::new(source))
+                    }
+                    OnExhaustedPolicy::Fail => {
+                        crate::error::MemoryLimitExceededSnafu.into_error(source)
+                    }
+                }
+            })
+        };
+        let memory = reserve().map_err(BoxedError::new).context(ExternalSnafu)?;
+        Ok(Arc::new((permit, memory)))
     }
 
     /// Acknowledges according to the global batching policy. Cancellation does
@@ -172,7 +206,7 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
         table_info: TableInfoRef,
         batch: RecordBatch,
         ctx: QueryContextRef,
-        permit: Arc<OwnedSemaphorePermit>,
+        permit: PendingRowsPermit,
     ) -> Result<Output> {
         let total_rows = batch.num_rows();
         let confirmed = ctx.confirmed_writes();
@@ -262,6 +296,7 @@ mod tests {
     use common_batcher::worker_registry::WorkerRegistry;
     use common_catalog::consts::default_engine;
     use common_grpc::flight::FlightDecoder;
+    use common_memory_manager::OnExhaustedPolicy;
     use common_meta::error::Result as MetaResult;
     use common_meta::peer::Peer;
     use common_meta::test_util::{MockDatanodeHandler, MockDatanodeManager};
@@ -292,6 +327,7 @@ mod tests {
     use crate::batcher::table::pending_worker::{WorkerCommand, start_worker};
     use crate::batcher::table::{PendingWorkers, TablePendingRowsBatcher, batch_key_from_ctx};
     use crate::batcher::test_util::mock_table_flownode_cache;
+    use crate::request_memory_limiter::ServerMemoryLimiter;
 
     #[derive(Clone)]
     struct BulkHandler {
@@ -337,6 +373,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_acknowledgement_preserves_admission() {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
         use operator::error::UnexpectedSnafu;
 
         use crate::batcher::pending_rows_batch_sync_enabled;
@@ -344,7 +382,8 @@ mod tests {
         use crate::batcher::table::pending_batch::notify_batches;
 
         for sync in [false, true] {
-            for fail in [false, true] {
+            for outcome in ["success", "failure", "cancel"] {
+                let fail = outcome == "failure";
                 let backend = prepare_mocked_backend().await;
                 let nodes = Arc::new(MockDatanodeManager::new(BulkHandler {
                     requests: Arc::new(Mutex::new(Vec::new())),
@@ -359,6 +398,12 @@ mod tests {
                     mock_table_flownode_cache(1, vec![]).await,
                     true,
                 ));
+                let policy = if sync {
+                    OnExhaustedPolicy::default()
+                } else {
+                    OnExhaustedPolicy::Fail
+                };
+                let memory = ServerMemoryLimiter::new(4096, policy);
                 let mut batcher = TablePendingRowsBatcher::try_new(
                     Duration::from_secs(3600),
                     1,
@@ -366,6 +411,7 @@ mod tests {
                     1,
                     1,
                     NonZeroUsize::new(1).unwrap(),
+                    memory.clone(),
                     inserter,
                 )
                 .unwrap();
@@ -374,6 +420,31 @@ mod tests {
                     pending_rows_batch_sync_enabled()
                 );
                 Arc::get_mut(&mut batcher).unwrap().pending_rows_batch_sync = sync;
+                assert!(batcher.acquire(4097, 0).await.is_err());
+                let held = memory.try_acquire(3072).unwrap();
+                let Err(error) = batcher.acquire(2048, held.granted_bytes()).await else {
+                    panic!("body and conversion together exceed the entire quota");
+                };
+                assert_eq!(error.status_code(), StatusCode::RateLimited);
+                let additional = batcher.acquire(1024, held.granted_bytes()).await.unwrap();
+                assert_eq!(memory.used_bytes(), 4096);
+                drop(additional);
+                // The same occupied quota belongs to another request and can be released.
+                let acquire = batcher.acquire(2048, 0);
+                tokio::pin!(acquire);
+                let std::task::Poll::Ready(Err(error)) = futures::poll!(acquire.as_mut()) else {
+                    panic!("conversion memory must not wait while a request holds other permits");
+                };
+                assert_eq!(
+                    error.status_code(),
+                    if sync {
+                        StatusCode::RuntimeResourcesExhausted
+                    } else {
+                        StatusCode::RateLimited
+                    }
+                );
+                drop(held);
+                assert_eq!(memory.used_bytes(), 0);
                 let table = Arc::new(new_test_table_info(1, "ack", [0].into_iter()));
                 let progress = Arc::new(session::write_progress::WriteProgress::default());
                 let mut ctx = QueryContext::with("greptime", "public");
@@ -388,7 +459,7 @@ mod tests {
                     Arc::new(Int32Array::from(vec![1])) as ArrayRef,
                 )])
                 .unwrap();
-                let permit = batcher.acquire().await.unwrap();
+                let permit = batcher.acquire(2048, 0).await.unwrap();
                 let submitter = batcher.clone();
                 let submitted =
                     tokio::spawn(async move { submitter.submit(table, batch, ctx, permit).await });
@@ -415,8 +486,16 @@ mod tests {
                 }
                 assert_eq!(progress.accepted(), !sync);
                 assert_eq!(progress.written(), 0);
+                if outcome == "cancel" {
+                    if let Some(submitted) = submitted.take() {
+                        submitted.abort();
+                        assert!(submitted.await.unwrap_err().is_cancelled());
+                    }
+                    drop(completion.take());
+                }
+                assert_eq!(memory.used_bytes(), 2048);
                 // Early acknowledgement must not release capacity before completion.
-                let acquire = batcher.acquire();
+                let acquire = batcher.acquire(0, 0);
                 tokio::pin!(acquire);
                 assert!(futures::poll!(acquire.as_mut()).is_pending());
                 let result = if fail {
@@ -430,6 +509,7 @@ mod tests {
                     Ok(())
                 };
                 notify_batches(vec![pending], result);
+                assert_eq!(memory.used_bytes(), 0);
                 if let Some(submitted) = submitted {
                     let result = timeout(Duration::from_secs(5), submitted)
                         .await
@@ -538,6 +618,7 @@ mod tests {
             4,
             if shared_request { 1 } else { 4 },
             NonZeroUsize::new(16).unwrap(),
+            ServerMemoryLimiter::default(),
             inserter,
         )
         .unwrap();
@@ -555,7 +636,7 @@ mod tests {
         opentsdb_ctx.set_skip_wal(skip_wal);
         let (first_result, second_result) = timeout(Duration::from_secs(5), async {
             if shared_request {
-                let permit = batcher.acquire().await.unwrap();
+                let permit = batcher.acquire(0, 0).await.unwrap();
                 let (first, second) = tokio::join!(
                     batcher.submit(table.clone(), first, influx_ctx, permit.clone()),
                     batcher.submit(table.clone(), second, opentsdb_ctx, permit),
@@ -740,6 +821,7 @@ mod tests {
                 4,
                 4,
                 NonZeroUsize::new(16).unwrap(),
+                ServerMemoryLimiter::default(),
                 inserter,
             )
             .unwrap();
@@ -756,8 +838,8 @@ mod tests {
                 ctx.set_write_progress(counter.clone());
                 Arc::new(ctx)
             });
-            let first_permit = batcher.acquire().await.unwrap();
-            let second_permit = batcher.acquire().await.unwrap();
+            let first_permit = batcher.acquire(0, 0).await.unwrap();
+            let second_permit = batcher.acquire(0, 0).await.unwrap();
             let (first, second) = tokio::join!(
                 batcher.submit(table.clone(), first, contexts[0].clone(), first_permit),
                 batcher.submit(table, second, contexts[1].clone(), second_permit),

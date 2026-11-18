@@ -1,0 +1,1151 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Partial aggregation: the state one execution partition folds its series into, and the merge
+//! of such states into the final result.
+//!
+//! A merge regroups the operations of a serial fold, so floating-point results differ from
+//! [`aggregate_float`](crate::aggregate::aggregate_float) by rounding. The same reassociation can
+//! also move an overflow of finite values: a serial `sum` of `[1e308, 1e308, -1e308]` is `+Inf`,
+//! while the merge of `[1e308]` and `[1e308, -1e308]` is finite. `stddev` and `stdvar` differ
+//! more where the samples differ by little more than the rounding of their mean: Prometheus'
+//! uncompensated Welford update rounds the mean on every sample, and no pairwise merge reproduces
+//! those roundings. For `[1e16]` and `[1e16 + 2]` Prometheus gives a variance of 2 and the merge
+//! gives the exact 1. Explicit NaN and infinite inputs follow the same rules as the serial fold. Where the serial fold keeps the first of two equal
+//! values, as `min` and `max` do for `0` and `-0`, a merge keeps the one merged first.
+
+use std::collections::btree_map::Entry as BTreeEntry;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
+use std::mem::size_of;
+use std::sync::Arc;
+
+use datafusion::arrow::array::Array;
+use datafusion::error::{DataFusionError, Result};
+use datatypes::series::SeriesLabels;
+use datatypes::series::aggregate_state::{
+    AggregateStateKind, HistogramState, StateComponent, StateFieldsBatch, StatePayload, StateSeries,
+};
+use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
+use datatypes::series::time::{GridSpan, TimeAxis};
+
+use crate::aggregate::{
+    AggregateOp, BLOCK_POINTS, Counts, FloatAggregator, FloatState, Group, HistogramAccumulator,
+    HistogramEvidence, LabelKey, accumulator_bytes, btree_backing_bytes, count_series,
+    evidence_summary, finish_groups, finish_groups_budgeted, hash_map_backing_bytes,
+    histogram_backing_bytes, kahan_inc, label_key, metric_bytes, next_hash_capacity,
+};
+use crate::map::validate_float_series;
+
+/// A component of [`AccumulatorState`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StateField {
+    /// The running sum (`sum`, and `avg` until it switches to a mean), the extreme (`min`,
+    /// `max`), or the sum of squared deviations (`stddev`, `stdvar`).
+    Value,
+    /// The running mean (`avg` once switched, `stddev`, `stdvar`).
+    Mean,
+    /// The Kahan compensation of `Value`, or of `Mean` once `avg` has switched.
+    Compensation,
+    /// The number of samples folded in.
+    Count,
+    /// Whether `avg` has switched from a sum to a mean, which it does when the sum overflows.
+    IncrementalMean,
+}
+
+impl AggregateOp {
+    /// The components the state of this aggregation carries; the others are unused and need not
+    /// be stored. `group` has none: a state that exists has a value of 1.
+    pub fn state_fields(self) -> &'static [StateField] {
+        use StateField::*;
+        match self {
+            Self::Sum => &[Value, Compensation],
+            Self::Count => &[Count],
+            Self::Avg => &[Value, Mean, Compensation, Count, IncrementalMean],
+            Self::Min | Self::Max => &[Value],
+            Self::Group => &[],
+            Self::Stddev | Self::Stdvar => &[Value, Mean, Count],
+        }
+    }
+}
+
+/// The state of one field of one group at one grid point.
+///
+/// The fold and the frame carry the same five components, so they share one type: the frame's own
+/// [`AggregateStateValues`] is the definition, and this is the name the aggregate side reads it by.
+pub use datatypes::series::aggregate_state::AggregateStateValues as AccumulatorState;
+
+/// The state of one execution partition, with its groups in the order they first appeared.
+///
+/// A group is the frame's own [`StateSeries`]: field-major states addressed on that group's sparse
+/// absolute grid positions. Exporting therefore hands the same representation over instead of
+/// transposing a second one into it.
+#[derive(Clone, Debug)]
+pub struct PartialAggregate {
+    pub op: AggregateOp,
+    pub groups: Vec<StateSeries>,
+}
+
+/// One Arrow-backed aggregate state row, independent of executor plumbing.
+#[derive(Clone, Debug)]
+pub(crate) struct StateRow {
+    pub metric: SeriesLabels,
+    pub time: TimeAxis,
+    pub fields: StateFieldsBatch,
+    pub kind: AggregateStateKind,
+}
+
+impl FloatAggregator {
+    /// The state folded so far, for a merge with the state of other partitions.
+    pub fn finish_partial(self) -> Result<PartialAggregate> {
+        self.finish_partial_inner()
+    }
+
+    /// [`Self::finish_partial`] that admits what it builds first: the fold state and the groups it
+    /// is exported as, at the exact capacity [`Self::finish_partial_inner`] gives them. A refusal
+    /// consumes the aggregator, so the caller drops the execution.
+    pub(crate) fn finish_partial_budgeted(
+        self,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<PartialAggregate> {
+        let width = self.schema.fields.len();
+        let mut partial_bytes = self.groups.len().saturating_mul(size_of::<StateSeries>());
+        for group in &self.groups {
+            // A group that folded histograms keeps them in its own map instead of the blocks, so
+            // the points it exports and what each of their payloads builds come from there: the
+            // export builds two one-row Arrow batches per point, which the chunk they are handed
+            // to is charged for only once that chunk exists.
+            let (points, payloads) = if group.histograms.is_empty() {
+                (seen_points(group, width), 0)
+            } else {
+                let payloads = group
+                    .histograms
+                    .values()
+                    .fold(0usize, |bytes, accumulator| {
+                        bytes.saturating_add(exported_payload_bytes(accumulator))
+                    });
+                (group.histograms.len(), payloads)
+            };
+            partial_bytes = partial_bytes
+                .saturating_add(size_of::<TimeAxis>())
+                .saturating_add(
+                    points.saturating_mul(size_of::<GridSpan>().saturating_add(size_of::<usize>())),
+                )
+                .saturating_add(width.saturating_mul(size_of::<Vec<Option<StatePayload>>>()))
+                .saturating_add(
+                    points
+                        .saturating_mul(width)
+                        .saturating_mul(size_of::<Option<StatePayload>>()),
+                )
+                .saturating_add(payloads);
+        }
+        budget(self.state_bytes().saturating_add(partial_bytes))?;
+        self.finish_partial_inner()
+    }
+
+    /// Turns the fold into the frame's own groups: field-major states on sparse absolute positions.
+    ///
+    /// The blocks are walked once, in ascending position order, so a position's states are appended
+    /// to every field at the same time and adjacent positions coalesce into one span as they come.
+    /// What comes out is the representation the frame writes; no per-point vector is built.
+    fn finish_partial_inner(self) -> Result<PartialAggregate> {
+        let width = self.schema.fields.len();
+        let grid = self.schema.eval_grid.as_ref().ok_or_else(|| {
+            DataFusionError::Execution("aggregate state is indexed on an evaluated grid".into())
+        })?;
+        let grid_len = grid.spec().len as usize;
+        let mut groups: Vec<StateSeries> = Vec::with_capacity(self.groups.len());
+        for group in self.groups {
+            let points = if group.histograms.is_empty() {
+                seen_points(&group, width)
+            } else {
+                // A field's state is one family, so a group that kept histogram payloads exports
+                // those: a float state beside them would be one column carrying two kinds.
+                if group
+                    .blocks
+                    .values()
+                    .any(|states| states.iter().any(|state| state.seen))
+                {
+                    return Err(DataFusionError::Execution(
+                        "an aggregate field cannot carry both float and histogram state".into(),
+                    ));
+                }
+                group.histograms.len()
+            };
+            let mut spans: Vec<GridSpan> = Vec::with_capacity(points.min(1));
+            let mut states: Vec<Vec<Option<StatePayload>>> =
+                (0..width).map(|_| Vec::with_capacity(points)).collect();
+            if !group.histograms.is_empty() {
+                // The histogram fold is keyed by absolute position, and its keys are ordered, so one
+                // pass visits each carried position once with its fields' payloads.
+                let mut position = None;
+                for (&(point, field), accumulator) in &group.histograms {
+                    if position != Some(point) {
+                        if point >= grid_len {
+                            return Err(DataFusionError::Execution(format!(
+                                "aggregate state point {point} exceeds a grid of {grid_len}"
+                            )));
+                        }
+                        extend_spans(&mut spans, point);
+                        for field_states in &mut states {
+                            field_states.push(None);
+                        }
+                        position = Some(point);
+                    }
+                    // The row just opened is the one this position's payloads belong to. It is the
+                    // row the field's states just grew, not the one the span *count* names: adjacent
+                    // points share one span while each of them still opens its own row, so a run
+                    // index would write every point of the run into the run's first row, leave the
+                    // rest empty, and the frame would drop them.
+                    let row = states[field].len() - 1;
+                    states[field][row] = Some(accumulator.payload(self.op)?);
+                }
+                let time = TimeAxis::from_grid_spans(Arc::clone(grid), spans)
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+                groups.push(StateSeries {
+                    metric: group.metric,
+                    time,
+                    states,
+                });
+                continue;
+            }
+            for (&block, block_states) in &group.blocks {
+                for (offset, point) in block_states.chunks_exact(width).enumerate() {
+                    if !point.iter().any(|state| state.seen) {
+                        continue;
+                    }
+                    let position = block * BLOCK_POINTS + offset;
+                    if position >= grid_len {
+                        return Err(DataFusionError::Execution(format!(
+                            "aggregate state point {position} exceeds a grid of {grid_len}"
+                        )));
+                    }
+                    extend_spans(&mut spans, position);
+                    for (field, state) in point.iter().enumerate() {
+                        states[field].push(state.partial().map(StatePayload::Float));
+                    }
+                }
+            }
+            let time = TimeAxis::from_grid_spans(Arc::clone(grid), spans)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+            groups.push(StateSeries {
+                metric: group.metric,
+                time,
+                states,
+            });
+        }
+        Ok(PartialAggregate {
+            op: self.op,
+            groups,
+        })
+    }
+}
+
+/// Appends `position` to `spans`, extending the last run when it continues.
+fn extend_spans(spans: &mut Vec<GridSpan>, position: usize) {
+    match spans.last_mut() {
+        Some(span) if span.start() + span.len() == position => {
+            *span = GridSpan::new(span.start(), span.len() + 1);
+        }
+        _ => spans.push(GridSpan::new(position, 1)),
+    }
+}
+
+/// Bytes one one-row batch of the frame's histogram layout costs before its bucket data.
+///
+/// Every column of the layout owns an Arrow array node with its own buffers, and that cost does not
+/// shrink for a histogram with one bucket: one row measures 2.6 KB whatever the bucket count, which
+/// is what a payload reports once the batch exists to be measured. It is rounded up here, so a batch
+/// whose bucket lists land at the top of their buffer capacity is covered too.
+pub(super) const HISTOGRAM_LAYOUT_ROW_BYTES: usize = 3 * 1024;
+
+/// Bytes one exported point's payload builds: the boxed state and the two one-row batches
+/// [`HistogramAccumulator::payload`] makes from the accumulator's live histogram and its
+/// compensation.
+///
+/// It is counted from the histograms the payload is built from rather than from the batches, which
+/// is the point: this is what the export admits before those batches exist. The bucket data a batch
+/// writes is charged at the width of the padded Rust pair, which bounds the `f64` each bucket costs,
+/// and the layout is charged per batch.
+pub(super) fn exported_payload_bytes(accumulator: &HistogramAccumulator) -> usize {
+    // The batch the payload builds from the live value is the mean once an average switched, and
+    // the other one is the compensation paired with it: the widest of the three bounds both.
+    let widest = [
+        Some(&accumulator.value),
+        accumulator.mean.as_ref(),
+        accumulator.compensation.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|histogram| histogram.heap_bytes())
+    .max()
+    .unwrap_or(0);
+    size_of::<HistogramState>().saturating_add(
+        HISTOGRAM_LAYOUT_ROW_BYTES
+            .saturating_add(widest)
+            .saturating_mul(2),
+    )
+}
+
+/// The points of `group` that carry a state: the ones a partial of it holds.
+fn seen_points(group: &Group, width: usize) -> usize {
+    group.blocks.values().fold(0usize, |count, states| {
+        count.saturating_add(
+            states
+                .chunks_exact(width)
+                .filter(|point| point.iter().any(|state| state.seen))
+                .count(),
+        )
+    })
+}
+
+/// Bytes a group's label key holds: a pair per capacity slot, and the `__name__` entry, whose
+/// label and value `label_key` copies, each with its own `Arc` header. The other label strings are
+/// the metric's, already counted with it.
+fn key_bytes(key: &LabelKey) -> usize {
+    let name = key
+        .iter()
+        .find(|(label, _)| &**label == "__name__")
+        .map_or(0, |(label, value)| {
+            label
+                .len()
+                .saturating_add(value.len())
+                .saturating_add(4 * size_of::<usize>())
+        });
+    key.capacity()
+        .saturating_mul(size_of::<(Arc<str>, Arc<str>)>())
+        .saturating_add(name)
+}
+
+/// Coarse bytes the key of `metric` holds while it is built: a pair per slot, the `__name__` label
+/// and a copy of the metric name, each with its `Arc` header.
+fn key_workspace_bytes(metric: &SeriesLabels) -> usize {
+    metric
+        .tags()
+        .len()
+        .saturating_add(1)
+        .saturating_mul(size_of::<(Arc<str>, Arc<str>)>())
+        .saturating_add("__name__".len())
+        .saturating_add(metric.name().map_or(0, str::len))
+        .saturating_add(4 * size_of::<usize>())
+        .saturating_add(size_of::<LabelKey>())
+}
+
+/// Merges the partial states of one aggregation into its result. Groups are identified by their
+/// full label set, already grouped by the partitions, and keep the order they first arrive in.
+pub struct FloatMerger {
+    schema: Arc<SeriesSchema>,
+    op: AggregateOp,
+    group_index: HashMap<LabelKey, usize>,
+    groups: Vec<Group>,
+    retained: usize,
+}
+
+impl FloatMerger {
+    pub fn try_new(schema: &Arc<SeriesSchema>, op: AggregateOp) -> Result<Self> {
+        if schema.eval_grid.is_none() {
+            return Err(DataFusionError::Execution(
+                "Aggregate requires an evaluated grid".into(),
+            ));
+        }
+        Ok(Self {
+            schema: schema.clone(),
+            op,
+            group_index: HashMap::new(),
+            groups: Vec::new(),
+            retained: 0,
+        })
+    }
+
+    /// Bytes this merge keeps: groups, labels, blocks, B-tree nodes, index table and its keys. Added
+    /// to by the allocations that change it, never recounted.
+    pub(crate) fn state_bytes(&self) -> usize {
+        self.retained
+    }
+
+    /// What the merged inputs recorded about their points.
+    pub(crate) fn evidence_summary(&self) -> HistogramEvidence {
+        evidence_summary(&self.groups)
+    }
+
+    /// Merges one Arrow-backed state row directly, without materializing a partial aggregate.
+    pub(crate) fn merge_row(
+        &mut self,
+        row: &StateRow,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
+        if row.fields.kind().is_histogram() {
+            return self.merge_histogram_row(row, budget);
+        }
+        let op = crate::native::state::op_of_state(row.kind);
+        if op != self.op {
+            return Err(DataFusionError::Execution(format!(
+                "cannot merge {:?} state into {:?}",
+                op, self.op
+            )));
+        }
+        let width = self.schema.fields.len();
+        if row.fields.len() != width {
+            return Err(DataFusionError::Execution(
+                "aggregate state does not match the grid or fields of the merge".into(),
+            ));
+        }
+        let grid_len = self
+            .schema
+            .eval_grid
+            .as_ref()
+            .expect("checked at construction")
+            .spec()
+            .len as usize;
+        let mut opened = None;
+        let key_workspace = key_workspace_bytes(&row.metric);
+        let mut live = None;
+        for (point, position) in row.time.positions() {
+            if point >= grid_len {
+                return Err(DataFusionError::Execution(
+                    "aggregate state does not match the grid or fields of the merge".into(),
+                ));
+            }
+            let mut present = false;
+            for field in 0..width {
+                present |= row
+                    .fields
+                    .is_present(field, position)
+                    .map_err(crate::grid_series::external)?;
+            }
+            if !present {
+                return Err(DataFusionError::Execution(
+                    "aggregate state names a position with no contribution".into(),
+                ));
+            }
+            let index = match opened {
+                Some(index) => index,
+                None => {
+                    budget(self.retained.saturating_add(key_workspace))?;
+                    let key = label_key(&row.metric);
+                    let live_bytes = key_bytes(&key);
+                    let index = match self.group_index.get(&key).copied() {
+                        Some(index) => index,
+                        None => {
+                            self.open_group(row.metric.clone(), key, live_bytes, &mut budget)?
+                        }
+                    };
+                    live = Some(live_bytes);
+                    opened = Some(index);
+                    index
+                }
+            };
+            let mut field = 0;
+            let mut state_error = None;
+            let states = std::iter::from_fn(|| {
+                if field == width || state_error.is_some() {
+                    return None;
+                }
+                let current = field;
+                field += 1;
+                match state_at(&row.fields, current, position) {
+                    Ok(state) => Some(state),
+                    Err(error) => {
+                        state_error = Some(error);
+                        None
+                    }
+                }
+            });
+            self.write_point(index, point, states, live.unwrap_or(0), &mut budget)?;
+            if let Some(error) = state_error {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Merges one Arrow-backed histogram state row: every present field's payload is merged into
+    /// that position's own state.
+    ///
+    /// A histogram state is sparse in both directions - a position is carried when any field has a
+    /// contribution there, and a field may be absent at a carried position - so the row is walked
+    /// position by position and each present component is merged where it belongs.
+    fn merge_histogram_row(
+        &mut self,
+        row: &StateRow,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
+        if crate::native::state::op_of_state(row.kind) != self.op {
+            return Err(DataFusionError::Execution(format!(
+                "cannot merge {:?} state into {:?}",
+                row.kind, self.op
+            )));
+        }
+        let width = self.schema.fields.len();
+        if row.fields.len() != width {
+            return Err(DataFusionError::Execution(
+                "aggregate state does not match the grid or fields of the merge".into(),
+            ));
+        }
+        let grid_len = self
+            .schema
+            .eval_grid
+            .as_ref()
+            .expect("checked at construction")
+            .spec()
+            .len as usize;
+        let mut opened = None;
+        for (point, position) in row.time.positions() {
+            if point >= grid_len {
+                return Err(DataFusionError::Execution(
+                    "aggregate state does not match the grid or fields of the merge".into(),
+                ));
+            }
+            let index = match opened {
+                Some(index) => index,
+                None => {
+                    let index = self.open_row_group(&row.metric, &mut budget)?;
+                    opened = Some(index);
+                    index
+                }
+            };
+            let mut present = false;
+            for field in 0..width {
+                let Some(payload) = histogram_state_at(&row.fields, field, position)? else {
+                    continue;
+                };
+                present = true;
+                self.merge_payload(index, point, field, &payload, &mut budget)?;
+            }
+            if !present {
+                return Err(DataFusionError::Execution(
+                    "aggregate state names a position with no contribution".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The group this row's labels name, opening it (and its key) on first sight.
+    fn open_row_group(
+        &mut self,
+        metric: &SeriesLabels,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+    ) -> Result<usize> {
+        budget(self.retained.saturating_add(key_workspace_bytes(metric)))?;
+        let key = label_key(metric);
+        let live = key_bytes(&key);
+        match self.group_index.get(&key).copied() {
+            Some(index) => Ok(index),
+            None => self.open_group(metric.clone(), key, live, budget),
+        }
+    }
+
+    /// Merges one field's payload into the state of `(point, field)`, admitting what it allocates.
+    fn merge_payload(
+        &mut self,
+        index: usize,
+        point: usize,
+        field: usize,
+        payload: &StatePayload,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
+        let StatePayload::Histogram(payload) = payload else {
+            return Err(DataFusionError::Execution(
+                "a histogram state carries a numeric payload".into(),
+            ));
+        };
+        let key = (point, field);
+        let histograms = &mut self.groups[index].histograms;
+        let vacant = !histograms.contains_key(&key);
+        let backing = if vacant {
+            histogram_backing_bytes(histograms.len() + 1)
+                .saturating_sub(histogram_backing_bytes(histograms.len()))
+        } else {
+            0
+        };
+        if vacant {
+            // Admit the state this position is about to hold before allocating it: both histograms
+            // the payload carries and the map node that holds them.
+            let incoming = payload.value.as_arrow().get_array_memory_size()
+                + payload.compensation.as_arrow().get_array_memory_size();
+            budget(
+                self.retained
+                    .saturating_add(size_of::<HistogramAccumulator>())
+                    .saturating_add(incoming)
+                    .saturating_add(backing),
+            )?;
+            let accumulator = HistogramAccumulator::from_payload(self.op, payload)?;
+            let bytes = accumulator_bytes(&accumulator).saturating_add(backing);
+            histograms.insert(key, accumulator);
+            self.retained = self.retained.saturating_add(bytes);
+            return Ok(());
+        }
+        let accumulator = histograms.get_mut(&key).expect("checked as occupied above");
+        let before = accumulator_bytes(accumulator);
+        let incoming = payload.value.as_arrow().get_array_memory_size()
+            + payload.compensation.as_arrow().get_array_memory_size();
+        budget(
+            self.retained
+                .saturating_add(before)
+                .saturating_add(incoming),
+        )?;
+        accumulator.merge_state(self.op, payload)?;
+        self.retained = self
+            .retained
+            .saturating_sub(before)
+            .saturating_add(accumulator_bytes(accumulator));
+        Ok(())
+    }
+
+    /// Adds a group and its key, admitting the group vector and index growth first.
+    fn open_group(
+        &mut self,
+        metric: SeriesLabels,
+        key: LabelKey,
+        live: usize,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+    ) -> Result<usize> {
+        let capacity = self.groups.capacity();
+        let next_capacity = if self.groups.len() == capacity {
+            capacity.saturating_mul(2).max(4)
+        } else {
+            capacity
+        };
+        let map_capacity = self.group_index.capacity();
+        let next_map_capacity = if self.group_index.len().saturating_add(1) > map_capacity {
+            next_hash_capacity(map_capacity)
+        } else {
+            map_capacity
+        };
+        let key_live = key_bytes(&key);
+        let metric_live = metric_bytes(&metric);
+        // A realloc that cannot grow in place keeps both buffers alive while it copies, so a
+        // growing step admits the new buffer beside the old one, which `retained` already holds.
+        budget(
+            self.retained
+                .saturating_add(live)
+                .saturating_add(key_live)
+                .saturating_add(metric_live)
+                .saturating_add(if next_capacity > capacity {
+                    next_capacity.saturating_mul(size_of::<Group>())
+                } else {
+                    0
+                })
+                .saturating_add(if next_map_capacity > map_capacity {
+                    hash_map_backing_bytes(next_map_capacity)
+                } else {
+                    0
+                }),
+        )?;
+        self.groups.try_reserve(1).map_err(|error| {
+            DataFusionError::Execution(format!("cannot reserve aggregate groups: {error}"))
+        })?;
+        self.groups.push(Group {
+            metric,
+            blocks: BTreeMap::new(),
+            histograms: BTreeMap::new(),
+        });
+        let index = self.groups.len() - 1;
+        self.group_index.insert(key, index);
+        self.retained = self
+            .retained
+            .saturating_add(
+                self.groups
+                    .capacity()
+                    .saturating_sub(capacity)
+                    .saturating_mul(size_of::<Group>()),
+            )
+            .saturating_add(
+                hash_map_backing_bytes(self.group_index.capacity())
+                    .saturating_sub(hash_map_backing_bytes(map_capacity)),
+            )
+            .saturating_add(metric_live)
+            .saturating_add(key_live);
+        Ok(index)
+    }
+
+    /// Writes one point's states, admitting a missing block before allocating it.
+    fn write_point(
+        &mut self,
+        index: usize,
+        point: usize,
+        states: impl Iterator<Item = Option<AccumulatorState>>,
+        live: usize,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
+        let width = self.schema.fields.len();
+        let block_bytes = BLOCK_POINTS
+            .saturating_mul(width)
+            .saturating_mul(size_of::<FloatState>());
+        let blocks = &mut self.groups[index].blocks;
+        let block_index = point / BLOCK_POINTS;
+        let entries = blocks.len();
+        let block = match blocks.entry(block_index) {
+            BTreeEntry::Occupied(entry) => entry.into_mut(),
+            BTreeEntry::Vacant(entry) => {
+                budget(
+                    self.retained
+                        .saturating_add(live)
+                        .saturating_add(block_bytes)
+                        .saturating_add(btree_backing_bytes(entries.saturating_add(1))),
+                )?;
+                self.retained = self
+                    .retained
+                    .saturating_add(block_bytes)
+                    .saturating_add(btree_backing_bytes(entries.saturating_add(1)))
+                    .saturating_sub(btree_backing_bytes(entries));
+                entry.insert(vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice())
+            }
+        };
+        let offset = (point % BLOCK_POINTS) * width;
+        for (slot, state) in block[offset..offset + width].iter_mut().zip(states) {
+            if let Some(state) = state {
+                slot.merge(self.op, FloatState::from_partial(state));
+            }
+        }
+        Ok(())
+    }
+
+    /// The result of every group, in the order the groups first arrived.
+    pub fn finish(self) -> Result<Vec<Series>> {
+        finish_groups(self.schema, self.op, self.groups)
+    }
+
+    /// [`Self::finish`] that admits the result it builds, on top of what the merge still holds. The
+    /// merge is consumed either way, so a caller that budgets drops it on a refusal.
+    pub(crate) fn finish_budgeted(
+        self,
+        budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Vec<Series>> {
+        finish_groups_budgeted(self.schema, self.op, self.groups, self.retained, budget)
+    }
+}
+
+/// One present field's histogram state at one position, read from the row's component arrays.
+///
+/// The two payload components are decoded into the kernel's own histograms, and the components a
+/// kind may omit - an average's count and mode flag - default to what the merge would fold from.
+fn histogram_state_at(
+    fields: &StateFieldsBatch,
+    field: usize,
+    position: usize,
+) -> Result<Option<StatePayload>> {
+    if !fields
+        .is_present(field, position)
+        .map_err(crate::grid_series::external)?
+    {
+        return Ok(None);
+    }
+    let mut state = datatypes::series::aggregate_state::HistogramState {
+        value: Arc::new(payload_histogram(
+            fields,
+            field,
+            StateComponent::HistogramValue,
+            position,
+        )?),
+        compensation: Arc::new(payload_histogram(
+            fields,
+            field,
+            StateComponent::HistogramCompensation,
+            position,
+        )?),
+        count: 0.0,
+        incremental_mean: false,
+        poisoned: false,
+        incompatible_layout: false,
+        custom_bounds_reconciled: false,
+        counter_reset_seen: false,
+        not_counter_reset_seen: false,
+    };
+    for &component in fields.components() {
+        match component {
+            StateComponent::HistogramValue | StateComponent::HistogramCompensation => {}
+            StateComponent::Count => {
+                state.count = payload_float(fields, field, component, position)?
+            }
+            StateComponent::IncrementalMean
+            | StateComponent::Poisoned
+            | StateComponent::IncompatibleLayout
+            | StateComponent::CustomBoundsReconciled
+            | StateComponent::CounterResetSeen
+            | StateComponent::NotCounterResetSeen => {
+                let flag = payload_bool(fields, field, component, position)?;
+                match component {
+                    StateComponent::IncrementalMean => state.incremental_mean = flag,
+                    StateComponent::Poisoned => state.poisoned = flag,
+                    StateComponent::IncompatibleLayout => state.incompatible_layout = flag,
+                    StateComponent::CustomBoundsReconciled => state.custom_bounds_reconciled = flag,
+                    StateComponent::CounterResetSeen => state.counter_reset_seen = flag,
+                    _ => state.not_counter_reset_seen = flag,
+                }
+            }
+            StateComponent::Value | StateComponent::Mean | StateComponent::Compensation => {
+                return Err(DataFusionError::Execution(
+                    "a histogram state declares a numeric component".into(),
+                ));
+            }
+        }
+    }
+    Ok(Some(StatePayload::Histogram(Box::new(state))))
+}
+
+fn payload_histogram(
+    fields: &StateFieldsBatch,
+    field: usize,
+    component: StateComponent,
+    position: usize,
+) -> Result<datatypes::series::histogram::HistogramBatch> {
+    fields
+        .field_histogram(field, component, position)
+        .map_err(crate::grid_series::external)?
+        .ok_or_else(missing_payload_component)
+}
+
+fn payload_float(
+    fields: &StateFieldsBatch,
+    field: usize,
+    component: StateComponent,
+    position: usize,
+) -> Result<f64> {
+    fields
+        .field_values(field, component)
+        .map_err(crate::grid_series::external)?
+        .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+        .ok_or_else(missing_payload_component)
+}
+
+fn payload_bool(
+    fields: &StateFieldsBatch,
+    field: usize,
+    component: StateComponent,
+    position: usize,
+) -> Result<bool> {
+    fields
+        .field_bool_values(field, component)
+        .map_err(crate::grid_series::external)?
+        .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+        .ok_or_else(missing_payload_component)
+}
+
+fn missing_payload_component() -> DataFusionError {
+    DataFusionError::Execution("present aggregate state has a missing component".into())
+}
+
+/// One present field's state at one position, read from the row's component arrays.
+///
+/// The components come from the row's own declaration; the native aggregate caller checks
+/// compatibility before this runs, so a component list that disagrees is caught before this runs.
+fn state_at(
+    fields: &StateFieldsBatch,
+    field: usize,
+    position: usize,
+) -> Result<Option<AccumulatorState>> {
+    if !fields
+        .is_present(field, position)
+        .map_err(crate::grid_series::external)?
+    {
+        return Ok(None);
+    }
+    let mut state = AccumulatorState::default();
+    for &component in fields.components() {
+        match component {
+            StateComponent::IncrementalMean => {
+                state.incremental_mean = fields
+                    .field_bool_values(field, component)
+                    .map_err(crate::grid_series::external)?
+                    .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "present aggregate state has a missing component".into(),
+                        )
+                    })?;
+            }
+            // A histogram state's payload is not numeric components, so this merge cannot read one:
+            // [`FloatMerger::merge_row`] sends a histogram row to `merge_histogram_row`, so a
+            // histogram component reaching here is a row whose kind says numeric and whose payload
+            // says otherwise. Refusing is what keeps a histogram from being folded as the numeric
+            // state it is not.
+            StateComponent::HistogramValue
+            | StateComponent::HistogramCompensation
+            | StateComponent::Poisoned
+            | StateComponent::IncompatibleLayout
+            | StateComponent::CustomBoundsReconciled
+            | StateComponent::CounterResetSeen
+            | StateComponent::NotCounterResetSeen => {
+                return Err(DataFusionError::Execution(
+                    "histogram aggregate state reached the numeric merge".into(),
+                ));
+            }
+            _ => {
+                let value = fields
+                    .field_values(field, component)
+                    .map_err(crate::grid_series::external)?
+                    .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "present aggregate state has a missing component".into(),
+                        )
+                    })?;
+                match component {
+                    StateComponent::Value => state.value = value,
+                    StateComponent::Mean => state.mean = value,
+                    StateComponent::Compensation => state.compensation = value,
+                    StateComponent::Count => state.count = value,
+                    _ => unreachable!("every other component is handled above"),
+                }
+            }
+        }
+    }
+    Ok(Some(state))
+}
+
+impl FloatState {
+    fn partial(&self) -> Option<AccumulatorState> {
+        self.seen.then_some(AccumulatorState {
+            value: self.value,
+            mean: self.mean,
+            compensation: self.compensation,
+            count: self.count,
+            incremental_mean: self.incremental_mean,
+        })
+    }
+
+    fn from_partial(state: AccumulatorState) -> Self {
+        Self {
+            seen: true,
+            value: state.value,
+            mean: state.mean,
+            compensation: state.compensation,
+            count: state.count,
+            incremental_mean: state.incremental_mean,
+        }
+    }
+
+    /// Folds the state of another partition into this one.
+    fn merge(&mut self, op: AggregateOp, other: Self) {
+        if !self.seen {
+            *self = other;
+            return;
+        }
+        match op {
+            AggregateOp::Sum => {
+                (self.value, self.compensation) = add_compensated(*self, other);
+            }
+            AggregateOp::Count => self.count += other.count,
+            AggregateOp::Group => {}
+            AggregateOp::Max => {
+                if self.value < other.value || self.value.is_nan() {
+                    self.value = other.value;
+                }
+            }
+            AggregateOp::Min => {
+                if self.value > other.value || self.value.is_nan() {
+                    self.value = other.value;
+                }
+            }
+            AggregateOp::Avg => self.merge_avg(other),
+            AggregateOp::Stddev | AggregateOp::Stdvar => {
+                // Chan et al.'s pairwise update. `delta * (delta * weight)` keeps the product
+                // finite where it is: `delta²` alone overflows for `[0]` and `[1.5e154]`, whose
+                // merged sum of squares is finite.
+                let count = self.count + other.count;
+                let delta = other.mean - self.mean;
+                let weight = self.count * other.count / count;
+                self.mean += delta * (other.count / count);
+                self.value = self.value + other.value + delta * (delta * weight);
+                self.count = count;
+            }
+        }
+    }
+
+    /// Adds the sums while they stay finite, and otherwise continues with the count-weighted
+    /// mean, as the serial update switches to an incremental mean once its sum overflows.
+    fn merge_avg(&mut self, other: Self) {
+        let count = self.count + other.count;
+        if !self.incremental_mean && !other.incremental_mean {
+            let (value, compensation) = add_compensated(*self, other);
+            if !value.is_infinite() {
+                self.value = value;
+                self.compensation = compensation;
+                self.count = count;
+                return;
+            }
+        }
+        let (mean, compensation) = self.mean_form();
+        let (other_mean, other_compensation) = other.mean_form();
+        let (weight, other_weight) = (self.count / count, other.count / count);
+        (self.mean, self.compensation) = kahan_inc(
+            other_mean * other_weight,
+            mean * weight,
+            compensation * weight + other_compensation * other_weight,
+        );
+        self.incremental_mean = true;
+        self.count = count;
+    }
+
+    /// The mean and its compensation, converting a sum as the serial update does on switching.
+    fn mean_form(&self) -> (f64, f64) {
+        if self.incremental_mean {
+            (self.mean, self.compensation)
+        } else {
+            (self.value / self.count, self.compensation / self.count)
+        }
+    }
+}
+
+/// The compensated sum of two partial sums. Both the other sum and its compensation are added as
+/// Kahan addends: adding the compensation plainly would drop what the compensation already
+/// holds once later partials cancel the sums, as merging `[1e100, 1]`, `[-1e100, 1e84]` and
+/// `[-1e84]` would lose the `1`.
+fn add_compensated(this: FloatState, other: FloatState) -> (f64, f64) {
+    let (value, compensation) = kahan_inc(other.value, this.value, this.compensation);
+    kahan_inc(other.compensation, value, compensation)
+}
+
+/// Merges `count_values` results of several partitions. Each partial already carries its full
+/// output label set, value label included, so series with one label set add their counts point
+/// by point and field by field.
+pub fn merge_count_values(
+    schema: &Arc<SeriesSchema>,
+    partials: impl IntoIterator<Item = Series>,
+) -> Result<Vec<Series>> {
+    let width = schema.fields.len();
+    let mut group_index: HashMap<LabelKey, usize> = HashMap::new();
+    let mut groups: Counts = Vec::new();
+    for series in partials {
+        validate_float_series(schema, &series)?;
+        let index = match group_index.entry(label_key(&series.metric)) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                groups.push((series.metric.clone(), BTreeMap::new()));
+                *entry.insert(groups.len() - 1)
+            }
+        };
+        for (field_index, field) in series.fields.iter().enumerate() {
+            for ((point, _), sample) in series.time.positions().zip(field.iter()) {
+                if let SampleRef::Float(count) = sample {
+                    groups[index]
+                        .1
+                        .entry(point)
+                        .or_insert_with(|| vec![0.0; width])[field_index] += count;
+                }
+            }
+        }
+    }
+    count_series(schema, groups)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::{Float64Array, ListArray, StructArray};
+    use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+    use datafusion::arrow::datatypes::{DataType, Field};
+    use datatypes::series::aggregate_state::{AggregateStateSchema, StateComponent};
+    use datatypes::series::samples::FieldSpec;
+    use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+
+    fn fields_batch() -> StateFieldsBatch {
+        let item_fields: datafusion::arrow::datatypes::Fields = vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new("compensation", DataType::Float64, true),
+        ]
+        .into();
+        let make_field =
+            |values: Vec<Option<f64>>, compensation: Vec<Option<f64>>, validity: Vec<bool>| {
+                let item = StructArray::new(
+                    item_fields.clone(),
+                    vec![
+                        Arc::new(Float64Array::from(values)),
+                        Arc::new(Float64Array::from(compensation)),
+                    ],
+                    Some(NullBuffer::from(validity)),
+                );
+                Arc::new(ListArray::new(
+                    Arc::new(Field::new(
+                        "item",
+                        DataType::Struct(item_fields.clone()),
+                        true,
+                    )),
+                    OffsetBuffer::new(ScalarBuffer::from(vec![0i32, 3])),
+                    Arc::new(item),
+                    None,
+                ))
+            };
+        let field_a = make_field(
+            vec![Some(2.), Some(3.), Some(4.)],
+            vec![Some(0.), Some(0.), Some(0.)],
+            vec![true, true, true],
+        );
+        let field_b = make_field(
+            vec![Some(5.), None, Some(7.)],
+            vec![Some(0.), None, Some(0.)],
+            vec![true, false, true],
+        );
+        let outer_fields = vec![
+            Field::new("a", field_a.data_type().clone(), false),
+            Field::new("b", field_b.data_type().clone(), false),
+        ]
+        .into();
+        let outer = StructArray::new(outer_fields, vec![field_a, field_b], None);
+        let schema = AggregateStateSchema::try_new(
+            AggregateStateKind::Sum,
+            vec![StateComponent::Value, StateComponent::Compensation],
+        )
+        .unwrap();
+        StateFieldsBatch::try_from_arrow(outer, &schema).unwrap()
+    }
+
+    fn schema() -> Arc<SeriesSchema> {
+        Arc::new(SeriesSchema {
+            fields: vec![
+                FieldSpec { name: "a".into() },
+                FieldSpec { name: "b".into() },
+            ]
+            .into(),
+            eval_grid: Some(Arc::new(
+                EvalGrid::try_new(GridSpec::try_new(0, 1, 3).unwrap()).unwrap(),
+            )),
+        })
+    }
+
+    /// The row's two fields carry different present states, so a hole in one of them is a hole in
+    /// that field only: it stays absent rather than becoming a zero the sum would count.
+    #[test]
+    fn merge_row_keeps_a_field_hole_absent() {
+        let schema = schema();
+        let row = StateRow {
+            metric: SeriesLabels::try_new(Some("m".into()), Vec::new()).unwrap(),
+            time: TimeAxis::Grid(
+                GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 3).unwrap(),
+            ),
+            fields: fields_batch(),
+            kind: AggregateStateKind::Sum,
+        };
+        let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+        merger.merge_row(&row, |_| Ok(())).unwrap();
+        let merged = merger.finish().unwrap();
+        assert_eq!(merged.len(), 1, "one group, one series");
+        let values = |field: usize| {
+            merged[0]
+                .fields
+                .get(field)
+                .expect("the fixture has two fields")
+                .iter()
+                .map(|sample| match sample {
+                    SampleRef::Float(value) => Some(value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(0), [Some(2.0), Some(3.0), Some(4.0)]);
+        assert_eq!(values(1), [Some(5.0), None, Some(7.0)]);
+    }
+}

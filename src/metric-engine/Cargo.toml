@@ -53,6 +53,7 @@ log-store = { workspace = true, features = ["testing"] }
 mito2 = { workspace = true, features = ["test"] }
 mur3 = "0.1"
 partition = { workspace = true }
+rstest = { workspace = true }
 
 [[bench]]
 name = "bench_tsid_generator"

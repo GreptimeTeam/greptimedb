@@ -464,7 +464,8 @@ impl LocalGcWorker {
         );
 
         let manifest = if let Some(region) = &region {
-            let manifest = region.manifest_ctx.manifest().await;
+            let manager = region.manifest_ctx.manifest_manager.read().await;
+            let manifest = manager.manifest();
             // If the manifest version does not match, skip GC for this region to avoid deleting files that are still in use.
             let file_ref_manifest_version = self
                 .file_ref_manifest
@@ -482,6 +483,24 @@ impl LocalGcWorker {
                 GC_ERRORS_TOTAL
                     .with_label_values(&["manifest_mismatch"])
                     .inc();
+                return Ok(RegionGcOutcome {
+                    removed_files: vec![],
+                    needs_retry: false,
+                });
+            }
+            // SSTs written for pending tails but not committed yet, and SSTs of a newer
+            // manifest, are not in this snapshot, so a full listing would take them for orphans.
+            if self.full_file_listing
+                && (!manifest.pending_tails.is_empty()
+                    || manager.has_update().await.unwrap_or_else(|e| {
+                        warn!(e; "Failed to check manifest updates of region {}", region_id);
+                        true
+                    }))
+            {
+                info!(
+                    "Skip full listing GC for region {}: it has pending WAL tails or a newer manifest may exist",
+                    region_id
+                );
                 return Ok(RegionGcOutcome {
                     removed_files: vec![],
                     needs_retry: false,

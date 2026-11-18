@@ -26,7 +26,7 @@ use crate::error::{Error, RdsTransactionRetryFailedSnafu, Result, UnexpectedSnaf
 use crate::kv_backend::txn::{
     Compare, Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse,
 };
-use crate::kv_backend::{KvBackend, TxnService};
+use crate::kv_backend::{ClosableKvBackend, KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -121,6 +121,11 @@ pub trait Transaction<'a>: Send + Sync {
 /// Factory for creating default and transaction query executors.
 #[async_trait::async_trait]
 pub trait ExecutorFactory<T: Executor>: Send + Sync {
+    /// Closes the connection pool to new acquisitions. This affects all shared pool handles.
+    /// MySQL waits for checked-out connections to be returned; PostgreSQL allows them to
+    /// finish and releases them when returned. Stop consumers before closing the backend.
+    async fn close(&self);
+
     async fn default_executor(&self) -> Result<T>;
 
     async fn txn_executor<'a>(&self, default_executor: &'a mut T) -> Result<T::Transaction<'a>>;
@@ -582,6 +587,20 @@ where
 
     fn max_txn_ops(&self) -> usize {
         self.max_txn_ops
+    }
+}
+
+#[async_trait::async_trait]
+impl<T, S, R> ClosableKvBackend for RdsStore<T, S, R>
+where
+    R: 'static,
+    Self: KvQueryExecutor<T> + Send + Sync,
+    T: Executor + 'static,
+    S: ExecutorFactory<T> + 'static,
+{
+    async fn close(&self) -> Result<()> {
+        self.executor_factory.close().await;
+        Ok(())
     }
 }
 

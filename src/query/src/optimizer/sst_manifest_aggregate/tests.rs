@@ -273,7 +273,7 @@ async fn test_manifest_aggregate_states_match_baseline() {
             analyzer.rules.push(Arc::new(SstManifestAggregateRule));
             analyzer
                 .rules
-                .push(Arc::new(crate::dist_plan::DistPlannerAnalyzer));
+                .push(Arc::new(crate::dist_plan::DistPlannerAnalyzer::default()));
             analyzer.rules.push(Arc::new(
                 common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer,
             ));

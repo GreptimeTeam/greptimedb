@@ -14,7 +14,7 @@
 
 use std::assert_matches;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common_datasource::compression::CompressionType;
@@ -25,10 +25,12 @@ use object_store::layers::mock::{
 };
 use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
+use tokio::sync::Notify;
 
 use crate::error::Error::{ChecksumMismatch, ManifestDeltaNotFound};
 use crate::manifest::action::{
-    RegionCheckpoint, RegionEdit, RegionMetaAction, RegionMetaActionList,
+    HandoffFloor, PendingTail, RegionCheckpoint, RegionEdit, RegionMetaAction,
+    RegionMetaActionList, UptoKind, WalRecoveryEdit,
 };
 use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::storage::checkpoint::CheckpointMetadata;
@@ -185,6 +187,55 @@ async fn manager_with_checkpoint_distance_1() {
     assert_eq!(10, manager.manifest().manifest_version);
 }
 
+#[rstest::rstest]
+#[case::delta(0)]
+#[case::checkpoint(1)]
+#[tokio::test]
+async fn wal_recovery_records_survive_reopen(#[case] checkpoint_distance: u64) {
+    let (env, mut manager) =
+        build_manager(checkpoint_distance, CompressionType::Uncompressed).await;
+    let pending_tails = vec![PendingTail {
+        node_id: 1,
+        after: 10,
+        upto: 20,
+        upto_kind: UptoKind::Listed,
+    }];
+    let edit = RegionEdit {
+        files_to_add: vec![],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: Some(1 << 40),
+        wal_recovery: WalRecoveryEdit {
+            pending_tails: Some(pending_tails.clone()),
+            handoff_floor: Some(HandoffFloor {
+                node_id: 1,
+                entry_id: 30,
+            }),
+        },
+    };
+    manager
+        .update(
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(edit)),
+            false,
+        )
+        .await
+        .unwrap();
+    wait_for_manifest_checkpoint(&manager).await;
+    let checkpoint = manager.store().load_last_checkpoint().await.unwrap();
+    assert_eq!(checkpoint.is_some(), checkpoint_distance > 0);
+    manager.stop().await;
+
+    let manifest = reopen_manager(&env, checkpoint_distance, CompressionType::Uncompressed)
+        .await
+        .manifest();
+    assert_eq!(manifest.pending_tails, pending_tails);
+    assert_eq!(manifest.handoff_floors, [(1, 30)].into());
+    assert_eq!(manifest.committed_sequence, Some(1 << 40));
+}
+
 #[tokio::test]
 async fn test_corrupted_data_causing_checksum_error() {
     // Initialize manager
@@ -266,6 +317,7 @@ async fn checkpoint_with_different_compression_types() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         })]);
         actions.push(action);
     }
@@ -332,6 +384,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         })]);
         actions.push(action);
     }
@@ -455,11 +508,13 @@ async fn manifest_install_manifest_to_with_checkpoint() {
 async fn test_checkpoint_bypass_in_staging_mode() {
     common_telemetry::init_default_ut_logging();
     let (_env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
+    let version = manager.last_version();
 
     // Apply actions in staging mode - checkpoint should be bypassed
     for _ in 0..15 {
         manager.update(nop_action(), true).await.unwrap();
     }
+    assert_eq!(manager.last_version(), version);
     assert!(!manager.checkpointer().is_doing_checkpoint());
 
     // Verify no checkpoint was created in staging mode
@@ -472,8 +527,9 @@ async fn test_checkpoint_bypass_in_staging_mode() {
             .is_none()
     );
 
-    // Now switch to normal mode and apply one more action
-    manager.update(nop_action(), false).await.unwrap();
+    // The end of staging commits all of them as the next version.
+    let (committed_version, _) = manager.commit_staged(|| false).await.unwrap();
+    assert_eq!(committed_version, version + 1);
 
     // Wait for potential checkpoint
     while manager.checkpointer().is_doing_checkpoint() {
@@ -489,8 +545,8 @@ async fn test_checkpoint_bypass_in_staging_mode() {
     );
     let (last_version, _checkpoint_data) = checkpoint_result.unwrap();
 
-    // Checkpoint should include all 16 actions (15 from staging + 1 from writable)
-    assert_eq!(last_version, 16);
+    // Checkpoint should include the staged actions, which took one version
+    assert_eq!(last_version, version + 1);
 }
 
 /// Simulates both a rejected delete and a close failure after eager deletion.
@@ -653,7 +709,7 @@ async fn install_preserves_listed_delta_not_found_retry_hint() {
         .unwrap();
     let mut store = manager.store();
     store
-        .save(1, &nop_action().encode().unwrap(), false)
+        .save(1, &nop_action().encode().unwrap())
         .await
         .unwrap();
 
@@ -771,6 +827,132 @@ async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
     manager.wait_for_pending_checkpoint().await;
 
     assert_eq!(2, manager.checkpointer().last_checkpoint_version());
+}
+
+#[rstest::rstest]
+#[case::cleanup_finished(false)]
+#[case::task_aborted(true)]
+#[tokio::test]
+async fn pending_checkpoint_completion_waits_until_the_task_ends(#[case] abort: bool) {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
+    let env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+
+    manager.update(nop_action(), false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
+        .await
+        .expect("checkpoint cleanup did not start");
+
+    // Two waiters stay on their own tasks until the checkpoint ends; a third is cancelled.
+    let waiters = [
+        manager.pending_checkpoint_completion(),
+        manager.pending_checkpoint_completion(),
+    ]
+    .map(tokio::spawn);
+    let mut cancelled = Box::pin(manager.pending_checkpoint_completion());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut cancelled)
+            .await
+            .is_err(),
+        "the cancelled wait ended before the checkpoint cleanup"
+    );
+    drop(cancelled);
+    assert!(
+        waiters.iter().all(|waiter| !waiter.is_finished()),
+        "a spawned wait ended before the checkpoint cleanup"
+    );
+    // The cleanup stays blocked in the abort case, so only the abort can end the task.
+    if abort {
+        manager.checkpointer().abort_checkpoint_task();
+    } else {
+        blocker.release();
+    }
+    for waiter in waiters {
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("the wait did not end with the checkpoint task")
+            .unwrap();
+    }
+    let wait_started = manager.checkpointer().pending_checkpoint_wait_started();
+    // Consumes the permit the waiters above left.
+    let _ = tokio::time::timeout(Duration::ZERO, wait_started.notified()).await;
+    tokio::time::timeout(Duration::ZERO, manager.pending_checkpoint_completion())
+        .await
+        .expect("a wait after the checkpoint task ended did not return at once");
+    assert!(
+        tokio::time::timeout(Duration::ZERO, wait_started.notified())
+            .await
+            .is_err(),
+        "a wait after the checkpoint task ended started waiting"
+    );
+}
+
+/// Panics on the first delete, which a checkpoint issues in its cleanup, once released.
+struct PanickingDeleter {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    panicked: Arc<AtomicBool>,
+}
+
+impl oio::Delete for PanickingDeleter {
+    async fn delete(&mut self, _path: &str, _args: OpDelete) -> MockResult<()> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.panicked.store(true, Ordering::Relaxed);
+        panic!("mock manifest delete panic");
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn pending_checkpoint_completion_ends_when_the_task_panics() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let panicked = Arc::new(AtomicBool::new(false));
+    let (factory_entered, factory_release, factory_panicked) =
+        (entered.clone(), release.clone(), panicked.clone());
+    let mock_layer = MockLayerBuilder::default()
+        .deleter_factory(Arc::new(move |_inner| {
+            Box::new(PanickingDeleter {
+                entered: factory_entered.clone(),
+                release: factory_release.clone(),
+                panicked: factory_panicked.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+
+    manager.update(nop_action(), false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("checkpoint cleanup did not start");
+    let mut done = Box::pin(manager.pending_checkpoint_completion());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut done)
+            .await
+            .is_err(),
+        "the wait ended before the checkpoint task panicked"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), done)
+        .await
+        .expect("the wait did not end after the checkpoint task panicked");
+    assert!(panicked.load(Ordering::Relaxed));
 }
 
 /// Retention runs inside the checkpoint task, so waiting for task completion also
@@ -956,6 +1138,7 @@ async fn manifest_size_warm_cache_matches_recovery_bytes(
                 .unwrap();
         let cache = ManifestCache::new(local_store, ReadableSize::mb(10), None, true).await;
         let options = RegionManifestOptions {
+            file_metadata_interner: Default::default(),
             manifest_dir: "/".to_string(),
             object_store,
             compress_type,
@@ -1058,6 +1241,7 @@ async fn manifest_cache_write_through_survives_reopen(#[case] compression: Compr
     let cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
     // Use a relative prefix, matching production keys and the recovered index.
     let mut options = RegionManifestOptions {
+        file_metadata_interner: Default::default(),
         manifest_dir: "region/".to_string(),
         object_store: remote,
         compress_type: compression,

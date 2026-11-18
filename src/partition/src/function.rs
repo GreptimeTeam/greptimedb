@@ -98,7 +98,7 @@ impl IcebergHash {
 
     pub fn to_logical_expr(&self) -> Expr {
         let column = Expr::Column(datafusion_common::Column::from_name(self.column()));
-        ScalarUDF::new_from_impl(IcebergHashUdf::default()).call(vec![column])
+        iceberg_hash_udf().call(vec![column])
     }
 }
 
@@ -106,6 +106,15 @@ impl Display for IcebergHash {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}({})", Self::NAME, self.column())
     }
+}
+
+/// Returns the DataFusion form of [`IcebergHash`].
+///
+/// Partition rules plan this UDF directly, and the SQL function `iceberg_hash`
+/// is registered from the same constructor, so a persisted rule and a user query
+/// always hash through one implementation.
+pub fn iceberg_hash_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(IcebergHashUdf::default())
 }
 
 fn is_signed_integer(data_type: &ConcreteDataType) -> bool {
@@ -120,6 +129,8 @@ fn is_signed_integer(data_type: &ConcreteDataType) -> bool {
 
 fn iceberg_hash_array(array: &dyn Array) -> datafusion_common::Result<ArrayRef> {
     let hashes: Int32Array = match array.data_type() {
+        // `iceberg_hash(NULL)` reaches here as an untyped null.
+        DataType::Null => Int32Array::from(vec![None; array.len()]),
         DataType::Utf8 => array
             .as_string::<i32>()
             .iter()

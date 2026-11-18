@@ -28,11 +28,15 @@ mod handle_flush;
 mod handle_manifest;
 mod handle_open;
 mod handle_rebuild_index;
+mod handle_reload;
 mod handle_remap;
+#[cfg(feature = "enterprise")]
+mod handle_table_compaction;
+mod handle_tail_replay;
 mod handle_truncate;
 mod handle_write;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -43,7 +47,7 @@ use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_stat::get_total_memory_bytes;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use futures::future::{join_all, try_join_all};
 use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
@@ -67,7 +71,7 @@ use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
-use crate::lease::NodeLease;
+use crate::lease::{GrantedLeases, NodeLease};
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
@@ -80,6 +84,7 @@ use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
     SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
+use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::series_index::{
     IndexFilePurger, SeriesIndexTaskState, series_index_channel, spawn_series_index_tasks,
@@ -87,8 +92,11 @@ use crate::series_index::{
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
+use crate::sst::index::handler::IndexKindProviderRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
+use crate::tail_replay::TailReplayLimits;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -161,6 +169,7 @@ pub(crate) struct WorkerGroup {
     /// Gc limiter to limit concurrent gc jobs.
     gc_limiter: GcLimiterRef,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
     /// Puffin manager factory.
@@ -212,6 +221,7 @@ impl WorkerGroup {
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
+        let tail_replay_limits = TailReplayLimits::new(&config);
         // We use another scheduler to avoid purge jobs blocking other jobs.
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
         let upload_store_wrapper = plugins.get::<WriteCacheUploadStoreWrapperRef>();
@@ -225,6 +235,10 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .enable_columnar_meta_cache(
+                    config.experimental_series_index_format
+                        == crate::config::SeriesIndexFormat::Columnar,
+                )
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
@@ -259,14 +273,16 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let granted_leases = Arc::new(GrantedLeases::default());
         let staging_regions = StagingRegionsRef::default();
+        let wal = Wal::new(log_store);
 
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
                     config: config.clone(),
-                    log_store: log_store.clone(),
+                    wal: wal.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
@@ -289,9 +305,11 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    tail_replay_limits: tail_replay_limits.clone(),
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    granted_leases: granted_leases.clone(),
                     staging_regions: staging_regions.clone(),
                 }
                 .start()
@@ -308,6 +326,7 @@ impl WorkerGroup {
             file_ref_manager,
             gc_limiter,
             node_lease,
+            granted_leases,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -416,6 +435,25 @@ impl WorkerGroup {
         &self.node_lease
     }
 
+    /// Returns the latest lease each region of this group received.
+    pub(crate) fn granted_leases(&self) -> &GrantedLeases {
+        &self.granted_leases
+    }
+
+    /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
+    pub(crate) fn notify_writable(&self, region: &MitoRegionRef) {
+        handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
+    }
+
+    pub(crate) fn node_lease_permit(&self) -> Arc<NodeLease> {
+        self.node_lease.clone()
+    }
+
+    /// Asks the worker of `region` to cancel its tail replay, if one runs, without waiting.
+    pub(crate) fn notify_cannot_replay(&self, region: &MitoRegionRef) {
+        handle_tail_replay::notify_cannot_replay(&self.worker(region.region_id).sender, region);
+    }
+
     /// Get worker for specific `region_id`.
     pub(crate) fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let index = region_id_to_index(region_id, self.workers.len());
@@ -483,6 +521,7 @@ impl WorkerGroup {
             config.max_background_compactions,
         ));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
+        let tail_replay_limits = TailReplayLimits::new(&config);
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
@@ -504,6 +543,10 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .enable_columnar_meta_cache(
+                    config.experimental_series_index_format
+                        == crate::config::SeriesIndexFormat::Columnar,
+                )
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
@@ -532,13 +575,15 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let granted_leases = Arc::new(GrantedLeases::default());
         let staging_regions = StagingRegionsRef::default();
+        let wal = Wal::new(log_store);
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
                     config: config.clone(),
-                    log_store: log_store.clone(),
+                    wal: wal.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
@@ -561,9 +606,11 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    tail_replay_limits: tail_replay_limits.clone(),
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    granted_leases: granted_leases.clone(),
                     staging_regions: staging_regions.clone(),
                 }
                 .start()
@@ -580,6 +627,7 @@ impl WorkerGroup {
             file_ref_manager,
             gc_limiter,
             node_lease,
+            granted_leases,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -608,7 +656,50 @@ async fn series_index_store_from_config(
     }
 
     let root = Path::new(data_home).join("series_index");
-    new_fs_cache_store(&root.to_string_lossy()).await.map(Some)
+    let store = new_fs_cache_store(&root.to_string_lossy()).await?;
+    initialize_series_index_cache(&store).await?;
+    Ok(Some(store))
+}
+
+/// Marks the rebuildable local index layout, and resets the store when it changes.
+///
+/// This branch is experimental and has no deployments, so it pins the token at `1`: a
+/// cache written by any other build is discarded on startup and rebuilt from the SSTs.
+/// Artifacts are additionally rejected on open when they lack the mandatory
+/// `identity_encoding` discriminator, so a stale artifact is never served even if the
+/// reset did not happen (a read that precedes it, or an artifact outside this cache).
+const SERIES_INDEX_CACHE_VERSION: &str = "1";
+
+/// Resets incompatible caches before any worker or reader can use their catalogs.
+async fn initialize_series_index_cache(store: &ObjectStore) -> Result<()> {
+    let version = match store.read("version").await {
+        Ok(bytes) => Some(bytes.to_bytes()),
+        Err(error) if error.kind() == object_store::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context(crate::error::OpenDalSnafu),
+    };
+    if version.as_deref() == Some(SERIES_INDEX_CACHE_VERSION.as_bytes()) {
+        return Ok(());
+    }
+    common_telemetry::info!("Resetting series-index cache: missing or incompatible layout version");
+    // Preserve the cache root, which may be a mount point.
+    let entries = store.list("/").await.context(crate::error::OpenDalSnafu)?;
+    for entry in entries {
+        // Listings can include the directory itself.
+        if entry.path() == "/" {
+            continue;
+        }
+        store
+            .delete_with(entry.path())
+            .recursive(true)
+            .await
+            .context(crate::error::OpenDalSnafu)?;
+    }
+    store
+        .write("version", SERIES_INDEX_CACHE_VERSION)
+        .await
+        .context(crate::error::OpenDalSnafu)?;
+    common_telemetry::info!("Series-index cache reset complete");
+    Ok(())
 }
 
 pub async fn write_cache_from_config(
@@ -648,11 +739,19 @@ pub(crate) fn worker_init_check_delay() -> Duration {
     Duration::from_secs(init_check_delay)
 }
 
+/// Constructs the shared registry for region creation and index maintenance.
+fn index_registry(
+    config: &MitoConfig,
+    provider: Option<IndexKindProviderRef>,
+) -> Result<IndexRegistryRef> {
+    IndexRegistry::from_config(config, provider).map(Arc::new)
+}
+
 /// Worker start config.
 struct WorkerStarter<S> {
     id: WorkerId,
     config: Arc<MitoConfig>,
-    log_store: Arc<S>,
+    wal: Wal<S>,
     object_store_manager: ObjectStoreManagerRef,
     write_buffer_manager: WriteBufferManagerRef,
     compact_job_pool: Arc<CompactionCoordinator>,
@@ -677,11 +776,14 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    /// Limits of the node's tail replays.
+    tail_replay_limits: TailReplayLimits,
     #[cfg(feature = "hdfs-object-store")]
     /// Limiter for the temporary file sweeps, or `None` if the datanode allows
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     staging_regions: StagingRegionsRef,
 }
 
@@ -738,7 +840,8 @@ impl<S: LogStore> WorkerStarter<S> {
             opening_regions: opening_regions.clone(),
             sender: sender.clone(),
             receiver,
-            wal: Wal::new(self.log_store),
+            wal_flush_receiver: self.wal.subscribe_flush_candidates(),
+            wal: self.wal,
             object_store_manager: self.object_store_manager.clone(),
             running: running.clone(),
             memtable_builder_provider: MemtableBuilderProvider::new(
@@ -779,16 +882,19 @@ impl<S: LogStore> WorkerStarter<S> {
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
-            pending_alters: Default::default(),
+            pending_ddls: PendingDdls::default(),
             schema_metadata_manager: self.schema_metadata_manager,
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
+            tail_replay_limits: self.tail_replay_limits,
             plugins: self.plugins,
             #[cfg(feature = "hdfs-object-store")]
             sweep_limiter: self.sweep_limiter,
             node_lease: self.node_lease,
+            granted_leases: self.granted_leases,
             staging_regions: self.staging_regions,
+            tail_replays: HashMap::new(),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -967,7 +1073,8 @@ type RequestBuffer = Vec<WorkerRequest>;
 
 /// Buffer for stalled write requests.
 ///
-/// Maintains stalled write requests and their estimated size.
+/// Maintains stalled write requests, their estimated size, and the regions whose writes wait for
+/// the end of staging to drain them.
 #[derive(Default)]
 pub(crate) struct StalledRequests {
     /// Stalled requests.
@@ -980,6 +1087,10 @@ pub(crate) struct StalledRequests {
         HashMap<RegionId, (usize, Vec<SenderWriteRequest>, Vec<SenderBulkRequest>)>,
     /// Estimated size of all stalled requests.
     pub(crate) estimated_size: usize,
+    /// Regions with writes stalled while they were ending staging. Later writes of these regions
+    /// stall behind them until [BackgroundNotify::StagingEnded] handles them, so they keep their
+    /// order.
+    staging_drains: HashSet<RegionId>,
 }
 
 impl StalledRequests {
@@ -1043,6 +1154,118 @@ impl StalledRequests {
             .map(|(_, reqs, bulk_reqs)| reqs.len() + bulk_reqs.len())
             .sum()
     }
+
+    /// Records that `region_id` stalled a write while ending staging, so its later writes stall
+    /// behind it until [Self::remove_staging_drain].
+    pub(crate) fn add_staging_drain(&mut self, region_id: RegionId) {
+        self.staging_drains.insert(region_id);
+    }
+
+    /// Returns whether writes of `region_id` stall behind the ones it stalled while ending
+    /// staging.
+    pub(crate) fn has_staging_drain(&self, region_id: &RegionId) -> bool {
+        self.staging_drains.contains(region_id)
+    }
+
+    /// Lets later writes of `region_id` through once the end of staging drains its stalled ones.
+    pub(crate) fn remove_staging_drain(&mut self, region_id: &RegionId) {
+        self.staging_drains.remove(region_id);
+    }
+}
+
+/// Has the worker handle the writes it stalled while the region was ending staging, and waits
+/// until it has. Await it only as `MitoRegion::end_staging` does.
+async fn drain_ended_staging(sender: &Sender<WorkerRequestWithTime>, region_id: RegionId) {
+    let (drained, wait) = oneshot::channel();
+    let notify = WorkerRequest::Background {
+        region_id,
+        notify: BackgroundNotify::StagingEnded(drained),
+    };
+    let _ = sender.send(WorkerRequestWithTime::new(notify)).await;
+    let _ = wait.await;
+}
+
+/// Maximum number of pending DDL requests per region.
+pub(crate) const MAX_PENDING_DDLS_PER_REGION: usize = 128;
+
+/// Lifecycle requests waiting for a region manifest operation to finish.
+#[derive(Default)]
+struct PendingDdls(HashMap<RegionId, VecDeque<SenderDdlRequest>>);
+
+impl PendingDdls {
+    fn enqueue(&mut self, ddl: SenderDdlRequest) -> std::result::Result<(), SenderDdlRequest> {
+        let queue = self.0.entry(ddl.region_id).or_default();
+        if queue.len() >= MAX_PENDING_DDLS_PER_REGION {
+            return Err(ddl);
+        }
+        debug!(
+            region_id = %ddl.region_id,
+            request = ?ddl.request,
+            queue_len = queue.len() + 1,
+            "Deferring DDL behind region manifest work"
+        );
+        queue.push_back(ddl);
+        Ok(())
+    }
+
+    fn pop_front(&mut self, region_id: RegionId) -> Option<SenderDdlRequest> {
+        let queue = self.0.get_mut(&region_id)?;
+        let ddl = queue.pop_front();
+        if queue.is_empty() {
+            self.0.remove(&region_id);
+        }
+        ddl
+    }
+
+    fn remove(&mut self, region_id: RegionId) -> Option<VecDeque<SenderDdlRequest>> {
+        self.0.remove(&region_id)
+    }
+
+    fn contains_region(&self, region_id: RegionId) -> bool {
+        self.0.contains_key(&region_id)
+    }
+
+    fn has_close(&self, region_id: RegionId) -> bool {
+        self.0.get(&region_id).is_some_and(|queue| {
+            queue
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::Close(_)))
+        })
+    }
+
+    fn has_enter_staging(&self, region_id: RegionId) -> bool {
+        self.0.get(&region_id).is_some_and(|queue| {
+            queue
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
+        })
+    }
+
+    fn front_is_enter_staging(&self, region_id: RegionId) -> bool {
+        self.0
+            .get(&region_id)
+            .and_then(VecDeque::front)
+            .is_some_and(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
+    }
+
+    fn take_closes(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
+        let Some(mut queue) = self.0.remove(&region_id) else {
+            return Vec::new();
+        };
+        let mut matching = Vec::new();
+        let mut remaining = VecDeque::new();
+        while let Some(ddl) = queue.pop_front() {
+            if matches!(ddl.request, DdlRequest::Close(_)) {
+                matching.push(ddl);
+            } else {
+                remaining.push_back(ddl);
+            }
+        }
+        if !remaining.is_empty() {
+            self.0.insert(region_id, remaining);
+        }
+        matching
+    }
 }
 
 /// Background worker loop to handle requests.
@@ -1065,6 +1288,8 @@ struct RegionWorkerLoop<S> {
     receiver: Receiver<WorkerRequestWithTime>,
     /// WAL of the engine.
     wal: Wal<S>,
+    /// Shared WAL pressure candidates, independently of memory-pressure wakeups.
+    wal_flush_receiver: watch::Receiver<Arc<[RegionId]>>,
     /// Manages object stores for manifest and SSTs.
     object_store_manager: ObjectStoreManagerRef,
     /// Whether the worker thread is still running.
@@ -1112,8 +1337,8 @@ struct RegionWorkerLoop<S> {
     request_wait_time: Histogram,
     /// Queues for region edit requests.
     region_edit_queues: RegionEditQueues,
-    /// ALTER requests waiting for the current edit or ALTER to finish.
-    pending_alters: handle_alter::PendingAlters,
+    /// DDL requests waiting for the current manifest operation to finish.
+    pending_ddls: PendingDdls,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
     /// Datanode level file references manager.
@@ -1122,6 +1347,8 @@ struct RegionWorkerLoop<S> {
     partition_expr_fetcher: PartitionExprFetcherRef,
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
+    /// Limits of the node's tail replays.
+    tail_replay_limits: TailReplayLimits,
     /// Plugins for flush hooks.
     plugins: Plugins,
     #[cfg(feature = "hdfs-object-store")]
@@ -1129,8 +1356,11 @@ struct RegionWorkerLoop<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     /// Staging regions of this node that have received writes.
     staging_regions: StagingRegionsRef,
+    /// Running tail replays, which stay here until they report their end.
+    tail_replays: HashMap<RegionId, CancellableTaskState>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1138,6 +1368,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn register_region(&mut self, region: MitoRegionRef) {
         if let Some(old) = self.regions.get_region(region.region_id) {
             old.deactivate_region_manifest_size_metric();
+            self.cancel_tail_replay(region.region_id);
         }
 
         self.compaction_scheduler.register_region(
@@ -1147,6 +1378,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         self.regions.insert_region(region.clone());
         region.activate_region_manifest_size_metric();
+        // A create can open an existing region as a writable leader.
+        self.maybe_replay_tails(region.region_id);
     }
 
     /// Starts the worker loop.
@@ -1217,6 +1450,30 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         self.handle_stalled_requests().await;
                         continue;
                     }
+                }
+                result = self.wal_flush_receiver.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                    let candidates = self.wal_flush_receiver.borrow_and_update().clone();
+                    if let Err(e) = self.flush_for_wal_pressure(&candidates) {
+                        error!(e; "Failed to flush regions under WAL pressure");
+                    }
+                    #[cfg(any(test, feature = "test"))]
+                    if let Some(listener) = &self.listener.listener {
+                        for &region_id in candidates.iter() {
+                            if self.regions.get_region(region_id).is_some() {
+                                listener.on_wal_pressure_checked(
+                                    region_id,
+                                    self.flush_scheduler.is_flush_requested(region_id),
+                                );
+                            }
+                        }
+                    }
+                    // Notifications reset the loop's sleep, so they must also
+                    // check periodic work even when the candidate list is empty.
+                    self.handle_periodical_tasks();
+                    continue;
                 }
                 _ = &mut sleep => {
                     // Timeout. Checks periodical tasks.
@@ -1358,7 +1615,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                 }
                 WorkerRequest::EditRegion(request) => {
-                    self.handle_region_edit(request);
+                    self.handle_incoming_region_edit(request);
                 }
                 WorkerRequest::CancelCompaction {
                     region_id,
@@ -1405,84 +1662,93 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.handle_write_requests(write_requests, bulk_requests, true)
             .await;
 
-        self.handle_ddl_requests(ddl_requests).await;
+        for ddl in ddl_requests.drain(..) {
+            let region_id = ddl.region_id;
+            if self.should_defer_region_ddl(&ddl) {
+                self.enqueue_region_ddl(ddl);
+            } else {
+                self.execute_ddl_request(ddl).await;
+            }
+            self.dispatch_pending_region_requests(region_id).await;
+        }
     }
 
     /// Takes and handles all ddl requests.
     async fn handle_ddl_requests(&mut self, ddl_requests: &mut Vec<SenderDdlRequest>) {
-        if ddl_requests.is_empty() {
-            return;
-        }
-
         for ddl in ddl_requests.drain(..) {
-            let res = match ddl.request {
-                DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
-                DdlRequest::Drop(req) => {
-                    self.handle_drop_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Open((req, wal_entry_receiver)) => {
-                    self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::OfflineCleanup(req) => {
-                    self.handle_offline_cleanup_request(ddl.region_id, req)
-                        .await
-                }
-                DdlRequest::Close(req) => {
-                    self.handle_close_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Alter(req) => {
-                    self.handle_alter_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Flush(req) => {
-                    self.handle_flush_request(ddl.region_id, req, ddl.sender);
-                    continue;
-                }
-                DdlRequest::Compact(req) => {
-                    self.handle_compaction_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::BuildIndex(req) => {
-                    self.handle_build_index_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Truncate(req) => {
-                    self.handle_truncate_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Catchup((req, wal_entry_receiver)) => {
-                    self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::EnterStaging(req) => {
-                    self.handle_enter_staging_request(
-                        ddl.region_id,
-                        req.partition_directive,
-                        ddl.sender,
-                    )
-                    .await;
-                    continue;
-                }
-                DdlRequest::ApplyStagingManifest(req) => {
-                    self.handle_apply_staging_manifest_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-            };
-
-            ddl.sender.send(res);
+            self.execute_ddl_request(ddl).await;
         }
+    }
+
+    /// Executes an admitted request, including requests handed back by a scheduler.
+    async fn execute_ddl_request(&mut self, ddl: SenderDdlRequest) {
+        let res = match ddl.request {
+            DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
+            DdlRequest::Drop(req) => {
+                self.handle_drop_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Open((req, wal_entry_receiver)) => {
+                self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::OfflineCleanup(req) => {
+                self.handle_offline_cleanup_request(ddl.region_id, req)
+                    .await
+            }
+            DdlRequest::Close(req) => {
+                self.handle_close_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Alter(req) => {
+                self.execute_alter_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Flush(req) => {
+                self.handle_flush_request(ddl.region_id, req, ddl.sender);
+                return;
+            }
+            DdlRequest::Compact(req) => {
+                self.handle_compaction_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::BuildIndex(req) => {
+                self.handle_build_index_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Truncate(req) => {
+                self.handle_truncate_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Catchup((req, wal_entry_receiver)) => {
+                self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::EnterStaging(req) => {
+                self.handle_enter_staging_request(
+                    ddl.region_id,
+                    req.partition_directive,
+                    ddl.sender,
+                )
+                .await;
+                return;
+            }
+            DdlRequest::ApplyStagingManifest(req) => {
+                self.handle_apply_staging_manifest_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+        };
+
+        ddl.sender.send(res);
     }
 
     /// Handle periodical tasks such as region auto flush.
@@ -1498,13 +1764,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         self.last_periodical_check_millis = self.time_provider.current_time_millis();
 
+        self.wal
+            .refresh_flush_candidates(self.last_periodical_check_millis, CHECK_REGION_INTERVAL);
         if let Err(e) = self.flush_periodically() {
             error!(e; "Failed to flush regions periodically");
+        }
+        // Retries the reloads that failed, and starts those no notification started.
+        for region in self.regions.list_regions() {
+            self.maybe_reload_region(region.region_id);
         }
     }
 
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
+        // A reload that fails for good would otherwise restart itself forever.
+        let is_reload_result = matches!(notify, BackgroundNotify::RegionReloaded { .. });
+        let should_dispatch_pending = notify.should_dispatch_pending();
         match notify {
             BackgroundNotify::RegionOpened { region, registered } => {
                 self.register_region(region);
@@ -1545,7 +1820,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_index_build_stopped(region_id, req).await
             }
             BackgroundNotify::IndexBuildRetry(req) => {
-                self.handle_rebuild_index(req, OptionOutputTx::new(None))
+                self.handle_rebuild_index_inner(req, OptionOutputTx::new(None), true)
                     .await
             }
             BackgroundNotify::CompactionFinished(req) => {
@@ -1560,10 +1835,42 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_manifest_region_change_result(req).await
             }
             BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
+            BackgroundNotify::StagingEnded(drained) => {
+                self.stalled_requests.remove_staging_drain(&region_id);
+                self.handle_region_stalled_requests(&region_id, true).await;
+                let _ = drained.send(());
+            }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
             BackgroundNotify::CopyRegionFromFinished(req) => {
                 self.handle_copy_region_from_finished(req)
             }
+            BackgroundNotify::RegionFenced => {}
+            BackgroundNotify::RegionReloaded { old, result } => {
+                self.handle_region_reloaded(region_id, old, result).await
+            }
+            BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::RegionCannotReplay { region } => {
+                self.handle_region_cannot_replay(region_id, region)
+            }
+            BackgroundNotify::TailReplayCommitted {
+                region,
+                edit,
+                tails,
+            } => {
+                self.handle_tail_replay_committed(region_id, region, edit, tails)
+                    .await
+            }
+            BackgroundNotify::TailReplayEnded => self.handle_tail_replay_ended(region_id),
+        }
+        // Completion handlers may return early after releasing their scheduler. Dispatch
+        // here covers those paths as well as their normal completion.
+        if should_dispatch_pending {
+            self.dispatch_pending_region_requests(region_id).await;
+        }
+        // A commit or a tail replay that found a newer manifest fenced the region before its job
+        // reported here.
+        if !is_reload_result {
+            self.maybe_reload_region(region_id);
         }
     }
 
@@ -1584,14 +1891,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // changes a writable or staging leader, but always fences
                 // promotions issued before.
                 region.manifest_ctx.begin_downgrade(region_id);
+                self.cancel_tail_replay(region_id);
             }
             #[cfg(feature = "hdfs-object-store")]
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;
             #[cfg(feature = "hdfs-object-store")]
             let sweep_limiter = self.sweep_limiter.clone();
+            let request_sender = self.sender.clone();
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
-                match region.set_role_state_gracefully(region_role_state).await {
+                let drain = drain_ended_staging(&request_sender, region_id);
+                match region
+                    .set_role_state_gracefully(region_role_state, drain)
+                    .await
+                {
                     Ok(()) => {
                         let last_entry_id = region.version_control.current().last_entry_id;
                         let _ = sender.send(SetRegionRoleStateResponse::success(
@@ -1616,6 +1929,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         ));
                     }
                 }
+                // The call commits outside the worker when it ends staging or backfills metadata.
+                handle_reload::notify_if_fenced(&request_sender, &region).await;
             });
         } else {
             let _ = sender.send(SetRegionRoleStateResponse::NotFound);
@@ -1626,14 +1941,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 impl<S> RegionWorkerLoop<S> {
     /// Cleans up the worker.
     async fn clean(&self) {
+        for state in self.tail_replays.values() {
+            let _ = state.request_cancel();
+        }
         // Closes remaining regions.
         let regions = self.regions.list_regions();
-        for region in regions {
+        for region in &regions {
             region.deactivate_region_manifest_size_metric();
             region.stop().await;
         }
+        // Another engine may open these regions from the same storage after the stop. Regions
+        // closed earlier are not waited for; a datanode or standalone shutdown closes every region
+        // first, so there this only covers regions whose close failed.
+        join_all(
+            regions
+                .iter()
+                .map(|region| region.manifest_ctx.wait_for_checkpoint_after_stop()),
+        )
+        .await;
 
         self.regions.clear();
+        for region in regions {
+            self.granted_leases.remove(region.region_id);
+        }
     }
 
     /// Notifies the whole group that a flush job is finished so other
@@ -1666,6 +1996,62 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_region_open_registered(_region_id).await;
+        }
+    }
+
+    /// The worker is about to replace a fenced region with its reload.
+    pub(crate) async fn on_region_reload_swap(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_region_reload_swap(_region_id).await;
+        }
+    }
+
+    /// A catchup is about to reopen the region.
+    pub(crate) async fn on_catchup_reopen_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_catchup_reopen_begin(_region_id).await;
+        }
+    }
+
+    /// A tail replay is about to commit its result.
+    pub(crate) async fn on_tail_commit_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_commit_begin(_region_id).await;
+        }
+    }
+
+    /// A tail replay checks for a Leader lease while it waits.
+    pub(crate) fn on_tail_lease_check(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_lease_check(_region_id);
+        }
+    }
+
+    /// A tail replay that found a newer manifest is about to wait to fence the region.
+    pub(crate) fn on_tail_fence_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_fence_begin(_region_id);
+        }
+    }
+
+    /// A round of tail replay failed.
+    pub(crate) fn on_tail_replay_failed(&self, _region_id: RegionId, _error: &crate::error::Error) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_replay_failed(_region_id, _error);
+        }
+    }
+
+    /// The worker learned that a tail replay ended.
+    pub(crate) fn on_tail_replay_ended(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_replay_ended(_region_id);
         }
     }
 
@@ -1864,6 +2250,13 @@ impl WorkerListener {
         }
     }
 
+    pub(crate) async fn on_index_build_stopped(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_stopped(_region_file_id).await;
+        }
+    }
+
     pub(crate) async fn on_index_build_before_manifest_commit(
         &self,
         _region_file_id: RegionFileId,
@@ -1890,6 +2283,70 @@ impl WorkerListener {
 mod tests {
     use super::*;
     use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_series_index_cache_layout_reset() {
+        let parent = common_test_util::temp_dir::create_temp_dir("series-cache-version");
+        let root = parent.path().join("series_index");
+        let sentinel = parent.path().join("sst");
+        tokio::fs::write(&sentinel, b"source data").await.unwrap();
+        let store = crate::access_layer::new_fs_cache_store(&root.to_string_lossy())
+            .await
+            .unwrap();
+        // Keep the original directory alive so its inode cannot be reused after deletion.
+        #[cfg(unix)]
+        let root_handle = tokio::fs::File::open(&root).await.unwrap();
+        for version in [None, Some("0"), Some("invalid")] {
+            if let Some(version) = version {
+                store.write("version", version).await.unwrap();
+            }
+            store.write("stale", "old").await.unwrap();
+            store
+                .write("42/samples/old/source/part-0.samples", "old")
+                .await
+                .unwrap();
+            store
+                .write("42/samples.json", "stale references")
+                .await
+                .unwrap();
+            super::initialize_series_index_cache(&store).await.unwrap();
+            assert!(!store.exists("stale").await.unwrap());
+            assert_eq!(
+                store.read("version").await.unwrap().to_bytes().as_ref(),
+                SERIES_INDEX_CACHE_VERSION.as_bytes()
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+
+                let original = root_handle.metadata().await.unwrap();
+                let current = tokio::fs::metadata(&root).await.unwrap();
+                assert_eq!(
+                    (original.dev(), original.ino()),
+                    (current.dev(), current.ino())
+                );
+            }
+            assert!(!store.exists("42/samples.json").await.unwrap());
+            assert!(
+                !store
+                    .exists("42/samples/old/source/part-0.samples")
+                    .await
+                    .unwrap()
+            );
+            store
+                .write("42/series/current/manifest.json", "current")
+                .await
+                .unwrap();
+            super::initialize_series_index_cache(&store).await.unwrap();
+            assert!(
+                store
+                    .exists("42/series/current/manifest.json")
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(tokio::fs::read(&sentinel).await.unwrap(), b"source data");
+        }
+    }
 
     #[test]
     fn test_region_id_to_index() {

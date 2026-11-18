@@ -26,15 +26,16 @@ use arrow::datatypes::{
     UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow_schema::{DataType, IntervalUnit};
-use auth::{PermissionTableTarget, PermissionTableTargets};
+use auth::{PermissionTableTarget, PermissionTableTargets, UserProviderRef};
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form};
 use catalog::CatalogManagerRef;
-use common_catalog::parse_catalog_and_schema_from_db_string;
+use common_catalog::consts;
 use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::native_histogram::is_native_histogram_value_type;
+use common_query::promql_annotations::promql_annotation_collector;
 use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{debug, tracing};
@@ -49,7 +50,7 @@ use futures::future::join_all;
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
-use promql_parser::parser::token::TokenType;
+use promql_parser::parser::token::{self, TokenType};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinModifier, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier,
@@ -76,6 +77,7 @@ use crate::error::{
     CollectRecordbatchSnafu, ConvertScalarValueSnafu, DataFusionSnafu, Error, InvalidQuerySnafu,
     NotSupportedSnafu, ParseTimestampSnafu, Result, TableNotFoundSnafu, UnexpectedResultSnafu,
 };
+use crate::http::authorize::select_database;
 use crate::http::header::collect_plan_metrics;
 use crate::otlp::metrics::ucum_to_openmetrics_unit;
 use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL, is_database_selection_label};
@@ -237,14 +239,20 @@ pub struct ExemplarQuery {
     fields(protocol = "prometheus", request_type = "query_exemplars")
 )]
 pub async fn query_exemplars(
+    user_provider: Option<Extension<UserProviderRef>>,
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<ExemplarQuery>,
     Extension(mut ctx): Extension<QueryContext>,
     Form(form): Form<ExemplarQuery>,
 ) -> PrometheusJsonResponse {
-    if let Some(db) = params.db.or(form.db) {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&db);
-        try_update_catalog_schema(&mut ctx, &catalog, &schema);
+    if let Err(error) = select_database(
+        &mut ctx,
+        params.db.or(form.db).as_deref(),
+        user_provider.as_ref().map(|Extension(provider)| provider),
+    )
+    .await
+    {
+        return PrometheusJsonResponse::error(error.status_code(), error.output_msg());
     }
     ctx.set_channel(Channel::Prometheus);
     let ctx = Arc::new(ctx);
@@ -356,12 +364,20 @@ pub async fn build_info_query() -> PrometheusJsonResponse {
     fields(protocol = "prometheus", request_type = "metadata_query")
 )]
 pub async fn metadata_query(
+    user_provider: Option<Extension<UserProviderRef>>,
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<MetadataQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> PrometheusJsonResponse {
-    let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
-    try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    if let Err(error) = select_database(
+        &mut query_ctx,
+        params.db.as_deref(),
+        user_provider.as_ref().map(|Extension(provider)| provider),
+    )
+    .await
+    {
+        return PrometheusJsonResponse::error(error.status_code(), error.output_msg());
+    }
     let query_ctx = Arc::new(query_ctx);
 
     if let Err(err) = handler.check_query_permission(&[], &query_ctx).await {
@@ -459,6 +475,7 @@ macro_rules! try_call_return_response {
     fields(protocol = "prometheus", request_type = "instant_query")
 )]
 pub async fn instant_query(
+    user_provider: Option<Extension<UserProviderRef>>,
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
@@ -482,9 +499,14 @@ pub async fn instant_query(
     };
 
     // update catalog and schema in query context if necessary
-    if let Some(db) = &params.db {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    if let Err(error) = select_database(
+        &mut query_ctx,
+        params.db.as_deref(),
+        user_provider.as_ref().map(|Extension(provider)| provider),
+    )
+    .await
+    {
+        return PrometheusJsonResponse::error(error.status_code(), error.output_msg());
     }
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
@@ -572,10 +594,11 @@ async fn do_instant_query(
     query_ctx: QueryContextRef,
 ) -> PrometheusJsonResponse {
     let (metric_name, result_type) = retrieve_metric_name_and_result_type(prom_query.expr());
-    let query_id = query_ctx.remote_query_id().map(str::to_string);
+    // Create the collector here so one strong reference spans planning, execution and the response;
+    // the planner and executor find it by query id through the registry.
+    let collector = query_ctx.remote_query_id().map(promql_annotation_collector);
     let result = handler.do_query_parsed(prom_query, query_ctx).await;
-    PrometheusJsonResponse::from_query_result(result, metric_name, result_type, query_id.as_deref())
-        .await
+    PrometheusJsonResponse::from_query_result(result, metric_name, result_type, collector).await
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -595,6 +618,7 @@ pub struct RangeQuery {
     fields(protocol = "prometheus", request_type = "range_query")
 )]
 pub async fn range_query(
+    user_provider: Option<Extension<UserProviderRef>>,
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<RangeQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
@@ -613,9 +637,14 @@ pub async fn range_query(
     };
 
     // update catalog and schema in query context if necessary
-    if let Some(db) = &params.db {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    if let Err(error) = select_database(
+        &mut query_ctx,
+        params.db.as_deref(),
+        user_provider.as_ref().map(|Extension(provider)| provider),
+    )
+    .await
+    {
+        return PrometheusJsonResponse::error(error.status_code(), error.output_msg());
     }
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
@@ -708,19 +737,16 @@ async fn do_range_query(
     query_ctx: QueryContextRef,
 ) -> PrometheusJsonResponse {
     let (metric_name, _) = retrieve_metric_name_and_result_type(prom_query.expr());
-    let query_id = query_ctx.remote_query_id().map(str::to_string);
+    // Create the collector here so one strong reference spans planning, execution and the response;
+    // the planner and executor find it by query id through the registry.
+    let collector = query_ctx.remote_query_id().map(promql_annotation_collector);
     // Matrix serialization sorts samples and series, so execution order never
     // reaches the response.
     let result = handler
         .do_query_parsed(prom_query.with_unordered_output(), query_ctx)
         .await;
-    PrometheusJsonResponse::from_query_result(
-        result,
-        metric_name,
-        ValueType::Matrix,
-        query_id.as_deref(),
-    )
-    .await
+    PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix, collector)
+        .await
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -798,13 +824,21 @@ macro_rules! handle_schema_err {
     fields(protocol = "prometheus", request_type = "labels_query")
 )]
 pub async fn labels_query(
+    user_provider: Option<Extension<UserProviderRef>>,
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<LabelsQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
     Form(form_params): Form<LabelsQuery>,
 ) -> PrometheusJsonResponse {
-    let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
-    try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    if let Err(error) = select_database(
+        &mut query_ctx,
+        params.db.as_deref(),
+        user_provider.as_ref().map(|Extension(provider)| provider),
+    )
+    .await
+    {
+        return PrometheusJsonResponse::error(error.status_code(), error.output_msg());
+    }
     let query_ctx = Arc::new(query_ctx);
 
     let mut queries = params.matches.0;
@@ -857,10 +891,13 @@ pub async fn labels_query(
         prom_queries
     };
 
+    let catalog = query_ctx.current_catalog();
+    let schema = query_ctx.current_schema();
+
     // Fetch all columns if no query matcher is provided
     if prom_queries.is_empty() {
         let (mut labels, table_names) =
-            match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await {
+            match get_all_column_names(catalog, &schema, &handler.catalog_manager()).await {
                 Ok(result) => result,
                 Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
             };
@@ -886,7 +923,7 @@ pub async fn labels_query(
                 Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
             }
         }
-        None => match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await {
+        None => match get_all_column_names(catalog, &schema, &handler.catalog_manager()).await {
             Ok((labels, _)) => labels,
             Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
         },
@@ -928,7 +965,7 @@ async fn get_all_column_names(
     let mut table_names = Vec::new();
     let mut tables = manager.tables(catalog, schema, None);
     while let Some(table) = tables.try_next().await? {
-        if is_internal_physical_metric_table(&table) {
+        if is_internal_metric_table(&table) {
             continue;
         }
         table_names.push(table.table_info().name.clone());
@@ -953,7 +990,7 @@ async fn get_target_column_names(
                 Some(query_ctx),
             )
             .await?
-            && !is_internal_physical_metric_table(&table)
+            && !is_internal_metric_table(&table)
         {
             extend_tag_column_names(&mut labels, &table);
         }
@@ -1403,27 +1440,6 @@ pub(crate) fn retrieve_metric_name_and_result_type(
     )
 }
 
-/// Tries to get catalog and schema from an optional db param. And retrieves
-/// them from [QueryContext] if they don't present.
-pub(crate) fn get_catalog_schema(db: &Option<String>, ctx: &QueryContext) -> (String, String) {
-    if let Some(db) = db {
-        parse_catalog_and_schema_from_db_string(db)
-    } else {
-        (
-            ctx.current_catalog().to_string(),
-            ctx.current_schema().clone(),
-        )
-    }
-}
-
-/// Update catalog and schema in [QueryContext] if necessary.
-pub(crate) fn try_update_catalog_schema(ctx: &mut QueryContext, catalog: &str, schema: &str) {
-    if ctx.current_catalog() != catalog || ctx.current_schema() != schema {
-        ctx.set_current_catalog(catalog);
-        ctx.set_current_schema(schema);
-    }
-}
-
 fn current_schema_metric_targets(
     query_ctx: &QueryContext,
     metric_names: &[String],
@@ -1442,8 +1458,9 @@ fn current_schema_metric_targets(
     )
 }
 
-fn is_internal_physical_metric_table(table: &TableRef) -> bool {
-    table.table_info().is_physical_table()
+fn is_internal_metric_table(table: &TableRef) -> bool {
+    let info = table.table_info();
+    info.is_physical_table() || info.name == consts::METRICS_EXEMPLARS_TABLE
 }
 
 fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
@@ -1527,21 +1544,19 @@ fn binary_metric_name_side<'a>(
 /// Recursively collect all metric names from a PromQL expression
 fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
     match expr {
-        PromqlExpr::Aggregate(AggregateExpr { modifier, expr, .. }) => {
-            match modifier {
+        PromqlExpr::Aggregate(AggregateExpr {
+            op, modifier, expr, ..
+        }) => {
+            if !matches!(
+                op.id(),
+                token::T_TOPK | token::T_BOTTOMK | token::T_LIMITK | token::T_LIMIT_RATIO
+            ) && !matches!(
+                modifier,
                 Some(LabelModifier::Include(labels))
-                    if !labels.labels.contains(&METRIC_NAME.to_string()) =>
-                {
-                    metric_names.clear();
-                    return;
-                }
-                Some(LabelModifier::Exclude(labels))
-                    if labels.labels.contains(&METRIC_NAME.to_string()) =>
-                {
-                    metric_names.clear();
-                    return;
-                }
-                _ => {}
+                    if labels.labels.contains(&METRIC_NAME.to_string())
+            ) {
+                metric_names.clear();
+                return;
             }
             collect_metric_names(expr, metric_names)
         }
@@ -1834,13 +1849,21 @@ pub struct LabelValueQuery {
     fields(protocol = "prometheus", request_type = "label_values_query")
 )]
 pub async fn label_values_query(
+    user_provider: Option<Extension<UserProviderRef>>,
     State(handler): State<PrometheusHandlerRef>,
     Path(label_name): Path<String>,
     Extension(mut query_ctx): Extension<QueryContext>,
     Query(params): Query<LabelValueQuery>,
 ) -> PrometheusJsonResponse {
-    let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
-    try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    if let Err(error) = select_database(
+        &mut query_ctx,
+        params.db.as_deref(),
+        user_provider.as_ref().map(|Extension(provider)| provider),
+    )
+    .await
+    {
+        return PrometheusJsonResponse::error(error.status_code(), error.output_msg());
+    }
     let query_ctx = Arc::new(query_ctx);
 
     let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
@@ -2201,7 +2224,7 @@ async fn retrieve_table_names(
             .options
             .extra_options
             .contains_key(LOGICAL_TABLE_METADATA_KEY)
-            || is_internal_physical_metric_table(&table)
+            || is_internal_metric_table(&table)
         {
             // skip non-prometheus (non-metricengine) tables for __name__ query
             continue;
@@ -2392,7 +2415,7 @@ async fn readable_metadata_tables(
         }
     }
     candidates.retain(|table| {
-        !is_internal_physical_metric_table(table)
+        !is_internal_metric_table(table)
             && (selectors.is_empty()
                 || selectors
                     .iter()
@@ -2495,6 +2518,7 @@ pub struct SeriesQuery {
     fields(protocol = "prometheus", request_type = "series_query")
 )]
 pub async fn series_query(
+    user_provider: Option<Extension<UserProviderRef>>,
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<SeriesQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
@@ -2524,9 +2548,14 @@ pub async fn series_query(
         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string());
 
     // update catalog and schema in query context if necessary
-    if let Some(db) = &params.db {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+    if let Err(error) = select_database(
+        &mut query_ctx,
+        params.db.as_deref(),
+        user_provider.as_ref().map(|Extension(provider)| provider),
+    )
+    .await
+    {
+        return PrometheusJsonResponse::error(error.status_code(), error.output_msg());
     }
     let query_ctx = Arc::new(query_ctx);
 
@@ -2876,6 +2905,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prometheus_endpoints_authorize_effective_database() {
+        use axum::http::{Request, StatusCode as HttpStatusCode};
+        use axum::response::IntoResponse;
+        use tower::ServiceExt;
+
+        for authorization in ["Basic cmVhZGVyOnB3ZA==", "Bearer test-token"] {
+            for (path, form_db, encoded_db) in [
+                ("/v1/prometheus/api/v1/query", false, false),
+                ("/v1/prometheus/api/v1/query_range", false, false),
+                ("/v1/prometheus/api/v1/metadata", false, false),
+                ("/v1/prometheus/api/v1/labels", false, false),
+                ("/v1/prometheus/api/v1/label/job/values", false, false),
+                ("/v1/prometheus/api/v1/series", false, false),
+                ("/v1/prometheus/api/v1/query_exemplars", false, false),
+                ("/v1/prometheus/api/v1/query_exemplars", true, false),
+                ("/v1/prometheus/api/v1/query", false, true),
+            ] {
+                let handler = Arc::new(TestPrometheusHandler {
+                    catalog_manager: MemoryCatalogManager::new(),
+                    deny_operation: false,
+                    denied_table: None,
+                    metric_names: Vec::new(),
+                    label_metric_names: Vec::new(),
+                    label_lookups: Mutex::new(Vec::new()),
+                    queries: Mutex::new(Vec::new()),
+                    ordered_outputs: Mutex::new(Vec::new()),
+                });
+                let app = axum::Router::new()
+                    .route(
+                        "/v1/prometheus/api/v1/query",
+                        axum::routing::get(instant_query),
+                    )
+                    .route(
+                        "/v1/prometheus/api/v1/query_range",
+                        axum::routing::get(range_query),
+                    )
+                    .route(
+                        "/v1/prometheus/api/v1/metadata",
+                        axum::routing::get(metadata_query),
+                    )
+                    .route(
+                        "/v1/prometheus/api/v1/labels",
+                        axum::routing::get(labels_query),
+                    )
+                    .route(
+                        "/v1/prometheus/api/v1/label/{name}/values",
+                        axum::routing::get(label_values_query),
+                    )
+                    .route(
+                        "/v1/prometheus/api/v1/series",
+                        axum::routing::get(series_query),
+                    )
+                    .route(
+                        "/v1/prometheus/api/v1/query_exemplars",
+                        axum::routing::get(query_exemplars).post(query_exemplars),
+                    )
+                    .with_state(handler.clone() as PrometheusHandlerRef)
+                    .layer(axum::middleware::from_fn_with_state(
+                        crate::http::authorize::AuthState::new(Some(Arc::new(
+                            crate::http::authorize::tests::ScopedUserProvider,
+                        ))),
+                        crate::http::authorize::check_http_auth,
+                    ));
+                let db = if encoded_db { "%64enied" } else { "denied" };
+                let query = if form_db {
+                    String::new()
+                } else {
+                    format!("&db={db}")
+                };
+                let mut request = Request::builder()
+                    .method(if form_db { "POST" } else { "GET" })
+                    .uri(format!(
+                        "{path}?query=requests&start=0&end=1&step=1&match[]=requests{query}"
+                    ))
+                    .header("authorization", authorization)
+                    .header("content-type", "application/x-www-form-urlencoded");
+                if !encoded_db {
+                    request = request.header("x-greptime-db-name", "public");
+                }
+                let body = if form_db { "db=denied" } else { "" };
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    app.oneshot(request.body(axum::body::Body::from(body)).unwrap()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    HttpStatusCode::FORBIDDEN,
+                    response.into_response().status(),
+                    "{path}"
+                );
+                assert!(handler.queries.lock().unwrap().is_empty());
+                assert!(handler.label_lookups.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_exemplar_timeout_cancels_scan() {
         for explicit in [false, true] {
             let handler = Arc::new(TestPrometheusHandler {
@@ -2893,6 +3021,7 @@ mod tests {
                 ctx.set_query_timeout(std::time::Duration::from_millis(1));
             }
             let response = query_exemplars(
+                None,
                 State(handler.clone()),
                 Query(ExemplarQuery {
                     query: Some("requests".into()),
@@ -2924,6 +3053,7 @@ mod tests {
         });
         let state: PrometheusHandlerRef = handler.clone();
         instant_query(
+            None,
             State(state.clone()),
             Query(InstantQuery {
                 query: Some("sort(vector(1))".to_string()),
@@ -2941,6 +3071,7 @@ mod tests {
         // Both a single-point and a multi-step range query take the same path.
         for end in ["0", "1"] {
             range_query(
+                None,
                 State(state.clone()),
                 Query(RangeQuery {
                     query: Some("sort(vector(1))".to_string()),
@@ -2978,6 +3109,7 @@ mod tests {
             ordered_outputs: Mutex::new(Vec::new()),
         });
         let response = range_query(
+            None,
             State(handler.clone() as PrometheusHandlerRef),
             Query(RangeQuery {
                 query: Some("vector(1)[5m:]".to_string()),
@@ -3023,6 +3155,7 @@ mod tests {
             .with_label_values(&[db.as_str(), "instant_query"]);
         let instant_count = instant_histogram.get_sample_count();
         let response = instant_query(
+            None,
             State(handler.clone()),
             Query(InstantQuery {
                 query: Some("up{".to_string()),
@@ -3039,6 +3172,7 @@ mod tests {
             .with_label_values(&[db.as_str(), "range_query"]);
         let range_count = range_histogram.get_sample_count();
         let response = range_query(
+            None,
             State(handler),
             Query(RangeQuery {
                 query: Some("up{".to_string()),
@@ -3166,6 +3300,7 @@ mod tests {
         assert!(schemas.contains(&"empty".to_string()));
         assert!(!schemas.contains(&"denied_schema".to_string()));
         let response = label_values_query(
+            None,
             State(handler),
             Path(FIELD_NAME_LABEL.to_string()),
             Extension(QueryContext::with(
@@ -3225,6 +3360,7 @@ mod tests {
     ) -> Vec<String> {
         let state: PrometheusHandlerRef = handler;
         let response = label_values_query(
+            None,
             State(state),
             Path(METRIC_NAME_LABEL.to_string()),
             Extension(QueryContext::with(
@@ -3362,6 +3498,7 @@ mod tests {
         let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         let target_ctx = Arc::new(query_ctx.clone());
         let response = series_query(
+            None,
             State(state),
             Query(SeriesQuery {
                 matches: Matches(vec![r#"{__name__=~"cpu_.*"}"#.to_string()]),
@@ -3444,9 +3581,121 @@ mod tests {
             },
             // Aggregation and function cases
             TestCase {
-                name: "metric with aggregation",
-                promql: "sum(cpu_usage)",
+                name: "topk preserves metric name",
+                promql: "topk(1, cpu_usage)",
                 expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "bottomk preserves metric name",
+                promql: "bottomk(1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk without preserves metric name",
+                promql: "topk without(host) (1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk by preserves metric name",
+                promql: "topk by(job) (1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "limitk preserves metric name",
+                promql: "limitk(1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk does not restore folded metric name",
+                promql: "topk(1, sum(cpu_usage))",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "outer aggregate drops topk metric name",
+                promql: "sum(topk(1, cpu_usage))",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "ungrouped aggregate drops metric name",
+                promql: "sum(cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate by non-name label drops metric name",
+                promql: "sum by (job) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without non-name label drops metric name",
+                promql: "sum without (host) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without empty label list drops metric name",
+                promql: "sum without () (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without nonexistent label drops metric name",
+                promql: "sum without (nonexistent) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate by name and job keeps metric name",
+                promql: "sum by (__name__, job) (cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "minimum without host drops metric name",
+                promql: "min without (host) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without name drops metric name",
+                promql: "sum without (__name__) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "ungrouped average drops metric name",
+                promql: "avg(cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "nested ungrouped aggregate drops metric name",
+                promql: "sum(sum by (job) (cpu_usage))",
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -3465,9 +3714,16 @@ mod tests {
                 should_error: false,
             },
             TestCase {
-                name: "complex aggregation",
+                name: "grouping by name preserves equality metric name",
+                promql: r#"sum by (__name__) ({__name__="alpha_total"})"#,
+                expected_metric: Some("alpha_total"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without instance drops metric name",
                 promql: r#"sum without (instance) (cpu_usage{job="node"})"#,
-                expected_metric: Some("cpu_usage"),
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -3901,6 +4157,126 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fields, HashSet::from(["value".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_exemplar_table_is_hidden_from_metadata() {
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use common_query::prelude::{EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels};
+        use datatypes::types::json_type::JsonNativeType;
+
+        let manager = MemoryCatalogManager::with_default_setup();
+        for (id, name, tag, field, data_type) in [
+            (
+                1024,
+                "cpu_usage",
+                "host",
+                "value",
+                ConcreteDataType::float64_datatype(),
+            ),
+            (
+                1025,
+                METRICS_EXEMPLARS_TABLE,
+                EXEMPLAR_METRIC_COLUMN,
+                greptime_exemplar_labels(),
+                ConcreteDataType::json2(JsonNativeType::Null),
+            ),
+        ] {
+            let mut info = test_table_info(
+                id,
+                name,
+                DEFAULT_SCHEMA_NAME,
+                DEFAULT_CATALOG_NAME,
+                Arc::new(Schema::new(vec![
+                    ColumnSchema::new(tag, ConcreteDataType::string_datatype(), true),
+                    ColumnSchema::new(field, data_type, true),
+                ])),
+            );
+            info.meta.primary_key_indices = vec![0];
+            manager
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: name.to_string(),
+                    table_id: id,
+                    table: EmptyTable::from_table_info(&info),
+                })
+                .unwrap();
+        }
+        let manager: CatalogManagerRef = manager;
+        let handler: PrometheusHandlerRef = Arc::new(TestPrometheusHandler {
+            catalog_manager: manager.clone(),
+            deny_operation: false,
+            denied_table: Some(METRICS_EXEMPLARS_TABLE),
+            metric_names: Vec::new(),
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
+            queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
+        });
+        let ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let response = labels_query(
+            None,
+            State(handler.clone()),
+            Query(LabelsQuery::default()),
+            Extension(ctx.fork()),
+            Form(LabelsQuery::default()),
+        )
+        .await;
+        assert_eq!(None, response.status_code, "{:?}", response.error);
+        assert_eq!(
+            response.data,
+            PrometheusResponse::Labels(vec![METRIC_NAME_LABEL.into(), "host".into()])
+        );
+
+        let targets = ["cpu_usage", METRICS_EXEMPLARS_TABLE].map(|name| {
+            PermissionTableTarget::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, name)
+        });
+        assert_eq!(
+            get_target_column_names(&targets, &manager, &ctx)
+                .await
+                .unwrap(),
+            HashSet::from(["host".to_string()])
+        );
+
+        let exemplar_selector = format!(r#"{{__name__=~"{METRICS_EXEMPLARS_TABLE}"}}"#);
+        let mixed_selector = format!(r#"{{__name__=~"cpu_usage|{METRICS_EXEMPLARS_TABLE}"}}"#);
+        for (label, selectors, expected) in [
+            (FIELD_NAME_LABEL, vec![], vec!["value"]),
+            (FIELD_NAME_LABEL, vec!["cpu_usage"], vec!["value"]),
+            (
+                FIELD_NAME_LABEL,
+                vec![mixed_selector.as_str()],
+                vec!["value"],
+            ),
+            (FIELD_NAME_LABEL, vec![METRICS_EXEMPLARS_TABLE], vec![]),
+            (FIELD_NAME_LABEL, vec![exemplar_selector.as_str()], vec![]),
+            ("__schema__", vec![METRICS_EXEMPLARS_TABLE], vec![]),
+            ("__schema__", vec![exemplar_selector.as_str()], vec![]),
+            (
+                "__schema__",
+                vec![mixed_selector.as_str()],
+                vec![DEFAULT_SCHEMA_NAME],
+            ),
+        ] {
+            let response = label_values_query(
+                None,
+                State(handler.clone()),
+                Path(label.to_string()),
+                Extension(ctx.fork()),
+                Query(LabelValueQuery {
+                    matches: Matches(selectors.iter().map(|value| value.to_string()).collect()),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            assert_eq!(None, response.status_code, "{:?}", response.error);
+            assert_eq!(
+                response.data,
+                PrometheusResponse::LabelValues(expected.into_iter().map(String::from).collect()),
+                "label={label}, selectors={selectors:?}",
+            );
+        }
     }
 
     #[tokio::test]
@@ -4346,6 +4722,7 @@ mod tests {
         assert!(metadata.contains_key("allowed"));
 
         let response = metadata_query(
+            None,
             State(Arc::new(TestPrometheusHandler {
                 catalog_manager: manager.clone(),
                 deny_operation: true,
@@ -4373,6 +4750,7 @@ mod tests {
             ordered_outputs: Mutex::new(Vec::new()),
         });
         let response = metadata_query(
+            None,
             State(handler.clone()),
             Query(MetadataQuery::default()),
             Extension(query_ctx.clone()),
@@ -4388,6 +4766,7 @@ mod tests {
         );
 
         let response = metadata_query(
+            None,
             State(handler),
             Query(MetadataQuery {
                 metric: Some("denied".to_string()),

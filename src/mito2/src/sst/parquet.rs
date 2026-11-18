@@ -1560,6 +1560,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager,
@@ -1631,7 +1632,8 @@ mod tests {
                 sequence: None,
                 partition_expr: match &metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
+                        .expect("partition expression should be valid JSON")
+                        .map(Into::into),
                     None => None,
                 },
                 num_series: 0,
@@ -2106,6 +2108,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata,
             puffin_manager,
@@ -2174,7 +2177,8 @@ mod tests {
                 sequence: None,
                 partition_expr: match &metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
+                        .expect("partition expression should be valid JSON")
+                        .map(Into::into),
                     None => None,
                 },
                 num_series: 0,
@@ -2227,6 +2231,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager,

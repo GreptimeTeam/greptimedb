@@ -51,8 +51,8 @@ use crate::error::{
     CompactionCancelledSnafu, Error, ManualCompactionAlreadyRunningSnafu, RegionClosedSnafu,
     RegionDroppedSnafu, RegionTruncatedSnafu, Result, UnsupportedOperationSnafu,
 };
+use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
 use crate::schedule::RequestCancelResult;
 use crate::worker::WorkerListener;
@@ -516,6 +516,23 @@ impl CompactionScheduler {
         status.pending_ddl_requests.push(request);
         Ok(())
     }
+
+    /// Pending and handed-off DDLs retain their turn until the final reply.
+    pub(crate) fn blocks_region_edits(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(|status| status.has_ddl())
+    }
+
+    /// Whether a staging request is still waiting for compaction cancellation.
+    pub(crate) fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
+        self.region_status.get(&region_id).is_some_and(|status| {
+            status
+                .pending_ddl_requests
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
+        })
+    }
 }
 
 // Internal state-machine helpers.
@@ -569,9 +586,17 @@ impl CompactionScheduler {
             return Ok(false);
         }
         let current_state = manifest_ctx.current_state();
-        if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
+        if current_state.in_staging_session() {
             info!(
                 "Skipping compaction for region {} in staging mode, options: {:?}",
+                region_id, compact_options
+            );
+            waiter.send(Ok(0));
+            return Ok(false);
+        }
+        if status.has_pending_tails() {
+            info!(
+                "Skipping compaction for region {} with pending WAL tails, options: {:?}",
                 region_id, compact_options
             );
             waiter.send(Ok(0));
@@ -644,6 +669,12 @@ impl CompactionScheduler {
         let Some(pending_request) = std::mem::take(&mut status.pending_request) else {
             return false;
         };
+        if status.has_pending_tails() {
+            status.pending_task_state = None;
+            status.publish_state();
+            pending_request.waiter.send(Ok(0));
+            return false;
+        }
 
         let PendingCompaction {
             options,
@@ -737,6 +768,9 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
         };
+        if status.has_pending_tails() {
+            return false;
+        }
         // An external automatic trigger requires one unrestricted follow-up pick.
         let request = status.new_compaction_request(
             self.request_sender.clone(),

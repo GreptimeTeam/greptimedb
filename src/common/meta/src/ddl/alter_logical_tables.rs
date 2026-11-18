@@ -24,7 +24,7 @@ use common_procedure::{Context, EventContext, EventTrigger, LockKey, Procedure, 
 use common_telemetry::{debug, error, info, warn};
 pub use executor::make_alter_region_request;
 use serde::{Deserialize, Serialize};
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
@@ -40,7 +40,7 @@ use crate::ddl::event::table::{
     TableDdlEvent, TableDdlEventType, TableDdlLocator, alter_table_kind_name,
 };
 use crate::ddl::utils::{extract_column_metadatas, map_to_procedure_error, sync_follower_regions};
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
@@ -67,7 +67,7 @@ fn build_validator_from_alter_table_data<'a>(
         .iter()
         .map(|task| &task.alter_table)
         .collect::<Vec<_>>();
-    AlterLogicalTableValidator::new(physical_table_id, alters)
+    AlterLogicalTableValidator::new(physical_table_id, alters, &data.logical_table_ids)
 }
 
 /// Builds the executor from the [`AlterTablesData`].
@@ -147,26 +147,6 @@ impl AlterLogicalTablesProcedure {
                 "There are {} alter tasks, {} of them were already finished.",
                 num_tasks, num_skipped
             );
-        }
-
-        // Locks are fixed at submission. A logical table that resolves to an
-        // id outside the locked set here was dropped and recreated in between,
-        // so this procedure holds no lock for it. Procedures restored from
-        // pre-upgrade state have no recorded ids and keep the old behavior.
-        if !self.data.logical_table_ids.is_empty() {
-            for value in &table_info_values {
-                let table_id = value.get_inner_ref().table_info.ident.table_id;
-                ensure!(
-                    self.data.logical_table_ids.contains(&table_id),
-                    error::UnexpectedSnafu {
-                        err_msg: format!(
-                            "logical table {} (id {table_id}) is not covered by the \
-                             procedure locks; retry the statement",
-                            value.get_inner_ref().table_info.name
-                        ),
-                    }
-                );
-            }
         }
 
         // Updates the procedure state.

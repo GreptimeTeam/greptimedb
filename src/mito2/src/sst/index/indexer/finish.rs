@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use common_error::ext::BoxedError;
 use common_telemetry::warn;
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
 
@@ -37,6 +40,7 @@ impl Indexer {
                 Ok(entries) => {
                     if let Err(err) = entries.iter().try_for_each(|entry| entry.validate()) {
                         warn!(err; "Invalid index completion, region_id: {}, file_id: {}", self.region_id, self.file_id);
+                        self.failure.get_or_insert_with(|| Arc::new(err));
                         drop(active);
                         self.do_abort().await;
                         return IndexOutput::default();
@@ -44,10 +48,11 @@ impl Indexer {
                     output.entries.extend(entries);
                 }
                 Err(err) => {
-                    if cfg!(any(test, feature = "test")) {
+                    if active.is_builtin() && cfg!(any(test, feature = "test")) {
                         panic!("Failed to finish index: {err:?}");
                     }
-                    warn!(err; "Failed to finish index, region_id: {}, file_id: {}, kind: {:?}", self.region_id, self.file_id, active.kind);
+                    warn!(err; "Failed to finish index, region_id: {}, file_id: {}, kinds: {:?}", self.region_id, self.file_id, active.kinds);
+                    self.record_failure(err);
                     drop(active);
                     self.do_abort().await;
                     return IndexOutput::default();
@@ -89,6 +94,7 @@ impl Indexer {
             );
         }
 
+        self.record_failure(BoxedError::new(err));
         None
     }
 
@@ -105,6 +111,7 @@ impl Indexer {
             self.region_id, self.file_id,
         );
 
+        self.record_failure(BoxedError::new(err));
         0
     }
 

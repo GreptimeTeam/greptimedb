@@ -1,0 +1,126 @@
+CREATE DATABASE drop_database_logical_tables;
+
+Affected Rows: 1
+
+USE drop_database_logical_tables;
+
+Affected Rows: 0
+
+CREATE TABLE physical (ts TIMESTAMP TIME INDEX, val DOUBLE)
+ENGINE=metric WITH ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE logical_a (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY)
+ENGINE=metric WITH ("on_physical_table" = "physical");
+
+Affected Rows: 0
+
+CREATE TABLE logical_b (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY)
+ENGINE=metric WITH ("on_physical_table" = "physical");
+
+Affected Rows: 0
+
+CREATE TABLE ordinary (ts TIMESTAMP TIME INDEX, val DOUBLE);
+
+Affected Rows: 0
+
+CREATE VIEW logical_view AS SELECT * FROM logical_a;
+
+Affected Rows: 0
+
+INSERT INTO logical_a (ts, val, host) VALUES (0, 1, 'a');
+
+Affected Rows: 1
+
+INSERT INTO logical_b (ts, val, host) VALUES (0, 2, 'b');
+
+Affected Rows: 1
+
+SELECT * FROM logical_view;
+
++------+---------------------+-----+
+| host | ts                  | val |
++------+---------------------+-----+
+| a    | 1970-01-01T00:00:00 | 1.0 |
++------+---------------------+-----+
+
+SHOW TABLES;
+
++----------------------------------------+
+| Tables_in_drop_database_logical_tables |
++----------------------------------------+
+| logical_a                              |
+| logical_b                              |
+| logical_view                           |
+| ordinary                               |
+| physical                               |
++----------------------------------------+
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE drop_database_logical_tables;
+
+Affected Rows: 0
+
+SHOW TABLES FROM drop_database_logical_tables;
+
++----------------------------------------+
+| Tables_in_drop_database_logical_tables |
++----------------------------------------+
++----------------------------------------+
+
+-- Reusing names must not retain the dropped tables or their rows.
+CREATE DATABASE drop_database_logical_tables;
+
+Affected Rows: 1
+
+USE drop_database_logical_tables;
+
+Affected Rows: 0
+
+CREATE TABLE physical (ts TIMESTAMP TIME INDEX, val DOUBLE)
+ENGINE=metric WITH ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE logical_a (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY)
+ENGINE=metric WITH ("on_physical_table" = "physical");
+
+Affected Rows: 0
+
+SELECT COUNT(*) FROM logical_a;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+INSERT INTO logical_a (ts, val, host) VALUES (0, 7, 'new');
+
+Affected Rows: 1
+
+-- SQLNESS ARG restart=true
+SELECT * FROM logical_a;
+
++------+---------------------+-----+
+| host | ts                  | val |
++------+---------------------+-----+
+| new  | 1970-01-01T00:00:00 | 7.0 |
++------+---------------------+-----+
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE drop_database_logical_tables;
+
+Affected Rows: 0
+
+DROP DATABASE IF EXISTS drop_database_logical_tables;
+
+Affected Rows: 0
+

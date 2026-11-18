@@ -30,6 +30,7 @@ mod otlp;
 pub mod prom_store;
 mod promql;
 mod region_query;
+mod schema_selection;
 
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -63,9 +64,11 @@ use common_recordbatch::RecordBatchStreamWrapper;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
+use common_time::timestamp::TimeUnit;
 use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
+use futures::TryStreamExt;
 use futures::{Stream, StreamExt, future};
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
@@ -73,7 +76,8 @@ use operator::statement::{StatementExecutor, StatementExecutorRef};
 use partition::manager::PartitionRuleManagerRef;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
-use promql_parser::label::Matcher;
+use promql_parser::label::{METRIC_NAME, MatchOp, Matcher};
+use promql_parser::util::{ExprVisitor, walk_expr};
 use query::QueryEngineRef;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
@@ -88,7 +92,8 @@ use servers::prometheus_handler::{
     ParsedPromQuery, PrometheusHandler, resolve_schema_from_matchers,
 };
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::{Channel, QueryContextRef};
+use servers::request_memory_limiter::ServerMemoryLimiter;
+use session::context::{Channel, MetricDiscoveryScope, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::ast::ObjectNamePartExt;
@@ -98,7 +103,10 @@ use sql::statements::comment::CommentObject;
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
-use sql::util::{extract_tables_from_prom_expr_checked, extract_tables_from_statement_checked};
+use sql::util::{
+    extract_tables_from_prom_expr_checked, extract_tables_from_prom_expr_partial,
+    extract_tables_from_statement_checked,
+};
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
 use tracing::Span;
 
@@ -115,6 +123,7 @@ use crate::stream_wrapper::CancellableStreamWrapper;
 /// [`servers::query_handler::sql::SqlQueryHandler`], etc.
 #[derive(Clone)]
 pub struct Instance {
+    server_memory_limiter: ServerMemoryLimiter,
     frontend_peer_addr: String,
     catalog_manager: CatalogManagerRef,
     pipeline_operator: Arc<PipelineOperator>,
@@ -130,6 +139,9 @@ pub struct Instance {
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
+    /// Time index unit for physical metric tables created by auto table creation
+    /// through the frontend instance (e.g., batched logical-table flushes).
+    auto_create_physical_table_timestamp_unit: TimeUnit,
     trace_ingest_chunk_size: usize,
     trace_aux_cache: otlp::TraceAuxCache,
     trace_aux_limiter: Option<RequestLimiter>,
@@ -138,6 +150,11 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// Returns the memory pool shared by protocol admission and table-batch conversion.
+    pub fn server_memory_limiter(&self) -> &ServerMemoryLimiter {
+        &self.server_memory_limiter
+    }
+
     pub fn frontend_peer_addr(&self) -> &str {
         &self.frontend_peer_addr
     }
@@ -396,6 +413,16 @@ impl Instance {
             }
             _ => {
                 query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
+                if let Statement::SetVariables(set) = &stmt
+                    && query_ctx.channel() == Channel::Postgres
+                    && let Some(schemas) = set.search_path()
+                {
+                    return self.set_search_path(schemas, query_ctx).await;
+                }
+                if let Statement::Use(schema) = &stmt {
+                    self.authorize_database(query_ctx.current_catalog(), schema, &query_ctx)
+                        .await?;
+                }
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(
                     CopyDatabase::From(arg),
                 )) = &stmt
@@ -561,6 +588,8 @@ impl Instance {
         stmt: &Statement,
         query_ctx: &QueryContextRef,
     ) -> Result<()> {
+        self.check_unselected_mysql_database(stmt, query_ctx)
+            .await?;
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -802,7 +831,9 @@ impl Instance {
                         }
                         Err(e) => {
                             if e.status_code().should_log_error() {
-                                error!(e; "Failed to execute query: {stmt}");
+                                error!(e; user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+                                    catalog = query_ctx.current_catalog(), schema = %query_ctx.current_schema(),
+                                    process_id = query_ctx.process_id(), "Failed to execute query: {stmt}");
                             } else {
                                 debug!("Failed to execute query: {stmt}, {e}");
                             }
@@ -857,6 +888,15 @@ impl Instance {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        if let Some(stmt) = &stmt {
+            self.check_unselected_mysql_database(stmt, &query_ctx)
+                .await?;
+        } else if query_ctx.channel() == Channel::Mysql && query_ctx.current_schema().is_empty() {
+            return Err(BoxedError::new(
+                session::SessionError::NoDatabaseSelected {},
+            ))
+            .context(ExternalSnafu);
+        }
 
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
@@ -1013,6 +1053,8 @@ impl Instance {
         query_ctx: QueryContextRef,
     ) -> Result<Option<DescribeResult>> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        self.check_unselected_mysql_database(&stmt, &query_ctx)
+            .await?;
 
         // EXPLAIN / EXPLAIN ANALYZE wrap an inner statement; describe them when the
         // wrapped statement is something we already plan (so that bind parameters
@@ -1310,6 +1352,239 @@ impl Instance {
     }
 }
 
+/// What one PromQL expression needs in order to be answered by discovering metrics.
+#[derive(Default)]
+struct MetricDiscoveryVisitor {
+    needs_discovery: bool,
+    /// True only while every selector that names no exact table is one discovery can answer. If
+    /// any selector is not discoverable, the check must stay unresolved rather than be replaced by
+    /// a set that silently stops naming a table the query reads.
+    all_unresolved_are_discoverable: bool,
+    schemas: HashSet<String>,
+    current_schema: String,
+    /// Addresses of the label selectors of `info` calls, which the walk reaches after their call.
+    /// Compared only, never read through; plain integers keep the visitor `Send` across awaits.
+    info_label_selectors: Vec<usize>,
+}
+
+impl MetricDiscoveryVisitor {
+    fn new(current_schema: String) -> Self {
+        Self {
+            all_unresolved_are_discoverable: true,
+            current_schema,
+            ..Default::default()
+        }
+    }
+
+    /// The planner reads the info table this selector stands for and never discovers with it, so
+    /// it must not authorize a schema here. A shape the table extractor leaves unresolved keeps
+    /// the whole expression unresolved.
+    fn inspect_info_labels(&mut self, labels: &promql_parser::parser::VectorSelector) {
+        self.info_label_selectors
+            .push(std::ptr::from_ref(labels) as usize);
+        let names = labels.matchers.find_matchers(METRIC_NAME);
+        let exact_name =
+            labels.name.is_some() || (names.len() == 1 && names[0].op == MatchOp::Equal);
+        self.all_unresolved_are_discoverable &=
+            exact_name || sql::util::reads_default_info_metric(labels);
+    }
+
+    /// Whether this selector is answered by enumerating the schema's metric tables.
+    ///
+    /// The planner decides the same thing before it scans anything, and the two answers have to
+    /// match: this walk authorizes what the planner will scan, so a selector the planner declines
+    /// must not authorize a whole schema here. It is one function in `query`, called from both.
+    fn is_discovery_selector(selector: &promql_parser::parser::VectorSelector) -> bool {
+        query::promql::planner::discovers_metric_name(selector)
+    }
+
+    fn inspect_selector(&mut self, selector: &promql_parser::parser::VectorSelector) {
+        let names = selector.matchers.find_matchers(METRIC_NAME);
+        let exact_name =
+            selector.name.is_some() || (names.len() == 1 && names[0].op == MatchOp::Equal);
+        let discover = Self::is_discovery_selector(selector);
+        if !exact_name {
+            self.all_unresolved_are_discoverable &= discover;
+        }
+        if !discover {
+            return;
+        }
+        self.needs_discovery = true;
+        let effective_schema = selector
+            .matchers
+            .matchers
+            .iter()
+            .rev()
+            .find(|m| {
+                (m.name == "__schema__" || m.name == "__database__") && m.op == MatchOp::Equal
+            })
+            .map(|m| m.value.clone())
+            .unwrap_or_else(|| self.current_schema.clone());
+        self.schemas.insert(effective_schema);
+    }
+}
+
+impl ExprVisitor for MetricDiscoveryVisitor {
+    type Error = std::convert::Infallible;
+
+    fn pre_visit(
+        &mut self,
+        expr: &promql_parser::parser::Expr,
+    ) -> std::result::Result<bool, Self::Error> {
+        match expr {
+            promql_parser::parser::Expr::Call(call) if call.func.name == "info" => {
+                if let Some(promql_parser::parser::Expr::VectorSelector(labels)) =
+                    call.args.args.get(1).map(|labels| labels.as_ref())
+                {
+                    self.inspect_info_labels(labels);
+                }
+            }
+            promql_parser::parser::Expr::VectorSelector(selector)
+                if !self
+                    .info_label_selectors
+                    .contains(&(std::ptr::from_ref(selector) as usize)) =>
+            {
+                self.inspect_selector(selector);
+            }
+            promql_parser::parser::Expr::MatrixSelector(selector) => {
+                self.inspect_selector(&selector.vs);
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+}
+
+impl Instance {
+    /// Bounds the metric tables this request may discover by the caller's grants, before anything
+    /// reads the catalog. `Unavailable` would make the planner decline discovery entirely, so this
+    /// always resolves to something explicit.
+    async fn prepare_metric_discovery_scope(
+        &self,
+        expr: &promql_parser::parser::Expr,
+        query_ctx: &mut QueryContextRef,
+    ) -> server_error::Result<()> {
+        // Discovery scope is read by the native PromQL route only, so a query that does not ask
+        // for it pays nothing here beyond resolving the switch: the value is read through the
+        // query engine's own resolver, which takes what the query states (a request hint, or the
+        // session `SET` it inherits) over the engine default - the same two sources planning
+        // reads, so the two cannot disagree. A route that is off leaves discovery unrestricted,
+        // which is what it was before the switch existed; a route that is on is bounded below
+        // whether or not the fallback option later keeps the plan on the existing route.
+        let native_requested = query::promql::planner::native_promql_resolved(
+            query_ctx,
+            self.query_engine
+                .engine_state()
+                .experimental_native_promql(),
+        )
+        .map_err(BoxedError::new)
+        .context(ExecuteQuerySnafu)?;
+        if !native_requested {
+            Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
+            return Ok(());
+        }
+        let checker = self.plugins.get::<PermissionCheckerRef>();
+        if !checker.as_ref().uses_table_targets() {
+            Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
+            return Ok(());
+        }
+        let mut visitor = MetricDiscoveryVisitor::new(query_ctx.current_schema());
+        let _ = walk_expr(&mut visitor, expr);
+        if !visitor.needs_discovery {
+            return Ok(());
+        }
+        let schemas = visitor.schemas;
+        let mut allowed = HashSet::new();
+        for schema in schemas {
+            let mut tables = self
+                .catalog_manager
+                .tables(query_ctx.current_catalog(), &schema, Some(query_ctx))
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteQuerySnafu)?;
+            tables.sort_by_key(|table| table.table_info().name.clone());
+            for table in tables {
+                let info = table.table_info();
+                if info.meta.engine != store_api::metric_engine_consts::METRIC_ENGINE_NAME
+                    || info.is_physical_table()
+                {
+                    continue;
+                }
+                if info.catalog_name != query_ctx.current_catalog() || info.schema_name != schema {
+                    continue;
+                }
+                let target = PermissionTableTarget::new(
+                    query_ctx.current_catalog(),
+                    &schema,
+                    info.name.as_str(),
+                );
+                match checker
+                    .as_ref()
+                    .check_permission_with_table_targets(
+                        query_ctx.current_user(),
+                        PermissionReq::Action(PROMQL_QUERY),
+                        PermissionTableTargets::resolved(vec![target.clone()]),
+                    )
+                    .context(AuthSnafu)
+                {
+                    Ok(_) => {
+                        allowed.insert(target);
+                    }
+                    // A rejected metric is skipped rather than failing the query, which is what
+                    // makes discovery mean "every metric you can see": a table the caller cannot
+                    // read is one the expression never mentions, the same way a query naming it
+                    // would be rejected only where it names it. The split route instead rejects a
+                    // query whose name matchers reach a denied table, so the same regex query
+                    // answers with the readable metrics here and with `PermissionDenied` there.
+                    Err(error)
+                        if error.status_code()
+                            == common_error::status_code::StatusCode::PermissionDenied => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Allowed(allowed));
+        Ok(())
+    }
+
+    /// Fails closed: a path that must have set the scope and did not is an internal error, not a
+    /// silent return to an unfiltered discovery.
+    fn validate_metric_discovery_scope(
+        expr: &promql_parser::parser::Expr,
+        scope: &MetricDiscoveryScope,
+    ) -> server_error::Result<()> {
+        let mut visitor = MetricDiscoveryVisitor::new(String::new());
+        let _ = walk_expr(&mut visitor, expr);
+        if visitor.needs_discovery && matches!(scope, MetricDiscoveryScope::Unavailable) {
+            return Err(server_error::Error::Internal {
+                err_msg: "Metric discovery reached without an authorization scope".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The statically named tables of an expression, kept even when another selector cannot be
+    /// resolved. The complete extractor would answer "no tables at all" for that expression and
+    /// drop these, which is how a mixed query lost the tables it names explicitly.
+    fn prom_expr_permission_targets_partial(
+        &self,
+        expr: &promql_parser::parser::Expr,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<PermissionTableTarget>> {
+        extract_tables_from_prom_expr_partial(expr)
+            .into_iter()
+            .map(|name| {
+                table_idents_to_full_name(&name, query_ctx).map(|(catalog, schema, table)| {
+                    PermissionTableTarget::new(catalog, schema, table)
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+}
+
 #[async_trait]
 impl PrometheusHandler for Instance {
     async fn query_exemplars(
@@ -1342,8 +1617,42 @@ impl PrometheusHandler for Instance {
 
         self.check_prom_query_privilege(&query_ctx)?;
 
-        let targets =
+        let parsed_expr = match query.statement() {
+            QueryStatement::Promql(eval_stmt, _) => &eval_stmt.expr,
+            _ => unreachable!("query is parsed from promql"),
+        };
+        // Authorization precedes any catalog read for discovery, so a denied name never reaches
+        // the plan, an error message, or an output column.
+        let mut scoped_ctx = query_ctx.clone();
+        self.prepare_metric_discovery_scope(parsed_expr, &mut scoped_ctx)
+            .await?;
+        let query_ctx = scoped_ctx;
+        Self::validate_metric_discovery_scope(parsed_expr, query_ctx.metric_discovery_scope())?;
+        let mut targets =
             self.prom_queries_permission_targets(std::slice::from_ref(&query), &query_ctx)?;
+        if matches!(targets, PermissionTableTargets::Unresolved) {
+            let mut visitor = MetricDiscoveryVisitor::new(query_ctx.current_schema());
+            let _ = walk_expr(&mut visitor, parsed_expr);
+            if visitor.needs_discovery && visitor.all_unresolved_are_discoverable {
+                match query_ctx.metric_discovery_scope() {
+                    MetricDiscoveryScope::Allowed(allowed) => {
+                        let mut resolved =
+                            self.prom_expr_permission_targets_partial(parsed_expr, &query_ctx)?;
+                        resolved.extend(allowed.iter().cloned());
+                        targets = PermissionTableTargets::resolved(resolved);
+                    }
+                    // The partial answer, because a selector that cannot be resolved statically
+                    // is what brought the query here: the complete one would answer "no tables",
+                    // dropping the named ones that the same query also reads.
+                    MetricDiscoveryScope::Unrestricted => {
+                        targets = PermissionTableTargets::resolved(
+                            self.prom_expr_permission_targets_partial(parsed_expr, &query_ctx)?,
+                        );
+                    }
+                    MetricDiscoveryScope::Unavailable => {}
+                }
+            }
+        }
         self.check_query_target_permission(targets, &query_ctx)
             .await?;
 
@@ -2148,6 +2457,44 @@ mod tests {
         }
 
         fn is_admin(&self) -> bool {
+            true
+        }
+    }
+
+    /// A checker that authorizes per table and counts the grants it was asked for, so a test can
+    /// state that a path did (or did not) ask.
+    #[derive(Default)]
+    struct CountingPermissionChecker {
+        table_target_checks: atomic::AtomicUsize,
+    }
+
+    impl CountingPermissionChecker {
+        fn table_target_checks(&self) -> usize {
+            self.table_target_checks.load(atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl PermissionChecker for CountingPermissionChecker {
+        fn check_permission(
+            &self,
+            _user_info: UserInfoRef,
+            _req: PermissionReq,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(PermissionResp::Allow)
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            _user_info: UserInfoRef,
+            _req: PermissionReq,
+            _targets: PermissionTableTargets,
+        ) -> auth::error::Result<PermissionResp> {
+            self.table_target_checks
+                .fetch_add(1, atomic::Ordering::Relaxed);
+            Ok(PermissionResp::Allow)
+        }
+
+        fn uses_table_targets(&self) -> bool {
             true
         }
     }
@@ -3796,6 +4143,429 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sql_schema_selection_authorizes_before_mutation() -> TestResult<()> {
+        struct SchemaProvider;
+        #[async_trait::async_trait]
+        impl auth::UserProvider for SchemaProvider {
+            fn name(&self) -> &str {
+                "schema-test"
+            }
+            async fn authenticate(
+                &self,
+                _: auth::Identity<'_>,
+                _: auth::Password<'_>,
+            ) -> auth::error::Result<UserInfoRef> {
+                unreachable!("the request already has an authenticated user")
+            }
+            async fn authorize(
+                &self,
+                _: &str,
+                schema: &str,
+                _: &UserInfoRef,
+            ) -> auth::error::Result<()> {
+                if schema == "backend_error" {
+                    return auth::error::InternalStateSnafu {
+                        msg: "backend unavailable",
+                    }
+                    .fail();
+                }
+                if matches!(schema, "public" | "allowed" | "allowed_missing" | "admin") {
+                    Ok(())
+                } else {
+                    auth::error::PermissionDeniedSnafu.fail()
+                }
+            }
+        }
+        let plugins = Plugins::new();
+        plugins.insert::<auth::UserProviderRef>(Arc::new(SchemaProvider));
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        for schema in ["denied", "allowed", "admin"] {
+            catalog
+                .register_schema_sync(catalog::RegisterSchemaRequest {
+                    catalog: "greptime".to_string(),
+                    schema: schema.to_string(),
+                })
+                .unwrap();
+        }
+        let instance = test_instance_with_catalog_manager(
+            catalog,
+            test_table(1025, "target")?,
+            plugins,
+            None,
+            Arc::new(NoopProcedureExecutor),
+        )
+        .await?;
+        for sql in [
+            "Use denied",
+            " USE denied",
+            "/* switch */ USE denied",
+            "USE public; Use denied",
+            "USE missing",
+        ] {
+            let ctx = Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Postgres,
+            ));
+            let results = instance.do_query_inner(sql, ctx.clone()).await;
+            assert_eq!(
+                StatusCode::PermissionDenied,
+                results.last().unwrap().as_ref().unwrap_err().status_code(),
+                "{sql}"
+            );
+            assert_eq!("public", ctx.current_schema());
+        }
+        for sql in ["USE allowed", "SET search_path TO allowed"] {
+            let ctx = Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Postgres,
+            ));
+            assert!(
+                instance
+                    .do_query_inner(sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .is_ok()
+            );
+            assert_eq!("allowed", ctx.current_schema());
+        }
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        let error = instance
+            .do_query_inner("USE allowed_missing", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert_eq!("public", ctx.current_schema());
+        for (sql, expected) in [
+            ("SET search_path TO denied, public", "public"),
+            ("SET search_path TO DEFAULT", "admin"),
+            ("SET search_path TO allowed_missing, allowed", "allowed"),
+            (
+                "SET search_path TO denied, allowed_missing, public",
+                "public",
+            ),
+            (r#"SET search_path TO "$user", public"#, "admin"),
+            (r#"SET "search_path" TO denied, allowed"#, "allowed"),
+            ("SET SEARCH_PATH TO 'denied'", ""),
+            ("SET search_path TO allowed_missing", ""),
+            ("SET search_path TO ''", ""),
+            ("SET search_path TO allowed; SET search_path TO denied", ""),
+        ] {
+            let ctx = Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Postgres,
+            ));
+            ctx.set_current_user(Arc::new(AdminUserInfo));
+            let results = instance.do_query_inner(sql, ctx.clone()).await;
+            assert!(
+                results.iter().all(|result| matches!(
+                    result,
+                    Ok(Output {
+                        data: OutputData::AffectedRows(0),
+                        ..
+                    })
+                )),
+                "{sql}: {results:?}"
+            );
+            assert_eq!(expected, ctx.current_schema(), "{sql}");
+        }
+
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        // The default user's schema is absent or unauthorized, so public remains usable.
+        assert!(
+            instance
+                .do_query_inner(r#"SET search_path TO "$user", public"#, ctx.clone())
+                .await
+                .remove(0)
+                .is_ok()
+        );
+        assert_eq!("public", ctx.current_schema());
+        assert!(
+            instance
+                .do_query_inner("SET search_path TO DEFAULT", ctx.clone())
+                .await
+                .remove(0)
+                .is_ok()
+        );
+        assert_eq!("public", ctx.current_schema());
+        let error = instance
+            .do_query_inner("SET search_path TO backend_error, allowed", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap_err();
+        assert_eq!(StatusCode::Unexpected, error.status_code());
+        assert_eq!("public", ctx.current_schema());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_mysql_without_selected_database() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<auth::UserProviderRef>(Arc::new(auth::tests::MockUserProvider::default()));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let ctx = Arc::new(QueryContext::with_channel("greptime", "", Channel::Mysql));
+        for sql in [
+            "SELECT * FROM source",
+            "INSERT INTO source VALUES (1, 0)",
+            "CREATE TABLE t (ts TIMESTAMP TIME INDEX)",
+            "SHOW TABLES",
+            "TRUNCATE TABLE source",
+            "SHOW CREATE TABLE source",
+            "COPY source TO '/tmp/out'",
+            "SELECT flush_table('public.source')",
+        ] {
+            let result = instance.do_query_inner(sql, ctx.clone()).await.remove(0);
+            let error = match result {
+                Err(error) => Err::<(), _>(BoxedError::new(error))
+                    .context(servers::error::ExecuteQuerySnafu)
+                    .unwrap_err(),
+                Ok(output) => {
+                    let OutputData::Stream(stream) = output.data else {
+                        panic!("Expected a query stream: {sql}");
+                    };
+                    common_recordbatch::util::collect(stream)
+                        .await
+                        .context(servers::error::CollectRecordbatchSnafu)
+                        .unwrap_err()
+                }
+            };
+            let (kind, message) = servers::mysql::writer::handle_err(error, ctx.clone());
+            assert_eq!(1046, kind as u16, "{sql}: {message}");
+            assert!(message.contains("No database selected"), "{message}");
+        }
+        let output = instance
+            .do_query_inner(
+                "SELECT 1, DATABASE() IS NULL AS no_database, SCHEMA() IS NULL AS no_schema",
+                ctx.clone(),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        assert_eq!(2, output.data.pretty_print().await.matches("true").count());
+        for sql in [
+            "SELECT * FROM denied.source",
+            "SHOW TABLES FROM denied",
+            "USE denied",
+        ] {
+            let error = instance
+                .do_query_inner(sql, ctx.clone())
+                .await
+                .remove(0)
+                .unwrap_err();
+            assert_eq!(
+                StatusCode::AccessDenied,
+                error.status_code(),
+                "{sql}: {error}"
+            );
+            assert!(ctx.current_schema().is_empty());
+        }
+        for sql in [
+            "SELECT * FROM public.source",
+            "SHOW TABLES FROM public",
+            "SET time_zone = '+00:00'",
+        ] {
+            assert!(
+                instance
+                    .do_query_inner(sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .is_ok(),
+                "{sql}"
+            );
+        }
+        let plan = instance
+            .do_describe_inner(parse_one_sql("SELECT * FROM public.source"), ctx.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .logical_plan;
+        instance
+            .do_exec_plan_inner(
+                plan.clone(),
+                Some(parse_one_sql("SELECT * FROM public.source")),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let error = instance
+            .do_describe_inner(parse_one_sql("SELECT * FROM denied.source"), ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::AccessDenied, error.status_code());
+        assert!(ctx.current_schema().is_empty());
+        let error = instance
+            .do_exec_plan_inner(plan.clone(), None, ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::DatabaseNotFound, error.status_code());
+        let current_user = ctx.current_user();
+        ctx.set_current_user(Arc::new(AdminUserInfo));
+        let error = instance
+            .do_exec_plan_inner(
+                plan,
+                Some(parse_one_sql("SELECT * FROM public.source")),
+                ctx.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::AccessDenied, error.status_code());
+        ctx.set_current_user(current_user);
+        instance
+            .do_query_inner("USE public", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        assert_eq!("public", ctx.current_schema());
+        instance
+            .do_query_inner("SELECT * FROM source", ctx)
+            .await
+            .remove(0)
+            .unwrap();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_empty_search_path_statements() -> TestResult<()> {
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            Plugins::new(),
+        )
+        .await?;
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        instance
+            .do_query_inner("SET search_path TO ''", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        let tables = instance
+            .do_query_inner("SHOW TABLES", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap()
+            .data
+            .pretty_print()
+            .await;
+        assert!(
+            !tables.contains("source") && !tables.contains("target"),
+            "{tables}"
+        );
+        let error = instance
+            .do_query_inner("INSERT INTO source VALUES (1, 0)", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::TableOperation { source: operator::error::Error::TableNotFound { ref table_name, .. }, .. } if table_name == "greptime..source"),
+            "{error:?}"
+        );
+        for sql in [
+            "CREATE TABLE no_schema (ts TIMESTAMP TIME INDEX)",
+            "ALTER TABLE source ADD COLUMN no_schema_column INT",
+            "CREATE VIEW no_schema_view AS SELECT 1 AS n",
+            "CREATE FLOW no_schema_flow SINK TO sink AS SELECT * FROM public.source",
+            "CREATE FLOW no_schema_flow SINK TO public.sink AS SELECT * FROM source",
+        ] {
+            let error = instance
+                .do_query_inner(sql, ctx.clone())
+                .await
+                .remove(0)
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::TableOperation { source: operator::error::Error::SchemaNotFound { ref schema_info, .. }, .. } if schema_info.is_empty()),
+                "{sql}: {error:?}"
+            );
+        }
+
+        for sql in ["SELECT * FROM source", "DELETE FROM source"] {
+            assert!(
+                instance
+                    .do_query_inner(sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .is_err(),
+                "{sql}"
+            );
+        }
+        let output = instance
+            .do_query_inner(
+                "SELECT current_schema() IS NULL AS empty, current_schemas(false) AS schemas",
+                ctx.clone(),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let printed = output.data.pretty_print().await;
+        assert!(
+            printed.contains("true") && printed.contains("[]"),
+            "{printed}"
+        );
+        let output = instance
+            .do_query_inner("DROP TABLE IF EXISTS source", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+        instance
+            .do_query_inner("USE public", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        assert!(
+            instance
+                .do_query_inner("SELECT * FROM source", ctx)
+                .await
+                .remove(0)
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_operator_rejects_search_path_without_frontend() -> TestResult<()> {
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            Plugins::new(),
+        )
+        .await?;
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        let error = instance
+            .statement_executor
+            .execute_sql(parse_one_sql("SET search_path TO denied"), ctx.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, operator::error::Error::NotSupported { .. }));
+        assert_eq!("public", ctx.current_schema());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_write_only_grpc_sql_is_checked_after_parsing() -> TestResult<()> {
         let plugins = Plugins::new();
         plugins.insert::<PermissionCheckerRef>(Arc::new(WriteOnlyPermissionChecker));
@@ -4180,6 +4950,80 @@ mod tests {
         Ok(())
     }
 
+    /// `info` reads `target_info` without naming it. With a label selector the query used to be
+    /// answered as a discovery over the tables the caller may read, which never named it either.
+    #[tokio::test]
+    async fn test_info_query_checks_the_info_table() -> TestResult<()> {
+        struct DenyInfoTable;
+
+        impl PermissionChecker for DenyInfoTable {
+            fn check_permission(
+                &self,
+                _user_info: UserInfoRef,
+                _req: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: UserInfoRef,
+                _req: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                let reject = match targets {
+                    PermissionTableTargets::Unresolved => true,
+                    PermissionTableTargets::Resolved(targets) => {
+                        targets.iter().any(|target| target.table == "target_info")
+                    }
+                };
+                Ok(if reject {
+                    PermissionResp::Reject
+                } else {
+                    PermissionResp::Allow
+                })
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(DenyInfoTable));
+        let instance = test_instance_with_plugins_and_metric_names(
+            test_logical_table(1024, "target_info")?,
+            test_logical_table(1025, "target")?,
+            plugins,
+            None,
+        )
+        .await?;
+        let ctx = Arc::new(
+            QueryContextBuilder::default()
+                .channel(Channel::Mysql)
+                .conn_info(ConnInfo::new(None, Channel::Mysql))
+                .extensions(HashMap::from([(
+                    query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY.to_string(),
+                    "true".to_string(),
+                )]))
+                .build(),
+        );
+
+        for promql in [
+            "info(target)",
+            r#"info(target, {version="v1"})"#,
+            // Not a shape that reads `target_info`, and not a discovery either: unresolved.
+            r#"info(target, {__schema__="public", version="v1"})"#,
+        ] {
+            let query = PromQuery {
+                query: promql.to_string(),
+                ..Default::default()
+            };
+            let err = PrometheusHandler::do_query(&instance, &query, ctx.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(StatusCode::PermissionDenied, err.status_code(), "{promql}");
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn test_should_track_statement_process() {
         assert!(should_track_statement_process(&parse_one_sql(
@@ -4213,6 +5057,58 @@ mod tests {
             &insert_dml_plan()
         ));
         assert!(!should_track_plan_process(None, &insert_dml_plan()));
+    }
+
+    #[tokio::test]
+    async fn test_exemplar_slow_query() -> TestResult<()> {
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use servers::exemplar::query::Query as ExemplarQuery;
+
+        for invalid_destination in [false, true] {
+            let table_name = if invalid_destination {
+                METRICS_EXEMPLARS_TABLE
+            } else {
+                "source"
+            };
+            let mut instance = test_instance_with_tables(
+                test_table(1024, table_name)?,
+                test_table(1025, "target")?,
+            )
+            .await?;
+            let recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
+            instance.slow_query_recorder = recorder.clone();
+            instance.slow_query_options.sample_ratio = 1.0;
+            instance.slow_query_options.record_type = SlowQueriesRecordType::SystemTable;
+
+            for (enabled, threshold, should_record) in [
+                (true, Duration::ZERO, true),
+                (false, Duration::ZERO, false),
+                (true, Duration::from_secs(3600), false),
+            ] {
+                instance.slow_query_options.enable = enabled;
+                instance.slow_query_options.threshold = threshold;
+                let query =
+                    ExemplarQuery::parse("source".into(), "-0.001", "0.001", "public").unwrap();
+                let result = instance.query_exemplars(query, QueryContext::arc()).await;
+                if invalid_destination {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.unwrap().is_empty());
+                }
+
+                let queries = std::mem::take(&mut *recorder.queries.lock().unwrap());
+                let expected = if should_record {
+                    vec!["query_exemplars(source, start_ns=-1000000, end_ns=1999999)"]
+                } else {
+                    vec![]
+                };
+                assert_eq!(
+                    queries, expected,
+                    "invalid_destination={invalid_destination}, enabled={enabled}, threshold={threshold:?}"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -5117,6 +6013,43 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_copy_in_checks_table_permissions() -> TestResult<()> {
+        use servers::query_handler::CopyInHandler;
+
+        for source in [
+            test_table(1024, "denied")?,
+            test_physical_table(1024, "physical")?,
+        ] {
+            let name = source.table_info().name.clone();
+            let plugins = Plugins::new();
+            plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+            let instance =
+                test_instance_with_plugins(source, test_table(1025, "target")?, plugins).await?;
+            let ctx = QueryContext::arc();
+            assert_permission_denied(
+                instance
+                    .copy_in_table("greptime", "public", &name, ctx.clone())
+                    .await,
+            );
+            assert!(
+                instance
+                    .copy_in_table("greptime", "public", "target", ctx.clone())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                instance
+                    .copy_in_table("greptime", "public", "missing", ctx)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        Ok(())
+    }
+
     /// COPY FROM STDIN must enforce the same cross-catalog restriction as
     /// SQL INSERT when `disallow_cross_catalog_query` is configured.
     #[tokio::test]
@@ -5178,6 +6111,181 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_some());
+
+        Ok(())
+    }
+    const NATIVE_PROMQL_OPTION: &str = "query.experimental_native_promql";
+
+    /// A frontend whose `public` schema holds two metric-engine logical tables, `cpu_usage` and
+    /// `target`, with `checker` as its permission checker.
+    async fn test_metric_discovery_instance(checker: PermissionCheckerRef) -> TestResult<Instance> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker);
+        test_instance_with_plugins_and_metric_names(
+            test_logical_table(1024, "cpu_usage")?,
+            test_logical_table(1025, "target")?,
+            plugins,
+            None,
+        )
+        .await
+    }
+
+    /// An expression that has to be answered by discovering the schema's metric tables: it names
+    /// no exact metric, only a name matcher.
+    fn discovery_metric_expr() -> promql_parser::parser::Expr {
+        promql_parser::parser::parse(r#"{__name__=~"cpu.*"}"#).unwrap()
+    }
+
+    /// The tables a bounded scope allows, sorted so a test can state them.
+    fn allowed_tables(scope: &MetricDiscoveryScope) -> Vec<String> {
+        let MetricDiscoveryScope::Allowed(allowed) = scope else {
+            panic!("expected a table-bounded discovery scope, got {scope:?}");
+        };
+        let mut tables = allowed
+            .iter()
+            .map(|target| target.table.clone())
+            .collect::<Vec<_>>();
+        tables.sort_unstable();
+        tables
+    }
+
+    /// A session `SET` turns the native route on without any request hint, so the scope has to be
+    /// bounded by the caller's grants in exactly that case too.
+    #[tokio::test]
+    async fn test_discovery_scope_bounds_a_session_enabled_native_route() -> TestResult<()> {
+        let instance =
+            test_metric_discovery_instance(Arc::new(RejectUnresolvedPermissionChecker)).await?;
+        let mut ctx = test_query_ctx(1);
+        ctx.configuration_parameter()
+            .set_query_option(NATIVE_PROMQL_OPTION, "true")
+            .unwrap();
+        assert!(
+            ctx.extension(NATIVE_PROMQL_OPTION).is_none(),
+            "a session SET is not a request hint"
+        );
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vec!["cpu_usage".to_string(), "target".to_string()],
+            allowed_tables(ctx.metric_discovery_scope())
+        );
+
+        Ok(())
+    }
+
+    /// With the switch off and nothing stated, the route never reads discovery, so the scope stays
+    /// unrestricted and no per-table grant is asked for: a query that does not use the route pays
+    /// nothing here.
+    #[tokio::test]
+    async fn test_discovery_scope_is_not_computed_when_the_route_is_off() -> TestResult<()> {
+        let counter = Arc::new(CountingPermissionChecker::default());
+        let instance = test_metric_discovery_instance(counter.clone()).await?;
+        let mut ctx = test_query_ctx(1);
+        assert!(ctx.extension(NATIVE_PROMQL_OPTION).is_none());
+        assert_eq!(
+            None,
+            ctx.effective_query_options()
+                .unwrap()
+                .get(NATIVE_PROMQL_OPTION),
+            "nothing states the option here"
+        );
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                ctx.metric_discovery_scope(),
+                MetricDiscoveryScope::Unrestricted
+            ),
+            "a route that is off reads no scope: {:?}",
+            ctx.metric_discovery_scope()
+        );
+        assert_eq!(
+            0,
+            counter.table_target_checks(),
+            "an off route asked for per-table grants"
+        );
+        assert!(
+            ctx.extension(NATIVE_PROMQL_OPTION).is_none(),
+            "resolving the switch must not state the option"
+        );
+
+        Ok(())
+    }
+
+    /// A checker that decides without table targets needs no bound: there is nothing to narrow.
+    #[tokio::test]
+    async fn test_discovery_scope_stays_unrestricted_without_table_targets() -> TestResult<()> {
+        let instance =
+            test_metric_discovery_instance(Arc::new(TargetIndependentPermissionChecker::default()))
+                .await?;
+        let mut ctx = test_query_ctx(1);
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                ctx.metric_discovery_scope(),
+                MetricDiscoveryScope::Unrestricted
+            ),
+            "got {:?}",
+            ctx.metric_discovery_scope()
+        );
+
+        Ok(())
+    }
+
+    /// Resolving the switch must not state it: the option a query inherits stays inherited, so
+    /// nothing this function does can change what planning later resolves. With nothing stated and
+    /// the engine default off the route is off, which leaves discovery unrestricted - the scope is
+    /// the only thing this function changes, and the route reads the option, not the scope.
+    ///
+    /// The routing itself is asserted where the plan is built
+    /// (`query::planner`'s `test_engine_option_is_the_default_a_request_or_session_overrides`
+    /// covers the "nothing stated, engine default" case): a catalog of plain in-memory tables
+    /// cannot plan a discovery expression natively, so a frontend-level plan assertion would only
+    /// restate the legacy planner's own rejections.
+    #[tokio::test]
+    async fn test_discovery_scope_does_not_state_the_native_option() -> TestResult<()> {
+        let instance =
+            test_metric_discovery_instance(Arc::new(RejectUnresolvedPermissionChecker)).await?;
+        let mut ctx = test_query_ctx(1);
+        assert!(ctx.extension(NATIVE_PROMQL_OPTION).is_none());
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                ctx.metric_discovery_scope(),
+                MetricDiscoveryScope::Unrestricted
+            ),
+            "an off route reads no scope: {:?}",
+            ctx.metric_discovery_scope()
+        );
+        assert!(
+            ctx.extension(NATIVE_PROMQL_OPTION).is_none(),
+            "computing the scope must not state the option"
+        );
+        assert_eq!(
+            None,
+            ctx.effective_query_options()
+                .unwrap()
+                .get(NATIVE_PROMQL_OPTION),
+            "the route stays on the engine default"
+        );
 
         Ok(())
     }
