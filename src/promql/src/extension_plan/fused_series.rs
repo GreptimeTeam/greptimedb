@@ -17,7 +17,12 @@
 //! [`FusedSeries`] is the logical half: it holds the PromQL text the tree was compiled from, the
 //! tree itself and the binding its input was compiled against. [`FusedSeriesExec`] is the physical
 //! half: it owns one execution of that tree per partition, decodes its input frames into raw
-//! series chunks, and converts evaluated chunks back into batches.
+//! series chunks, and converts evaluated chunks back into batches. An input that is one of our own
+//! in-process operators hands its chunks over instead of frames
+//! ([`crate::extension_plan::SeriesExecutionPlan`]), which is the same chunks with no round trip
+//! through a batch. The decision is per input and taken by asking the input
+//! ([`crate::extension_plan::series_execution_plan`]): one source can be read in process while
+//! another is decoded from its frames, because each input is either one of ours or it is not.
 //!
 //! Both halves show their own compiled tree in `EXPLAIN`, rendered by [`NativeTree`]'s display.
 //! The logical node shows its tree without metrics; the physical node includes each tree node's
@@ -92,6 +97,9 @@ use store_api::region_engine::RawLabelSource;
 use table::table::scan::SeriesScanExec;
 
 use crate::evaluated::EvaluatedChunk;
+use crate::extension_plan::series_execution::{
+    HandedSeriesChunk, SeriesCharge, SeriesChunk, checked_series_stream, series_execution_plan,
+};
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::extension_plan::{RawSeriesSourceExec, SeriesRouting};
 use crate::grid_series::METADATA_LABELS;
@@ -3000,9 +3008,32 @@ impl ExecutionPlan for FusedSeriesExec {
         let mut streams: Vec<futures::stream::BoxStream<'static, Result<FusedFeed, BoxedError>>> =
             Vec::new();
         let bound_inputs = self.tree.root().inputs();
-        for (source, (input, _, _)) in self.inputs.iter().enumerate() {
+        for (source, (input, _, ordering)) in self.inputs.iter().enumerate() {
+            let kind = self.source_kinds[source];
+            // One input, one answer, asked of the input itself: an operator that can hand its
+            // chunks over is asked for them, and everything else is asked for its frames. Asking
+            // the input is what makes the two paths one decision - calling `execute_series` *is*
+            // the statement that this input is read in process.
+            //
+            // Aggregate state is the one content no handover carries (a state publication is a row
+            // of an exported group, and `SeriesChunk` deliberately has no variant for it), so a
+            // state source is read from its frames whatever else it could answer.
+            if kind != FusedInputKind::AggregateState
+                && let Some(series_plan) = series_execution_plan(input.as_ref())
+            {
+                let chunks = series_plan.execute_series(partition, Arc::clone(&context))?;
+                let chunks = checked_series_stream(chunks, *ordering);
+                streams.push(
+                    chunks
+                        .map(move |item| {
+                            item.and_then(|chunk| in_process_feed(source, kind, chunk))
+                        })
+                        .boxed(),
+                );
+                continue;
+            }
             let frames = input.execute(partition, Arc::clone(&context))?;
-            match self.source_kinds[source] {
+            match kind {
                 FusedInputKind::Evaluated => {
                     let decoded = unpack_evaluated_series(
                         frames,
@@ -3013,6 +3044,7 @@ impl ExecutionPlan for FusedSeriesExec {
                             .map(move |item| {
                                 item.map(|(series, is_last)| FusedFeed {
                                     source,
+                                    charge: None,
                                     chunk: FusedChunk::Evaluated(EvaluatedChunk {
                                         series,
                                         is_last,
@@ -3054,6 +3086,7 @@ impl ExecutionPlan for FusedSeriesExec {
                                 Ok(row) => state_row_from_frame_row(row, &binding)
                                     .map(|row| FusedFeed {
                                         source,
+                                        charge: None,
                                         chunk: FusedChunk::State(StateChunk::Row(row)),
                                     })
                                     .map_err(|error| {
@@ -3073,6 +3106,7 @@ impl ExecutionPlan for FusedSeriesExec {
                         raw.map(move |item| {
                             item.map(|chunk| FusedFeed {
                                 source,
+                                charge: None,
                                 chunk: FusedChunk::Raw(chunk),
                             })
                         })
@@ -3290,10 +3324,46 @@ enum FusedChunk {
     State(StateChunk),
 }
 
-/// One chunk and the source index it belongs to.
+/// One chunk and the source index it belongs to, and what the producer charged it to.
+///
+/// The charge is held for as long as this value is: it is dropped once the chunk has been pushed
+/// into the tree, which is the point where the executor's copy of the values is its own and the
+/// producer's accounting of them is over. A framed input has no charge here - its charge lives in
+/// the packer's handoff - so the field is empty on that path and nothing changes for it.
 struct FusedFeed {
     source: usize,
     chunk: FusedChunk,
+    charge: Option<SeriesCharge>,
+}
+
+/// One chunk a native input handed over, as the form this node's runtime reads that source in.
+///
+/// The variant has to be the one the tree bound the source to: a source compiled as raw samples
+/// cannot be read as evaluated values, and treating one as the other would misread the plan rather
+/// than merely slow it down, so a mismatch is reported.
+fn in_process_feed(
+    source: usize,
+    kind: FusedInputKind,
+    handed: HandedSeriesChunk,
+) -> Result<FusedFeed, BoxedError> {
+    let (chunk, charge) = handed.into_parts();
+    let chunk = match (kind, chunk) {
+        (FusedInputKind::Raw, SeriesChunk::Raw(chunk)) => FusedChunk::Raw(chunk),
+        (FusedInputKind::Evaluated, SeriesChunk::Evaluated(chunk)) => FusedChunk::Evaluated(chunk),
+        (kind, chunk) => {
+            return Err(BoxedError::new(common_query::error::Error::from(
+                DataFusionError::Execution(format!(
+                    "FusedSeries source {source} is bound to {kind:?} but its operator handed over \
+                     {chunk:?}"
+                )),
+            )));
+        }
+    };
+    Ok(FusedFeed {
+        source,
+        chunk,
+        charge,
+    })
 }
 
 /// The native histogram column of one evaluated field.
@@ -3408,15 +3478,24 @@ impl Drop for EvidenceClaim {
 impl FusedSeriesStream {
     /// Hands one raw chunk over and queues what it settled.
     fn push(&mut self, feed: FusedFeed) -> DataFusionResult<()> {
+        let FusedFeed {
+            source,
+            chunk,
+            charge,
+        } = feed;
+        // What the producer charged this chunk is released when this call returns. That is the
+        // whole point of holding it here rather than in the handover stream: the tree reads the
+        // chunk below, so the reservation covers the bytes for as long as they are read and not one
+        // poll less - and the copy the executor keeps, when it keeps one, is accounted by the tree.
+        let _charge = charge;
         let Some(executor) = self.executor.as_mut() else {
             return Err(DataFusionError::Execution(
                 "FusedSeriesExec stream pushed a chunk after its execution closed".to_string(),
             ));
         };
-        let input_ids = self.input_ids.get(feed.source).ok_or_else(|| {
+        let input_ids = self.input_ids.get(source).ok_or_else(|| {
             DataFusionError::Execution(format!(
-                "FusedSeries has no runtime input IDs for source {}",
-                feed.source
+                "FusedSeries has no runtime input IDs for source {source}"
             ))
         })?;
         // One source feeding several runtime inputs hands each the same value, cloned per input,
@@ -3424,7 +3503,7 @@ impl FusedSeriesStream {
         // copy: the chunk moves into it. A producer's state batch carries the charge for its whole
         // payload, so it is never bound to several inputs -- and it stays refused either way.
         if let [input_id] = input_ids.as_slice() {
-            match feed.chunk {
+            match chunk {
                 FusedChunk::Raw(value) => executor.push_raw(*input_id, value)?,
                 FusedChunk::Evaluated(value) => executor.push_evaluated(*input_id, value)?,
                 FusedChunk::State(StateChunk::Row(row)) => {
@@ -3437,7 +3516,7 @@ impl FusedSeriesStream {
                 }
             }
         } else {
-            let chunk = Some(feed.chunk);
+            let chunk = Some(chunk);
             for input_id in input_ids {
                 match chunk.as_ref().expect("the feed is read at most twice") {
                     FusedChunk::Raw(value) => executor.push_raw(*input_id, value.clone())?,

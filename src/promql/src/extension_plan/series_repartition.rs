@@ -114,6 +114,7 @@
 //! partition can still claim its queue; the execution going away as a whole, which no later `execute`
 //! can reach, is the other point at which everything is released.
 
+use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Formatter};
 use std::hash::{Hash, Hasher};
@@ -150,6 +151,10 @@ use store_api::region_engine::{RawSeriesStream, SendableRawSeriesStream};
 use tokio::sync::mpsc;
 use twox_hash::XxHash64;
 
+use crate::evaluated::EvaluatedChunk;
+use crate::extension_plan::series_execution::{
+    HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk, SeriesExecutionPlan,
+};
 use crate::grid_series::{label_set, merge_same_labelset};
 use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
 use crate::source::merge_raw_identity_charging;
@@ -426,6 +431,75 @@ impl SeriesRepartitionExec {
     pub fn outputs(&self) -> usize {
         self.properties.partitioning.partition_count()
     }
+
+    /// Whether what this node publishes is a chunk a native consumer can read in process.
+    ///
+    /// Raw and evaluated publications are values this crate holds: an owner's merged series, or the
+    /// reconstructed samples of one raw identity. Aggregate state is not - a state publication is a
+    /// row of an exported group on the schema the producer wrote, read as a frame by the node that
+    /// folds it - so a consumer asks for that as frames, which is what this answers.
+    pub fn hands_over_series(&self) -> bool {
+        matches!(self.content, FrameContent::Raw | FrameContent::Evaluated)
+    }
+
+    /// The queue of `partition` and the lease on this read that reading it takes.
+    ///
+    /// Both public entry points take an output through here - the frames it publishes and the chunks
+    /// it hands over are the same publication, read two ways - so an output is claimed once no
+    /// matter which of them is asked for, and asking for both is the error it has always been.
+    fn claim_output(
+        &self,
+        partition: usize,
+        context: &Arc<TaskContext>,
+    ) -> DataFusionResult<(mpsc::UnboundedReceiver<Queued>, OutputLease)> {
+        if partition >= self.outputs() {
+            return Err(DataFusionError::Execution(format!(
+                "SeriesRepartition output partition {partition} is out of range"
+            )));
+        }
+        let shared = {
+            let mut state = self
+                .shared
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if state.is_none() {
+                // The whole execution is started here, once: the output partitions are separate
+                // calls, and reading the child once for all of them is what keeps a chunk from being
+                // emitted twice or read by a scan that was never meant to run twice.
+                *state = Some(SharedExecution::start(
+                    &self.input,
+                    self.routing.clone(),
+                    Arc::clone(&self.series_schema),
+                    self.state.clone(),
+                    context,
+                )?);
+            }
+            Arc::clone(state.as_ref().expect("the execution was just started"))
+        };
+        SharedExecution::claim(&shared, partition).ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "SeriesRepartition output partition {partition} was executed twice"
+            ))
+        })
+    }
+
+    /// One claimed output as the owner that merges it: the queue, its charge, and its lease.
+    fn partition_stream(
+        &self,
+        receiver: mpsc::UnboundedReceiver<Queued>,
+        lease: OutputLease,
+        context: &Arc<TaskContext>,
+    ) -> RepartitionStream {
+        RepartitionStream::new(
+            receiver,
+            lease,
+            Arc::clone(&self.series_schema),
+            &context.runtime_env().memory_pool,
+            self.input.properties().partitioning.partition_count(),
+            self.ordering,
+            self.identity_completion,
+        )
+    }
 }
 
 impl fmt::Debug for SeriesRepartitionExec {
@@ -511,36 +585,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        if partition >= self.outputs() {
-            return Err(DataFusionError::Execution(format!(
-                "SeriesRepartition output partition {partition} is out of range"
-            )));
-        }
-        let shared = {
-            let mut state = self
-                .shared
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if state.is_none() {
-                // The whole execution is started here, once: the output partitions are separate
-                // calls, and reading the child once for all of them is what keeps a chunk from being
-                // emitted twice or read by a scan that was never meant to run twice.
-                *state = Some(SharedExecution::start(
-                    &self.input,
-                    self.routing.clone(),
-                    Arc::clone(&self.series_schema),
-                    self.state.clone(),
-                    &context,
-                )?);
-            }
-            Arc::clone(state.as_ref().expect("the execution was just started"))
-        };
-        let (receiver, lease) = SharedExecution::claim(&shared, partition).ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "SeriesRepartition output partition {partition} was executed twice"
-            ))
-        })?;
-        // Take the queue and its claim on the read together.
+        let (receiver, lease) = self.claim_output(partition, &context)?;
         if self.content == FrameContent::AggregateState {
             return Ok(Box::pin(StateBatchOutputStream {
                 schema: self.input.schema(),
@@ -550,15 +595,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
                 reported: false,
             }));
         }
-        let inner = RepartitionStream::new(
-            receiver,
-            lease,
-            Arc::clone(&self.series_schema),
-            &context.runtime_env().memory_pool,
-            self.input.properties().partitioning.partition_count(),
-            self.ordering,
-            self.identity_completion,
-        );
+        let inner = self.partition_stream(receiver, lease, &context);
         let handoff = Arc::clone(&inner.handoff);
         let output: SendableRecordBatchStream = match self.content {
             FrameContent::Evaluated => pack_evaluated_series(
@@ -591,6 +628,107 @@ impl ExecutionPlan for SeriesRepartitionExec {
             handoff,
         });
         Ok(datafusion::physical_plan::coop::make_cooperative(output))
+    }
+}
+
+impl SeriesExecutionPlan for SeriesRepartitionExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    /// One owner's publications, as the chunks they are.
+    ///
+    /// This is [`ExecutionPlan::execute`] without the encode: the same claim of the same output of
+    /// the same read, the same owner merging the same identity, and the values that owner produced
+    /// handed over instead of packed into a frame. An evaluated publication leaves as one closed
+    /// chunk - the owner publishes an identity once, already merged, which is exactly the `is_last`
+    /// the packer's evaluated stream declares - and a raw one as the chunk whose finality
+    /// [`merge_raw_identity_charging`] recomputed for the whole identity.
+    ///
+    /// Everything the owner reserved for that publication rides along with the value
+    /// ([`SeriesCharge`]), because the consumer holds the bytes those reservations account for: the
+    /// frame path holds them in the packer's handoff until the batch is flushed, and there is no
+    /// packer here to hold them.
+    fn execute_series(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableSeriesStream> {
+        if !self.hands_over_series() {
+            return Err(DataFusionError::Execution(format!(
+                "SeriesRepartition output partition {partition} publishes {} frames, which are read \
+                 as frames",
+                self.content.as_str()
+            )));
+        }
+        let (receiver, lease) = self.claim_output(partition, &context)?;
+        let inner = self.partition_stream(receiver, lease, &context);
+        Ok(Box::pin(ChunkOutputStream {
+            inner: Some(Box::pin(inner)),
+            content: self.content,
+        }))
+    }
+}
+
+/// One owner's publications as handed-over chunks.
+///
+/// The inner stream is [`RepartitionStream`], which decides what an owner publishes; this only
+/// changes the form - a [`ReadyOutput`] becomes the [`SeriesChunk`] a native consumer reads - and
+/// moves the charge of that publication out of the packer's handoff and onto the value.
+struct ChunkOutputStream {
+    /// The owner's stream, or `None` once this one ended.
+    inner: Option<Pin<Box<RepartitionStream>>>,
+    /// What this node publishes, so a raw publication cannot be handed over as an evaluated one.
+    content: FrameContent,
+}
+
+impl Stream for ChunkOutputStream {
+    type Item = Result<HandedSeriesChunk, BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let Some(inner) = this.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let ready = match inner.as_mut().poll_next(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Some(Err(error))) => {
+                this.inner = None;
+                return Poll::Ready(Some(Err(error)));
+            }
+            Poll::Ready(None) => {
+                this.inner = None;
+                return Poll::Ready(None);
+            }
+            Poll::Ready(Some(Ok(ready))) => ready,
+        };
+        // The owner charged this publication just before publishing it, and the charge is the whole
+        // of what the consumer's copy of the values keeps alive.
+        let charge = inner.take_charge();
+        let chunk = match (this.content, ready) {
+            (FrameContent::Evaluated, ReadyOutput::Evaluated(series)) => {
+                SeriesChunk::Evaluated(EvaluatedChunk {
+                    series,
+                    // A merged identity is final: the owner publishes it once, already closed.
+                    is_last: true,
+                })
+            }
+            (FrameContent::Raw, ReadyOutput::Raw(chunk)) => SeriesChunk::Raw(chunk),
+            (content, ready) => {
+                this.inner = None;
+                return Poll::Ready(Some(Err(boxed(DataFusionError::Internal(format!(
+                    "a {} repartition output carried {}",
+                    content.as_str(),
+                    ready.what()
+                ))))));
+            }
+        };
+        match charge {
+            Some(charge) => Poll::Ready(Some(Ok(HandedSeriesChunk::charged(chunk, charge)))),
+            // The charge stays where the frame path keeps it, so it is released with the handoff
+            // rather than silently dropped here.
+            None => Poll::Ready(Some(Ok(HandedSeriesChunk::uncharged(chunk)))),
+        }
     }
 }
 
@@ -1998,15 +2136,19 @@ enum ReadyOutput {
     Raw(RawSeriesChunk),
 }
 
-struct ReadySeries {
-    series: ReadyOutput,
-    charges: ReadyCharges,
+impl ReadyOutput {
+    /// What this publication is, for an error that has to name what arrived instead.
+    fn what(&self) -> &'static str {
+        match self {
+            Self::Evaluated(_) => "an evaluated series",
+            Self::Raw(_) => "a raw series",
+        }
+    }
 }
 
-struct ReadyCharges {
-    _charges: Vec<MemoryReservation>,
-    _metadata: MemoryReservation,
-    _workspace: Option<MemoryReservation>,
+struct ReadySeries {
+    series: ReadyOutput,
+    charge: SeriesCharge,
 }
 
 /// One owner processes identities as soon as every input has closed or contributed its final chain.
@@ -2123,8 +2265,8 @@ struct RepartitionStream {
 /// releases completed cursors after the packer has flushed the frames they back.
 #[derive(Default)]
 struct Handoff {
-    current: Option<ReadyCharges>,
-    completed: Vec<ReadyCharges>,
+    current: Option<SeriesCharge>,
+    completed: Vec<SeriesCharge>,
 }
 
 struct PackedHandoffStream {
@@ -2196,6 +2338,21 @@ impl RepartitionStream {
         }
     }
 
+    /// Takes what the owner charged for the publication it just returned.
+    ///
+    /// [`poll_next`](Stream::poll_next) installs the charge of the publication it returns in the
+    /// handoff, where [`PackedHandoffStream`] releases it once the batch it backs has been flushed.
+    /// A consumer that is handed the value itself takes it here instead, so the reservation rides
+    /// with the chunk and is released when the consumer drops it - neither before the bytes it
+    /// accounts for are gone, nor after.
+    fn take_charge(&mut self) -> Option<SeriesCharge> {
+        self.handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current
+            .take()
+    }
+
     fn finish_group(&mut self, key: &OwnerKey) -> DataFusionResult<()> {
         let Some(group) = self.groups.remove(key) else {
             return Ok(());
@@ -2231,11 +2388,7 @@ impl RepartitionStream {
         };
         self.output.push_back(ReadySeries {
             series: ReadyOutput::Evaluated(series),
-            charges: ReadyCharges {
-                _charges: group.charges,
-                _metadata: group.metadata,
-                _workspace: workspace,
-            },
+            charge: SeriesCharge::new(group.charges, group.metadata, workspace),
         });
         Ok(())
     }
@@ -2270,11 +2423,7 @@ impl RepartitionStream {
             chunk.is_last = true;
             self.output.push_back(ReadySeries {
                 series: ReadyOutput::Raw(chunk),
-                charges: ReadyCharges {
-                    _charges: group.charges,
-                    _metadata: group.metadata,
-                    _workspace: None,
-                },
+                charge: SeriesCharge::new(group.charges, group.metadata, None),
             });
             return Ok(());
         }
@@ -2301,11 +2450,7 @@ impl RepartitionStream {
         )?;
         self.output.push_back(ReadySeries {
             series: ReadyOutput::Raw(chunk),
-            charges: ReadyCharges {
-                _charges: group.charges,
-                _metadata: group.metadata,
-                _workspace: Some(workspace),
-            },
+            charge: SeriesCharge::new(group.charges, group.metadata, Some(workspace)),
         });
         Ok(())
     }
@@ -2427,7 +2572,7 @@ impl Stream for RepartitionStream {
                 this.handoff
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .current = Some(ready.charges);
+                    .current = Some(ready.charge);
                 return Poll::Ready(Some(Ok(ready.series)));
             }
             if this.reported {
@@ -2597,7 +2742,7 @@ impl Stream for RepartitionStream {
                         this.handoff
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .current = Some(ready.charges);
+                            .current = Some(ready.charge);
                         return Poll::Ready(Some(Ok(ready.series)));
                     }
                     return Poll::Ready(None);

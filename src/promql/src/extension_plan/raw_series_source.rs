@@ -26,6 +26,7 @@
 //! scan partition is re-labelled independently, keeping its place in the partition layout and
 //! each series contiguous within its scan partition.
 
+use std::any::Any;
 use std::fmt::{self, Formatter};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -60,9 +61,12 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::{Stream, StreamExt};
 use greptime_proto::substrait_extension::RawSeriesSource as RawSeriesSourceProto;
 use prost::Message;
-use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
+use store_api::region_engine::{RawLabelSource, RawSeriesStream};
 use table::table::scan::SeriesScanExec;
 
+use crate::extension_plan::series_execution::{
+    HandedSeriesChunk, SendableSeriesStream, SeriesChunk, SeriesExecutionPlan,
+};
 use crate::source::materialize_raw_labels;
 
 /// The ordering every frame of this node declares.
@@ -247,31 +251,58 @@ impl UserDefinedLogicalNodeCore for RawSeriesSource {
     }
 }
 
-/// One partition's relabelled frames, published under this node's declared ordering.
+/// One partition's chunks, read by the frame packer as this node's own raw series.
 ///
-/// The scan states its own key order, which the node cannot repeat in a schema it fixed at plan
-/// time. Every other property is forwarded unchanged.
-struct DeclaredOrdering(SendableRawSeriesStream);
+/// The frames this node publishes are packed from exactly what
+/// [`SeriesExecutionPlan::execute_series`] hands over, so [`RawSeriesSourceExec::execute`] reads
+/// that stream through here. Two things are declared rather than forwarded: the labels are the
+/// complete ones [`materialize_raw_labels`] produced - the frames this node writes are explicit and
+/// carry no decode description - and the ordering is the [`ORDERING`] it publishes, not the finer
+/// one the scan states, because the node fixed its schema at plan time and cannot repeat the scan's
+/// promise.
+struct DeclaredSeries {
+    /// The chunks this node hands over in process.
+    chunks: SendableSeriesStream,
+    /// The raw schema every chunk of that stream is bound to.
+    schema: Arc<SeriesSchema>,
+}
 
-impl Stream for DeclaredOrdering {
+impl Stream for DeclaredSeries {
     type Item = Result<RawSeriesChunk, BoxedError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.0.as_mut().poll_next(cx)
+        match self.chunks.as_mut().poll_next(cx) {
+            // What this node hands over is uncharged: the scan's read is charged where it happens
+            // and this node reserves nothing of its own, so the packer has nothing of its to hold.
+            Poll::Ready(Some(Ok(handed))) => match handed.into_parts().0 {
+                SeriesChunk::Raw(chunk) => Poll::Ready(Some(Ok(chunk))),
+                // This node answers raw chunks and nothing else. Another variant would mean the
+                // frame path and the in-process path no longer describe the same output, so it is
+                // reported rather than reinterpreted.
+                SeriesChunk::Evaluated(_) => Poll::Ready(Some(Err(BoxedError::new(
+                    common_query::error::Error::from(DataFusionError::Execution(
+                        "RawSeriesSourceExec handed over an evaluated chunk".to_string(),
+                    )),
+                )))),
+            },
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
-impl RawSeriesStream for DeclaredOrdering {
+impl RawSeriesStream for DeclaredSeries {
     fn schema(&self) -> &Arc<SeriesSchema> {
-        self.0.schema()
+        &self.schema
     }
 
     fn label_source(&self) -> &RawLabelSource {
-        self.0.label_source()
+        &RawLabelSource::Explicit
     }
 
     fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
-        self.0.label_decode_spec()
+        None
     }
 
     fn ordering(&self) -> SeriesOrdering {
@@ -291,6 +322,11 @@ fn is_series_scan(plan: &dyn ExecutionPlan) -> bool {
 }
 
 /// The physical node: the region's raw-series leaf, re-labelling each scan partition in place.
+///
+/// It decodes the scan's frames once. A consumer behind a boundary reads the frames it publishes; a
+/// consumer in this process asks for the chunks instead
+/// ([`SeriesExecutionPlan::execute_series`]),
+/// which is that same decode without the encode on the way out.
 #[derive(Debug)]
 pub struct RawSeriesSourceExec {
     input: Arc<dyn ExecutionPlan>,
@@ -404,6 +440,24 @@ impl RawSeriesSourceExec {
     pub fn is_per_series_scan(&self) -> bool {
         self.per_series_scan
     }
+
+    /// The child's frames for `partition`, after checking `partition` is one of this node's.
+    ///
+    /// Both entry points read the child through here, so a partition this node does not have is
+    /// refused the same way whether the caller asked for frames or for series.
+    fn child_frames(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        let partition_count = self.properties.partitioning.partition_count();
+        if partition >= partition_count {
+            return Err(DataFusionError::Execution(format!(
+                "RawSeriesSourceExec partition {partition} is out of bounds for {partition_count} partitions"
+            )));
+        }
+        self.input.execute(partition, context)
+    }
 }
 
 impl DisplayAs for RawSeriesSourceExec {
@@ -476,18 +530,12 @@ impl ExecutionPlan for RawSeriesSourceExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        let partition_count = self.properties.partitioning.partition_count();
-        if partition >= partition_count {
-            return Err(DataFusionError::Execution(format!(
-                "RawSeriesSourceExec partition {partition} is out of bounds for {partition_count} partitions"
-            )));
-        }
-        let frames = self.input.execute(partition, context)?;
         if let Some(child_schema) = &self.pass_through {
             // The child already writes this node's frame, so a batch differs only in the ordering
             // it declares. Re-declaring keeps the child's column data untouched and publishes
             // exactly the schema the plan was built with; one batch in, one batch out, so the
             // child's polling and backpressure are unchanged.
+            let frames = self.child_frames(partition, context)?;
             let declared = Arc::clone(&self.frame_schema);
             let child_schema = Arc::clone(child_schema);
             let batches = frames.map(move |batch| {
@@ -505,18 +553,47 @@ impl ExecutionPlan for RawSeriesSourceExec {
                 batches,
             )));
         }
-        let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
-        let relabelled = materialize_raw_labels(raw)
-            .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        // The scan may promise a finer order than this node declares. Exchange the promise here so
-        // the published frame carries the schema the plan was built with, which is what the region
-        // and the frontend both compare.
+        // The frames are the in-process chunks, encoded: `execute_series` is the decode,
+        // so a consumer reading frames and one reading series read the same values rather than two
+        // decodings that have to agree.
         // This node runs inside the query engine's DataFusion execution, whose runtimes enable the
         // time driver, so the packer may hold a partially filled batch across a pending period.
         pack_raw_series_with(
-            Box::pin(DeclaredOrdering(relabelled)),
+            Box::pin(DeclaredSeries {
+                chunks: self.execute_series(partition, context)?,
+                schema: Arc::clone(&self.series_schema),
+            }),
             PendingBatching::Deadline,
         )
+    }
+}
+
+impl SeriesExecutionPlan for RawSeriesSourceExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    /// The child's frames decoded once, named by their complete labels, and handed over as the
+    /// chunks they are.
+    ///
+    /// [`ExecutionPlan::execute`] packs exactly this stream when its consumer reads frames, so the two
+    /// entry points cannot decode differently: there is one decode, and the in-process one skips
+    /// only the encode at the end of it.
+    fn execute_series(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableSeriesStream> {
+        let frames = self.child_frames(partition, context)?;
+        let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
+        let relabelled = materialize_raw_labels(raw)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        // The scan may promise a finer order than this node declares. The ordering is a property
+        // of the schema this node publishes - which is where a consumer reads it - and not of the
+        // values, so a chunk stream carries none of its own and nothing is re-declared here.
+        Ok(relabelled
+            .map(|chunk| chunk.map(|chunk| HandedSeriesChunk::uncharged(SeriesChunk::Raw(chunk))))
+            .boxed())
     }
 }
 
@@ -553,6 +630,7 @@ pub(crate) mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
         BoundTag, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+        SendableRawSeriesStream,
     };
     use store_api::storage::{RegionId, ScanRequest};
     use table::table::scan::RegionScanExec;

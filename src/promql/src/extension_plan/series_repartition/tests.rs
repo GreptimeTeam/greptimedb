@@ -71,6 +71,7 @@ use futures::TryStreamExt;
 use store_api::region_engine::RawLabelSource;
 
 use super::*;
+use crate::extension_plan::series_execution::series_execution_plan;
 use crate::extension_plan::test_util::prepare_test_data;
 use crate::grid_series::render_label_set;
 use crate::native::execute::merge_workspace_bytes;
@@ -356,6 +357,92 @@ async fn public_frame_retains_large_series_charge_until_remainder_is_dropped() {
         pool.reserved(),
         "dropping delivered batches releases all charges"
     );
+}
+
+/// The charge of a handed-over chunk is released with the chunk.
+///
+/// The frame path keeps an owner's reservation in the packer's handoff until the batch it backs is
+/// flushed; a chunk handed over in process has no packer, so the reservation travels with the value
+/// instead. Both halves of that are asserted here: while a consumer holds the chunk the pool still
+/// holds its bytes, so it cannot hand them out twice, and the moment the consumer drops the chunk
+/// they are back. A release that ran early would let the pool over-commit; one that never ran would
+/// leak the read - `drop` is the whole of what has to happen, so neither can hide behind a call.
+#[tokio::test]
+async fn a_handed_chunk_holds_its_charge_until_it_is_dropped() {
+    const FRAGMENTS: usize = 257;
+    let metric = labels("handed");
+    let eval_grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, FRAGMENTS as u64).unwrap())
+            .unwrap(),
+    );
+    let series_schema = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from("value"),
+        }]),
+        eval_grid: Some(eval_grid),
+    });
+    let steps: Vec<Step> = (0..FRAGMENTS)
+        .map(|position| {
+            let time = TimeAxis::from_grid_spans(
+                series_schema.eval_grid.clone().unwrap(),
+                vec![GridSpan::new(position, 1)],
+            )
+            .unwrap();
+            let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+                position as f64,
+            ])));
+            let series = Series::try_new(&series_schema, metric.clone(), time, fields).unwrap();
+            Step::Chunk(series, position + 1 == FRAGMENTS)
+        })
+        .collect();
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let context = task_context(&pool);
+    let plan = node(
+        Scripted::plan_with_schema(vec![steps], Arc::clone(&series_schema)),
+        1,
+    );
+    let mut chunks = series_execution_plan(plan.as_ref())
+        .expect("a router over evaluated frames hands its chunks over")
+        .execute_series(0, Arc::clone(&context))
+        .expect("the output is claimed once");
+    wait_until("the producer queues the completed series", || {
+        producer_stopped(&execution(&plan))
+    })
+    .await;
+
+    // The owner publishes the one identity this read has once, merged, closed.
+    let handed = futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+        .await
+        .expect("the owner publishes its merged series")
+        .expect("the publication arrives");
+    let payload = FRAGMENTS * std::mem::size_of::<f64>();
+    assert!(
+        pool.reserved() >= payload + merge_workspace_bytes(FRAGMENTS, 1, 1),
+        "a held chunk keeps its payload and its merge workspace: {} against at least {}",
+        pool.reserved(),
+        payload + merge_workspace_bytes(FRAGMENTS, 1, 1)
+    );
+
+    // Dropping the value is what releases it: the reservation rides with the chunk.
+    let held = pool.reserved();
+    drop(handed);
+    let after = pool.reserved();
+    assert!(
+        after + payload <= held,
+        "drop gives back at least the payload: {held} held, {after} still reserved, {payload} of values"
+    );
+    assert!(
+        after < held,
+        "the reservation was released, not merely replaced"
+    );
+    assert!(
+        futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+            .await
+            .is_none(),
+        "the output ends after its one publication"
+    );
+    drop(chunks);
+    assert_eq!(0, pool.reserved(), "the finished read holds nothing");
 }
 
 /// One evaluated chunk: `len` rows from grid position `start`, and whether it closes its series.
