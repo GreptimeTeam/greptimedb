@@ -533,6 +533,21 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
+        if create_expr.if_not_exists {
+            let (catalog_name, schema_name, table_name) =
+                table_idents_to_full_name(&create_expr.name, &ctx)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+            if let Some(table) = self
+                .catalog_manager
+                .table(&catalog_name, &schema_name, &table_name, Some(&ctx))
+                .await
+                .context(CatalogSnafu)?
+            {
+                return Ok(table);
+            }
+        }
+
         let create_expr =
             &mut expr_helper::create_external_expr(create_expr, &ctx, &self.local_file_access)
                 .await?;

@@ -16,6 +16,7 @@
 pub mod trigger;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::result;
 use std::time::Duration;
 
@@ -759,11 +760,27 @@ impl From<DropTableTask> for PbDropTableTask {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(PartialEq, Clone)]
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
     pub partitions: Vec<Partition>,
     pub table_info: TableInfo,
+}
+
+impl fmt::Debug for CreateTableTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut create_table = self.create_table.clone();
+        for (key, value) in create_table.table_options.iter_mut() {
+            if let Some(redacted) = table::requests::redact_option_value(key, value.as_str()) {
+                *value = redacted;
+            }
+        }
+        f.debug_struct("CreateTableTask")
+            .field("create_table", &create_table)
+            .field("partitions", &self.partitions)
+            .field("table_info", &self.table_info)
+            .finish()
+    }
 }
 
 impl TryFrom<PbCreateTableTask> for CreateTableTask {
@@ -1996,6 +2013,40 @@ mod tests {
 
         let de = serde_json::from_slice(&output).unwrap();
         assert_eq!(task, de);
+    }
+
+    #[test]
+    fn test_create_table_task_debug_redacts_connection() {
+        let schema = SchemaBuilder::default().build().unwrap();
+        let table_info = test_table_info(1025, "foo", "bar", "baz", Arc::new(schema));
+        let mut create_table = CreateTableExpr::default();
+        create_table.table_options.insert(
+            table::requests::RELATIONAL_META_KEY.to_string(),
+            "{\"connection\":\"mysql://user:secret@127.0.0.1:3306/db\",\"remote_table\":\"sample\"}"
+                .to_string(),
+        );
+        let task = CreateTableTask::new(create_table, Vec::new(), table_info);
+        let debug = format!("{task:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("mysql://user:******@127.0.0.1:3306/db"));
+    }
+
+    #[test]
+    fn test_create_table_task_debug_redacts_credential() {
+        let schema = SchemaBuilder::default().build().unwrap();
+        let table_info = test_table_info(1026, "foo", "bar", "baz", Arc::new(schema));
+        let mut create_table = CreateTableExpr::default();
+        create_table
+            .table_options
+            .insert("secret_access_key".to_string(), "my-secret".to_string());
+        create_table
+            .table_options
+            .insert("session_token".to_string(), "my-token".to_string());
+        let task = CreateTableTask::new(create_table, Vec::new(), table_info);
+        let debug = format!("{task:?}");
+        assert!(!debug.contains("my-secret"));
+        assert!(!debug.contains("my-token"));
+        assert!(debug.contains("******"));
     }
 
     #[test]
