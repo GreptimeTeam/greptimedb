@@ -1,0 +1,65 @@
+src/store-api/src/sketch/proto.rs
+  s_17057bba187655::t_38c9ab33e284b2 267,317,355-434,436-449,453-464,466-470,472-566,568-572,625-626,642-643,660,674,729
+  s_17057bba187655::t_ea6b0bddfe752f 27-28,435,450-452,465,471,567,573,610-624,627-641,644-659,661-673,675-728,730
+src/datanode/src/region_server.rs
+  s_17057bba187655::t_9c025549f7b739 1148-1151
+  s_17057bba187655::t_ea22c4136d44ac 679,1147,1152,1198,1349,1970,2079
+src/store-api/src/sketch.rs
+  s_17057bba187655::t_6ad162da950b3e 149-214,320-331,352-377
+  s_17057bba187655::t_31ccd7e46ba6af 113-148,378-467
+src/datanode/src/region_server/sketch.rs
+  s_17057bba187655::t_9c025549f7b739 82-91
+  s_17057bba187655::t_697e13c6bbec68 20-22,55-63,75-81,92-103
+Cargo.lock
+  s_17057bba187655::t_56e3af45792d59 1660,6163,6775,9351,11627,11675,11688,13244,14166,14737,15362
+Cargo.toml
+  s_17057bba187655::t_6bc825af29536e 167
+src/api/src/region.rs
+  s_17057bba187655::t_857d8248f7446e 40-41,66,77,88
+src/client/src/region.rs
+  s_17057bba187655::t_c681c6c5178644 172-190,786-843
+src/common/meta/src/ddl/test_util/datanode_handler.rs
+  s_17057bba187655::t_8d679b13fe7f25 43
+src/meta-srv/src/procedure/utils.rs
+  s_17057bba187655::t_5c94165c19720d 366
+src/metric-engine/src/engine.rs
+  s_17057bba187655::t_b5edf6dda32e76 184,200,331,645
+src/metric-engine/src/engine/read.rs
+  s_e34fd7705c5d97::t_a2543423096c65 27-29,61-71,410-507
+src/mito2/AGENTS.md
+  s_17057bba187655::t_d4fee1b4ece053 76-77
+src/mito2/src/engine/sketch.rs
+  s_17057bba187655::t_ac716d01a29fe7 21-24,39-40,49-50,53-62,69,84,133-160
+src/mito2/src/sst/index/sketch_reader.rs
+  s_17057bba187655::t_de9cd7a9231c45 21-22,24-26,89-100
+src/operator/src/write_dispatcher.rs
+  s_17057bba187655::t_a7e9c43923c21a 364,450
+src/store-api/src/region_engine.rs
+  s_17057bba187655::t_52e1fec21a9651 1179
+src/store-api/src/region_request.rs
+  s_e34fd7705c5d97::t_72d6136eed2311 203-206,208
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3621bbd7e1368d865f088446db347c12ce4e6d3b",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_e34fd7705c5d97": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a5c8-659d-7ba3-b164-540806c9f233",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

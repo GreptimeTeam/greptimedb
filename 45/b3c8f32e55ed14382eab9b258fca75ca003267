@@ -1,0 +1,21 @@
+src/common/meta/src/kv_backend/rds/postgres.rs
+  s_4b1fbc048e2731::t_3694973d6a2450 52-54,755-771,1238-1245,1257-1265,1267-1268,1270-1272,1274-1279,1282-1284
+  s_4b1fbc048e2731::t_085ec147b59c10 935
+  s_4b1fbc048e2731::t_e97f4e49afbce4 1246-1256,1266,1269,1273,1280-1281,1285-1288
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "45b3c8f32e55ed14382eab9b258fca75ca003267",
+  "prompts": {},
+  "sessions": {
+    "s_4b1fbc048e2731": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e9f4-5a61-7992-99d3-b1532b10f960",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

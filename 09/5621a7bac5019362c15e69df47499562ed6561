@@ -1,0 +1,23 @@
+src/mito2/src/test_util.rs
+  s_17057bba187655::t_b973888b772338 481,519,535-541,956-959,962,964
+Cargo.lock
+  s_17057bba187655::t_0a11a98faeb538 1660,6163,6775,8714,9352,11628,11676,11689,13245,14167,14738,15363
+Cargo.toml
+  s_17057bba187655::t_677de44786b354 167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "095621a7bac5019362c15e69df47499562ed6561",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

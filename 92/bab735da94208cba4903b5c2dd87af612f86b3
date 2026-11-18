@@ -1,0 +1,29 @@
+tests-integration/fixtures/docker-compose.yml
+  s_4b1fbc048e2731::t_7d3a8fd3e6af40 133
+.github/workflows/nightly-ci.yml
+  s_4b1fbc048e2731::t_7d3a8fd3e6af40 125
+.github/workflows/rust.yml
+  s_4b1fbc048e2731::t_7d3a8fd3e6af40 237,295
+src/common/meta/src/kv_backend/rds/mysql.rs
+  s_4b1fbc048e2731::t_867ac5a42eb0e5 435-437
+  s_4b1fbc048e2731::t_7d3a8fd3e6af40 920-951
+  s_4b1fbc048e2731::t_684797663fbab1 952-955
+.github/workflows/integration.yml
+  s_4b1fbc048e2731::t_7d3a8fd3e6af40 246
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "92bab735da94208cba4903b5c2dd87af612f86b3",
+  "prompts": {},
+  "sessions": {
+    "s_4b1fbc048e2731": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e9f4-5a61-7992-99d3-b1532b10f960",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
