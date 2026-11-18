@@ -1536,9 +1536,7 @@ mod tests {
         let payload =
             DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
                 .unwrap();
-        let bytes = match payload {
-            DynFilterPayload::Datafusion(bytes) => bytes,
-        };
+        let DynFilterPayload::Datafusion(bytes) = payload;
         assert!(bytes.len() > 512 * 1024);
 
         let decoded = DynFilterPayload::Datafusion(bytes)
