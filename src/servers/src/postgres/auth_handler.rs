@@ -91,7 +91,9 @@ impl PgUserProviderSource {
     /// Authorizes a request that changes the connection's catalog/schema
     /// scope (a qualified COPY target). Denials are metered and logged
     /// like startup authorization, minus the client address which is not
-    /// reachable here.
+    /// reachable here, and surface as their SQLSTATE-mapped pg error
+    /// (`42501` insufficient privilege for access denials) instead of an
+    /// internal error.
     pub(crate) async fn authorize_database(
         &self,
         catalog: &str,
@@ -112,7 +114,7 @@ impl PgUserProviderSource {
                     warn!(user = user_info.username(), protocol = "postgres", catalog = %catalog,
                         schema = %schema, reason = %e.status_code(), "COPY target authorization denied");
                 }
-                Err(PgWireError::ApiError(Box::new(AuthSnafu.into_error(e))))
+                Err(convert_err(AuthSnafu.into_error(e)))
             }
             Ok(()) => Ok(()),
         }

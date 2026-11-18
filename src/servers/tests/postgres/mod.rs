@@ -1418,9 +1418,14 @@ async fn test_copy_in_otlp_target_authorization() -> Result<()> {
         let db_error = error
             .as_db_error()
             .unwrap_or_else(|| panic!("{sql}: {error}"));
-        // The authorization failure surfaces as an internal error whose
-        // message comes from the user provider.
-        assert_eq!(db_error.code(), &SqlState::INTERNAL_ERROR, "{sql}");
+        // The authorization failure surfaces as insufficient privilege
+        // (SQLSTATE 42501), not an internal error.
+        assert_eq!(
+            db_error.code(),
+            &SqlState::INSUFFICIENT_PRIVILEGE,
+            "{sql}: {}",
+            db_error.message()
+        );
     }
     // Denied before ingestion: the handler was never reached.
     assert_eq!(otlp_handler.calls(), 0);
