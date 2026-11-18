@@ -218,6 +218,74 @@ async fn test_create_and_reopen_region_with_object_store_wal() {
 }
 
 #[tokio::test]
+async fn test_root_prefix_create_reopen_and_offline_cleanup() {
+    let mut env = TestEnv::with_prefix("object-store-wal-root-prefix").await;
+    let (engine, log_store) = new_engine(&mut env).await;
+    let region_id = RegionId::new(1, 1);
+    let provider = object_store_provider(region_id);
+    let options = HashMap::from([(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&WalOptions::ObjectStore(ObjectStoreWalOptions::new(
+            wal_config().prefix,
+        )))
+        .unwrap(),
+    )]);
+    let request = CreateRequestBuilder::new()
+        .insert_option(WAL_OPTIONS_KEY, &options[WAL_OPTIONS_KEY])
+        .build();
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    assert_eq!(provider, engine.get_region(region_id).unwrap().provider);
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    let last_entry_id = log_store.latest_entry_id(&provider).unwrap();
+
+    reopen_region(&engine, region_id, table_dir.clone(), true, options.clone()).await;
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(provider, region.provider);
+    assert_eq!(
+        last_entry_id,
+        region.version_control.current().last_entry_id
+    );
+    assert_eq!(3, count_rows(&engine, region_id).await);
+    let object_store = region.access_layer.object_store().clone();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    assert!(!object_store.list(&region_dir).await.unwrap().is_empty());
+    drop(region);
+
+    close_region(&engine, region_id).await;
+    assert_eq!(
+        vec![last_entry_id],
+        stored_entry_ids(&log_store, region_id).await
+    );
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::CleanUp(RegionCleanUpRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(stored_entry_ids(&log_store, region_id).await.is_empty());
+    assert!(object_store.list(&region_dir).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_topic_latest_entry_id_follows_replay() {
     let mut env = TestEnv::with_prefix("object-store-wal-latest-entry-id").await;
     let (engine, log_store) = new_engine(&mut env).await;
