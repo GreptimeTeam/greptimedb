@@ -2522,8 +2522,9 @@ async fn test_conditional_discard_over_uncertain_replay_reloads_region() {
 }
 
 /// A discard raises the flushed entry id to a listed tail's bound. After a crash, the
-/// object-store WAL checks history, so the region opens only if this node's WAL durably holds
-/// history through the bound, as whoever records the tail ensures.
+/// object-store WAL, which by default does not accept missing history, checks history, so the
+/// region opens only if this node's WAL durably holds history through the bound, as whoever
+/// records the tail ensures.
 #[rstest]
 #[case::history_past_bound(true)]
 #[case::history_below_bound(false)]

@@ -85,8 +85,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// entries up to the new flushed entry id, except those covered by the node's remaining
     /// tails, which a background replay still reads.
     ///
-    /// Where the log store checks history, opening the region also requires this node's WAL
-    /// to hold history through the new flushed entry id. The discard checks neither
+    /// Where the log store checks history and does not accept missing history, opening the
+    /// region also requires this node's WAL to hold history through the new flushed entry id. The discard checks neither
     /// condition: whoever adds a tail ensures both (see
     /// [RegionManifest::wal_replay_start](crate::manifest::action::RegionManifest::wal_replay_start)).
     ///

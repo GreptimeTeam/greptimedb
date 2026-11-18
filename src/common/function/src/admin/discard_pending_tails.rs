@@ -37,8 +37,9 @@ use crate::helper::{cast_u64, one_of_sigs2};
 /// A region's flushed entry id is raised to the largest bound of the tails it discards. Where
 /// the WAL checks its history when a region opens, as the object-store WAL does after the
 /// datanode restarts, the region then opens only if the WAL of the datanode that leads the
-/// region holds history through that bound. The function does not check this: whoever records
-/// the tails ensures it.
+/// region holds history through that bound, unless the WAL is configured to accept missing
+/// history, which opens the region and loses its writes that were not flushed. The function
+/// does not check this: whoever records the tails ensures it.
 ///
 /// - `region_id` or `table_name`: the region or the table.
 /// - `node_id`: the datanode that wrote the tails.
