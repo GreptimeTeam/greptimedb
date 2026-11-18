@@ -30,8 +30,9 @@ use datafusion_common::Result;
 /// `FilterExec` buffers its output until `batch_size` rows pass. Under a selective
 /// filter a TopK above it receives nothing until the whole input partition is
 /// scanned, so its heap never fills and it never publishes the dynamic filter
-/// threshold that lets the scan skip older files and row groups. This rule lowers
-/// the batch size of such filters to the TopK's fetch.
+/// threshold that lets the scan skip older files and row groups. This rule sets the
+/// batch size of such filters to 1, which passes each filtered input batch on whole:
+/// the coalescer never splits a batch into pieces of the target size or holds rows back.
 #[derive(Debug)]
 pub struct TopKFilterBatchSize;
 
@@ -41,7 +42,7 @@ impl PhysicalOptimizerRule for TopKFilterBatchSize {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        rewrite(plan, None)
+        rewrite(plan, false)
     }
 
     fn name(&self) -> &str {
@@ -53,28 +54,29 @@ impl PhysicalOptimizerRule for TopKFilterBatchSize {
     }
 }
 
-/// `fetch` is the fetch of a TopK that reads `plan`'s output through operators that
+/// `under_topk` is true if a TopK reads `plan`'s output through operators that
 /// neither combine rows nor reorder them by anything but the sort key.
-fn rewrite(plan: Arc<dyn ExecutionPlan>, fetch: Option<usize>) -> Result<Arc<dyn ExecutionPlan>> {
-    let (plan, child_fetch) = if let Some(sort) = plan.downcast_ref::<SortExec>() {
-        let fetch = sort.fetch();
-        (plan, fetch)
+fn rewrite(plan: Arc<dyn ExecutionPlan>, under_topk: bool) -> Result<Arc<dyn ExecutionPlan>> {
+    let (plan, child_under_topk) = if let Some(sort) = plan.downcast_ref::<SortExec>() {
+        let is_topk = sort.fetch().is_some();
+        (plan, is_topk)
     } else if let Some(filter) = plan.downcast_ref::<FilterExec>() {
-        match fetch {
-            Some(fetch) if fetch > 0 && fetch < filter.batch_size() => {
-                let filter = filter.with_batch_size(fetch)?;
-                (Arc::new(filter) as Arc<dyn ExecutionPlan>, Some(fetch))
-            }
-            _ => (plan, fetch),
+        if under_topk && filter.batch_size() > 1 {
+            (
+                Arc::new(filter.with_batch_size(1)?) as Arc<dyn ExecutionPlan>,
+                true,
+            )
+        } else {
+            (plan, under_topk)
         }
     } else if plan.is::<ProjectionExec>()
         || plan.is::<CoalescePartitionsExec>()
         || plan.is::<RepartitionExec>()
         || plan.is::<CooperativeExec>()
     {
-        (plan, fetch)
+        (plan, under_topk)
     } else {
-        (plan, None)
+        (plan, false)
     };
 
     let children = plan.children();
@@ -85,7 +87,7 @@ fn rewrite(plan: Arc<dyn ExecutionPlan>, fetch: Option<usize>) -> Result<Arc<dyn
     let new_children = children
         .into_iter()
         .map(|child| {
-            let new_child = rewrite(child.clone(), child_fetch)?;
+            let new_child = rewrite(child.clone(), child_under_topk)?;
             changed |= !Arc::ptr_eq(&new_child, child);
             Ok(new_child)
         })
@@ -142,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn test_topk_lowers_filter_batch_size() {
+    fn test_topk_flushes_filter_per_batch() {
         let filter = filter_over_empty();
         let default_size = filter_batch_size(&filter);
         let projection = Arc::new(
@@ -154,7 +156,7 @@ mod tests {
         );
 
         let plan = optimize(sort(projection, Some(100)));
-        assert_eq!(100, filter_batch_size(&plan));
+        assert_eq!(1, filter_batch_size(&plan));
 
         // A full sort needs every row; batching does not delay any decision.
         let plan = optimize(sort(filter.clone(), None));

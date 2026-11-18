@@ -26,6 +26,8 @@ use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use table::table::scan::RegionScanExec;
 
+use crate::optimizer::windowed_sort::is_time_index_expr;
+
 /// Keeps one TopK heap for all partitions of a filtered region scan.
 ///
 /// A partitioned TopK publishes its dynamic filter threshold only after one partition
@@ -34,15 +36,15 @@ use table::table::scan::RegionScanExec;
 /// fills after `fetch` matching rows in total, so the scan starts skipping older ranges
 /// about `partitions` times earlier. Only the filtered rows go through the heap.
 ///
-/// The single heap runs on one thread, so the rule only applies to fetches up to
-/// [`MAX_GLOBAL_TOPK_FETCH`].
+/// Runs after [`TopKFilterBatchSize`](super::topk_filter_batch::TopKFilterBatchSize),
+/// which lets each filter pass on its matches without waiting for more.
 #[derive(Debug)]
 pub struct GlobalTopKOverFilteredScan;
 
-/// Largest fetch that gets one heap. With a filter passing 90% of 24M rows, a single
-/// heap took about 1.6x as long as per-partition heaps at fetch 100000 and showed no
-/// loss at fetch 10000.
-pub(crate) const MAX_GLOBAL_TOPK_FETCH: usize = 10_000;
+/// Largest fetch that gets one heap. The heap runs on one thread: with a filter passing
+/// 90% of 24M rows, it took about 1.6x as long as per-partition heaps at fetch 100000
+/// and showed no loss at fetch 10000.
+const MAX_GLOBAL_TOPK_FETCH: usize = 10_000;
 
 impl PhysicalOptimizerRule for GlobalTopKOverFilteredScan {
     fn optimize(
@@ -54,28 +56,21 @@ impl PhysicalOptimizerRule for GlobalTopKOverFilteredScan {
             let Some(sort) = plan.downcast_ref::<SortExec>() else {
                 return Ok(Transformed::no(plan));
             };
-            let input = sort.input();
-            if !sort
-                .fetch()
-                .is_some_and(|fetch| fetch <= MAX_GLOBAL_TOPK_FETCH)
-                || !sort.preserve_partitioning()
-                || input.output_partitioning().partition_count() <= 1
-                || !filters_region_scan(input, false)
+            if !sort.preserve_partitioning()
+                || sort.input().output_partitioning().partition_count() <= 1
+                || filtered_scan_below_topk(sort)?.is_none()
             {
                 return Ok(Transformed::no(plan));
             }
-            // Every partition now feeds the same heap, so a partition should not wait for
-            // `fetch` matches of its own before passing them on. A batch size of 1 passes
-            // each filtered batch through whole instead of splitting it.
-            let input = flush_filters_per_batch(input.clone())?;
-            let coalesced: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(input));
+            let coalesced: Arc<dyn ExecutionPlan> =
+                Arc::new(CoalescePartitionsExec::new(sort.input().clone()));
+            // Both calls keep the dynamic filter expression already pushed into the scan.
             #[allow(deprecated)]
             let resorted = plan.clone().with_new_children(vec![coalesced])?;
-            // `with_fetch` keeps the dynamic filter expression already pushed into the scan.
             let global = resorted
                 .downcast_ref::<SortExec>()
                 .expect("with_new_children keeps the SortExec")
-                .with_fetch(sort.fetch())
+                .clone()
                 .with_preserve_partitioning(false);
             Ok(Transformed::yes(Arc::new(global) as Arc<dyn ExecutionPlan>))
         })
@@ -91,38 +86,36 @@ impl PhysicalOptimizerRule for GlobalTopKOverFilteredScan {
     }
 }
 
-fn flush_filters_per_batch(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
-    if plan.is::<RegionScanExec>() {
-        return Ok(plan);
+/// Returns the region scan that `sort` reads if `sort` is a TopK on the time index with
+/// a fetch up to [`MAX_GLOBAL_TOPK_FETCH`], reading the scan through row-wise operators
+/// that include at least one filter.
+///
+/// Without a filter every scanned row reaches the heaps, so each fills at once. On another
+/// sort key the scan cannot skip ranges by time, so one heap only serializes the work.
+pub(crate) fn filtered_scan_below_topk(sort: &SortExec) -> Result<Option<&RegionScanExec>> {
+    if !sort
+        .fetch()
+        .is_some_and(|fetch| fetch <= MAX_GLOBAL_TOPK_FETCH)
+        || !is_time_index_expr(sort.input(), &sort.expr().first().expr)?
+    {
+        return Ok(None);
     }
-    let child = flush_filters_per_batch(plan.children()[0].clone())?;
-    if plan.is::<FilterExec>() {
-        #[allow(deprecated)]
-        let filter = plan.clone().with_new_children(vec![child])?;
-        let filter = filter
-            .downcast_ref::<FilterExec>()
-            .expect("with_new_children keeps the FilterExec")
-            .with_batch_size(1)?;
-        return Ok(Arc::new(filter));
+    let mut node = sort.input();
+    let mut seen_filter = false;
+    loop {
+        if let Some(scan) = node.downcast_ref::<RegionScanExec>() {
+            return Ok(seen_filter.then_some(scan));
+        }
+        seen_filter |= node.is::<FilterExec>();
+        if !(node.is::<FilterExec>() || node.is::<ProjectionExec>() || node.is::<CooperativeExec>())
+        {
+            return Ok(None);
+        }
+        let Some(child) = node.children().into_iter().next() else {
+            return Ok(None);
+        };
+        node = child;
     }
-    #[allow(deprecated)]
-    plan.with_new_children(vec![child])
-}
-
-/// Returns true if `plan` reads a region scan through row-wise operators that include
-/// at least one filter.
-fn filters_region_scan(plan: &Arc<dyn ExecutionPlan>, seen_filter: bool) -> bool {
-    if plan.is::<RegionScanExec>() {
-        return seen_filter;
-    }
-    let seen_filter = seen_filter || plan.is::<FilterExec>();
-    if plan.is::<FilterExec>() || plan.is::<ProjectionExec>() || plan.is::<CooperativeExec>() {
-        return plan
-            .children()
-            .first()
-            .is_some_and(|child| filters_region_scan(child, seen_filter));
-    }
-    false
 }
 
 #[cfg(test)]
@@ -176,16 +169,22 @@ mod tests {
         Arc::new(FilterExec::try_new(predicate, input).unwrap())
     }
 
-    fn partitioned_topk(input: Arc<dyn ExecutionPlan>, fetch: usize) -> Arc<dyn ExecutionPlan> {
-        let ordering = LexOrdering::new(vec![PhysicalSortExpr::new_default(Arc::new(
-            Column::new("ts", 1),
-        ))])
-        .unwrap();
+    fn partitioned_topk(
+        input: Arc<dyn ExecutionPlan>,
+        sort_key: Column,
+        fetch: usize,
+    ) -> Arc<dyn ExecutionPlan> {
+        let ordering =
+            LexOrdering::new(vec![PhysicalSortExpr::new_default(Arc::new(sort_key))]).unwrap();
         Arc::new(
             SortExec::new(ordering, input)
                 .with_fetch(Some(fetch))
                 .with_preserve_partitioning(true),
         )
+    }
+
+    fn ts() -> Column {
+        Column::new("ts", 1)
     }
 
     fn optimize(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
@@ -194,42 +193,46 @@ mod tests {
             .unwrap()
     }
 
+    fn is_partitioned_topk(plan: &Arc<dyn ExecutionPlan>) -> bool {
+        plan.downcast_ref::<SortExec>()
+            .unwrap()
+            .preserve_partitioning()
+    }
+
     #[test]
     fn test_filtered_scan_gets_one_heap() {
-        let plan = optimize(partitioned_topk(filter(region_scan(4)), 100));
+        let topk = partitioned_topk(filter(region_scan(4)), ts(), 100);
+        let pushed_filter = topk.dynamic_expressions_produced()[0].clone();
+        let plan = optimize(topk);
 
         let sort = plan.downcast_ref::<SortExec>().unwrap();
         assert!(!sort.preserve_partitioning());
         assert_eq!(Some(100), sort.fetch());
+        // The scan holds the filter the old TopK produced; the new one must update it.
+        assert!(Arc::ptr_eq(
+            &pushed_filter,
+            &sort.dynamic_expressions_produced()[0]
+        ));
         let coalesce = sort.input();
         assert!(coalesce.is::<CoalescePartitionsExec>());
-        let filter = coalesce.children()[0].downcast_ref::<FilterExec>().unwrap();
-        assert_eq!(1, filter.batch_size());
-        assert_eq!(4, filter.input().output_partitioning().partition_count());
+        assert_eq!(
+            4,
+            coalesce.children()[0]
+                .output_partitioning()
+                .partition_count()
+        );
     }
 
     #[test]
-    fn test_large_fetch_keeps_partitioned_topk() {
+    fn test_topk_keeps_partitions_when_one_heap_does_not_help() {
         // One thread would merge every filtered row of a weak filter.
-        let plan = optimize(partitioned_topk(
-            filter(region_scan(4)),
-            MAX_GLOBAL_TOPK_FETCH + 1,
-        ));
-        assert!(
-            plan.downcast_ref::<SortExec>()
-                .unwrap()
-                .preserve_partitioning()
-        );
-    }
-
-    #[test]
-    fn test_unfiltered_scan_keeps_partitioned_topk() {
+        let plan = partitioned_topk(filter(region_scan(4)), ts(), MAX_GLOBAL_TOPK_FETCH + 1);
+        assert!(is_partitioned_topk(&optimize(plan)));
         // Without a filter every scanned row reaches the heaps, so each fills at once.
-        let plan = optimize(partitioned_topk(region_scan(4), 100));
-        assert!(
-            plan.downcast_ref::<SortExec>()
-                .unwrap()
-                .preserve_partitioning()
-        );
+        let plan = partitioned_topk(region_scan(4), ts(), 100);
+        assert!(is_partitioned_topk(&optimize(plan)));
+        // The scan cannot skip ranges on another sort key.
+        let plan = partitioned_topk(filter(region_scan(4)), Column::new("body", 0), 100);
+        assert!(is_partitioned_topk(&optimize(plan)));
     }
 }
