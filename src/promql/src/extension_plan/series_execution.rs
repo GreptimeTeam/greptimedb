@@ -24,8 +24,8 @@
 //! implements the trait, and a native consumer that receives one calls
 //! [`SeriesExecutionPlan::execute_series`] instead of decoding a frame. The chunk is the internal
 //! value the operator already holds - a [`RawSeriesChunk`] read from a region, an
-//! [`EvaluatedChunk`] a tree settled on its grid, or a [`StateFrameRow`] a `Partial` exported - so
-//! the handover reuses the buffers instead of encoding them. Every content a native node publishes
+//! [`EvaluatedChunk`] a tree settled on its grid, or a [`StateChunk`] a `Partial` folded - so the
+//! handover reuses the buffers instead of encoding them. Every content a native node publishes
 //! travels this way; there is no second path for one of them to be left on.
 //!
 //! What keeps the shortcut structural, rather than a convention an operator has to remember, is
@@ -79,17 +79,15 @@ use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::MemoryReservation;
 use datafusion::physical_plan::ExecutionPlan;
-use std::fmt::{self, Formatter};
-
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::StateFrameRow;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::SeriesSchema;
 use futures::Stream;
 
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::RawSeriesSourceExec;
+use crate::extension_plan::fused_series::FusedSeriesExec;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
+use crate::native::state::StateChunk;
 
 /// One piece of one series, handed from one native operator to the next.
 ///
@@ -100,57 +98,19 @@ use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 /// chunk that cannot say whether it closes its series would make the consumer guess, and "no value
 /// here" and "nothing more here" would become the same thing.
 ///
-/// [`SeriesChunk::State`] is the content a state frame row carries, and deliberately not a second
-/// encoding of it: [`AggregateStateChunk`] holds the [`StateFrameRow`] a decoding consumer would
-/// have built, so the producer's decoder is the frame path's decoder and the consumer's conversion
-/// is the frame path's conversion. The variant exists because that publication is a value this
-/// crate holds, exactly like the other two, and an in-process consumer reads it as that value.
+/// [`SeriesChunk::State`] is the chunk a producer's aggregate already produces, with no conversion
+/// on the way: a `Partial` hands over the groups it folded, on the layout it exported them with, and
+/// a `Final` merges that chunk exactly as it merges the row a region's frame decodes to - the two
+/// sources meet inside the merge kernel, not at this boundary.
 #[derive(Debug)]
 pub enum SeriesChunk {
     /// One scan series, with its own timestamps and its finality.
     Raw(RawSeriesChunk),
     /// Values a producer already evaluated on the grid its frame declares.
     Evaluated(EvaluatedChunk),
-    /// One group's exported aggregate state, as the row a `Final` aggregate folds.
-    State(AggregateStateChunk),
-}
-
-/// One row of an exported aggregate state, handed over in process.
-///
-/// Nothing is re-encoded: the row is what [`StateFrameRow`] is - the group, the grid positions it
-/// has contributions at, whether it closes its chain, and the state arrays themselves - and the
-/// series layout it was exported on travels with it, because that layout is what the frame's
-/// declaration would have told a decoding consumer, and a consumer has to be able to check that it
-/// still binds the same series.
-pub struct AggregateStateChunk {
-    /// The exported row.
-    row: StateFrameRow,
-    /// The series layout the export was declared on.
-    series: Arc<SeriesSchema>,
-}
-
-impl AggregateStateChunk {
-    /// One exported row, and the series layout it was declared on.
-    pub(crate) fn new(row: StateFrameRow, series: Arc<SeriesSchema>) -> Self {
-        Self { row, series }
-    }
-
-    /// The exported row, and the series layout it was declared on, to be read together.
-    pub fn into_parts(self) -> (StateFrameRow, Arc<SeriesSchema>) {
-        (self.row, self.series)
-    }
-}
-
-impl fmt::Debug for AggregateStateChunk {
-    /// Which group closes where, not the payload: a `StateFrameRow` keeps its arrays and is not
-    /// `Debug` for the same reason a chunk is not printed sample by sample.
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AggregateStateChunk")
-            .field("metric", self.row.metric())
-            .field("is_last", &self.row.is_last())
-            .field("fields", &self.series.fields)
-            .finish_non_exhaustive()
-    }
+    /// The aggregate state its producer exported: the groups a `Partial` folded, or the row a
+    /// frame-fed producer decoded, as [`StateChunk`] carries them.
+    State(StateChunk),
 }
 
 /// What one handed chunk is charged to, released when the chunk is.
@@ -320,11 +280,17 @@ pub fn series_execution_plan(plan: &dyn ExecutionPlan) -> Option<&dyn SeriesExec
         return Some(source as &dyn SeriesExecutionPlan);
     }
     // A router is asked for every content it publishes: an owner's merged raw identity, the series
-    // an owner settled on its grid, and the row of a group an owner exported are all values this
-    // crate holds, so all three are read in process and none of them is left on a frame path.
-    plan.downcast_ref::<SeriesRepartitionExec>()
-        .filter(|router| router.hands_over_series())
-        .map(|router| router as &dyn SeriesExecutionPlan)
+    // an owner settled on its grid, and the groups an owner exported are all values this crate
+    // holds, so all three are read in process and none of them is left on a frame path.
+    if let Some(router) = plan.downcast_ref::<SeriesRepartitionExec>() {
+        return Some(router as &dyn SeriesExecutionPlan);
+    }
+    // A fused node answers with a frame - of values, or of the state a `Partial` folded - and that
+    // is a chunk another native operator reads. A node answering a row table is the query's answer
+    // instead, and only `execute` hands that out.
+    plan.downcast_ref::<FusedSeriesExec>()
+        .filter(|fused| fused.hands_over_series())
+        .map(|fused| fused as &dyn SeriesExecutionPlan)
 }
 
 /// `chunks` with the sequence check the frame path runs, applied to each chunk as it arrives.

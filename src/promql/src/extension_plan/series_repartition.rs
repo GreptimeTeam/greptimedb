@@ -147,17 +147,18 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{Series, SeriesSchema};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt};
-use store_api::region_engine::{RawSeriesStream, SendableRawSeriesStream};
+use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 use tokio::sync::mpsc;
 use twox_hash::XxHash64;
 
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::series_execution::{
-    AggregateStateChunk, HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk,
-    SeriesExecutionPlan,
+    HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk, SeriesExecutionPlan,
+    series_execution_plan,
 };
 use crate::grid_series::{label_set, merge_same_labelset};
 use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
+use crate::native::state::{StateChunk, state_bytes, state_row_of};
 use crate::source::merge_raw_identity_charging;
 use datatypes::series::samples::DenseSamplesRef;
 
@@ -195,6 +196,209 @@ pub enum IdentityCompletion {
     /// The router may publish a closed chain immediately and does not retain history to validate
     /// that guarantee after publication.
     CompleteDisjoint,
+}
+
+/// How the claim of an output reads this node's child.
+///
+/// The child is read once, for whichever of the two ways its consumer asked for first - the frames
+/// this node publishes, or the chunks it hands over - and the second claim is refused, so the two
+/// cannot disagree about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputRead {
+    /// The consumer reads frames: the child is executed and its frames are decoded here.
+    Frames,
+    /// The consumer reads chunks: the child is asked for its chunks when it can hand them over, and
+    /// decoded here only when it cannot.
+    Chunks,
+}
+
+/// One child partition, as this node reads it: its chunks when it hands them over, its frames when
+/// it does not.
+///
+/// `hand_over` is the child as a native operator, decided once for the whole read: with it, the
+/// partition is read in process and wrapped in the form this node's chain assembly expects; without
+/// it, the partition is executed and its frames decoded here.
+fn routed_input(
+    input: &Arc<dyn ExecutionPlan>,
+    hand_over: Option<&dyn SeriesExecutionPlan>,
+    content: FrameContent,
+    series_schema: &Arc<SeriesSchema>,
+    state: Option<&Arc<AggregateStateSchema>>,
+    partition: usize,
+    context: &Arc<TaskContext>,
+) -> DataFusionResult<RoutedInput> {
+    if let Some(plan) = hand_over {
+        let chunks = plan.execute_series(partition, Arc::clone(context))?;
+        return Ok(match content {
+            FrameContent::Evaluated => {
+                RoutedInput::Evaluated(Box::pin(HeldSeriesCharges::evaluated(chunks)))
+            }
+            FrameContent::Raw => {
+                RoutedInput::Raw(HeldSeriesCharges::raw(chunks, Arc::clone(series_schema)))
+            }
+            FrameContent::AggregateState => RoutedInput::StateChunks(chunks),
+        });
+    }
+    let frames = input.execute(partition, Arc::clone(context))?;
+    // The expected schema is a check and never an input: the decoder reads the frame's own
+    // declaration, and a partition declaring another frame is refused here rather than routed
+    // under labels it does not carry.
+    Ok(match content {
+        FrameContent::Evaluated => RoutedInput::Evaluated(unpack_evaluated_series(
+            frames,
+            Some(Arc::clone(series_schema)),
+        )?),
+        FrameContent::Raw => {
+            // The node publishes labels, so a child that names them by its key is decoded here,
+            // where the frames are already unpacked. An already-labelled stream passes through
+            // untouched.
+            let stream = unpack_raw_series(frames, Some(Arc::clone(series_schema)))?;
+            let stream = crate::source::materialize_raw_labels(stream)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?;
+            RoutedInput::Raw(stream)
+        }
+        FrameContent::AggregateState => {
+            let state = state.ok_or_else(|| {
+                DataFusionError::Plan("aggregate state declaration is missing".into())
+            })?;
+            RoutedInput::State(frames, Arc::clone(state), Arc::clone(series_schema))
+        }
+    })
+}
+
+/// A child's chunks, read as the series this node's chain assembly expects.
+///
+/// The producer's charge for a chunk is held until the next poll instead of being dropped with the
+/// conversion: by then this node has grown its own reservation for what it queued, so there is no
+/// moment at which the bytes are charged to nobody. That is the same hand-off the frame consumers
+/// make when they keep a batch's charge through the next poll.
+struct HeldSeriesCharges {
+    /// The child's chunks.
+    chunks: SendableSeriesStream,
+    /// What this stream is read as, so another content is refused rather than reinterpreted.
+    content: FrameContent,
+    /// The charge of the chunk handed out last, released when the next one is read.
+    held: Option<SeriesCharge>,
+}
+
+impl HeldSeriesCharges {
+    /// `chunks` read as evaluated series.
+    fn evaluated(chunks: SendableSeriesStream) -> SendableEvaluatedSeriesStream {
+        Box::pin(HeldEvaluated {
+            inner: HeldSeriesCharges {
+                chunks,
+                content: FrameContent::Evaluated,
+                held: None,
+            },
+        })
+    }
+
+    /// `chunks` read as raw series declared on `schema`.
+    ///
+    /// The chunks already carry complete labels - that is what a raw producer hands over - so the
+    /// stream declares no decode description and no bound source, which is what a decoding consumer
+    /// reads to decide it has nothing to decode.
+    fn raw(chunks: SendableSeriesStream, schema: Arc<SeriesSchema>) -> SendableRawSeriesStream {
+        Box::pin(HeldRaw {
+            inner: HeldSeriesCharges {
+                chunks,
+                content: FrameContent::Raw,
+                held: None,
+            },
+            schema,
+            label_source: RawLabelSource::Explicit,
+        })
+    }
+
+    /// The next chunk, with the charge of the previous one released first.
+    fn next_chunk(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<SeriesChunk, BoxedError>>> {
+        self.held = None;
+        match self.chunks.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(handed))) => {
+                let (chunk, charge) = handed.into_parts();
+                self.held = charge;
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// The error a child hands over a content this stream is not read as.
+    fn refused(&self, chunk: &SeriesChunk) -> BoxedError {
+        boxed(DataFusionError::Execution(format!(
+            "a {} input handed over {chunk:?}",
+            self.content.as_str()
+        )))
+    }
+}
+
+/// [`HeldSeriesCharges`] read as evaluated series.
+struct HeldEvaluated {
+    inner: HeldSeriesCharges,
+}
+
+impl Stream for HeldEvaluated {
+    type Item = Result<(Series, bool), BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.next_chunk(cx) {
+            Poll::Ready(Some(Ok(SeriesChunk::Evaluated(chunk)))) => {
+                Poll::Ready(Some(Ok((chunk.series, chunk.is_last))))
+            }
+            Poll::Ready(Some(Ok(other))) => {
+                let error = this.inner.refused(&other);
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// [`HeldSeriesCharges`] read as raw series.
+struct HeldRaw {
+    inner: HeldSeriesCharges,
+    schema: Arc<SeriesSchema>,
+    label_source: RawLabelSource,
+}
+
+impl RawSeriesStream for HeldRaw {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        &self.schema
+    }
+
+    fn label_source(&self) -> &RawLabelSource {
+        &self.label_source
+    }
+
+    fn ordering(&self) -> SeriesOrdering {
+        SeriesOrdering::Contiguous
+    }
+}
+
+impl Stream for HeldRaw {
+    type Item = Result<RawSeriesChunk, BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.next_chunk(cx) {
+            Poll::Ready(Some(Ok(SeriesChunk::Raw(chunk)))) => Poll::Ready(Some(Ok(chunk))),
+            Poll::Ready(Some(Ok(other))) => {
+                let error = this.inner.refused(&other);
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// The Repartition stage: one child's partitions, redistributed by canonical label set.
@@ -433,19 +637,6 @@ impl SeriesRepartitionExec {
         self.properties.partitioning.partition_count()
     }
 
-    /// Whether what this node publishes is a chunk a native consumer can read in process.
-    ///
-    /// Every content is. A raw publication is the merged samples of one stored identity, an
-    /// evaluated one the series an owner settled on its grid, and a state one the row of a group
-    /// that owner exported - each a value this crate holds, and each read in process by the node
-    /// that consumes it. The match is spelled out rather than `true` so a fourth content has to
-    /// answer here too.
-    pub fn hands_over_series(&self) -> bool {
-        match self.content {
-            FrameContent::Raw | FrameContent::Evaluated | FrameContent::AggregateState => true,
-        }
-    }
-
     /// The queue of `partition` and the lease on this read that reading it takes.
     ///
     /// Both public entry points take an output through here - the frames it publishes and the chunks
@@ -455,6 +646,7 @@ impl SeriesRepartitionExec {
         &self,
         partition: usize,
         context: &Arc<TaskContext>,
+        read: InputRead,
     ) -> DataFusionResult<(mpsc::UnboundedReceiver<Queued>, OutputLease)> {
         if partition >= self.outputs() {
             return Err(DataFusionError::Execution(format!(
@@ -476,6 +668,7 @@ impl SeriesRepartitionExec {
                     Arc::clone(&self.series_schema),
                     self.state.clone(),
                     context,
+                    read,
                 )?);
             }
             Arc::clone(state.as_ref().expect("the execution was just started"))
@@ -536,7 +729,6 @@ impl SeriesRepartitionExec {
         Ok(StateChunkOutputStream {
             decoder,
             frame_schema,
-            series: Arc::clone(&self.series_schema),
             receiver,
             lease,
             pending: VecDeque::new(),
@@ -628,7 +820,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        let (receiver, lease) = self.claim_output(partition, &context)?;
+        let (receiver, lease) = self.claim_output(partition, &context, InputRead::Frames)?;
         if self.content == FrameContent::AggregateState {
             return Ok(Box::pin(StateBatchOutputStream {
                 schema: self.input.schema(),
@@ -701,7 +893,7 @@ impl SeriesExecutionPlan for SeriesRepartitionExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableSeriesStream> {
-        let (receiver, lease) = self.claim_output(partition, &context)?;
+        let (receiver, lease) = self.claim_output(partition, &context, InputRead::Chunks)?;
         match self.content {
             FrameContent::Raw | FrameContent::Evaluated => {
                 let inner = self.partition_stream(receiver, lease, &context);
@@ -728,8 +920,6 @@ struct StateChunkOutputStream {
     decoder: SeriesFrameDecoder,
     /// The schema every exported batch carries, checked before it is decoded.
     frame_schema: SchemaRef,
-    /// The series layout the export was declared on, handed over with each row.
-    series: Arc<SeriesSchema>,
     /// The owner's queue, shared with the frames this output would otherwise publish.
     receiver: mpsc::UnboundedReceiver<Queued>,
     /// The claim on this read, released when this output ends.
@@ -813,15 +1003,30 @@ impl Stream for StateChunkOutputStream {
                     }
                     // One batch, one reservation, shared by every row cut from it: the bytes are
                     // live while any of those rows is, and released when the last one is dropped.
-                    let series = Arc::clone(&this.series);
                     let metadata = Arc::new(_metadata);
-                    let chunks = rows.into_iter().map(|row| {
-                        HandedSeriesChunk::charged(
-                            SeriesChunk::State(AggregateStateChunk::new(row, Arc::clone(&series))),
+                    for row in rows {
+                        let row = match state_row_of(row) {
+                            Ok(row) => row,
+                            Err(error) => return this.failed(error.to_string()),
+                        };
+                        this.pending.push_back(HandedSeriesChunk::charged(
+                            SeriesChunk::State(StateChunk::Row(row)),
                             SeriesCharge::shared(vec![Arc::clone(&_charge), Arc::clone(&metadata)]),
-                        )
-                    });
-                    this.pending.extend(chunks);
+                        ));
+                    }
+                }
+                Poll::Ready(Some(Queued::StateChunk {
+                    chunk,
+                    _charge,
+                    _metadata,
+                })) => {
+                    // A child that answered with its chunks has already done what this output's
+                    // frame form would do, so the group is handed on as it is; only the charge this
+                    // node queued it with moves onto the value.
+                    this.pending.push_back(HandedSeriesChunk::charged(
+                        SeriesChunk::State(chunk),
+                        SeriesCharge::shared(vec![Arc::new(_charge), Arc::new(_metadata)]),
+                    ));
                 }
                 Poll::Ready(Some(Queued::Eof { .. })) => {
                     // The shared ending and the queue's closure establish completion; this message
@@ -963,12 +1168,14 @@ impl SharedExecution {
     /// One task per child partition, started here: the child's computation happens inside its own
     /// `poll_next`, so a partition read on a task of another partition would run there, and the
     /// partition count the child declared would buy no parallelism at all.
+    #[allow(clippy::too_many_arguments)]
     fn start(
         input: &Arc<dyn ExecutionPlan>,
         routing: Routing,
         series_schema: Arc<SeriesSchema>,
         state: Option<Arc<AggregateStateSchema>>,
         context: &Arc<TaskContext>,
+        read: InputRead,
     ) -> DataFusionResult<Arc<Self>> {
         // What the child carries is what it declares, not what the policy suggests: a raw frame
         // can be routed by a match key too, so the policy no longer names the content.
@@ -976,33 +1183,23 @@ impl SharedExecution {
             .map_err(|error| DataFusionError::Plan(error.to_string()))?
             .content();
         let partitions = input.properties().partitioning.partition_count();
+        // The child is asked for its chunks only when a reader of them claimed this read: the other
+        // claim publishes frames, and a chunk read would have to be packed again.
+        let hand_over = match read {
+            InputRead::Chunks => series_execution_plan(input.as_ref()),
+            InputRead::Frames => None,
+        };
         let mut streams = Vec::with_capacity(partitions);
         for child_partition in 0..partitions {
-            let frames = input.execute(child_partition, Arc::clone(context))?;
-            // The expected schema is a check and never an input: the decoder reads the frame's own
-            // declaration, and a partition declaring another frame is refused here rather than
-            // routed under labels it does not carry.
-            streams.push(match content {
-                FrameContent::Evaluated => RoutedInput::Evaluated(unpack_evaluated_series(
-                    frames,
-                    Some(Arc::clone(&series_schema)),
-                )?),
-                FrameContent::Raw => {
-                    // The node publishes labels, so a child that names them by its key is decoded
-                    // here, where the frames are already unpacked. An already-labelled stream
-                    // passes through untouched.
-                    let stream = unpack_raw_series(frames, Some(Arc::clone(&series_schema)))?;
-                    let stream = crate::source::materialize_raw_labels(stream)
-                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
-                    RoutedInput::Raw(stream)
-                }
-                FrameContent::AggregateState => {
-                    let state = state.as_ref().ok_or_else(|| {
-                        DataFusionError::Plan("aggregate state declaration is missing".into())
-                    })?;
-                    RoutedInput::State(frames, Arc::clone(state), Arc::clone(&series_schema))
-                }
-            });
+            streams.push(routed_input(
+                input,
+                hand_over,
+                content,
+                &series_schema,
+                state.as_ref(),
+                child_partition,
+                context,
+            )?);
         }
         let mut senders = Vec::with_capacity(routing.outputs);
         let mut receivers = Vec::with_capacity(routing.outputs);
@@ -1587,6 +1784,93 @@ async fn read_state_batches(
     Stop::Ended
 }
 
+/// Reads a child's handed-over state, routing each group to the owner that folds it.
+///
+/// A state publication is not merged here: every group the child folded is one row of its export, and
+/// which owner folds it is the hash of its labels, exactly as a state frame's row is routed. What
+/// differs is only the form - the group arrives as the child's own chunk instead of as a batch - so
+/// the charge this node queues it with is grown while the child's charge is still in hand.
+async fn read_state_chunks(
+    stream: &mut SendableSeriesStream,
+    // The queue item names the group, not the partition it came from: a state publication is routed
+    // by its labels, and nothing waits for one partition's group to complete another's.
+    _partition: usize,
+    routing: &Routing,
+    senders: &[mpsc::UnboundedSender<Queued>],
+    read_ahead: &MemoryReservation,
+) -> Stop {
+    loop {
+        tokio::task::coop::consume_budget().await;
+        let next = stream.next().await;
+        match next {
+            Some(Ok(handed)) => {
+                let (chunk, child_charge) = handed.into_parts();
+                let SeriesChunk::State(chunk) = chunk else {
+                    return Stop::Failed(Arc::new(DataFusionError::Execution(format!(
+                        "an aggregate-state input handed over {chunk:?}"
+                    ))));
+                };
+                // One publication may hold several groups; each is routed on its own labels, and
+                // the charge the child put on the whole of it rides on all of them until this node
+                // has charged what it queued.
+                let (groups, child_reservation) = match chunk {
+                    StateChunk::Series {
+                        series,
+                        state_schema,
+                        reservation,
+                    } => (
+                        series
+                            .into_iter()
+                            .map(|series| StateChunk::Series {
+                                series: vec![series],
+                                state_schema: Arc::clone(&state_schema),
+                                reservation: None,
+                            })
+                            .collect::<Vec<_>>(),
+                        reservation,
+                    ),
+                    row @ StateChunk::Row(_) => (vec![row], None),
+                };
+                for group in groups {
+                    let metric = match &group {
+                        StateChunk::Series { series, .. } => &series[0].metric,
+                        StateChunk::Row(row) => &row.metric,
+                    };
+                    let output = routing.output_labels(metric);
+                    if senders[output].is_closed() {
+                        continue;
+                    }
+                    // Charged as it is queued, so what this node holds is accounted for before the
+                    // child's own charge goes.
+                    let charge = read_ahead.new_empty();
+                    if let Err(error) = charge.try_grow(state_bytes(&group)) {
+                        return Stop::Failed(Arc::new(error));
+                    }
+                    let metadata = read_ahead.new_empty();
+                    if let Err(error) = metadata.try_grow(std::mem::size_of::<Queued>()) {
+                        return Stop::Failed(Arc::new(error));
+                    }
+                    if let Err(error) = senders[output].send(Queued::StateChunk {
+                        chunk: group,
+                        _charge: charge,
+                        _metadata: metadata,
+                    }) {
+                        drop(error.0);
+                    }
+                }
+                // Every group this node queued is charged above; only now does the child's charge
+                // for the same publication go.
+                drop(child_reservation);
+                drop(child_charge);
+            }
+            Some(Err(error)) => {
+                return Stop::Failed(Arc::new(DataFusionError::External(Box::new(error))));
+            }
+            None => return Stop::Ended,
+        }
+    }
+}
+
 /// One input partition's task: reads its own child, assembles chains, and sends each complete chain to
 /// its canonical owner. Output queues are unbounded, so sending does not wait for an owner to poll;
 /// queued chains remain charged to the pool until consumed or dropped. Each task records its outcome
@@ -1607,6 +1891,9 @@ async fn route_partition(
         }
         RoutedInput::Raw(stream) => {
             read_raw_chains(stream, partition, &routing, &senders, &read_ahead).await
+        }
+        RoutedInput::StateChunks(stream) => {
+            read_state_chunks(stream, partition, &routing, &senders, &read_ahead).await
         }
         RoutedInput::State(stream, state, series) => {
             read_state_batches(
@@ -2053,6 +2340,8 @@ enum Ending {
 enum RoutedInput {
     Evaluated(SendableEvaluatedSeriesStream),
     Raw(SendableRawSeriesStream),
+    /// Exported state a child handed over, one publication at a time.
+    StateChunks(SendableSeriesStream),
     State(
         SendableRecordBatchStream,
         Arc<AggregateStateSchema>,
@@ -2081,6 +2370,13 @@ enum Queued {
         // None forwards the entire parent; Some selects one row for multi-output routing.
         row: Option<usize>,
         _charge: Arc<MemoryReservation>,
+        _metadata: MemoryReservation,
+    },
+    /// One group of exported state, as the child that folded it handed it over.
+    StateChunk {
+        chunk: StateChunk,
+        /// What this node queued it with: the payload the group holds.
+        _charge: MemoryReservation,
         _metadata: MemoryReservation,
     },
 }
@@ -2380,6 +2676,19 @@ impl Stream for StateBatchOutputStream {
                     // this message is only a queue-order barrier for the routed state stream.
                     let _ = input;
                     drop(_metadata);
+                }
+                Poll::Ready(Some(Queued::StateChunk { .. })) => {
+                    let error = DataFusionError::Internal(
+                        "a state frame output received a handed-over group".into(),
+                    );
+                    self.lease.fail(Arc::new(DataFusionError::Internal(
+                        "a state frame output received a handed-over group".into(),
+                    )));
+                    self.reported = true;
+                    self.receiver.close();
+                    while self.receiver.try_recv().is_ok() {}
+                    self.retained = None;
+                    return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(Some(Queued::Chain { .. })) => {
                     let error = DataFusionError::Internal(
@@ -2759,9 +3068,10 @@ impl Stream for RepartitionStream {
                 return Poll::Pending;
             }
             match this.receiver.poll_recv(cx) {
-                Poll::Ready(Some(Queued::StateBatch { .. })) => {
+                Poll::Ready(Some(Queued::StateBatch { .. }))
+                | Poll::Ready(Some(Queued::StateChunk { .. })) => {
                     this.lease.fail(Arc::new(DataFusionError::Internal(
-                        "non-state output received an aggregate-state batch".into(),
+                        "a series output received aggregate state".into(),
                     )));
                 }
                 Poll::Ready(Some(Queued::Chain {

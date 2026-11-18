@@ -59,8 +59,8 @@ pub use raw_series_source::{RawSeriesSource, RawSeriesSourceExec};
 pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use series_execution::{
-    AggregateStateChunk, HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk,
-    SeriesExecutionPlan, checked_series_stream, series_execution_plan,
+    HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk, SeriesExecutionPlan,
+    checked_series_stream, series_execution_plan,
 };
 pub use series_repartition::{IdentityCompletion, SeriesRepartitionExec, SeriesRouting};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};

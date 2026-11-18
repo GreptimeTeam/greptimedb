@@ -120,6 +120,7 @@ use crate::native::plan::{
     BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr,
     NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
+use crate::native::state::StateChunk;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use common_query::series_frame::series_frame_ordering;
@@ -10623,7 +10624,27 @@ async fn handed_state_rows(plan: &Arc<dyn ExecutionPlan>, owner: usize) -> Vec<D
     handed
         .into_iter()
         .map(|handed| match handed.into_parts().0 {
-            SeriesChunk::State(chunk) => decoded_state(&chunk.into_parts().0),
+            SeriesChunk::State(chunk) => match chunk {
+                StateChunk::Series { series, .. } => {
+                    let series = series.first().expect("one group per handed chunk");
+                    DecodedState {
+                        metric: series.metric.clone(),
+                        runs: series
+                            .time
+                            .runs()
+                            .map(|run| (run.position, run.len))
+                            .collect(),
+                        // A handed-over group is a whole publication: the producer folded it
+                        // completely, which is what the frame row it would have been says too.
+                        is_last: true,
+                    }
+                }
+                StateChunk::Row(row) => DecodedState {
+                    metric: row.metric.clone(),
+                    runs: row.time.runs().map(|run| (run.position, run.len)).collect(),
+                    is_last: true,
+                },
+            },
             other => panic!("a state owner handed over {other:?}"),
         })
         .collect()
@@ -10800,4 +10821,80 @@ async fn a_handed_state_chunk_holds_its_charge_until_it_is_dropped() {
     // The other owner of this router is never claimed, so the read it belongs to ends with the plan.
     drop(plan);
     assert_eq!(0, pool.reserved(), "the finished export holds nothing");
+}
+
+/// Whether `plan` is answered by the guard.
+fn guard_answers(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    series_execution_plan(plan.as_ref()).is_some()
+}
+
+/// A frame the guard answers for, and the row table it does not.
+///
+/// A `SeriesFrame` - of values, or of the state a `Partial` folded - is a publication another native
+/// operator reads in process. The row table a statement is answered with is the query's own answer,
+/// and only `execute` hands that out, so the guard says no and no consumer above reads a chunk.
+#[test]
+fn the_guard_answers_for_frames_and_not_for_rows() {
+    let values = aliasing_producer(routed_evaluated_partitions());
+    assert!(
+        guard_answers(&values),
+        "a node publishing a frame of values hands its chunks over"
+    );
+
+    let state = state_producer();
+    assert!(
+        guard_answers(&state),
+        "the state a Partial folds is handed over as the chunk it is"
+    );
+
+    let rows = plan_of(
+        fused(rate_tree()),
+        memory_exec(frames(&[series_chunk("web-0", &series_samples(1.0), true)])),
+    )
+    .expect("the runtime executes a rate tree");
+    assert!(
+        !guard_answers(&rows),
+        "a node answering rows is the query's answer, not a chunk"
+    );
+}
+
+/// A fused node above another reads its chunks, and answers what the frames would have.
+///
+/// The same tree over the same publication: `over_chunks` reads the node below in process, and
+/// `over_frames` decodes what that node publishes for a boundary consumer. The answer has to be the
+/// same batch for batch, which is what makes the handover a saving rather than a second semantics.
+#[tokio::test]
+async fn a_fused_node_hands_over_what_the_frames_above_it_would_decode() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let context = SessionContext::default().task_ctx();
+        // What the node below publishes, taken from the node itself so both plans read one input.
+        let lower = aliasing_producer(routed_evaluated_partitions());
+        let published = published_frames(&lower).await;
+        let lower_frames = memory_exec_partitioned_with(lower.schema(), published);
+
+        let over_chunks = summed_window_over(aliasing_producer(routed_evaluated_partitions()));
+        let over_frames = summed_window_over(lower_frames);
+        assert!(
+            uses_in_process_series(&over_chunks),
+            "the node below is one of ours, so its chunks are read"
+        );
+        assert!(
+            !uses_in_process_series(&over_frames),
+            "a memory leaf publishes frames, so the node above decodes them"
+        );
+
+        let chunk_batches = collect(Arc::clone(&over_chunks), Arc::clone(&context))
+            .await
+            .expect("the chunk path completes");
+        let frame_batches = collect(Arc::clone(&over_frames), context)
+            .await
+            .expect("the frame path completes");
+        assert!(!chunk_batches.is_empty(), "the fixture answers on the grid");
+        assert_eq!(
+            frame_batches, chunk_batches,
+            "the two paths answer the same batches"
+        );
+    })
+    .await
+    .expect("the composition finishes");
 }

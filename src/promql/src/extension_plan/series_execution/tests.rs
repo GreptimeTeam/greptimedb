@@ -132,9 +132,8 @@ fn every_content_a_router_publishes_is_handed_over() {
             answered
                 .as_any()
                 .downcast_ref::<SeriesRepartitionExec>()
-                .expect("the answer is the router itself")
-                .hands_over_series(),
-            "the router over {name} says it hands over"
+                .is_some(),
+            "the answer over {name} is the router itself"
         );
     }
 }

@@ -4773,6 +4773,79 @@ mod aggregate_state_acceptance {
         (batch, decoder)
     }
 
+    /// The row a producer builds is the row the frame it would have written carries.
+    ///
+    /// One encoder builds both: `from_state_series` for the single group a consumer merges in
+    /// process, and the frame encoder for the columns a boundary consumer decodes. So the labels,
+    /// the carried positions, the finality and every component value have to be identical - which is
+    /// what makes handing the row over a saving rather than a second semantics.
+    #[test]
+    fn a_state_row_is_the_row_the_frame_carries() {
+        let schema = state_schema(&["v"], 3);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let series = StateSeries {
+            metric: metric(Some("m"), &[("job", "x")]),
+            time: TimeAxis::from_grid_spans(
+                schema.eval_grid.clone().unwrap(),
+                vec![GridSpan::new(0, 2), GridSpan::new(2, 1)],
+            )
+            .unwrap(),
+            states: vec![values(3, 1.0)],
+        };
+        let direct =
+            StateFrameRow::from_state_series(&state, &schema, series.clone(), true).unwrap();
+
+        let (batch, decoder) = state_frame(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 2), GridSpan::new(2, 1)],
+            series.states.clone(),
+            true,
+        );
+        let framed = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_eq!(1, framed.len(), "one group is one row");
+        let framed = &framed[0];
+
+        assert_eq!(direct.metric(), framed.metric());
+        assert_eq!(direct.is_last(), framed.is_last());
+        assert_eq!(
+            direct.time().positions().collect::<Vec<_>>(),
+            framed.time().positions().collect::<Vec<_>>(),
+            "the same positions, in the same order"
+        );
+        let built = direct.fields().unwrap();
+        let decoded = framed.fields().unwrap();
+        assert_eq!(built.kind(), decoded.kind());
+        assert_eq!(built.components(), decoded.components());
+        assert_eq!(built.len(), decoded.len(), "the same fields");
+        for field in 0..built.len() {
+            let items = built.field(field).expect("the field is present");
+            for position in 0..items.len() {
+                assert_eq!(
+                    built.is_present(field, position).unwrap(),
+                    decoded.is_present(field, position).unwrap(),
+                    "field {field} at {position} is present on both"
+                );
+            }
+            assert_eq!(
+                built.field_values(field, Component::Value).unwrap(),
+                decoded.field_values(field, Component::Value).unwrap(),
+                "field {field} carries the same values"
+            );
+            assert_eq!(
+                built.field_values(field, Component::Compensation).unwrap(),
+                decoded
+                    .field_values(field, Component::Compensation)
+                    .unwrap(),
+                "field {field} carries the same compensations"
+            );
+        }
+    }
+
     fn floats(n: usize, seed: f64) -> Vec<Option<Values>> {
         (0..n)
             .map(|i| {

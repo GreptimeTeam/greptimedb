@@ -70,7 +70,9 @@ use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, Grouping as BoundGrouping,
     aggregate_state_binding,
 };
-use crate::native::state::{StateChunk, state_bytes, state_chunk_from_partial};
+use crate::native::state::{
+    StateChunk, state_bytes, state_chunk_from_partial, state_row_from_frame_row,
+};
 
 /// The output shape produced by an aggregate stage.
 pub(crate) enum AggregateOutput {
@@ -491,6 +493,13 @@ impl AggregateRuntime {
     }
 
     /// Merges one state chunk into this final aggregate.
+    ///
+    /// State reaches a `Final` from exactly two places and is merged here, once: a producer in this
+    /// process hands over the groups it folded ([`StateChunk::Series`]), and a region's exported
+    /// frame is decoded into the row it carries ([`StateChunk::Row`], which a merge scan reads
+    /// across processes). Both are read as the rows the merge kernel takes, so there is one merge
+    /// and not one per source; the series form is turned into those rows here, inside the kernel,
+    /// instead of by a caller that would have to know what the kernel eats.
     pub(crate) fn accumulate_state(
         &mut self,
         chunk: StateChunk,
@@ -500,36 +509,64 @@ impl AggregateRuntime {
         let expected = self.state_schema.as_ref().ok_or_else(|| {
             DataFusionError::NotImplemented("this runtime does not merge aggregate state".into())
         })?;
-        let StateChunk::Row(row) = chunk else {
-            return Err(DataFusionError::Internal(
-                "Final aggregate received producer state series".into(),
-            ));
+        // The one conversion this edge performs, and it is here rather than at the API boundary: a
+        // producer hands over the groups it folded, and the kernel merges rows.
+        let rows = match chunk {
+            StateChunk::Row(row) => vec![row],
+            StateChunk::Series {
+                series,
+                state_schema: _,
+                reservation: _reservation,
+            } => {
+                let declared = datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                    expected.kind,
+                    expected.components.to_vec(),
+                )
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+                let mut rows = Vec::with_capacity(series.len());
+                for group in series {
+                    // A group a `Partial` hands over is whole: it folded the group's contribution of
+                    // its partition, and the merge above joins partitions rather than continuing a
+                    // chain.
+                    let row = datatypes::series::frame::StateFrameRow::from_state_series(
+                        &declared,
+                        &self.schema,
+                        group,
+                        true,
+                    )
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+                    rows.push(state_row_from_frame_row(row, expected)?);
+                }
+                rows
+            }
         };
-        if row.fields.kind() != expected.kind
-            || row.fields.components() != expected.components.as_ref()
-        {
-            return Err(DataFusionError::NotImplemented(
-                "this runtime does not merge that kind of state".into(),
-            ));
-        }
-        if row
-            .time
-            .grid()
-            .is_none_or(|grid| grid.spec() != expected.grid.spec())
-        {
-            return Err(DataFusionError::Execution(
-                "aggregate state grid mismatch".into(),
-            ));
-        }
-        if row.fields.len() != self.schema.fields.len() {
-            return Err(DataFusionError::Execution(
-                "aggregate state field count mismatch".into(),
-            ));
-        }
         let description = self.describe();
         let merger = self.merger.as_mut().ok_or_else(|| no_fold(&description))?;
-        merger.merge_row(&row, |bytes| buffer.resize(pending.saturating_add(bytes)))?;
-        drop(row);
+        for row in &rows {
+            if row.fields.kind() != expected.kind
+                || row.fields.components() != expected.components.as_ref()
+            {
+                return Err(DataFusionError::NotImplemented(
+                    "this runtime does not merge that kind of state".into(),
+                ));
+            }
+            if row
+                .time
+                .grid()
+                .is_none_or(|grid| grid.spec() != expected.grid.spec())
+            {
+                return Err(DataFusionError::Execution(
+                    "aggregate state grid mismatch".into(),
+                ));
+            }
+            if row.fields.len() != self.schema.fields.len() {
+                return Err(DataFusionError::Execution(
+                    "aggregate state field count mismatch".into(),
+                ));
+            }
+            merger.merge_row(row, |bytes| buffer.resize(pending.saturating_add(bytes)))?;
+        }
+        drop(rows);
         buffer.resize(merger.state_bytes())
     }
 

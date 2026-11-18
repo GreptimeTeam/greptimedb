@@ -1298,6 +1298,7 @@ async fn aggregate_state_slice_wrappers_remain_charged_until_terminal_cleanup() 
         Arc::clone(&series),
         Some(Arc::clone(&wire)),
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let owner = Routing::new(2).output(&labels("many-slice-wrappers"));
@@ -3470,6 +3471,7 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
         Arc::clone(&schema()),
         None,
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
@@ -5503,6 +5505,7 @@ async fn a_recorded_failure_reaches_every_output_once() {
         Arc::clone(&schema()),
         None,
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let mut streams = Vec::new();
@@ -6695,6 +6698,7 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         Arc::clone(&schema()),
         None,
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
@@ -7001,6 +7005,7 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         Arc::clone(&schema()),
         None,
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
@@ -8171,4 +8176,105 @@ async fn histogram_state_router_dispatches_each_row_of_a_packed_batch() {
         }
     }
     assert_eq!(seen, groups.len());
+}
+
+/// The child is asked for its chunks when the consumer reads chunks, and for its frames when not.
+///
+/// The two readings describe one publication, so nothing outside this node can tell them apart - but
+/// the state content can, because a handed group and a decoded batch are different queue items. The
+/// child here is a router over state frames, which is the one shape that answers both ways.
+#[tokio::test]
+async fn the_child_is_read_the_way_the_consumer_reads_this_node() {
+    let grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, GRID_LEN).unwrap()).unwrap(),
+    );
+    let series = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from("value"),
+        }]),
+        eval_grid: Some(grid),
+    });
+    let wire = Arc::new(
+        datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+            AggregateStateKind::Sum,
+            vec![StateComponent::Value, StateComponent::Compensation],
+        )
+        .unwrap(),
+    );
+    let rows = (0..2)
+        .map(|position| {
+            (
+                StateSeries {
+                    metric: labels("handed-state"),
+                    time: TimeAxis::from_grid_spans(
+                        Arc::clone(&series.eval_grid.clone().unwrap()),
+                        vec![GridSpan::new(position, 1)],
+                    )
+                    .unwrap(),
+                    states: vec![vec![Some(StatePayload::Float(AggregateStateValues {
+                        value: position as f64,
+                        mean: position as f64,
+                        compensation: 0.0,
+                        count: 1.0,
+                        incremental_mean: false,
+                    }))]],
+                },
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut frames = common_query::series_frame::pack_aggregate_state(
+        Box::pin(futures::stream::iter(rows.into_iter().map(Ok))),
+        Arc::clone(&wire),
+        Arc::clone(&series),
+    )
+    .unwrap();
+    let batch = frames
+        .next()
+        .await
+        .expect("a state batch is emitted")
+        .expect("the state batch packs");
+    let child_schema = batch.schema();
+    let leaf: Arc<dyn ExecutionPlan> =
+        MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema, None).unwrap();
+    // A router over the frames answers both ways: chunks for a consumer that reads them, frames for
+    // one that does not. One claim per instance, so each reading gets its own child.
+    let child = || {
+        Arc::new(
+            SeriesRepartitionExec::try_new(Arc::clone(&leaf), 2).expect("a state frame routes"),
+        ) as Arc<dyn ExecutionPlan>
+    };
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(usize::MAX)));
+
+    let chunks = child();
+    let handed = routed_input(
+        &chunks,
+        series_execution_plan(chunks.as_ref()),
+        FrameContent::AggregateState,
+        &series,
+        Some(&wire),
+        0,
+        &context,
+    )
+    .unwrap();
+    assert!(
+        matches!(handed, RoutedInput::StateChunks(_)),
+        "a chunk read asks the child for its chunks"
+    );
+
+    let frames = child();
+    let decoded = routed_input(
+        &frames,
+        None,
+        FrameContent::AggregateState,
+        &series,
+        Some(&wire),
+        0,
+        &context,
+    )
+    .unwrap();
+    assert!(
+        matches!(decoded, RoutedInput::State(_, _, _)),
+        "a frame read executes the child and decodes it here"
+    );
 }

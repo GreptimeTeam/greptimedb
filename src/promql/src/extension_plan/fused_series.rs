@@ -44,6 +44,7 @@
 //! batch arrives: a tree the native runtime does not execute, a frame whose schema the tree's input
 //! was not compiled against, or an output schema the conversion cannot classify.
 
+use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::fmt::{self, Formatter};
@@ -100,7 +101,8 @@ use table::table::scan::SeriesScanExec;
 
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::series_execution::{
-    HandedSeriesChunk, SeriesCharge, SeriesChunk, checked_series_stream, series_execution_plan,
+    HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk, SeriesExecutionPlan,
+    checked_series_stream, series_execution_plan,
 };
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::extension_plan::{RawSeriesSourceExec, SeriesRouting};
@@ -2959,6 +2961,88 @@ impl ExecutionPlan for FusedSeriesExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
+        let FusedExecution { stream, state } = self.output_stream(partition, context)?;
+        match (self.format, state) {
+            (FusedOutputFormat::SeriesFrame, Some(state)) => {
+                let source: SendableStateSeriesStream = Box::pin(FusedStateStream {
+                    source: stream,
+                    pending: Vec::new().into_iter(),
+                    reservation: None,
+                });
+                Ok(pack_aggregate_state(source, state.declared, state.series)?)
+            }
+            (FusedOutputFormat::SeriesFrame, None) => {
+                let schema = evaluated_output(&self.tree)?;
+                let source: SendableEvaluatedSeriesStream =
+                    Box::pin(FusedEvaluatedStream { source: stream });
+                Ok(pack_evaluated_series(source, schema)?)
+            }
+            // A row table is the query's answer, not a publication another native operator reads.
+            (FusedOutputFormat::PlainRows, _) => Ok(Box::pin(stream)),
+        }
+    }
+}
+
+impl SeriesExecutionPlan for FusedSeriesExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    /// One partition's tree, handed over as the chunks a native consumer reads.
+    ///
+    /// The same execution the frame entry point runs, without the encode: the evaluated values the
+    /// tree settled, each with the finality the packer would have given it, or - for a `Partial`
+    /// root - the groups it folded, handed over exactly as its own aggregate produced them.
+    fn execute_series(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableSeriesStream> {
+        if self.format != FusedOutputFormat::SeriesFrame {
+            return Err(DataFusionError::Execution(format!(
+                "FusedSeries partition {partition} answers a row table, which is read as rows"
+            )));
+        }
+        let FusedExecution { stream, state } = self.output_stream(partition, context)?;
+        match state {
+            Some(state) => {
+                let source: SendableStateSeriesStream = Box::pin(FusedStateStream {
+                    source: stream,
+                    pending: Vec::new().into_iter(),
+                    reservation: None,
+                });
+                Ok(Box::pin(FusedStateChunks {
+                    source,
+                    declared: state.binding,
+                }))
+            }
+            None => {
+                let source: SendableEvaluatedSeriesStream =
+                    Box::pin(FusedEvaluatedStream { source: stream });
+                Ok(Box::pin(FusedEvaluatedChunks { source }))
+            }
+        }
+    }
+}
+
+impl FusedSeriesExec {
+    /// Whether this node's output is a publication another native operator can read in process.
+    ///
+    /// A `SeriesFrame` - of values or of exported state - is one. The plain row table this node
+    /// answers a statement with is not: rows are the query's answer, and `execute` hands them out.
+    pub fn hands_over_series(&self) -> bool {
+        self.format == FusedOutputFormat::SeriesFrame
+    }
+
+    /// One partition's execution, before it is put in the form a consumer asked for.
+    ///
+    /// Both entry points start here, so the tree, its input and the evidence one execution claims are
+    /// built once and the same way; they differ only in what they do with what the tree produced.
+    fn output_stream(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<FusedExecution> {
         if partition >= self.properties.partitioning.partition_count() {
             return Err(DataFusionError::Execution(
                 "FusedSeries output partition is out of range".into(),
@@ -3167,38 +3251,19 @@ impl ExecutionPlan for FusedSeriesExec {
             evidence_completed: false,
             evidence_claim: claim,
         };
-        if self.format == FusedOutputFormat::SeriesFrame {
-            if state_mode {
-                let binding = state_binding.as_ref().ok_or_else(|| {
-                    DataFusionError::Plan(
-                        "FusedSeries Partial root has no aggregate-state binding".into(),
-                    )
-                })?;
-                let schema = Arc::new(SeriesSchema {
+        Ok(FusedExecution {
+            state: state_binding.as_ref().map(|binding| FusedStateOutput {
+                declared: state_schema
+                    .clone()
+                    .expect("a binding declares a frame state layout"),
+                binding: Arc::clone(binding),
+                series: Arc::new(SeriesSchema {
                     fields: binding.accumulators.clone(),
                     eval_grid: Some(Arc::clone(&binding.grid)),
-                });
-                let source: SendableStateSeriesStream = Box::pin(FusedStateStream {
-                    source: stream,
-                    pending: Vec::new().into_iter(),
-                    reservation: None,
-                });
-                Ok(pack_aggregate_state(
-                    source,
-                    state_schema.ok_or_else(|| {
-                        DataFusionError::Plan("FusedSeries Partial state schema is missing".into())
-                    })?,
-                    schema,
-                )?)
-            } else {
-                let schema = evaluated_output(&self.tree)?;
-                let source: SendableEvaluatedSeriesStream =
-                    Box::pin(FusedEvaluatedStream { source: stream });
-                Ok(pack_evaluated_series(source, schema)?)
-            }
-        } else {
-            Ok(Box::pin(stream))
-        }
+                }),
+            }),
+            stream,
+        })
     }
 }
 
@@ -3321,6 +3386,24 @@ enum FusedChunk {
     State(StateChunk),
 }
 
+/// One partition's execution: the tree's own output, and its state layout when it exports state.
+struct FusedExecution {
+    /// The tree's output, which a consumer reads as values, as state, or as rows.
+    stream: FusedSeriesStream,
+    /// What a `Partial` root exports.
+    state: Option<FusedStateOutput>,
+}
+
+/// The aggregate state a `Partial` root exports.
+struct FusedStateOutput {
+    /// The layout as the frame path declares it, which is what the packer takes.
+    declared: Arc<datatypes::series::aggregate_state::AggregateStateSchema>,
+    /// The same layout as the tree's binding, which is what a handed-over chunk names.
+    binding: Arc<AggregateStateSchema>,
+    /// The series schema the export is of.
+    series: Arc<SeriesSchema>,
+}
+
 /// One chunk and the source index it belongs to, and what the producer charged it to.
 ///
 /// The charge is held for as long as this value is: it is dropped once the chunk has been pushed
@@ -3355,14 +3438,41 @@ fn in_process_feed(
                     "FusedSeries state source {source} binds no aggregate state"
                 )));
             };
-            let (row, declared) = chunk.into_parts();
-            // The two checks the frame path makes before it folds a state row, on the same two
-            // properties: the series the export was declared on is the one this node binds, and the
-            // row's state is the kind and component layout this node's aggregate declared.
-            ensure_declared_series(&declared, series, source)?;
-            let row = state_row_from_frame_row(row, binding)
-                .map_err(|error| BoxedError::new(common_query::error::Error::from(error)))?;
-            FusedChunk::State(StateChunk::Row(row))
+            // The two checks the frame path makes before it folds state, on the same two properties:
+            // the state layout the export was declared on is the kind and component layout this
+            // node's aggregate declared, and the series it was exported on is the series this node
+            // binds. After them the chunk travels as it is - a `Final` merges the groups a producer
+            // folded exactly as it merges the row a frame decodes to.
+            match &chunk {
+                StateChunk::Row(row) => {
+                    if row.kind != binding.kind
+                        || row.fields.components() != binding.components.as_ref()
+                    {
+                        return Err(failed(format!(
+                            "FusedSeries state source {source} was handed {:?} state, not the {:?} \
+                             state it binds",
+                            row.kind, binding.kind
+                        )));
+                    }
+                }
+                StateChunk::Series { state_schema, .. } => {
+                    if state_schema.kind != binding.kind
+                        || state_schema.components.as_ref() != binding.components.as_ref()
+                    {
+                        return Err(failed(format!(
+                            "FusedSeries state source {source} was handed {:?} state, not the {:?} \
+                             state it binds",
+                            state_schema.kind, binding.kind
+                        )));
+                    }
+                    let declared = SeriesSchema {
+                        fields: state_schema.accumulators.clone(),
+                        eval_grid: Some(Arc::clone(&state_schema.grid)),
+                    };
+                    ensure_declared_series(&declared, series, source)?;
+                }
+            }
+            FusedChunk::State(chunk)
         }
         (kind, chunk) => {
             return Err(failed(format!(
@@ -3575,14 +3685,7 @@ impl FusedSeriesStream {
             match chunk {
                 FusedChunk::Raw(value) => executor.push_raw(*input_id, value)?,
                 FusedChunk::Evaluated(value) => executor.push_evaluated(*input_id, value)?,
-                FusedChunk::State(StateChunk::Row(row)) => {
-                    executor.push_state(*input_id, StateChunk::Row(row))?
-                }
-                FusedChunk::State(StateChunk::Series { .. }) => {
-                    return Err(DataFusionError::Execution(
-                        "one producer state batch cannot feed several runtime inputs".to_string(),
-                    ));
-                }
+                FusedChunk::State(chunk) => executor.push_state(*input_id, chunk)?,
             }
         } else {
             let chunk = Some(chunk);
@@ -3817,6 +3920,57 @@ impl Stream for FusedSeriesStream {
                     "evaluated chunk reached the row stream adapter".into(),
                 ))))
             }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// The tree's evaluated output, handed over as the chunks a native consumer reads.
+struct FusedEvaluatedChunks {
+    source: SendableEvaluatedSeriesStream,
+}
+
+impl Stream for FusedEvaluatedChunks {
+    type Item = Result<HandedSeriesChunk, BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.source).poll_next(cx) {
+            Poll::Ready(Some(Ok((series, is_last)))) => {
+                Poll::Ready(Some(Ok(HandedSeriesChunk::uncharged(
+                    SeriesChunk::Evaluated(EvaluatedChunk { series, is_last }),
+                ))))
+            }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Exported state, handed over one group at a time as the chunks a `Final` merges.
+struct FusedStateChunks {
+    source: SendableStateSeriesStream,
+    /// The layout every group of this export was folded on.
+    declared: Arc<AggregateStateSchema>,
+}
+
+impl Stream for FusedStateChunks {
+    type Item = Result<HandedSeriesChunk, BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let declared = Arc::clone(&self.declared);
+        match Pin::new(&mut self.source).poll_next(cx) {
+            // A `Partial` closes every group it exports: the fold of one partition is whole, and the
+            // `Final` above merges the partitions' publications rather than continuing one chain.
+            Poll::Ready(Some(Ok((series, _closed)))) => Poll::Ready(Some(Ok(
+                HandedSeriesChunk::uncharged(SeriesChunk::State(StateChunk::Series {
+                    series: vec![series],
+                    state_schema: declared,
+                    reservation: None,
+                })),
+            ))),
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
