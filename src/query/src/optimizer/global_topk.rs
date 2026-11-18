@@ -35,9 +35,6 @@ use crate::optimizer::windowed_sort::is_time_index_expr;
 /// `fetch / selectivity` rows before that happens. A single heap fed by all partitions
 /// fills after `fetch` matching rows in total, so the scan starts skipping older ranges
 /// about `partitions` times earlier. Only the filtered rows go through the heap.
-///
-/// Runs after [`TopKFilterBatchSize`](super::topk_filter_batch::TopKFilterBatchSize),
-/// which lets each filter pass on its matches without waiting for more.
 #[derive(Debug)]
 pub struct GlobalTopKOverFilteredScan;
 

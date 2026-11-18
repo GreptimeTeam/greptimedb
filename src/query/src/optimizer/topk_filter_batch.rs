@@ -30,8 +30,8 @@ use crate::optimizer::windowed_sort::is_time_index_expr;
 /// Lets a TopK see filtered rows as soon as it can use them.
 ///
 /// `FilterExec` buffers its output until `batch_size` rows pass. Under a selective
-/// filter a TopK above it receives nothing until the whole input partition is
-/// scanned, so its heap never fills and it never publishes the dynamic filter
+/// filter a TopK above it receives nothing until 8192 rows match or the input
+/// partition ends, so its heap fills too late to publish the dynamic filter
 /// threshold that lets the scan skip older files and row groups. For a TopK on the
 /// time index, this rule sets the batch size of such filters to 1, which passes each
 /// filtered input batch on whole: the coalescer never splits a batch into pieces of the

@@ -23,17 +23,20 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_recordbatch::RecordBatches;
-use datafusion::physical_plan::ExecutionPlan;
-use datatypes::schema::{ColumnSchema, Schema};
+use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
+use datatypes::schema::{ColumnSchema, SchemaRef};
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
-    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
-    SinglePartitionScanner, SyncRegionFromRequest, SyncRegionFromResponse,
+    PartitionRange, PrepareRequest, QueryScanContext, RegionEngine, RegionRole, RegionScanner,
+    RegionScannerRef, RegionStatistic, RemapManifestsRequest, RemapManifestsResponse,
+    ScannerProperties, SetRegionRoleStateResponse, SettableRegionRoleState, SinglePartitionScanner,
+    SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest, SequenceNumber};
@@ -230,15 +233,7 @@ fn mock_region_metadata_with_tsid(region_id: RegionId) -> RegionMetadata {
     builder.build().unwrap()
 }
 
-/// A region scan over an empty `(body STRING, ts TIMESTAMP TIME INDEX)` table split
-/// into `partitions` partitions.
-pub(crate) fn log_region_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
-    let ts_type = ConcreteDataType::timestamp_millisecond_datatype();
-    let schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("body", ConcreteDataType::string_datatype(), true),
-        ColumnSchema::new("ts", ts_type.clone(), false),
-    ]));
-    let stream = RecordBatches::try_new(schema, vec![]).unwrap().as_stream();
+fn log_region_metadata() -> RegionMetadataRef {
     let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
     builder
         .push_column_metadata(ColumnMetadata {
@@ -247,19 +242,105 @@ pub(crate) fn log_region_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
             column_id: 1,
         })
         .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("ts", ts_type, false),
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
             semantic_type: SemanticType::Timestamp,
             column_id: 2,
         });
-    let scanner = Box::new(SinglePartitionScanner::new(
-        stream,
-        false,
-        Arc::new(builder.build().unwrap()),
-        None,
-    ));
+    Arc::new(builder.build().unwrap())
+}
+
+/// A region scan over an empty `(body STRING, ts TIMESTAMP TIME INDEX)` table split
+/// into `partitions` partitions.
+pub(crate) fn log_region_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
+    let metadata = log_region_metadata();
+    let stream = RecordBatches::try_new(metadata.schema.clone(), vec![])
+        .unwrap()
+        .as_stream();
+    let scanner = Box::new(SinglePartitionScanner::new(stream, false, metadata, None));
     let scan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
     Arc::new(
         scan.with_new_partitions(vec![vec![]; partitions], partitions)
             .unwrap(),
     )
+}
+
+/// A region scan over the same table as [`log_region_scan`] whose ranges are not yet
+/// assigned to partitions, as `ParallelizeScan` sees it.
+pub(crate) fn unassigned_log_region_scan(ranges: Vec<PartitionRange>) -> Arc<dyn ExecutionPlan> {
+    let scanner = Box::new(RangesScanner {
+        metadata: log_region_metadata(),
+        properties: ScannerProperties::new(vec![ranges], false, 0),
+    });
+    Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap())
+}
+
+#[derive(Debug)]
+struct RangesScanner {
+    metadata: RegionMetadataRef,
+    properties: ScannerProperties,
+}
+
+impl DisplayAs for RangesScanner {
+    fn fmt_as(
+        &self,
+        _format: DisplayFormatType,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        write!(f, "RangesScanner")
+    }
+}
+
+impl RegionScanner for RangesScanner {
+    fn name(&self) -> &str {
+        "RangesScanner"
+    }
+
+    fn properties(&self) -> &ScannerProperties {
+        &self.properties
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.metadata.schema.clone()
+    }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        self.metadata.clone()
+    }
+
+    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.properties.prepare(request);
+        Ok(())
+    }
+
+    fn scan_partition(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics: &ExecutionPlanMetricsSet,
+        _partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        unreachable!("planning only")
+    }
+
+    fn has_predicate_without_region(&self) -> bool {
+        false
+    }
+
+    fn add_dyn_filter_to_predicate(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Vec<bool> {
+        vec![false; filter_exprs.len()]
+    }
+
+    fn set_logical_region(&mut self, logical_region: bool) {
+        self.properties.set_logical_region(logical_region);
+    }
+
+    fn set_query_load_region_id(&mut self, region_id: RegionId) {
+        self.properties.set_query_load_region_id(region_id);
+    }
 }

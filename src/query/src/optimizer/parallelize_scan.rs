@@ -90,7 +90,7 @@ impl ParallelizeScan {
                         .find(|(scan, _)| std::ptr::eq(*scan, region_scan_exec))
                         .map(|(_, descending)| *descending);
                     let mut partition_ranges = match global_topk_descending {
-                        // The heap stops reading a range once its threshold excludes the
+                        // The scan skips a range once the TopK threshold excludes the
                         // range's time span. Dealing ranges in time order makes the first
                         // range of every partition one of the newest (or oldest), so the
                         // threshold forms before older ranges are read.
@@ -148,8 +148,9 @@ impl ParallelizeScan {
 }
 
 /// Assigns ranges in time order, newest first when `descending`, each to the partition
-/// with the fewest rows so far. Every partition starts with one of the newest ranges,
-/// and the rows stay balanced when range sizes vary.
+/// with the fewest rows so far, then the fewest ranges. Every partition starts with one
+/// of the newest ranges, and the rows stay balanced when range sizes vary. Ranges of
+/// old files may report 0 rows, meaning unknown; the range count spreads those.
 fn assign_partition_ranges_by_time(
     mut ranges: Vec<PartitionRange>,
     expected_partition_num: usize,
@@ -164,7 +165,7 @@ fn assign_partition_ranges_by_time(
     let mut partition_rows = vec![0; expected_partition_num];
     for range in ranges {
         let target = (0..expected_partition_num)
-            .min_by_key(|&i| (partition_rows[i], i))
+            .min_by_key(|&i| (partition_rows[i], partition_ranges[i].len(), i))
             .unwrap();
         partition_rows[target] += range.num_rows;
         partition_ranges[target].push(range);
@@ -176,9 +177,15 @@ fn assign_partition_ranges_by_time(
 mod test {
     use common_time::Timestamp;
     use common_time::timestamp::TimeUnit;
+    use datafusion::physical_plan::filter::FilterExec;
+    use datafusion::physical_plan::union::UnionExec;
+    use datafusion_physical_expr::expressions::{Column, IsNotNullExpr};
+    use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
+    use datatypes::arrow::compute::SortOptions;
     use store_api::region_engine::PartitionRange;
 
-    use super::{assign_partition_ranges, assign_partition_ranges_by_time};
+    use super::*;
+    use crate::optimizer::test_util::unassigned_log_region_scan;
 
     #[test]
     fn test_assign_by_time_starts_every_partition_with_newest_ranges() {
@@ -223,6 +230,88 @@ mod test {
             .map(|p| p.iter().map(|r| r.num_rows).sum())
             .collect();
         assert_eq!(vec![1001, 1001], rows);
+    }
+
+    #[test]
+    fn test_assign_by_time_spreads_ranges_of_unknown_size() {
+        let ranges = (0..4)
+            .map(|i| PartitionRange {
+                start: Timestamp::new(i * 10, TimeUnit::Second),
+                end: Timestamp::new(i * 10 + 10, TimeUnit::Second),
+                num_rows: 0,
+                identifier: i as usize,
+            })
+            .collect();
+        let partitions = assign_partition_ranges_by_time(ranges, 2, true);
+        assert_eq!(
+            vec![2, 2],
+            partitions.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_only_filtered_time_topk_scans_get_time_ordered_ranges() {
+        // Older ranges are larger, so assigning by rows alone starts a partition with
+        // an old range.
+        let ranges: Vec<_> = (0..8)
+            .map(|i| PartitionRange {
+                start: Timestamp::new(i * 10, TimeUnit::Millisecond),
+                end: Timestamp::new(i * 10 + 10, TimeUnit::Millisecond),
+                num_rows: (8 - i as usize) * 100,
+                identifier: i as usize,
+            })
+            .collect();
+        let predicate = Arc::new(IsNotNullExpr::new(Arc::new(Column::new("body", 0))));
+        let filter = Arc::new(
+            FilterExec::try_new(predicate, unassigned_log_region_scan(ranges.clone())).unwrap(),
+        );
+        let ordering = LexOrdering::new(vec![PhysicalSortExpr::new(
+            Arc::new(Column::new("ts", 1)),
+            SortOptions {
+                descending: true,
+                nulls_first: true,
+            },
+        )])
+        .unwrap();
+        let topk = Arc::new(SortExec::new(ordering, filter).with_fetch(Some(100)));
+        // A sibling scan that no TopK reads must keep the row-balanced assignment.
+        let plan =
+            UnionExec::try_new(vec![topk, unassigned_log_region_scan(ranges.clone())]).unwrap();
+
+        let mut config = ConfigOptions::default();
+        config.execution.target_partitions = 3;
+        let plan = ParallelizeScan.optimize(plan, &config).unwrap();
+
+        let mut assignments = vec![];
+        plan.apply(|node| {
+            if let Some(scan) = node.downcast_ref::<RegionScanExec>() {
+                assignments.push(members(&scan.get_uncollapsed_partition_ranges()));
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        assert_eq!(
+            vec![
+                members(&assign_partition_ranges_by_time(ranges.clone(), 3, true)),
+                members(&assign_partition_ranges(ranges, 3)),
+            ],
+            assignments
+        );
+    }
+
+    /// The range identifiers of each partition, ignoring order within and across
+    /// partitions.
+    fn members(partitions: &[Vec<PartitionRange>]) -> Vec<Vec<usize>> {
+        let mut members: Vec<Vec<usize>> = partitions
+            .iter()
+            .map(|p| {
+                let mut ids: Vec<_> = p.iter().map(|r| r.identifier).collect();
+                ids.sort();
+                ids
+            })
+            .collect();
+        members.sort();
+        members
     }
 
     #[test]
