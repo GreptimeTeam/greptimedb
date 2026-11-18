@@ -5207,6 +5207,9 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                 }
                 NativeExpr::ParameterizedTopK {
                     input, parameter, ..
+                }
+                | NativeExpr::ParameterizedAggregate {
+                    input, parameter, ..
                 } => {
                     sources(input, out);
                     sources(parameter, out);
@@ -5950,6 +5953,9 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
                     }
                 }
                 NativeExpr::ParameterizedTopK {
+                    input, parameter, ..
+                }
+                | NativeExpr::ParameterizedAggregate {
                     input, parameter, ..
                 } => {
                     child(input);
@@ -7190,6 +7196,198 @@ async fn native_fused_quantile_is_a_complete_aggregate() {
         // The quantile answers a float per group, under the fields and labels it read.
         assert_eq!(columns, sorted_column_names(&plan), "`{query}`");
     }
+}
+
+/// A `quantile` whose argument the query evaluates binds that argument beside the fold, and answers
+/// per point.
+///
+/// Prometheus reads the parameter at every step, so `quantile(scalar(foo), m)` is not the quantile of
+/// a number bound before the query ran: the tree holds one `Complete` fold with its argument as a
+/// second operand, the fold's input first. Neither route splits it - a quantile exports no state to
+/// combine and a partition's quantile is not part of the group's - and a constant written as an
+/// expression stays the number it folds to, exactly as it was.
+#[tokio::test]
+async fn native_fused_quantile_reads_a_per_point_parameter() {
+    // A constant the statement decides - a literal or arithmetic over literals - is bound on the
+    // fold, so the tree keeps the constant path it always had.
+    for (query, quantile) in [
+        (
+            "quantile(0.25 + 0.1 + 0.15, some_metric)",
+            0.25 + 0.1 + 0.15,
+        ),
+        (
+            "quantile(pi() / 4, some_metric)",
+            std::f64::consts::PI / 4.0,
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+        let NativeExpr::Aggregate { op, .. } = &fused.tree().root().expr else {
+            panic!("`{query}`: the folded constant left the constant path: {display}");
+        };
+        assert!(
+            matches!(
+                op.kind,
+                AggregateKind::Quantile { quantile: value } if value.to_bits() == quantile.to_bits()
+            ),
+            "`{query}`: {:?}",
+            op.kind
+        );
+    }
+
+    // An argument the statement evaluates: the fold reads it once per grid point. The columns are
+    // the grouping's either way, which is why the ungrouped statements publish no tag at all.
+    for (query, tags, grouped) in [
+        (
+            "quantile(scalar(some_metric), some_metric)",
+            &["__name__"][..],
+            false,
+        ),
+        (
+            "quantile(time() / 150 + 0.5, some_metric)",
+            &["__name__"][..],
+            false,
+        ),
+        (
+            "quantile(scalar(some_metric), some_metric) by (tag_0)",
+            &["__name__", "tag_0"][..],
+            true,
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+        // A quantile exports no state, so there is no split half for it, with an argument or without.
+        assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
+        let NativeExpr::ParameterizedAggregate {
+            input,
+            op,
+            parameter,
+        } = &fused.tree().root().expr
+        else {
+            panic!("`{query}`: the root is not a per-point fold: {display}");
+        };
+        assert!(
+            matches!(op.kind, AggregateKind::Quantile { .. })
+                && op.stage == AggregateStage::Complete,
+            "`{query}`: {display}"
+        );
+        assert_eq!(
+            grouped,
+            matches!(&op.group, Grouping::By(labels) if !labels.is_empty()),
+            "`{query}`: {display}"
+        );
+        // The fold reads the vector, the argument the scalar expression beside it.
+        assert!(
+            matches!(
+                input.expr,
+                NativeExpr::Instant { .. } | NativeExpr::Input(_)
+            ),
+            "`{query}`: {display}"
+        );
+        assert!(
+            matches!(parameter.output, NativeType::Scalar(_)),
+            "`{query}`: the argument is not a scalar: {display}"
+        );
+        assert_eq!(
+            // The value column the statement publishes is the expression it wrote, and the argument
+            // adds no column of its own: a scalar carries no labels.
+            expected_native_column_names(query, tags),
+            sorted_column_names(&plan),
+            "`{query}`"
+        );
+    }
+}
+
+/// A fold that reads its argument per point keeps the canonical boundary below it.
+///
+/// `label_replace` rewrites the label set two series can share, so the fragments it produces meet
+/// at a canonical merge before anything folds them. The fold above that merge reads the whole
+/// vector - a `quantile` answers from its group's whole sample set, with a `φ` the statement
+/// evaluates or with a number bound on it - so it is a global consumer of the same kind the bound
+/// fold is, and the segmentation has to read it as one: the fold is cut out as its own segment and
+/// the merge below it keeps its own boundary. Read as a per-partition node instead, the whole
+/// subtree would be cut over the scans in one go, and the label-set merge would run once per
+/// partition with nothing above it to collect the pieces.
+#[tokio::test]
+async fn native_fused_nested_per_point_quantile_keeps_its_canonical_boundary() {
+    let query = r#"quantile(time() / 2400, label_replace(some_metric, "tag_0", "same", "tag_0", ".*")) + 0"#;
+    let plan = build_native_fused_plan(query, true).await;
+    let display = plan.display_indent().to_string();
+    fn segment_of(plan: &LogicalPlan) -> &FusedSeries {
+        let LogicalPlan::Extension(Extension { node }) = plan else {
+            panic!("a segment is an extension node");
+        };
+        node.as_any()
+            .downcast_ref::<FusedSeries>()
+            .expect("the extension is not a fused segment")
+    }
+    // The root is the pointwise rewrite, and what it reads is the fold as a segment of its own.
+    let root = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+    let [fold] = root.children() else {
+        panic!("`{query}`: the rewrite must read the fold and nothing else: {display}");
+    };
+    let fold = segment_of(fold);
+    assert!(
+        matches!(
+            fold.tree().root().expr,
+            NativeExpr::ParameterizedAggregate { .. }
+        ),
+        "`{query}`: the fold is not a segment of its own: {display}"
+    );
+    // Below the fold is the canonical boundary the label rewrite needs, as its own segment over the
+    // scan it reads.
+    let [producer] = fold.children() else {
+        panic!("`{query}`: the fold must read the canonical boundary: {display}");
+    };
+    let producer = segment_of(producer);
+    assert!(
+        producer.is_canonical_producer()
+            && matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+        "`{query}`: the label-set merge is not a boundary below the fold: {display}"
+    );
+    let [source] = producer.children() else {
+        panic!("`{query}`: the producer must read the scan it merges: {display}");
+    };
+    assert!(
+        find_fused_series(source).is_none(),
+        "`{query}`: the producer reads the scan itself, not another segment: {display}"
+    );
+    assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
+}
+
+/// A `quantile` whose argument reads a second table still runs as one native execution.
+///
+/// The argument is a scalar expression over another metric, so the statement reads two tables: the
+/// fold reads one and its argument the other, and one execution above both is what folds them.
+#[tokio::test]
+async fn native_fused_quantile_parameter_over_a_second_table() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+    ];
+    let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
+    let query = "quantile(scalar(some_metric), other_metric)";
+    let plan = build_native_fused_plan_with_provider(query, true, provider().await).await;
+    let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+    assert_eq!(None, fused.binding().metric_name, "`{query}`: {display}");
+    assert!(
+        matches!(
+            fused.tree().root().expr,
+            NativeExpr::ParameterizedAggregate { .. }
+        ),
+        "`{query}`: {display}"
+    );
+    // The fold's input is bound first and its argument second, which is the order the sources are
+    // read in, and the statement still reads both tables.
+    assert_eq!(
+        vec!["other_metric", "some_metric"],
+        fused_input_metrics(&plan),
+        "`{query}`: {display}"
+    );
+    assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
 }
 
 /// A `quantile` over a histogram column folds it natively, exactly as `min` and `max` do.

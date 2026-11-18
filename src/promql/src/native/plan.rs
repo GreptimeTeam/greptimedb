@@ -167,21 +167,11 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
         // does. A grouping by `__name__` keeps the name where the input reports one; a named scan
         // only reports it among the runtime labels, so the aggregate keeps it there and publishes no
         // column for it, which is what `sum by (__name__)` over one metric reports.
-        NativeExpr::Aggregate { input, op } => {
-            let input_tags = fused_output_tags(input, source_tags)?;
-            Some(match &op.group {
-                Grouping::By(kept) => input_tags
-                    .into_iter()
-                    .filter(|tag| kept.iter().any(|name| name.as_ref() == tag.as_str()))
-                    .collect(),
-                Grouping::Without(dropped) => input_tags
-                    .into_iter()
-                    .filter(|tag| {
-                        tag != METRIC_NAME
-                            && !dropped.iter().any(|name| name.as_ref() == tag.as_str())
-                    })
-                    .collect(),
-            })
+        NativeExpr::Aggregate { input, op } => grouped_output_tags(input, op, source_tags),
+        // Its parameter is a scalar, which carries no labels, so a fold that reads it per point
+        // reports the same columns as the one that binds its `φ`.
+        NativeExpr::ParameterizedAggregate { input, op, .. } => {
+            grouped_output_tags(input, op, source_tags)
         }
         // Selecting some of the input's series keeps each one's own labels, and `count_values`
         // keeps its grouping's; `histogram` folds bucket series into one histogram, so it does not
@@ -420,6 +410,36 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
         }
     }
 }
+
+/// The labels an aggregate reports: the ones its grouping keeps among those its input carries.
+///
+/// `by(...)` keeps exactly the labels it names, and `without(...)` keeps the rest and drops the
+/// metric name, as Prometheus does. A grouping by `__name__` keeps the name where the input reports
+/// one; a named scan only reports it among the runtime labels, so the aggregate keeps it there and
+/// publishes no column for it, which is what `sum by (__name__)` over one metric reports.
+///
+/// Both the fold that binds its argument and the one that reads it per point answer this way: what
+/// decides the columns is the grouping, not where the aggregate's one argument comes from.
+fn grouped_output_tags(
+    input: &NativeNode,
+    op: &BoundAggregate,
+    source_tags: &[Vec<String>],
+) -> Option<Vec<String>> {
+    let input_tags = fused_output_tags(input, source_tags)?;
+    Some(match &op.group {
+        Grouping::By(kept) => input_tags
+            .into_iter()
+            .filter(|tag| kept.iter().any(|name| name.as_ref() == tag.as_str()))
+            .collect(),
+        Grouping::Without(dropped) => input_tags
+            .into_iter()
+            .filter(|tag| {
+                tag != METRIC_NAME && !dropped.iter().any(|name| name.as_ref() == tag.as_str())
+            })
+            .collect(),
+    })
+}
+
 /// Whether a binary operation reports the samples of the side it keeps, name included.
 ///
 /// A filtering comparison reports those samples, so the name survives it. Every other binary
@@ -683,6 +703,9 @@ impl NativeNode {
             // float otherwise. Naming it here is what lets `sum(count_over_time(h[5m]))` - a float
             // built from histograms - declare a float column, and `sum(h)` declare a histogram one.
             NativeExpr::Aggregate { op, .. } => Some(aggregate_output_kind(op)),
+            // A per-point parameter decides the `φ` the fold reads, not the layout it answers, so
+            // the kind is the one the same aggregate's state carries.
+            NativeExpr::ParameterizedAggregate { op, .. } => Some(aggregate_output_kind(op)),
             _ => None,
         }
     }
@@ -1140,6 +1163,19 @@ pub enum NativeExpr {
         op: BoundVectorOp,
         parameters: Vec<NativeNode>,
     },
+    /// An aggregate whose argument is read at every grid point instead of bound as a constant:
+    /// `quantile(<φ per point>, v)`.
+    ///
+    /// `op` is still the `Quantile` the constant path binds; its `φ` is unused here, because the
+    /// value this node folds with is the parameter's, read once per point -- exactly as
+    /// [`Self::ParameterizedTopK`] ignores the `k` its own binding carries. What the fold keeps is
+    /// its group's sample set either way, so a parameter read per point changes what is folded, not
+    /// how.
+    ParameterizedAggregate {
+        input: Box<NativeNode>,
+        op: BoundAggregate,
+        parameter: Box<NativeNode>,
+    },
 }
 
 /// One node of a bound tree.
@@ -1176,6 +1212,9 @@ impl NativeExpr {
                 .chain(parameters.iter())
                 .collect(),
             NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            }
+            | NativeExpr::ParameterizedAggregate {
                 input, parameter, ..
             } => vec![input, parameter],
             NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
@@ -1222,6 +1261,11 @@ impl NativeExpr {
                 input: Box::new(next()),
             },
             NativeExpr::ParameterizedTopK { op, .. } => NativeExpr::ParameterizedTopK {
+                input: Box::new(next()),
+                op: op.clone(),
+                parameter: Box::new(next()),
+            },
+            NativeExpr::ParameterizedAggregate { op, .. } => NativeExpr::ParameterizedAggregate {
                 input: Box::new(next()),
                 op: op.clone(),
                 parameter: Box::new(next()),
@@ -1378,7 +1422,7 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
                 || duplicates_canonical_labels(input, source_tags)
         }
         // A fold answers one series per group, which is one label set per group.
-        NativeExpr::Aggregate { .. } => false,
+        NativeExpr::Aggregate { .. } | NativeExpr::ParameterizedAggregate { .. } => false,
         NativeExpr::Vector { input, op } => match op {
             // These keep and order the series they read, so they alias exactly as their input does.
             BoundVectorOp::TopK { .. }
@@ -1449,10 +1493,10 @@ fn map_writes_existing_label(
 }
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
-/// An `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two vectors' series
-/// by label, an `Info` looks the info series of each series up by its identifying labels, and a
-/// `Vector` operation (`sort`, `absent`, `topk`, `limitk`, `histogram_quantile`, ...) reorders or
-/// reads the whole vector at a grid point.
+/// An `Aggregate` folds every series of its group, whether its argument is bound or read per point,
+/// a `Binary` and a `Set` pair two vectors' series by label, an `Info` looks the info series of each
+/// series up by its identifying labels, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`,
+/// `histogram_quantile`, ...) reorders or reads the whole vector at a grid point.
 ///
 /// `Merge` answers one series per label set, and the label sets it answers span every input series:
 /// two of them can collapse into the one it emits. It is therefore whole-vector too, which is why it
@@ -1498,6 +1542,7 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
         // decides which series survive.
         NativeExpr::ParameterizedTopK { .. } | NativeExpr::ParameterizedHistogram { .. } => true,
         NativeExpr::Aggregate { .. }
+        | NativeExpr::ParameterizedAggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
         | NativeExpr::Info { .. }
@@ -1677,6 +1722,21 @@ fn native_node_supported_within_stack(node: &NativeNode) -> bool {
         NativeExpr::Aggregate { input, op } => {
             native_node_supported(input) && aggregate_supported(node, input, op)
         }
+        // A per-point argument does not change which fold runs, only where its `φ` comes from: the
+        // same aggregate checks apply, and the parameter is a subtree like any other. That it is a
+        // scalar on this fold's grid is a type contract `validate` already refuses.
+        NativeExpr::ParameterizedAggregate {
+            input,
+            op,
+            parameter,
+        } => {
+            native_node_supported(input)
+                && native_node_supported(parameter)
+                // A literal hands over no chunk, so the fold could never read a value from it:
+                // `validate` refuses one, and a tree this predicate admits must be one it does not.
+                && !matches!(parameter.expr, NativeExpr::Scalar(_))
+                && aggregate_supported(node, input, op)
+        }
         NativeExpr::Vector { input, op } => {
             native_node_supported(input)
                 && node
@@ -1754,10 +1814,9 @@ fn binary_supported(left: &NativeNode, right: &NativeNode, matching: &BinaryMatc
 
 /// Whether the runtime folds `op` over `input` with the layout `node` declares.
 ///
-/// `quantile` has no kernel on this route, so it is refused at every stage. A `Complete` or
-/// `Partial` node folds values into groups it keys by series labels only, while `Final` merges
-/// state that was already grouped, which is why only the folding stages are checked against the
-/// schema.
+/// A `Complete` or `Partial` node folds values into groups it keys by series labels only, while
+/// `Final` merges state that was already grouped, which is why only the folding stages are checked
+/// against the schema.
 fn aggregate_supported(node: &NativeNode, input: &NativeNode, op: &BoundAggregate) -> bool {
     match op.kind {
         AggregateKind::Sum
@@ -2300,6 +2359,71 @@ impl NativeNode {
                     }
                 }
             }
+            NativeExpr::ParameterizedAggregate {
+                input,
+                op,
+                parameter,
+            } => {
+                input.validate()?;
+                parameter.validate()?;
+                // The parameter is read off the chunk its node hands over, once per grid point, so
+                // it has to be a scalar the node answers a series for -- `scalar()`, `time()` and
+                // the like all do. A literal has no chunk of its own: its value is on the binding
+                // of a node that carries it, and a fold that never receives one would run to the
+                // end of its input and fail instead of folding. A query that writes a constant gets
+                // the constant path, which binds the number on the fold itself; a tree that reaches
+                // here with one was not built by the compiler, so it is refused before it runs.
+                if matches!(parameter.expr, NativeExpr::Scalar(_)) {
+                    return Err(invalid(
+                        "a parameterized aggregate reads a parameter node that hands over a \
+                         scalar series, not a literal",
+                    ));
+                }
+                // Only a `quantile` takes an argument a query reads per point: it is the one
+                // aggregate whose argument is a value rather than a name, and every other kind
+                // binds its parameter into its own op (or is not an aggregate at all).
+                if !matches!(op.kind, AggregateKind::Quantile { .. }) {
+                    return Err(invalid(
+                        "a parameterized aggregate that is not a `quantile`",
+                    ));
+                }
+                // A quantile answers from its group's whole sample set, so it keeps no state: the
+                // stage that reads a parameter is the one that folds, exactly as for the bound `φ`.
+                if op.stage != AggregateStage::Complete {
+                    return Err(invalid(
+                        "a parameterized aggregate at a stage other than `Complete`",
+                    ));
+                }
+                // The parameter is read at every point the fold answers, one value per point and no
+                // labels, so it is a scalar on the grid the answer is stamped on.
+                let Some((_, output_grid)) = evaluated_vector(&self.output) else {
+                    return Err(invalid(
+                        "a parameterized aggregate does not produce an evaluated vector",
+                    ));
+                };
+                if !matches!(&parameter.output, NativeType::Scalar(grid) if grid.spec() == output_grid.spec())
+                {
+                    return Err(invalid(
+                        "an aggregate parameter is not a scalar on its output grid",
+                    ));
+                }
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid(&format!(
+                        "a complete aggregate consumes an evaluated vector, not {}",
+                        input.output.describe()
+                    )));
+                };
+                ensure_same_fields(
+                    &input.output,
+                    &self.output,
+                    "a parameterized complete aggregate",
+                )?;
+                ensure_grid(
+                    &self.output,
+                    input_grid,
+                    "a parameterized complete aggregate",
+                )?;
+            }
             NativeExpr::Binary { left, right, .. } => {
                 left.validate()?;
                 right.validate()?;
@@ -2585,8 +2709,9 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
         // label set.
         NativeExpr::Info { .. } => Some(true),
         // A finished aggregate emits one series per group, and two groups are two label sets.
-        // `Partial` state is not a series at all, which is not several either.
-        NativeExpr::Aggregate { .. } => Some(true),
+        // `Partial` state is not a series at all, which is not several either. A per-point parameter
+        // does not change that: the labels a group is filed under are its grouping's.
+        NativeExpr::Aggregate { .. } | NativeExpr::ParameterizedAggregate { .. } => Some(true),
         // `topk`, `limit_ratio` and `sort` hand back the series they read with their labels, so the
         // input's answer is theirs. The four that read the whole vector - `limitk`, `absent`,
         // `histogram_*` and `count_values` - emit one series per label set: `limitk` counts series
