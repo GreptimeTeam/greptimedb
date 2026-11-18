@@ -1381,6 +1381,7 @@ impl ErrorExt for Error {
         match self {
             Error::RetryLater { .. }
             | Error::RetryLaterWithSource { .. }
+            | Error::RepartitionPendingTails { .. }
             | Error::MailboxTimeout { .. }
             | Error::NoEnoughAvailableNode { .. }
             | Error::NoLeader { .. }

@@ -221,32 +221,18 @@ impl State for RepartitionStart {
 }
 
 impl RepartitionStart {
-    /// Fails before any region is allocated or rerouted if a source region of `plans` still
-    /// had pending WAL tails when it last reported, since entering staging would then
-    /// fail after the route change. Targets are the sources or new regions, so only sources
-    /// are checked. A source that has not reported as leader to this metasrv yet is retried
-    /// later.
+    /// Fails with a retryable error before any region is allocated or rerouted if a source
+    /// region of `plans` still had pending WAL tails when it last reported as leader, since
+    /// entering staging would then fail after the route change. Targets are the sources or new
+    /// regions, so only sources are checked. A source without a leader report to this metasrv
+    /// passes, and entering staging still refuses its pending tails.
     fn ensure_no_pending_tails(ctx: &Context, plans: &[AllocationPlanEntry]) -> Result<()> {
         let region_ids = plans
             .iter()
-            .flat_map(|plan| plan.source_regions.iter().map(|source| source.region_id()))
-            .collect::<Vec<_>>();
-        let leaders = ctx
+            .flat_map(|plan| plan.source_regions.iter().map(|source| source.region_id()));
+        let mut pending = ctx
             .leader_region_registry
-            .batch_get(region_ids.iter().copied());
-        let unreported = region_ids
-            .iter()
-            .filter(|region_id| !leaders.contains_key(region_id))
-            .collect::<Vec<_>>();
-        ensure!(
-            unreported.is_empty(),
-            error::RetryLaterSnafu {
-                reason: format!(
-                    "Regions {unreported:?} have not reported as leaders to this metasrv since it became leader; check that their datanodes are alive"
-                ),
-            }
-        );
-        let mut pending = leaders
+            .batch_get(region_ids)
             .into_iter()
             .filter(|(_, leader)| leader.has_pending_tails)
             .map(|(region_id, _)| region_id)
@@ -542,9 +528,7 @@ mod tests {
         )
         .await;
         let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-        let ctx = new_parent_context(env, node_manager, table_id);
-        report_leader_regions(&ctx, &[RegionId::new(table_id, 1)], false);
-        ctx
+        new_parent_context(env, node_manager, table_id)
     }
 
     #[test]
@@ -710,7 +694,6 @@ mod tests {
         .await;
         let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
         let mut ctx = new_parent_context(&env, node_manager, table_id);
-        report_leader_regions(&ctx, &[RegionId::new(table_id, 1)], false);
         let mut state = RepartitionStart::new(
             RepartitionFrom::Partitioned {
                 exprs: vec![range_expr("x", 0, 100)],
@@ -744,7 +727,6 @@ mod tests {
         .await;
         let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
         let mut ctx = new_parent_context(&env, node_manager, table_id);
-        report_leader_regions(&ctx, &[RegionId::new(table_id, 1)], false);
         let current = ctx.get_raw_table_info_value().await.unwrap();
         let mut table_info = current.table_info.clone();
         table_info.meta.partition_key_indices = vec![0];
@@ -955,7 +937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_repartition_start_rejects_source_with_pending_tails() {
+    async fn test_repartition_start_retries_source_with_pending_tails() {
         let env = TestingEnv::new();
         let table_id = 1024;
         let (mut ctx, mut state) = new_merge(&env, table_id).await;
@@ -967,28 +949,27 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(!err.is_retryable());
+        assert!(err.is_retryable());
         assert!(matches!(
             &err,
             error::Error::RepartitionPendingTails { region_ids, .. }
                 if region_ids == &[RegionId::new(table_id, 2)]
         ));
+        report_leader_regions(&ctx, &[RegionId::new(table_id, 2)], false);
+        let (next, _) = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(next.as_any().is::<AllocateRegion>());
     }
 
     #[tokio::test]
-    async fn test_repartition_start_retries_unreported_source() {
+    async fn test_repartition_start_passes_unreported_source() {
         let env = TestingEnv::new();
         let table_id = 1024;
         let (mut ctx, mut state) = new_merge(&env, table_id).await;
         report_leader_regions(&ctx, &[RegionId::new(table_id, 1)], false);
 
-        let err = state
-            .next(&mut ctx, &TestingEnv::procedure_context())
-            .await
-            .unwrap_err();
-
-        assert!(err.is_retryable());
-        report_leader_regions(&ctx, &[RegionId::new(table_id, 2)], false);
         let (next, _) = state
             .next(&mut ctx, &TestingEnv::procedure_context())
             .await
