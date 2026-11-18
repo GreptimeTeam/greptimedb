@@ -231,7 +231,7 @@ pub struct MitoRegion {
 pub(crate) struct RegionStats {
     /// The total bytes written to the region.
     pub(crate) written_bytes: Arc<AtomicU64>,
-    /// Parquet bytes committed by flushes since this region instance was opened.
+    /// Parquet bytes committed by flushes and scoped bulk ingestion since this region instance was opened.
     pub(crate) ingested_parquet_bytes: AtomicU64,
     /// The total query CPU time of the region in nanoseconds.
     pub(crate) query_cpu_time: Arc<AtomicU64>,

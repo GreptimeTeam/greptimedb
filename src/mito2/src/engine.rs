@@ -178,7 +178,7 @@ use crate::read::stream::ScanBatchStream;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::options::parse_wal_options;
 use crate::region::{MitoRegionRef, RegionRoleState};
-use crate::request::{RegionEditRequest, WorkerRequest};
+use crate::request::{RegionEditKind, RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -540,6 +540,30 @@ impl MitoEngine {
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        self.edit_region_with_kind(region_id, edit, RegionEditKind::Import)
+            .await
+    }
+
+    /// Publishes newly ingested SSTs and accounts their Parquet bytes as write load.
+    /// Repartition and compaction must use their existing publication paths instead.
+    pub async fn ingest_ssts(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        ensure!(
+            edit.files_to_remove.is_empty(),
+            InvalidRequestSnafu {
+                region_id,
+                reason: "SST ingestion cannot remove files"
+            }
+        );
+        self.edit_region_with_kind(region_id, edit, RegionEditKind::Ingest)
+            .await
+    }
+
+    async fn edit_region_with_kind(
+        &self,
+        region_id: RegionId,
+        edit: RegionEdit,
+        kind: RegionEditKind,
+    ) -> Result<()> {
         let _timer = HANDLE_REQUEST_ELAPSED
             .with_label_values(&["edit_region"])
             .start_timer();
@@ -553,7 +577,9 @@ impl MitoEngine {
         );
 
         let (tx, rx) = oneshot::channel();
-        let request = WorkerRequest::EditRegion(RegionEditRequest::new(region_id, edit, true, tx));
+        let mut request = RegionEditRequest::new(region_id, edit, true, tx);
+        request.kind = kind;
+        let request = WorkerRequest::EditRegion(request);
         self.inner
             .workers
             .submit_to_worker(region_id, request)

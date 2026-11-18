@@ -171,6 +171,15 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(
         .await
         .unwrap();
 
+    assert_eq!(
+        engine
+            .get_region_statistic(target)
+            .unwrap()
+            .ingested_parquet_bytes,
+        0,
+        "Applying repartition files is not new ingestion"
+    );
+
     let manifest = engine
         .get_region(target)
         .unwrap()

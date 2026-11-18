@@ -2000,3 +2000,200 @@ async fn test_narthex_cleanup_failure_drains_tracking() {
     tracker.cleanup_for_test().await.unwrap();
     assert_eq!(2, attempts.load(std::sync::atomic::Ordering::Relaxed));
 }
+
+#[tokio::test]
+async fn test_bulk_ingestion_write_statistics() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let file = |size| FileMeta {
+        region_id,
+        file_id: FileId::random(),
+        file_size: size,
+        ..Default::default()
+    };
+    let edit = |files| RegionEdit {
+        files_to_add: files,
+        ..Default::default()
+    };
+    let imported = file(100);
+    engine
+        .edit_region(region_id, edit(vec![imported.clone()]))
+        .await
+        .unwrap();
+    let statistic = || {
+        engine
+            .get_region_statistic(region_id)
+            .unwrap()
+            .ingested_parquet_bytes
+    };
+    assert_eq!(statistic(), 0, "generic imports are not new writes");
+    let first = file(200);
+    engine
+        .ingest_ssts(
+            region_id,
+            edit(vec![imported, first.clone(), first.clone()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        statistic(),
+        200,
+        "exclude visible and in-request duplicates"
+    );
+    engine
+        .ingest_ssts(region_id, edit(vec![first]))
+        .await
+        .unwrap();
+    assert_eq!(statistic(), 200, "notification retry is not new ingestion");
+    let mut invalid = edit(vec![file(400)]);
+    invalid.files_to_remove.push(file(1));
+    assert!(engine.ingest_ssts(region_id, invalid).await.is_err());
+    assert_eq!(statistic(), 200, "failed ingestion must not count");
+    let mut invalid_level = file(400);
+    invalid_level.level = 9;
+    assert!(
+        engine
+            .ingest_ssts(region_id, edit(vec![invalid_level]))
+            .await
+            .is_err()
+    );
+    assert_eq!(statistic(), 200, "worker rejection must not count");
+    engine
+        .ingest_ssts(region_id, edit(vec![file(300)]))
+        .await
+        .unwrap();
+    assert_eq!(statistic(), 500);
+    engine
+        .edit_region(region_id, edit(vec![file(800)]))
+        .await
+        .unwrap();
+    assert_eq!(statistic(), 500, "file movement must not count");
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_bulk_ingestion_write_statistics_scope() {
+    use datatypes::value::Value;
+    use partition::expr::col;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1, 1);
+    let scope = col("tag_0").lt(Value::String("m".into()));
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(
+                CreateRequestBuilder::new()
+                    .partition_expr_json(Some(scope.as_json_str().unwrap()))
+                    .build(),
+            ),
+        )
+        .await
+        .unwrap();
+    // Origin paths are not ownership: bulk writers can use the parent's directory.
+    let file = |partition_expr, size| FileMeta {
+        region_id: RegionId::new(1, 0),
+        file_id: FileId::random(),
+        file_size: size,
+        partition_expr,
+        ..Default::default()
+    };
+    engine
+        .ingest_ssts(
+            id,
+            RegionEdit {
+                files_to_add: vec![
+                    file(Some(scope.into()), 100),
+                    file(None, 200),
+                    file(
+                        Some(col("tag_0").gt_eq(Value::String("m".into())).into()),
+                        400,
+                    ),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .get_region_statistic(id)
+            .unwrap()
+            .ingested_parquet_bytes,
+        100
+    );
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_bulk_ingestion_counts_after_caller_cancellation() {
+    let mut env = TestEnv::new().await;
+    let (engine, _) = create_engine_with_request_listener(&mut env).await;
+    let id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(id).unwrap();
+    let guard = region.manifest_ctx.manifest_manager.write().await;
+    let edit = RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id: id,
+            file_id: FileId::random(),
+            file_size: 123,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let ingest_engine = engine.clone();
+    let task = tokio::spawn(async move { ingest_engine.ingest_ssts(id, edit).await });
+    wait_until_region_is_in_editing(&region).await;
+    assert_eq!(
+        engine
+            .get_region_statistic(id)
+            .unwrap()
+            .ingested_parquet_bytes,
+        0
+    );
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if engine
+                .get_region_statistic(id)
+                .unwrap()
+                .ingested_parquet_bytes
+                == 123
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    engine.stop().await.unwrap();
+}

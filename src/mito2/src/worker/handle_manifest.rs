@@ -16,9 +16,10 @@
 //!
 //! It updates the manifest and applies the changes to the region in background.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use common_telemetry::{debug, info, warn};
 use parquet::file::metadata::PageIndexPolicy;
@@ -103,7 +104,10 @@ impl RegionEditQueue {
 
     fn dequeue(&mut self) -> Option<RegionEditRequest> {
         fn can_merge(request: &RegionEditRequest) -> bool {
-            if !matches!(request.kind, RegionEditKind::Import) {
+            if !matches!(
+                request.kind,
+                RegionEditKind::Import | RegionEditKind::Ingest
+            ) {
                 return false;
             }
             let edit = &request.edit;
@@ -133,7 +137,9 @@ impl RegionEditQueue {
 
         // Merging must preserve the staging binding of every waiter.
         while let Some(request) = self.requests.pop_front_if(|request| {
-            can_merge(request) && request.staging_partition_expr == merged.staging_partition_expr
+            can_merge(request)
+                && std::mem::discriminant(&request.kind) == std::mem::discriminant(&merged.kind)
+                && request.staging_partition_expr == merged.staging_partition_expr
         }) {
             merged.edit.files_to_add.extend(request.edit.files_to_add);
             merged.waiters.merge(request.waiters);
@@ -315,7 +321,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     fn is_import_without_staging_binding(request: &RegionEditRequest) -> bool {
-        matches!(request.kind, RegionEditKind::Import) && request.staging_partition_expr.is_none()
+        matches!(
+            request.kind,
+            RegionEditKind::Import | RegionEditKind::Ingest
+        ) && request.staging_partition_expr.is_none()
     }
 
     /// Whether EnterStaging is pending in the worker, flush, or compaction queue.
@@ -425,13 +434,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
             return RegionEditDispatch::Rejected;
         }
-        if matches!(kind, RegionEditKind::Import)
+        if matches!(kind, RegionEditKind::Import | RegionEditKind::Ingest)
             && let Err(error) = prepare_region_edit(&region, &mut edit)
         {
             let error = Arc::new(error);
             waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
             return RegionEditDispatch::Rejected;
         }
+
+        let ingested_parquet_bytes = if matches!(kind, RegionEditKind::Ingest) {
+            match new_ingested_parquet_bytes(&region, &edit) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let error = Arc::new(error);
+                    waiters
+                        .reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
+                    return RegionEditDispatch::Rejected;
+                }
+            }
+        } else {
+            0
+        };
 
         // Allow retrieving `is_staging` before spawn the edit region task.
         let is_staging = region.is_staging();
@@ -457,7 +480,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
             let result = match kind {
-                RegionEditKind::Import => {
+                RegionEditKind::Import | RegionEditKind::Ingest => {
                     edit_region(
                         &region,
                         edit.clone(),
@@ -478,6 +501,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let notify = WorkerRequest::Background {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
+                    ingested_parquet_bytes,
                     region_id,
                     origin: region,
                     waiters,
@@ -575,6 +599,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
+                region
+                    .region_stats
+                    .ingested_parquet_bytes
+                    .fetch_add(edit_result.ingested_parquet_bytes, Ordering::Relaxed);
                 // Applies the edit to the region.
                 region.version_control.apply_edit(
                     Some(edit_result.edit),
@@ -970,6 +998,39 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
+/// Visits only incoming files and uses existing per-level maps for duplicate checks.
+/// A shared file with unknown target coverage cannot be charged in full to every region.
+fn new_ingested_parquet_bytes(region: &MitoRegionRef, edit: &RegionEdit) -> Result<u64> {
+    let version = region.version();
+    let scope = crate::region::parse_partition_expr(version.metadata.partition_expr.as_deref())?;
+    let mut seen = HashSet::with_capacity(edit.files_to_add.len());
+    let mut bytes = 0u64;
+    let mut unscoped_files = 0;
+    for file in &edit.files_to_add {
+        if !seen.insert(file.file_id)
+            || version
+                .ssts
+                .levels()
+                .iter()
+                .any(|level| level.files.contains_key(&file.file_id))
+        {
+            continue;
+        }
+        if file.partition_expr.as_deref() != scope.as_ref() {
+            unscoped_files += 1;
+            continue;
+        }
+        bytes = bytes.saturating_add(file.file_size);
+    }
+    if unscoped_files > 0 {
+        warn!(
+            "Bulk SST write load excludes {unscoped_files} files without matching region scope, region_id: {}",
+            region.region_id
+        );
+    }
+    Ok(bytes)
+}
+
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
     let region_id = region.region_id;
     edit.validate_shared_reclassification(region_id)?;
@@ -1170,6 +1231,38 @@ mod tests {
     use super::*;
     use crate::sst::file::{FileMeta, LEVEL_SHARED};
     use crate::test_util::{CreateRequestBuilder, TestEnv};
+
+    #[test]
+    fn test_edit_queue_preserves_ingestion_source() {
+        for kinds in [[false, true], [true, false], [true, true]] {
+            let mut queue = RegionEditQueue::new(RegionId::new(1, 1));
+            let mut receivers = Vec::new();
+            for ingest in kinds {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let mut request =
+                    RegionEditRequest::new(RegionId::new(1, 1), RegionEdit::default(), false, tx);
+                if ingest {
+                    request.kind = RegionEditKind::Ingest;
+                }
+                queue.enqueue(request);
+                receivers.push(rx);
+            }
+            let first = queue.dequeue().unwrap();
+            assert_eq!(matches!(first.kind, RegionEditKind::Ingest), kinds[0]);
+            first.waiters.reply_with(|| Ok(()));
+            assert!(receivers[0].try_recv().unwrap().is_ok());
+            if kinds[0] == kinds[1] {
+                assert!(receivers[1].try_recv().unwrap().is_ok());
+            } else {
+                assert!(receivers[1].try_recv().is_err());
+                let second = queue.dequeue().unwrap();
+                assert_eq!(matches!(second.kind, RegionEditKind::Ingest), kinds[1]);
+                second.waiters.reply_with(|| Ok(()));
+                assert!(receivers[1].try_recv().unwrap().is_ok());
+            }
+            assert!(queue.is_empty());
+        }
+    }
 
     #[test]
     fn test_edit_queue_preserves_staging_bindings() {
