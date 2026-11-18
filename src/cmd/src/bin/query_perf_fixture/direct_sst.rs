@@ -296,7 +296,6 @@ fn file_meta_from_sst_info(
     sequence: u64,
 ) -> FileMeta {
     FileMeta {
-        format: Default::default(),
         region_id,
         file_id,
         time_range: info.time_range,
@@ -315,6 +314,7 @@ fn file_meta_from_sst_info(
         primary_key_min: None,
         primary_key_max: None,
         preserve_row_sequence: false,
+        format: Default::default(),
     }
 }
 

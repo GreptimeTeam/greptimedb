@@ -339,7 +339,6 @@ impl ParquetbenchCommand {
         let mut schema_printed = false;
         let file_handle = FileHandle::new(
             FileMeta {
-                format: Default::default(),
                 region_id: source.region_id,
                 file_id: source.file_id,
                 time_range: Default::default(),
@@ -358,6 +357,7 @@ impl ParquetbenchCommand {
                 primary_key_min: None,
                 primary_key_max: None,
                 preserve_row_sequence: false,
+                format: Default::default(),
             },
             Arc::new(NoopFilePurger),
         );

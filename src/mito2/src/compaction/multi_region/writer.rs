@@ -182,7 +182,6 @@ impl<'a> TargetWriter<'a> {
             .as_ref()
             .and_then(|footer| extract_primary_key_range(footer, &self.target.metadata));
         Ok(FileMeta {
-            format: info.format.clone(),
             region_id: self.target.metadata.region_id,
             file_id: info.file_id,
             time_range: info.time_range,
@@ -203,6 +202,7 @@ impl<'a> TargetWriter<'a> {
             primary_key_min: range.as_ref().map(|(min, _)| min.clone()),
             primary_key_max: range.map(|(_, max)| max),
             preserve_row_sequence: self.preserve_row_sequence,
+            format: info.format.clone(),
         })
     }
 }

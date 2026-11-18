@@ -215,8 +215,6 @@ impl Default for WriteOptions {
 /// Parquet SST info returned by the writer.
 #[derive(Debug, Default)]
 pub struct SstInfo {
-    /// Physical encoding and inventory of the finalized output.
-    pub format: crate::sst::file::FileFormat,
     /// SST file id.
     pub file_id: FileId,
     /// Time range of the SST. The timestamps have the same time unit as the
@@ -236,6 +234,8 @@ pub struct SstInfo {
     pub index_metadata: IndexOutput,
     /// Number of series
     pub num_series: u64,
+    /// Physical encoding and inventory of the finalized output.
+    pub format: crate::sst::file::FileFormat,
 }
 
 #[cfg(test)]
