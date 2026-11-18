@@ -39,7 +39,8 @@ pub use crate::schema::column_schema::{
     COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY, COMPRESSION_KEY, ColumnEncoding,
     ColumnExtType, ColumnSchema, CompressionOptions, CompressionType, FULLTEXT_KEY,
     FulltextAnalyzer, FulltextBackend, FulltextOptions, HLL_KEY, INVERTED_INDEX_KEY, KLL_KEY,
-    MG_KEY, Metadata, SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType, TIME_INDEX_KEY,
+    METRIC_NAME_KEY, MG_KEY, Metadata, SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType,
+    TIME_INDEX_KEY, is_metric_name_field, metric_name_field_metadata,
 };
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 #[cfg(feature = "enterprise")]

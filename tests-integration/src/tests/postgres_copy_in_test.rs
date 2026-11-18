@@ -17,6 +17,7 @@
 
 use bytes::Bytes;
 use common_telemetry::init_default_ut_logging;
+use datatypes::arrow;
 use futures::SinkExt;
 use tokio_postgres::NoTls;
 
@@ -39,6 +40,396 @@ async fn feed_copy_in(
         sink.as_mut().send(chunk).await?;
     }
     sink.as_mut().finish().await
+}
+
+/// Standard IPC output, not Flight protobuf messages or PostgreSQL binary COPY.
+fn arrow_copy_payload(compression: Option<arrow::ipc::CompressionType>, batches: usize) -> Vec<u8> {
+    use arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
+    use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    // Field order deliberately differs from the table's declaration.
+    let batch = RecordBatch::try_from_iter(vec![
+        (
+            "val",
+            Arc::new(Float64Array::from(vec![Some(1.5), None])) as ArrayRef,
+        ),
+        (
+            "ts",
+            Arc::new(TimestampMillisecondArray::from(vec![1000, 2000])) as ArrayRef,
+        ),
+        (
+            "host",
+            Arc::new(StringArray::from(vec!["a", "z"])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let options = IpcWriteOptions::default()
+        .try_with_compression(compression)
+        .unwrap();
+    let mut writer =
+        StreamWriter::try_new_with_options(Vec::new(), &batch.schema(), options).unwrap();
+    for _ in 0..batches {
+        writer.write(&batch).unwrap();
+    }
+    writer.finish().unwrap();
+    writer.into_inner().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_arrow_end_to_end() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_arrow").await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    client.simple_query("CREATE TABLE arrow_copy (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX)").await.unwrap();
+    for compression in [
+        None,
+        Some(arrow::ipc::CompressionType::LZ4_FRAME),
+        Some(arrow::ipc::CompressionType::ZSTD),
+    ] {
+        let payload = arrow_copy_payload(compression, 3);
+        let rows = feed_copy_in(
+            &client,
+            "COPY public.arrow_copy FROM STDIN WITH (FORMAT arrow)",
+            payload.chunks(7).map(Bytes::copy_from_slice).collect(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows, 6);
+        let messages = client
+            .simple_query(
+                "SELECT host, val, CAST(ts AS BIGINT) AS millis FROM arrow_copy ORDER BY ts",
+            )
+            .await
+            .unwrap();
+        let rows: Vec<_> = messages
+            .iter()
+            .filter(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(host_of(rows[0], 0), "a");
+        assert_eq!(host_of(rows[0], 1), "1.5");
+        assert_eq!(host_of(rows[0], 2), "1000");
+        assert_eq!(host_of(rows[1], 0), "z");
+        assert_eq!(host_of(rows[1], 1), "");
+    }
+    assert_eq!(
+        feed_copy_in(
+            &client,
+            "COPY arrow_copy FROM STDIN WITH (FORMAT arrow)",
+            vec![Bytes::from(arrow_copy_payload(None, 0))]
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    server.shutdown().await.unwrap();
+}
+
+/// A forged IPC length must be rejected before Arrow's LZ4 decoder can grow
+/// an output Vec beyond that length. Exercise the actual COPY endpoint, not
+/// just the reservation estimator, and verify failure leaves the session usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_arrow_understated_lz4_length() {
+    use arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
+    use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+    use arrow::record_batch::RecordBatch;
+    use bytes::Buf;
+    use std::sync::Arc;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_arrow_lz4_bound").await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    client
+        .simple_query(
+            "CREATE TABLE arrow_lz4 (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+    let batch = RecordBatch::try_from_iter(vec![
+        (
+            "host",
+            Arc::new(StringArray::from(vec!["x".repeat(8 * 1024 * 1024)])) as ArrayRef,
+        ),
+        ("val", Arc::new(Float64Array::from(vec![1.5])) as ArrayRef),
+        (
+            "ts",
+            Arc::new(TimestampMillisecondArray::from(vec![1000])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let options = IpcWriteOptions::default()
+        .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))
+        .unwrap();
+    let mut writer =
+        StreamWriter::try_new_with_options(Vec::new(), &batch.schema(), options).unwrap();
+    writer.write(&batch).unwrap();
+    writer.finish().unwrap();
+    let mut payload = writer.into_inner().unwrap();
+    assert!(payload.len() < 64 * 1024);
+    // StreamWriter emits modern IPC framing: continuation + metadata length.
+    let mut offset = 0;
+    let mut forged = false;
+    while offset < payload.len() {
+        let mut prefix = &payload[offset..];
+        assert_eq!(prefix.get_i32_le(), -1);
+        let length = prefix.get_i32_le() as usize;
+        if length == 0 {
+            break;
+        }
+        let body_start = offset + 8 + length;
+        let message = arrow::ipc::root_as_message(&payload[offset + 8..body_start]).unwrap();
+        let next = body_start + message.bodyLength() as usize;
+        if let Some(batch) = message.header_as_record_batch() {
+            for buffer in batch.buffers().unwrap() {
+                if buffer.length() < 8 {
+                    continue;
+                }
+                let start = body_start + buffer.offset() as usize;
+                if (&payload[start..start + 8]).get_i64_le() >= 8 * 1024 * 1024 {
+                    payload[start..start + 8].copy_from_slice(&1i64.to_le_bytes());
+                    forged = true;
+                    break;
+                }
+            }
+        }
+        if forged {
+            break;
+        }
+        offset = next;
+    }
+    assert!(forged);
+    let error = feed_copy_in(
+        &client,
+        "COPY arrow_lz4 FROM STDIN WITH (FORMAT arrow)",
+        payload.chunks(1024).map(Bytes::copy_from_slice).collect(),
+    )
+    .await
+    .unwrap_err();
+    let error = error.as_db_error().unwrap();
+    assert_eq!(error.code().code(), "22P04");
+    assert!(
+        error
+            .message()
+            .contains("LZ4 output exceeds its declared length"),
+        "{error}"
+    );
+    let messages = client
+        .simple_query("SELECT count(*) FROM arrow_lz4")
+        .await
+        .unwrap();
+    let count = messages.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+        _ => None,
+    });
+    assert_eq!(count, Some("0"));
+    assert_eq!(
+        feed_copy_in(
+            &client,
+            "COPY arrow_lz4 FROM STDIN WITH (FORMAT arrow)",
+            vec![Bytes::from(arrow_copy_payload(
+                Some(arrow::ipc::CompressionType::LZ4_FRAME),
+                1
+            ))]
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_arrow_partitioned() {
+    init_default_ut_logging();
+    let instance = crate::tests::create_distributed_instance("pg_copy_arrow_partitioned").await;
+    let server =
+        crate::test_util::setup_pg_server_for_frontend_instance(instance.frontend(), None).await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    client.simple_query(
+        "CREATE TABLE arrow_partitioned (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX) \
+         PARTITION ON COLUMNS (host) (host < 'm', host >= 'm')"
+    ).await.unwrap();
+    assert_eq!(
+        feed_copy_in(
+            &client,
+            "COPY arrow_partitioned FROM STDIN WITH (FORMAT arrow)",
+            vec![Bytes::from(arrow_copy_payload(
+                Some(arrow::ipc::CompressionType::ZSTD),
+                1
+            ))]
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    let messages = client
+        .simple_query("SELECT host FROM arrow_partitioned ORDER BY host")
+        .await
+        .unwrap();
+    let hosts: Vec<_> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(hosts, vec!["a", "z"]);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_arrow_skip_wal() {
+    use crate::test_util::{
+        MockInstanceImpl, assert_wal_delta, setup_pg_server_for_frontend_instance,
+    };
+
+    init_default_ut_logging();
+    for (distributed, partitioned) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut db =
+            MockInstanceImpl::new(&format!("pg_copy_arrow_wal_{partitioned}"), distributed).await;
+        let server = setup_pg_server_for_frontend_instance(db.frontend(), None).await;
+        let client = connect(server.bind_addr().unwrap().port()).await;
+        let partition = if partitioned {
+            " PARTITION ON COLUMNS (host) (host < 'm', host >= 'm')"
+        } else {
+            ""
+        };
+        client.simple_query(&format!(
+            "CREATE TABLE arrow_wal (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX){partition}"
+        )).await.unwrap();
+        let mut before = db.flush_and_snapshot_wal().await;
+        assert_eq!(before.len(), if partitioned { 2 } else { 1 });
+        for hint in [None, Some(true), Some(false), None] {
+            let option = hint
+                .map(|value| format!(", insert_skip_wal {value}"))
+                .unwrap_or_default();
+            assert_eq!(
+                feed_copy_in(
+                    &client,
+                    &format!("COPY arrow_wal FROM STDIN WITH (FORMAT arrow{option})"),
+                    vec![Bytes::from(arrow_copy_payload(None, 2))]
+                )
+                .await
+                .unwrap(),
+                4
+            );
+            let after = db.flush_and_snapshot_wal().await;
+            assert_wal_delta(&before, &after, hint == Some(true));
+            for (id, &(flushed_sequence, _)) in &after {
+                assert!(
+                    flushed_sequence > before[id].0,
+                    "region {id:?} received no rows"
+                );
+            }
+            before = after;
+        }
+        server.shutdown().await.unwrap();
+        db.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_arrow_schema_evolution() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_arrow_schema").await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    client
+        .simple_query(
+            "CREATE TABLE arrow_schema (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+    let payload = arrow_copy_payload(None, 1);
+    let error = feed_copy_in(
+        &client,
+        "COPY arrow_schema FROM STDIN WITH (FORMAT arrow, auto_create_table false)",
+        vec![Bytes::from(payload.clone())],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.as_db_error().is_some());
+    // Request-local hints must not disable schema evolution on the next COPY.
+    assert_eq!(feed_copy_in(&client,
+        "COPY arrow_schema FROM STDIN WITH (FORMAT arrow, auto_create_table true, insert_skip_wal false)",
+        vec![Bytes::from(payload)]).await.unwrap(), 2);
+    let messages = client
+        .simple_query("SELECT val FROM arrow_schema ORDER BY ts")
+        .await
+        .unwrap();
+    let row = messages
+        .iter()
+        .find(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
+        .unwrap();
+    assert_eq!(host_of(row, 0), "1.5");
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_arrow_errors_and_recovery() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_arrow_errors").await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    client.simple_query("CREATE TABLE arrow_errors (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX)").await.unwrap();
+    for sql in [
+        "COPY FROM STDIN WITH (FORMAT arrow)",
+        "COPY arrow_errors (host, ts) FROM STDIN WITH (FORMAT arrow)",
+        "COPY missing_table FROM STDIN WITH (FORMAT arrow)",
+        "COPY arrow_errors FROM STDIN WITH (FORMAT arrow, pipeline_name 'p')",
+    ] {
+        let error = client.simple_query(sql).await.unwrap_err();
+        assert!(error.as_db_error().is_some(), "{sql}: {error}");
+    }
+    let payload = arrow_copy_payload(None, 1);
+    for bytes in [
+        Vec::new(),
+        b"not arrow".to_vec(),
+        payload[..payload.len() - 10].to_vec(),
+    ] {
+        assert!(
+            feed_copy_in(
+                &client,
+                "COPY arrow_errors FROM STDIN WITH (FORMAT arrow)",
+                vec![Bytes::from(bytes)]
+            )
+            .await
+            .is_err()
+        );
+        assert!(!client.simple_query("SELECT 1").await.unwrap().is_empty());
+    }
+    // Earlier complete batches are not rolled back when a later frame is bad.
+    let mut bad_tail = payload[..payload.len() - 8].to_vec();
+    bad_tail.extend_from_slice(&[255, 255, 255, 255, 1]);
+    assert!(
+        feed_copy_in(
+            &client,
+            "COPY arrow_errors FROM STDIN WITH (FORMAT arrow)",
+            vec![Bytes::from(bad_tail)]
+        )
+        .await
+        .is_err()
+    );
+    let messages = client
+        .simple_query("SELECT count(*) FROM arrow_errors")
+        .await
+        .unwrap();
+    let row = messages
+        .iter()
+        .find(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
+        .unwrap();
+    assert_eq!(host_of(row, 0), "2");
+    assert_eq!(
+        feed_copy_in(
+            &client,
+            "COPY arrow_errors FROM STDIN WITH (FORMAT arrow)",
+            vec![Bytes::from(payload)]
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    server.shutdown().await.unwrap();
 }
 
 fn host_of(message: &tokio_postgres::SimpleQueryMessage, column: usize) -> String {

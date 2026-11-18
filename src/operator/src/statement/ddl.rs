@@ -76,6 +76,7 @@ use partition::function::IcebergHash;
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
+use query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
 use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
 use session::context::QueryContextRef;
@@ -1178,7 +1179,12 @@ impl StatementExecutor {
                 )
                 .await?
             }
-            Statement::Tql(query) => self.plan_tql(query.clone(), &ctx).await?,
+            Statement::Tql(query) => {
+                // The serialized view plan must not depend on the native execution extension.
+                let mut view_ctx = ctx.as_ref().clone();
+                view_ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "false");
+                self.plan_tql(query.clone(), &Arc::new(view_ctx)).await?
+            }
             _ => {
                 return InvalidViewStmtSnafu {}.fail();
             }

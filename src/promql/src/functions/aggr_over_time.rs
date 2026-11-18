@@ -443,13 +443,18 @@ impl SlidingExtrema {
 
 /// Folds one window on its own, the way the per-window scan used to.
 fn scan_extremum(values: &Float64Array, start: usize, end: usize, is_min: bool) -> Option<f64> {
-    let mut extremum: Option<f64> = None;
-    for index in start..end {
-        if values.is_null(index) {
-            continue;
-        }
+    extremum(
+        (start..end)
+            .filter(|&index| values.is_valid(index))
+            .map(|index| values.value(index)),
+        is_min,
+    )
+}
 
-        let value = values.value(index);
+/// The minimum (`is_min`) or maximum of `values`, `None` when there are none.
+pub(crate) fn extremum(values: impl IntoIterator<Item = f64>, is_min: bool) -> Option<f64> {
+    let mut extremum: Option<f64> = None;
+    for value in values {
         let replace = match extremum {
             None => true,
             // A NaN only holds the slot until any other sample arrives.

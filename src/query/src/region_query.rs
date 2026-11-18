@@ -22,8 +22,35 @@ use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use session::ReadPreference;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::error::Result;
+
+/// Caps the region reads one query keeps in flight.
+///
+/// A region read is a `DoGet` whose body streams until that region is drained, so a query
+/// reading several sources would otherwise run one body per source and partition at once.
+/// The bound belongs to the query, not to one scan: its permit count is the query's target
+/// partitions, so two scans of three regions no longer read four bodies at once.
+pub(crate) struct RegionReadLimiter {
+    permits: Semaphore,
+}
+
+impl RegionReadLimiter {
+    pub(crate) fn new(permits: usize) -> Self {
+        Self {
+            permits: Semaphore::new(permits.max(1)),
+        }
+    }
+
+    /// Waits for one region read to be allowed; the read stays counted until the permit drops.
+    pub(crate) async fn acquire(&self) -> SemaphorePermit<'_> {
+        self.permits
+            .acquire()
+            .await
+            .expect("the region read limiter is never closed")
+    }
+}
 
 /// The peer selected to serve a region query.
 ///
@@ -86,10 +113,52 @@ pub trait RegionQueryHandler: Send + Sync {
 pub type RegionQueryHandlerRef = Arc<dyn RegionQueryHandler>;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use async_trait::async_trait;
     use common_meta::peer::Peer;
+    use session::ReadPreference;
+    use store_api::storage::RegionId;
 
-    use super::RegionQueryTarget;
+    use super::{RegionQueryHandler, RegionQueryTarget};
+
+    pub(crate) struct PlanningOnlyRegionQueryHandler;
+
+    #[async_trait]
+    impl RegionQueryHandler for PlanningOnlyRegionQueryHandler {
+        async fn select_target(
+            &self,
+            _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> crate::error::Result<RegionQueryTarget> {
+            unimplemented!("planning test does not dispatch regions")
+        }
+
+        async fn do_get(
+            &self,
+            _target: &RegionQueryTarget,
+            _request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            unimplemented!("planning test does not dispatch regions")
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _target: &RegionQueryTarget,
+            _query_id: String,
+            _update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            unimplemented!("planning test does not dispatch regions")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            unimplemented!("planning test does not dispatch regions")
+        }
+    }
 
     #[test]
     fn region_query_target_exposes_immutable_peer() {

@@ -144,6 +144,7 @@
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
 | `procedure.max_running_procedures` | Integer | `128` | Max running procedures.<br/>The maximum number of procedures that can be running at the same time.<br/>If the number of running procedures exceeds this limit, the procedure will be rejected. |
 | `query` | -- | -- | The query engine options. |
+| `query.experimental_native_promql` | Bool | `false` | Enable experimental native PromQL execution for compatible queries.<br/>This is the engine-wide default: a session<br/>SET query.experimental_native_promql = true or a per-request<br/>query.experimental_native_promql option overrides it, in that order.<br/>Default: false |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join,<br/>and internal series merges during table scans).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>Projected Parquet row groups and streamed scan batches use scan_memory_limit separately. |
 | `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
@@ -186,6 +187,7 @@
 | `region_engine.mito.manifest_checkpoint_distance` | Integer | `10` | Number of meta action updated to trigger a new checkpoint for the manifest. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_series_index_format` | String | `legacy` | Under development. Select legacy Parquet indexes or paired columnar series and samples. |
 | `region_engine.mito.experimental_series_index_max_size` | String | `5GiB` | Approximate series and range index size limit in open regions, shared across workers.<br/>Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation<br/>can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots<br/>retained by readers are not counted.<br/>Minimum: 1KiB. Takes effect on restart. |
 | `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
@@ -260,7 +262,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
@@ -394,6 +396,7 @@
 | `meta_client.metadata_cache_ttl` | String | `10m` | TTL of the metadata cache. |
 | `meta_client.metadata_cache_tti` | String | `5m` | -- |
 | `query` | -- | -- | The query engine options. |
+| `query.experimental_native_promql` | Bool | `false` | Enable experimental native PromQL execution for compatible standalone queries.<br/>Requires in-process region transport. This is the engine-wide default: a<br/>session SET query.experimental_native_promql = true or a per-request<br/>query.experimental_native_promql option overrides it, in that order.<br/>Default: false |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.allow_query_fallback` | Bool | `false` | Whether to allow query fallback when push down optimize fails.<br/>Default to false, meaning when push down optimize failed, return error msg |
 | `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>This pool applies to operators on this frontend. Datanodes use their own query<br/>pools for local operators and internal series merges during table scans. |
@@ -422,7 +425,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
@@ -541,7 +544,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
@@ -670,6 +673,7 @@
 | `region_engine.mito.experimental_manifest_keep_removed_file_ttl` | String | `1h` | How long to keep removed files in the `removed_files` field of manifest<br/>after they are removed from manifest.<br/>files will only be removed from `removed_files` field<br/>if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_series_index_format` | String | `legacy` | Under development. Select legacy Parquet indexes or paired columnar series and samples. |
 | `region_engine.mito.experimental_series_index_max_size` | String | `5GiB` | Approximate series and range index size limit in open regions, shared across workers.<br/>Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation<br/>can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots<br/>retained by readers are not counted.<br/>Minimum: 1KiB. Takes effect on restart. |
 | `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
@@ -748,7 +752,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
@@ -809,7 +813,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |

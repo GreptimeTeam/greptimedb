@@ -1,0 +1,2893 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Compiles a PromQL AST into a [`NativeTree`].
+//!
+//! This is the front half of the native evaluation model: it reads the parsed statement and writes
+//! down what it means as bound nodes. The native planner uses this compiler to build a tree for
+//! standalone execution. Its accepted expressions are described by the recursive rule below:
+//!
+//! ```text
+//! <expression>                                     one of, recursively:
+//!   <selector>                                     e.g. x, x offset -5m
+//!   <range function>(<matrix>)                     e.g. rate(x[5m]), rate(x[5m:1m] @ 1234)
+//!   quantile_over_time(<constant>, <matrix>)       e.g. quantile_over_time(0.9, x[5m])
+//!   predict_linear(<matrix>, <constant>)           e.g. predict_linear(x[5m], 300)
+//!   double_exponential_smoothing(<matrix>, <constant>, <constant>)
+//!                                                  e.g. double_exponential_smoothing(x[5m], .5, .1)
+//!   <math function>(<expression>[, <constant>]*)   e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//!   <round or clamp>(<expression>, <scalar>+)      e.g. round(x, time() / 10), clamp(x, 0, time())
+//!   <histogram function>(<expression>)             e.g. histogram_count(x)
+//!   <sort>(<expression>[, <string>]*)              e.g. sort_desc(x), sort_by_label(x, "job")
+//!   absent(<expression>)                           e.g. absent(x{job="a"})
+//!   absent_over_time(<matrix>)                     e.g. absent_over_time(x{job="a"}[5m])
+//!   <histogram>(<constant>+, <expression>)         e.g. histogram_quantile(0.9, rate(x[5m]))
+//!   <label function>(<expression>, <string>*)       e.g. label_replace(x, "a", "$1", "b", "(.*)")
+//!   <expression> <operator> <scalar>               e.g. x * 100, x > bool time()
+//!   <scalar> <operator> <expression>               e.g. 1 / x, time() - timestamp(x)
+//!   <scalar> <operator> <scalar>                   e.g. time() - 60, time() > bool 1
+//!   time(), pi(), vector(<scalar>)                 e.g. vector(time()), pi() * x
+//!   <date function>()                              e.g. hour(), which is `hour(vector(time()))`
+//!   -<expression>                                  e.g. -x
+//!   <expression> <set operator> <expression>       e.g. x and on(job) y, x unless y
+//!   info(<expression>[, {<matchers>}])             e.g. info(rate(x[5m]), {version=~".+"})
+//!   <aggregator> [(by|without)(<labels>)] (<expression>)
+//!                                                  e.g. avg by(job)(rate(x[5m]) * 100)
+//!   <aggregator> (<expression>) [(by|without)(<labels>)]
+//!                                                  e.g. count (x) by(job)
+//!   quantile(<constant>, <expression>) [(by|without)(<labels>)]
+//!                                                  e.g. quantile(0.9, x) by(job)
+//!   <selector aggregator>(<constant>, <expression>) [(by|without)(<labels>)]
+//!                                                  e.g. topk(3, x) by(job), limit_ratio(0.5, x)
+//!   count_values(<string>, <expression>) [(by|without)(<labels>)]
+//!                                                  e.g. count_values("v", x)
+//!
+//! <matrix>    <selector>[<range>]<modifiers>       a range selector: raw samples
+//!           | <expression>[<range>:<step>]<modifiers>
+//!                                                  a subquery: <expression> evaluated on a grid;
+//!                                                  the step may be omitted as `[<range>:]`
+//! <scalar>    <constant> | time() | <scalar> <operator> <scalar>
+//! <modifiers>                                      nothing, `offset <duration>`, `@ <anchor>`, or
+//!                                                  both, in either order — e.g. `x[5m] @ 1234
+//!                                                  offset 1m`
+//! ```
+//!
+//! where `<set operator>` is `and`, `or` or `unless`, optionally with `on(...)` or `ignoring(...)`,
+//! `<aggregator>` is `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` or
+//! `quantile`, `<selector aggregator>` is `topk`, `bottomk`, `limitk` or `limit_ratio`, the
+//! function names are [`range_signature`]'s and [`math_signature`]'s, and which side
+//! of the matrix a range function's constants go on is [`RangeSignature`]'s: before it for
+//! `quantile_over_time`, after it for `predict_linear` and `double_exponential_smoothing`. A math
+//! function's constants always follow its vector.
+//!
+//! Parentheses are transparent wherever they appear — `rate((x[5m]))` is `rate(x[5m])` — because
+//! they say how a statement was typed rather than what it asks for.
+//!
+//! A subquery's `<expression>` is any shape above, so a subquery nests inside a subquery on a grid
+//! of its own, as in `rate(rate(x[5m:1m])[10m:30s])`; a `<step>` left out means Prometheus's default
+//! evaluation interval, one minute. Its `offset` and its `@` anchor are its own, not the inner
+//! expression's, so `rate(x[5m:1m] @ end() offset 1m)` reads one fixed interval. A `<selector>`
+//! outside a `<matrix>` takes an `offset` and an optional `@` anchor; `x @ 100` selects at one
+//! fixed instant across the evaluation grid, as does `rate(x[5m] @ 100)` for its window.
+//!
+//! Those shapes become `Input` (raw samples) → `Instant` (the last sample within the statement's
+//! lookback), `Input` (raw samples) → `Window` (the range function over the statement's grid),
+//! `<expression>` → `Window` whose input is evaluated (the subquery, whose input grid is its own),
+//! `<expression>` → `Map` (a pointwise math, native histogram or label function over what its
+//! argument evaluates to) and, over
+//! any of those, `Binary` (an arithmetic or comparison operation between vectors or with a
+//! constant on one side), `Scalar` (that constant), `Set` (`and`, `or` or `unless` between two
+//! vectors), `Info` (the expression and an `Instant` of the info metric reporting sample times),
+//! `Aggregate` (one of the nine aggregators that
+//! fold a group's values into one value per grid point, optionally grouped) and `Vector` (an
+//! operation over the whole vector at each point: a sort, `absent`, a classic histogram function, a
+//! selecting aggregator or `count_values`). Everything else is a
+//! [`DataFusionError::NotImplemented`] that names what was found and quotes the shapes above,
+//! because rejecting a query the compiler does not understand is the only honest alternative to
+//! compiling it into something else.
+//!
+//! The compiler binds a subquery's child grid and `RangeWindow` independently of runtime execution:
+//! compilation describes the anchored interval, while runtime support determines how that bound
+//! plan is consumed.
+//!
+//! Two decisions keep the recursion from growing a branch per query. A constant argument — a
+//! quantile, a rounding step, a clamp bound — is folded out of the statement by [`constant_value`],
+//! so `quantile_over_time(1 - 0.1, x[5m])` binds the number it means rather than the expression it
+//! was written as. A math function is bound by [`math_op`] from a list of names, so
+//! `clamp_min(abs(rate(x[5m])), 0)` is two maps over one window because the arguments nest, not
+//! because the compiler knows the query. Arithmetic inside a fold is the kernel operation
+//! [`BinaryOp::kind`] names, so the number this compiler binds and the number the kernel computes
+//! cannot disagree about `%`, `^` or `atan2`.
+//!
+//! Two more are about what a node means rather than about which node to build. A binary operation
+//! keeps its operands in the order they were written, because most operators are not commutative:
+//! `1 / x` is not `x / 1`, and which side the constant is on is the only thing that tells them
+//! apart. `return_bool` is carried as its own field, so `x > 0` (which filters) and `x > bool 0`
+//! (which reports zero or one) are one node with one field changed. A negation then needs no node of
+//! its own: `-x` binds as the multiplication by `-1` that it is, which the multiplication kernel
+//! already computes.
+//!
+//! Vector matching is bound with each selector's own input, including the labels and cardinality
+//! written on a vector–vector operation. A scalar has no input of its own: it is bound next to the
+//! vector that gives it something to broadcast over, while a statement whose value is only a
+//! constant is bound by [`compile_statement`] as that constant on the statement's grid.
+//!
+//! An aggregate is bound as [`AggregateStage::Complete`], which is a claim about the whole execution
+//! rather than about the node: it says that every contribution to every group is in this execution's
+//! input. The caller has to keep that claim. One tree per partition does not: handing every
+//! partition the same `Complete` tree sums each partition's part and reports it as the group's
+//! whole, so a partitioned caller has to feed whole groups to one execution or split the aggregation
+//! into `Partial` and `Final` instead. What a `Complete` node guarantees here is only the arithmetic
+//! — that the values it folded are all the values it was given.
+//!
+//! The statement's grid, the selector's lookback, window, offset and anchor are the only numbers
+//! derived here; the legality of the tree is not checked here. [`NativeTree::try_new`] is the
+//! single authority on that, so a node added later cannot be legal in one place and illegal in
+//! another. What is refused before a tree exists is the scan's shape: no shape below can consume
+//! chunks of different series that interleave, so an `Interleaved` ordering is refused once, at the
+//! entry, and [`NativeNode::validate`] refuses the same ordering for a tree built some other way.
+
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::time::Duration;
+
+use datafusion::error::{DataFusionError, Result};
+use datatypes::series::samples::{FieldSpec, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::{SeriesLabels, SeriesOrdering};
+use promql::extension_plan::FieldKind;
+use promql::histogram_eval::{HistogramFunction, NativeHistogramFunction};
+use promql::info::InfoSelector;
+use promql::map::MathOp;
+use promql::map_label::LabelRewrite;
+use promql::map_time::DateFunction;
+use promql::native::plan::{
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
+    BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode,
+    NativeTree, NativeType, ParameterizedOp,
+};
+use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
+use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
+use promql::vector_match::{
+    BinaryKind, BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
+    binary_output_schema,
+};
+use promql_parser::label::{MatchOp as ParserMatchOp, Matcher, Matchers};
+use promql_parser::parser::token::TokenType;
+use promql_parser::parser::value::ValueType;
+use promql_parser::parser::{
+    AggregateExpr, AtModifier, BinModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr,
+    LabelModifier, MatrixSelector, NumberLiteral, Offset, StringLiteral, SubqueryExpr,
+    VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
+};
+
+use crate::promql::label_values::signed_millis_since_epoch;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectorTiming {
+    Instant { lookback_ms: i64 },
+    Window { range_ms: i64 },
+}
+
+#[derive(Clone, Debug)]
+pub struct SelectorRequirement {
+    pub metric: Option<String>,
+    pub matchers: Matchers,
+    pub offset_ms: i64,
+    pub at_ms: Option<i64>,
+    pub grid_start_ms: i64,
+    pub grid_end_ms: i64,
+    pub timing: SelectorTiming,
+}
+
+impl SelectorRequirement {
+    /// Returns `(start_ms, end_ms, include_start)` for the scan hull covering this selector.
+    ///
+    /// The upper endpoint is inclusive. The hull can include timestamps unused by a sparse
+    /// evaluation grid; `grid_end_ms` is its actual last point, not the statement's end. The lower
+    /// endpoint is inclusive only for a zero-lookback instant selector.
+    pub fn raw_scan_bounds(&self) -> Result<(i64, i64, bool)> {
+        let end = self
+            .at_ms
+            .unwrap_or(self.grid_end_ms)
+            .checked_sub(self.offset_ms)
+            .ok_or_else(|| DataFusionError::Plan("selector scan end overflows".into()))?;
+        let lower = self
+            .at_ms
+            .unwrap_or(self.grid_start_ms)
+            .checked_sub(self.offset_ms)
+            .ok_or_else(|| DataFusionError::Plan("selector scan start overflows".into()))?;
+        let (duration, inclusive) = match self.timing {
+            SelectorTiming::Instant { lookback_ms } => (lookback_ms, lookback_ms == 0),
+            SelectorTiming::Window { range_ms } => (range_ms, false),
+        };
+        let start = lower
+            .checked_sub(duration)
+            .ok_or_else(|| DataFusionError::Plan("selector scan start overflows".into()))?;
+        Ok((start, end, inclusive))
+    }
+}
+
+/// One compiled selector occurrence and the scan layout bound for it.
+#[derive(Clone, Debug)]
+pub struct CompiledInput {
+    /// Occurrence number assigned in compiler traversal order, starting at zero. The caller maps this
+    /// occurrence to the appropriate scan; different occurrences may map to a shared scan child.
+    pub source_index: usize,
+    pub requirement: SelectorRequirement,
+    pub schema: Arc<SeriesSchema>,
+    pub ordering: SeriesOrdering,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompiledTree {
+    pub tree: NativeTree,
+    pub inputs: Arc<[CompiledInput]>,
+}
+
+/// The shapes this compiler accepts, quoted in every rejection.
+///
+/// It is one sentence of grammar rather than a list of examples, because it is what a refused query
+/// reads: the shapes have to be true of every query the compiler binds, and the examples only show
+/// them. The two matrix shapes and the recursion through them are stated first, because that
+/// recursion is what a reader is most likely to get wrong.
+const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a range function over \
+                         a matrix, where a matrix is `<selector>[<range>]` as in `rate(x[5m])` or \
+                         `<expression>[<range>:<step>]` as in `rate(x[5m:1m])`, with the step \
+                         optionally omitted as `[<range>:]`, where the subquery's `<expression>` \
+                         is any shape here, so a subquery nests on a grid of its own as in \
+                         `rate(rate(x[5m:1m])[10m:30s])`, and where either matrix shape carries the \
+                         `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; a math \
+                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), with \
+                         `round` and the `clamp` functions also taking scalars \
+                         (`round(x, time() / 10)`), a native \
+                         histogram function over any of them (`histogram_count(x)`), a label \
+                         function over any of them \
+                         (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
+                         operation between one of them and a scalar (`2 / (x + 1)`, \
+                         `x > bool time()`, `time() - timestamp(x)`), a scalar — a constant, \
+                         `time()` or a binary operation between scalars — \
+                         `vector(<scalar>)`, a date function without an argument (`hour()`), a \
+                         negation of one of them (`-x`), a set operation between two of them \
+                         (`x and on(job) y`, `x or y`, `x unless y`), `info` over any of them with \
+                         one info metric (`info(x, {version=~\".+\"})`), or one of the \
+                         aggregators that folds a group's values into one value per grid point — \
+                         `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
+                         `quantile(<constant>, <expression>)` — over any of them, optionally \
+                         grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
+                         `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
+                         them, as in `topk(3, x) by(job)` and `count_values(\"v\", x)`; a \
+                         sort, `absent`, `absent_over_time` or `histogram_quantile` / \
+                         `histogram_fraction` over any of them (`sort_desc(x)`, \
+                         `absent(x{job=\"a\"})`, `absent_over_time(x{job=\"a\"}[5m])`, \
+                         `histogram_quantile(0.9, rate(x[5m]))`); a range function's own \
+                         constants sit where that function takes them, before \
+                         the matrix for `quantile_over_time(0.9, x[5m])` and after it for \
+                         `predict_linear(x[5m], 300)` and \
+                         `double_exponential_smoothing(x[5m], 0.5, 0.1)`";
+
+/// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
+///
+/// `input` is the raw series schema the caller bound from the table, and the caller has to apply the
+/// selector's matchers before binding it: `__field__`, `__schema__` and `__database__` select rows
+/// and fields the same way they do in the existing planner, and the AST cannot restate that
+/// afterwards. `input.fields` is therefore the post-`__field__` field set, not the table's; a caller
+/// that binds every field of the table instead compiles a different, wrong window, because
+/// `rate(x{__field__="a"}[5m])` over fields `[a, b]` would fold two fields where the planner folds
+/// one.
+///
+/// `ordering` is what the caller's scan guarantees, and the tree records it rather than assuming
+/// one. Only `Contiguous` and `KeyThenTime` are accepted: every shape this compiler accepts reads
+/// one series to its last chunk before the next, so an `Interleaved` declaration is refused at the
+/// entry, before any shape is built — the bare selector included, which returns before a window
+/// exists — and a shape added later inherits the refusal instead of restating it.
+/// [`NativeNode::validate`] refuses the same ordering in its `Instant` and `Window` branches, as a
+/// backstop for a tree built some other way.
+///
+/// This compatibility entry accepts exactly one selector. Call [`compile_selectors`] to retain
+/// each selector's requirement and binding when compiling more than one input.
+pub fn compile(
+    stmt: &EvalStmt,
+    input: Arc<SeriesSchema>,
+    ordering: SeriesOrdering,
+) -> Result<NativeTree> {
+    // This entry describes one float input: it has no way to be told that a field carries native
+    // histograms, so an aggregate whose state would depend on that is bound as the float aggregate it
+    // would be. A caller that does know - the planner, from the table's own fields - binds through
+    // [`compile_selectors`] and passes the kind with it.
+    let compiled = compile_selectors(
+        stmt,
+        &|_| Ok(Arc::clone(&input)),
+        ordering,
+        Some(FieldKind::Float),
+    )?;
+    if compiled.inputs.len() != 1 {
+        return Err(not_implemented(&format!(
+            "`compile` with {} selector inputs; use `compile_selectors` to bind each input",
+            compiled.inputs.len()
+        )));
+    }
+    Ok(compiled.tree)
+}
+
+fn data_free_value_field(stmt: &EvalStmt) -> Arc<str> {
+    fn visit(expr: &PromExpr, targets: &mut Vec<String>) {
+        match expr {
+            PromExpr::Aggregate(aggregate) => {
+                if aggregate.op.id() == token::T_COUNT_VALUES
+                    && let Some(param) = &aggregate.param
+                    && let PromExpr::StringLiteral(value) = unparen(param)
+                {
+                    targets.push(value.val.clone());
+                }
+                if let Some(modifier) = &aggregate.modifier {
+                    match modifier {
+                        LabelModifier::Include(labels) | LabelModifier::Exclude(labels) => {
+                            targets.extend(labels.labels.iter().cloned());
+                        }
+                    }
+                }
+                // An aggregate's parameter is an expression since `topk` and friends take one, and
+                // the grouping labels it binds are names the value field must not collide with:
+                // an aggregate refuses to group by the field it folds.
+                if let Some(param) = &aggregate.param {
+                    visit(param, targets);
+                }
+                visit(&aggregate.expr, targets);
+            }
+            PromExpr::Unary(unary) => visit(&unary.expr, targets),
+            PromExpr::Binary(binary) => {
+                if let Some(modifier) = &binary.modifier {
+                    if let Some(matching) = &modifier.matching {
+                        targets.extend(matching.labels().labels.iter().cloned());
+                    }
+                    match &modifier.card {
+                        VectorMatchCardinality::OneToMany(labels)
+                        | VectorMatchCardinality::ManyToOne(labels) => {
+                            targets.extend(labels.labels.iter().cloned());
+                        }
+                        _ => {}
+                    }
+                }
+                visit(&binary.lhs, targets);
+                visit(&binary.rhs, targets);
+            }
+            PromExpr::Paren(paren) => visit(&paren.expr, targets),
+            PromExpr::Subquery(subquery) => visit(&subquery.expr, targets),
+            PromExpr::Call(call) => call.args.args.iter().for_each(|arg| visit(arg, targets)),
+            _ => {}
+        }
+    }
+    let mut targets = Vec::new();
+    visit(&stmt.expr, &mut targets);
+    if !targets.iter().any(|name| name == VECTOR_FIELD) {
+        return Arc::from(VECTOR_FIELD);
+    }
+    (0usize..)
+        .map(|index| format!("native_value_{index}"))
+        .find(|candidate| !targets.iter().any(|name| name == candidate))
+        .map(Arc::from)
+        .expect("the value field candidate sequence is unbounded")
+}
+
+/// Compiles a statement that reads no data — a constant, `time()`, `vector(time())`, `hour()` —
+/// to a tree without inputs, on the statement's grid.
+///
+/// A statement that reads a selector is refused: its scan is the caller's to bind, through
+/// [`compile_selectors`].
+pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
+    let output_field = data_free_value_field(stmt);
+    let compiled = compile_selectors_with_value_field(
+        stmt,
+        &|_| {
+            Err(not_implemented(&format!(
+                "a selector in `{}`, which is compiled as a statement that reads no data",
+                stmt.expr
+            )))
+        },
+        SeriesOrdering::Contiguous,
+        output_field,
+        // A statement that reads no data has no source to take a kind from. An aggregate over it
+        // still binds: the walk only reads the source kind at an input node, and there is none.
+        None,
+    )?;
+    Ok(compiled.tree)
+}
+
+/// Compiles `stmt` with an explicit evaluation grid, instead of the one its bounds derive.
+///
+/// A subquery root's inner expression is evaluated on the subquery's child grid, while the
+/// statement's own bounds stay where `@ start()` and `@ end()` resolve against them.
+pub(crate) fn compile_statement_with_grid(
+    stmt: &EvalStmt,
+    grid: Arc<EvalGrid>,
+) -> Result<NativeTree> {
+    let output_field = data_free_value_field(stmt);
+    let compiled = compile_selectors_with_grid_and_value_field(
+        stmt,
+        &|_| {
+            Err(not_implemented(&format!(
+                "a selector in `{}`, which is compiled as a statement that reads no data",
+                stmt.expr
+            )))
+        },
+        SeriesOrdering::Contiguous,
+        output_field,
+        Some(grid),
+        None,
+    )?;
+    Ok(compiled.tree)
+}
+
+/// Compiles `stmt` into a tree and returns a binding record for each selector occurrence.
+///
+/// `bindings` is called once per selector with its requirements. The resulting source indices are
+/// occurrence numbers in compiler traversal order; the caller maps them to scan children.
+pub fn compile_selectors(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    source_kind: Option<FieldKind>,
+) -> Result<CompiledTree> {
+    compile_selectors_with_value_field(
+        stmt,
+        bindings,
+        ordering,
+        Arc::from(VECTOR_FIELD),
+        source_kind,
+    )
+}
+
+/// Compiles `stmt` with an explicit evaluation grid. See [`compile_statement_with_grid`].
+pub(crate) fn compile_selectors_with_grid(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    grid: Arc<EvalGrid>,
+    source_kind: Option<FieldKind>,
+) -> Result<CompiledTree> {
+    compile_selectors_with_grid_and_value_field(
+        stmt,
+        bindings,
+        ordering,
+        Arc::from(VECTOR_FIELD),
+        Some(grid),
+        source_kind,
+    )
+}
+
+fn compile_selectors_with_value_field(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    value_field: Arc<str>,
+    source_kind: Option<FieldKind>,
+) -> Result<CompiledTree> {
+    compile_selectors_with_grid_and_value_field(
+        stmt,
+        bindings,
+        ordering,
+        value_field,
+        None,
+        source_kind,
+    )
+}
+
+fn compile_selectors_with_grid_and_value_field(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    value_field: Arc<str>,
+    grid: Option<Arc<EvalGrid>>,
+    source_kind: Option<FieldKind>,
+) -> Result<CompiledTree> {
+    if ordering == SeriesOrdering::Interleaved {
+        return Err(not_implemented(
+            "raw samples whose series interleave, which this compiler cannot consume: a native \
+             evaluation reads one series to its last chunk before the next, so chunks of different \
+             series may not interleave",
+        ));
+    }
+    // A tree reports evaluated samples or a scalar on the statement's grid; a range vector or a
+    // string has no grid of its own.
+    if !matches!(
+        stmt.expr.value_type(),
+        ValueType::Vector | ValueType::Scalar
+    ) {
+        return Err(not_implemented(&format!(
+            "the expression `{}`, which is a {} where a tree reports evaluated samples or a \
+             scalar",
+            stmt.expr,
+            stmt.expr.value_type()
+        )));
+    }
+    let inputs = RefCell::new(Vec::new());
+    let context = Context {
+        stmt,
+        bindings,
+        ordering,
+        inputs: &inputs,
+        // The grid is derived only once the statement is a shape this compiler answers, so an
+        // unsupported statement reports the reason it has no tree rather than a grid complaint.
+        grid: match grid {
+            Some(grid) => grid,
+            None => statement_grid(stmt)?,
+        },
+        value_field,
+        source_kind,
+    };
+    let tree = NativeTree::try_new(compile_expr(&context, &stmt.expr)?)?;
+    let inputs = inputs.into_inner();
+    validate_inputs(tree.root(), &inputs)?;
+    Ok(CompiledTree {
+        tree,
+        inputs: inputs.into(),
+    })
+}
+
+fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
+    let bound = root.inputs();
+    if bound.len() == inputs.len()
+        && bound
+            .iter()
+            .zip(inputs)
+            .enumerate()
+            .all(|(index, (bound, input))| {
+                input.source_index == index
+                    && bound.source_index == input.source_index
+                    && bound.ordering == input.ordering
+                    && bound
+                        .output
+                        .samples()
+                        .is_some_and(|schema| Arc::ptr_eq(schema, &input.schema))
+            })
+    {
+        return Ok(());
+    }
+    Err(DataFusionError::Internal(
+        "a compiled tree's recorded inputs do not match its input nodes".into(),
+    ))
+}
+
+/// Shared statement, per-selector binding callback, occurrence records, ordering and current grid.
+///
+/// A subquery substitutes its own grid while reusing the statement-level bindings and input list.
+struct Context<'a> {
+    stmt: &'a EvalStmt,
+    bindings: &'a dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    inputs: &'a RefCell<Vec<CompiledInput>>,
+    grid: Arc<EvalGrid>,
+    value_field: Arc<str>,
+    /// The kind the statement's sources carry, when the caller knows it.
+    ///
+    /// A binding whose state depends on it is refused rather than bound from a guess when it is
+    /// unknown: `source_kind` is `None` only for a statement the caller could not describe, and a
+    /// tree with no source never needs it.
+    source_kind: Option<FieldKind>,
+}
+
+/// Compiles `expr` into the node it denotes, recursing into whatever it is made of.
+///
+/// One rule per kind of expression and nothing per query: a math function is compiled by compiling
+/// its argument, so a query nests as deeply as it was written. A kind this compiler has no node for
+/// is refused with what was found, which is why the rejection is useful without a coverage list.
+fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
+    // A constant is a value rather than a computation, so it binds as the number it folds to, by the
+    // same fold a call's parameters use: `x * (1 + 2)` carries `3` rather than an addition the tree
+    // would have to know how to run. The fold is checked first so that no shape below has to say
+    // what it does with a constant operand.
+    if let Some(value) = constant_value(expr) {
+        return Ok(scalar_node(context, value));
+    }
+    match expr {
+        // Parentheses group, so they change how a statement was typed rather than what it asks for:
+        // the expression inside them is the one that compiles.
+        PromExpr::Paren(paren) => compile_expr(context, &paren.expr),
+        PromExpr::Call(call) => compile_call(context, call),
+        PromExpr::VectorSelector(selector) => instant_selection(context, selector),
+        PromExpr::Unary(unary) => negate(context, &unary.expr),
+        PromExpr::Binary(binary) => binary_operation(context, binary),
+        PromExpr::Aggregate(aggregate) => aggregate_expr(context, aggregate),
+        found => Err(not_implemented(&format!("the expression `{found}`"))),
+    }
+}
+
+/// Binds `value` as a constant scalar on the grid of the expression being compiled.
+///
+/// The grid is the context's rather than the constant's own: a constant has no timestamps, so the
+/// only positions it can be broadcast over are the ones the expression it sits next to is evaluated
+/// at — the statement's grid, or a subquery's inside one. [`NativeTree::validate`] compares a binary
+/// operation's two grids by spec rather than by allocation.
+///
+/// Nothing here can fail: the grid is the one [`Context`] already carries, so a caller needs no `?`.
+fn scalar_node(context: &Context, value: f64) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value }),
+        output: NativeType::Scalar(Arc::clone(&context.grid)),
+    }
+}
+
+/// Compiles a negation as the multiplication it is: `-x` is `-1 * x`.
+///
+/// The tree has no negate node and needs none: broadcasting a constant over the expression's value
+/// is the same arithmetic, and the multiplication kernel is the one that already computes it. A
+/// dedicated negate kernel would be an optimization of this node's work rather than a different
+/// meaning, so binding the multiplication does not bind anything the query did not ask for.
+fn negate(context: &Context, operand: &PromExpr) -> Result<NativeNode> {
+    // The constant goes on the left, where the minus was: `-x` subtracts nothing, but a reader of
+    // the tree should see the same order the query was written in.
+    Ok(broadcast(
+        scalar_node(context, -1.0),
+        compile_expr(context, operand)?,
+        BinaryOp::Mul,
+        false,
+    ))
+}
+
+/// Compiles a binary operation, preserving written operand order and vector matching modifiers.
+///
+/// A scalar carries no labels, so broadcasting it over a vector is unambiguous. Vector operands
+/// retain their own input bindings and matching, including a fill on either side.
+fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode> {
+    if let Some(op) = set_op(&binary.op) {
+        return set_operation(context, binary, op);
+    }
+    let Some(op) = binary_op(&binary.op) else {
+        return Err(not_implemented(&format!(
+            "the binary operator `{}` in `{binary}`",
+            binary.op
+        )));
+    };
+    // Two vectors are matched by their labels, so the node carries the modifiers the query wrote and
+    // each operand is compiled from its own selector.
+    if binary.lhs.value_type() == ValueType::Vector && binary.rhs.value_type() == ValueType::Vector
+    {
+        let left = compile_expr(context, &binary.lhs)?;
+        let right = compile_expr(context, &binary.rhs)?;
+        return bind_vector_binary(binary, left, right, op);
+    }
+    // What is left has a constant on one side, and a modifier is refused rather than dropped. This
+    // is deliberately narrower than Prometheus, which drops an `on` or `ignoring` written on a
+    // scalar rather than refusing it; refusing is the conservative choice here, because the tree's
+    // matching has no field that could carry the modifier, so binding the operation would compute
+    // something the query did not ask for. A fill value is refused for the same reason: the tree's
+    // matching has no field for one, and dropping it would compute the operation without the fill
+    // the query asked for.
+    if refuses_modifier(binary.modifier.as_ref()) {
+        return Err(not_implemented(&format!(
+            "the vector matching in `{binary}`, which a constant operand has nothing to match: \
+             `on`, `ignoring`, `group_left` and `group_right` name labels of a vector, and a fill \
+             value fills in a match group that could miss"
+        )));
+    }
+    // A comparison of two scalars reports a value only when written with `bool`; Prometheus
+    // refuses to parse one without it. Binding it would produce a node that only fails when it is
+    // run, so it is refused here with what was found. Two constants never reach here: they folded.
+    if binary.lhs.value_type() == ValueType::Scalar
+        && binary.rhs.value_type() == ValueType::Scalar
+        && matches!(op.kind(), BinaryKind::Comparison(_))
+        && !binary.return_bool()
+    {
+        return Err(not_implemented(&format!(
+            "the binary operation `{binary}` between two scalars, which reports no value: a \
+             comparison of two scalars is written with `bool` to say whether it holds"
+        )));
+    }
+    // Both operands are compiled before the node is built, so `2 / (x + 1)` nests. The constant side
+    // is bound by [`compile_expr`]'s fold, which is what makes it a scalar node rather than an
+    // expression the tree would have to run.
+    Ok(broadcast(
+        compile_expr(context, &binary.lhs)?,
+        compile_expr(context, &binary.rhs)?,
+        op,
+        binary.return_bool(),
+    ))
+}
+
+/// Binds the same vector operation over compiled or already evaluated operands.
+fn bind_vector_binary(
+    binary: &BinaryExpr,
+    left: NativeNode,
+    right: NativeNode,
+    op: BinaryOp,
+) -> Result<NativeNode> {
+    let (Some(lhs), Some(rhs)) = (left.output.samples(), right.output.samples()) else {
+        return Err(DataFusionError::Internal(format!(
+            "the binary operation `{binary}` compiled a vector operand to something other than samples"
+        )));
+    };
+    let output = NativeType::Samples(binary_output_schema(lhs, rhs)?);
+    Ok(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: vector_matching(binary, op)?,
+        },
+        output,
+    })
+}
+
+/// Uses the ordinary binary binder for two evaluated frame inputs.
+pub(crate) fn bind_evaluated_binary(
+    binary: &BinaryExpr,
+    left: NativeNode,
+    right: NativeNode,
+) -> Result<NativeTree> {
+    let op = binary_op(&binary.op).ok_or_else(|| {
+        not_implemented(&format!(
+            "the binary operator `{}` in `{binary}`",
+            binary.op
+        ))
+    })?;
+    NativeTree::try_new(bind_vector_binary(binary, left, right, op)?)
+}
+
+/// Compiles `and`, `or` or `unless` between two vectors, matched by the labels the query wrote.
+///
+/// The parser already refuses a scalar operand, `bool` and `group_left` / `group_right` on a set
+/// operator. It does not refuse a fill value, which Prometheus does ("filling in missing series not
+/// allowed for set operators"), so that is refused here along with any cardinality other than the
+/// many-to-many the parser assigns.
+fn set_operation(context: &Context, binary: &BinaryExpr, op: SetOp) -> Result<NativeNode> {
+    let modifier = binary.modifier.as_ref();
+    if modifier.is_some_and(|modifier| {
+        modifier.card != VectorMatchCardinality::ManyToMany
+            || modifier.fill_values != VectorMatchFillValues::default()
+    }) {
+        return Err(not_implemented(&format!(
+            "the modifiers in `{binary}`: a set operator matches many-to-many and takes no fill \
+             value"
+        )));
+    }
+    let labels = matching_labels(modifier);
+    let left = compile_expr(context, &binary.lhs)?;
+    let right = compile_expr(context, &binary.rhs)?;
+    let (Some(lhs), Some(rhs)) = (left.output.samples(), right.output.samples()) else {
+        return Err(DataFusionError::Internal(format!(
+            "the set operation `{binary}` compiled an operand to something other than samples: the \
+             parser only accepts a set operator between two vectors"
+        )));
+    };
+    // Prometheus has one value per sample, and the existing planner refuses a set operator over
+    // several fields, so per-field presence has no reference semantics to follow.
+    if lhs.fields.len() != 1 || rhs.fields.len() != 1 {
+        return Err(not_implemented(&format!(
+            "the set operation `{binary}` between vectors of {} and {} fields: a set operator is \
+             compiled over one field on each side",
+            lhs.fields.len(),
+            rhs.fields.len()
+        )));
+    }
+    // A set operation hands on the samples it keeps unchanged, so it reports the left side's fields
+    // on the grid both sides share.
+    let output = left.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Set {
+            left: Box::new(left),
+            right: Box::new(right),
+            op: BoundSetOp { op, labels },
+        },
+        output,
+    })
+}
+
+/// Wraps two compiled operands in the binary node that applies `op` to them.
+///
+/// The output is the vector side's own binding, because a scalar carries no fields: a broadcast keeps
+/// the vector's fields and the grid it is evaluated on, which is the statement's grid on both sides.
+/// Two scalars are possible as a nested operand — a pair that [`constant_value`] refuses to fold, such
+/// as a comparison between two constants — and the node reports the left one's grid, which is the
+/// statement's too. The operands keep the order they were written in, because a non-commutative
+/// operator means what that order says.
+fn broadcast(left: NativeNode, right: NativeNode, op: BinaryOp, return_bool: bool) -> NativeNode {
+    // `compile_expr` binds a constant to a scalar node and a selection or a function to a vector, so
+    // this is where the side the operation reports is decided.
+    let output = if matches!(left.output, NativeType::Scalar(_)) {
+        right.output.clone()
+    } else {
+        left.output.clone()
+    };
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: scalar_matching(op, return_bool),
+        },
+        output,
+    }
+}
+
+/// The matching a vector-and-constant operation records.
+///
+/// Nothing is matched: a scalar carries no labels, so [`NativeTree::validate`] broadcasts it and
+/// reads neither `labels` nor `cardinality`. They carry the default a vector–vector operation of the
+/// same operator would have, which is also the only matching PromQL allows here — it rejects
+/// `on`, `ignoring`, `group_left` and `group_right` on a scalar–vector operation. `return_bool` is
+/// the one modifier that changes what this operation computes: `x > 0` filters the vector and
+/// `x > bool 0` reports zero or one for each of its values.
+fn scalar_matching(op: BinaryOp, return_bool: bool) -> BinaryMatching {
+    BinaryMatching {
+        op,
+        return_bool,
+        labels: MatchingLabels::Ignoring(Vec::new()),
+        cardinality: Cardinality::OneToOne,
+        // A fill value fills in a match group that could miss, which a broadcast over a constant never
+        // does: the constant exists at every grid point, so there is no missing side to fill.
+        fill: FillValues::default(),
+    }
+}
+
+/// The matching a vector–vector operation records.
+///
+/// Each part is read from the modifier the query wrote, and a modifier it did not write is the
+/// default PromQL applies: every label but `__name__` matches (`ignoring` nothing), and the
+/// cardinality is one-to-one. Fill fields retain the parser's left/right values, which name the
+/// sides as written: the kernel swaps them together with the operands under `group_right`.
+///
+/// `ManyToMany` is the cardinality of a set operator, which [`binary_operation`] compiles before
+/// asking for a matching, so reaching it means the two disagree; it is reported as a shape with no
+/// node rather than panicking on a path a query cannot take today.
+fn vector_matching(binary: &BinaryExpr, op: BinaryOp) -> Result<BinaryMatching> {
+    let modifier = binary.modifier.as_ref();
+    let labels = matching_labels(modifier);
+    let cardinality = match modifier.map(|modifier| &modifier.card) {
+        None | Some(VectorMatchCardinality::OneToOne) => Cardinality::OneToOne,
+        Some(VectorMatchCardinality::ManyToOne(labels)) => {
+            Cardinality::ManyToOne(label_names(&labels.labels))
+        }
+        Some(VectorMatchCardinality::OneToMany(labels)) => {
+            Cardinality::OneToMany(label_names(&labels.labels))
+        }
+        Some(VectorMatchCardinality::ManyToMany) => {
+            return Err(not_implemented(&format!(
+                "the many-to-many matching in `{binary}`, which is the cardinality of a set \
+                 operator: it combines two vectors' series, and this node is an arithmetic or \
+                 comparison operation over values"
+            )));
+        }
+    };
+    let fill = modifier.map_or_else(FillValues::default, |modifier| FillValues {
+        lhs: modifier.fill_values.lhs,
+        rhs: modifier.fill_values.rhs,
+    });
+    Ok(BinaryMatching {
+        op,
+        return_bool: binary.return_bool(),
+        labels,
+        cardinality,
+        fill,
+    })
+}
+
+/// The set operator a PromQL token denotes, or `None` when it is not one.
+fn set_op(op: &TokenType) -> Option<SetOp> {
+    match op.id() {
+        token::T_LAND => Some(SetOp::And),
+        token::T_LOR => Some(SetOp::Or),
+        token::T_LUNLESS => Some(SetOp::Unless),
+        _ => None,
+    }
+}
+
+/// The labels `on(...)` or `ignoring(...)` names; with neither, every label but `__name__`.
+fn matching_labels(modifier: Option<&BinModifier>) -> MatchingLabels {
+    match modifier.and_then(|modifier| modifier.matching.as_ref()) {
+        None => MatchingLabels::Ignoring(Vec::new()),
+        Some(LabelModifier::Include(labels)) => MatchingLabels::On(label_names(&labels.labels)),
+        Some(LabelModifier::Exclude(labels)) => {
+            MatchingLabels::Ignoring(label_names(&labels.labels))
+        }
+    }
+}
+
+fn label_names(labels: &[String]) -> Vec<Arc<str>> {
+    labels.iter().map(|name| Arc::from(name.as_str())).collect()
+}
+
+/// The binary operator a PromQL token denotes, or `None` when there is no node for it.
+///
+/// A comparison carries `return_bool` separately, so `x > 0` and `x > bool 0` use the same
+/// operator. The node the runtime executes and the constant fold both read the operator here.
+fn binary_op(op: &TokenType) -> Option<BinaryOp> {
+    match op.id() {
+        token::T_ADD => Some(BinaryOp::Add),
+        token::T_SUB => Some(BinaryOp::Sub),
+        token::T_MUL => Some(BinaryOp::Mul),
+        token::T_DIV => Some(BinaryOp::Div),
+        token::T_MOD => Some(BinaryOp::Mod),
+        token::T_POW => Some(BinaryOp::Pow),
+        token::T_ATAN2 => Some(BinaryOp::Atan2),
+        token::T_EQLC => Some(BinaryOp::Eq),
+        token::T_NEQ => Some(BinaryOp::Ne),
+        token::T_GTR => Some(BinaryOp::Gt),
+        token::T_LSS => Some(BinaryOp::Lt),
+        token::T_GTE => Some(BinaryOp::Ge),
+        token::T_LTE => Some(BinaryOp::Le),
+        _ => None,
+    }
+}
+
+/// Compiles an aggregation into an aggregate node over the expression it groups.
+///
+/// The aggregators that fold a group's values into one value per grid point bind to an aggregate
+/// node: `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and `quantile`. The
+/// runtime validates whether the resulting tree can execute.
+///
+/// The rest of the parser's aggregates are a different shape and bind as a vector operation
+/// ([`vector_aggregate`]) rather than as a kind that would compute something else: `topk`,
+/// `bottomk`, `limitk` and `limit_ratio` select some of the input's series, so they do not report
+/// one value per group per grid point, and `count_values` writes one output label per distinct value
+/// rather than folding a group's values at all.
+///
+/// The grouping is bound in the tree's own terms, because `by` and `without` are not each other's
+/// inverse: `by(job)` keeps `job` and drops every other label, while `without(instance)` keeps every
+/// label it does not name and drops `__name__` as well, so a list of the surviving labels could not
+/// say the same thing. A bare `sum(x)` groups by no label at all, which is Prometheus's reading of
+/// "no modifier": every label is dropped, `__name__` included, and every series of the input falls
+/// into one group.
+///
+/// The stage is [`AggregateStage::Complete`], which says that every contribution to each group is in
+/// this execution's input. The module documentation says what keeping that claim costs a caller.
+fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<NativeNode> {
+    let AggregateExpr {
+        op,
+        expr,
+        param,
+        modifier,
+    } = aggregate;
+    let kind = match op.id() {
+        token::T_SUM => AggregateKind::Sum,
+        token::T_AVG => AggregateKind::Avg,
+        token::T_COUNT => AggregateKind::Count,
+        token::T_MIN => AggregateKind::Min,
+        token::T_MAX => AggregateKind::Max,
+        token::T_GROUP => AggregateKind::Group,
+        token::T_STDDEV => AggregateKind::Stddev,
+        token::T_STDVAR => AggregateKind::Stdvar,
+        token::T_QUANTILE => {
+            // `quantile` is the only one of the nine with a parameter, and the parser always gives
+            // it one: a `quantile` with no quantile written is refused before the compiler sees it.
+            // The quantile is the call's first argument, so a parameter that is not a constant is
+            // refused under that name rather than answered from a number bound too early.
+            let param = param.as_ref().ok_or_else(|| {
+                not_implemented(&format!(
+                    "the aggregate `{op}` in `{aggregate}`, which takes its quantile as its first \
+                     argument"
+                ))
+            })?;
+            AggregateKind::Quantile {
+                quantile: constant_argument(&op.to_string(), param, 0)?,
+            }
+        }
+        // A ranking aggregate keeps some of the input's series, and `count_values` writes one
+        // output label per distinct value: neither folds a group into one value per grid point, so
+        // both read the whole vector in a `Vector` node instead.
+        token::T_TOPK
+        | token::T_BOTTOMK
+        | token::T_LIMITK
+        | token::T_LIMIT_RATIO
+        | token::T_COUNT_VALUES => {
+            return vector_aggregate(context, aggregate);
+        }
+        // The parser's `aggregate_op` rule lists exactly the fourteen names above, so this arm is
+        // an operator this compiler was not taught rather than one it means to fold.
+        _ => {
+            return Err(not_implemented(&format!(
+                "the aggregate `{op}` in `{aggregate}`"
+            )));
+        }
+    };
+    let input = compile_expr(context, expr)?;
+    // What the aggregate's state carries is what its direct input answers with, so the binding is
+    // decided here, from the input's own walk, rather than from the statement's sources: an
+    // operator between the two can change the kind (`sum(count_over_time(h[5m]))` folds a float
+    // built from histograms).
+    //
+    // A kind this walk cannot name is not a float by default: the state a `sum` or `avg` keeps over
+    // a histogram is a different layout, so binding one from a guess would compute the wrong thing
+    // for a statement whose sources carry histograms. Such a shape keeps the existing plan (the
+    // refusal is `NotImplemented`).
+    //
+    // With float sources - or with no source at all - an unnameable input is still a float, and the
+    // aggregate binds the numeric state it always did. What makes that a proof rather than a default
+    // is that a native histogram sample can only enter a tree from a source that carries one: every
+    // operator here passes a histogram through, reduces it to a float, or declines the shape. A
+    // shape whose samples this walk does not describe (`clamp`, `topk`, `vector()` of a scalar) can
+    // therefore not be holding one.
+    let field_kind = match input.output_field_kind(context.source_kind) {
+        Some(kind) => kind,
+        None if context.source_kind == Some(FieldKind::Histogram) => {
+            return Err(not_implemented(&format!(
+                "the aggregate `{op}` in `{aggregate}`, whose input's field kind this compile cannot \
+                 name while its sources carry native histograms: the aggregate's state depends on \
+                 whether the input carries floats or histograms"
+            )));
+        }
+        None => FieldKind::Float,
+    };
+    // A complete aggregate folds each group's values and reports them on its input's grid, one value
+    // per input field, so its layout is its input's.
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(input),
+            op: BoundAggregate {
+                kind,
+                group: grouping(modifier.as_ref()),
+                stage: AggregateStage::Complete,
+                field_kind,
+            },
+        },
+        output,
+    })
+}
+
+/// Binds `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` as a vector operation over
+/// the expression it aggregates.
+///
+/// The parser gives each of them its parameter: a number for the first four, folded to the constant
+/// it means like a `quantile`, and a string for `count_values`, the label it writes the value to.
+fn vector_aggregate(context: &Context, aggregate: &AggregateExpr) -> Result<NativeNode> {
+    let AggregateExpr {
+        op,
+        expr,
+        param,
+        modifier,
+    } = aggregate;
+    let name = op.to_string();
+    let param = param.as_ref().ok_or_else(|| {
+        not_implemented(&format!(
+            "the aggregate `{op}` in `{aggregate}`, which takes a parameter as its first argument"
+        ))
+    })?;
+    let group = grouping(modifier.as_ref());
+    if matches!(op.id(), token::T_TOPK | token::T_BOTTOMK) && constant_value(param).is_none() {
+        let input = compile_expr(context, expr)?;
+        let output = input.output.clone();
+        let parameter = compile_expr(context, param)?;
+        return Ok(NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(input),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: op.id() == token::T_TOPK,
+                    group,
+                },
+                parameter: Box::new(parameter),
+            },
+            output,
+        });
+    }
+    let bound = match op.id() {
+        token::T_TOPK | token::T_BOTTOMK => BoundVectorOp::TopK {
+            k: constant_argument(&name, param, 0)?,
+            top: op.id() == token::T_TOPK,
+            group,
+        },
+        token::T_LIMITK => BoundVectorOp::LimitK {
+            k: constant_argument(&name, param, 0)?,
+            group,
+        },
+        // `limit_ratio` keeps whole series by their label hash, so a grouping changes nothing.
+        token::T_LIMIT_RATIO => BoundVectorOp::LimitRatio {
+            ratio: constant_argument(&name, param, 0)?,
+        },
+        _ => {
+            let PromExpr::StringLiteral(StringLiteral { val }) = unparen(param) else {
+                return Err(not_implemented(&format!(
+                    "the aggregate `{op}` in `{aggregate}`, whose label `{param}` is not a string \
+                     literal"
+                )));
+            };
+            BoundVectorOp::CountValues {
+                label: Arc::from(val.as_str()),
+                group,
+            }
+        }
+    };
+    vector_call(context, &name, bound, expr)
+}
+
+/// How a `by` or `without` modifier identifies a group, in the tree's own terms.
+///
+/// The labels keep the order they were written in: a grouping is a set, and the tree records the
+/// query rather than a key it derived from one.
+fn grouping(modifier: Option<&LabelModifier>) -> Grouping {
+    /// The written labels, as the tree stores them.
+    fn labels(labels: &[String]) -> Arc<[Arc<str>]> {
+        labels
+            .iter()
+            .map(|label| Arc::<str>::from(label.as_str()))
+            .collect()
+    }
+    match modifier {
+        // No modifier and `by()` ask for the same grouping: no label is kept, so every series of the
+        // input falls into one group.
+        None => Grouping::By(Arc::new([])),
+        Some(LabelModifier::Include(by)) => Grouping::By(labels(&by.labels)),
+        Some(LabelModifier::Exclude(without)) => Grouping::Without(labels(&without.labels)),
+    }
+}
+
+/// Compiles `timestamp`, projecting selected source times for a selector and evaluation times for
+/// an already evaluated vector.
+fn timestamp_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNode> {
+    if args.len() != 1 {
+        return Err(not_implemented("timestamp expects one argument"));
+    }
+    let argument = unparen(&args[0]);
+    if argument.value_type() != ValueType::Vector {
+        return Err(not_implemented("timestamp argument is not a vector"));
+    }
+    if let PromExpr::VectorSelector(selector) = argument {
+        return instant_selection_of(context, selector, InstantValue::Timestamp);
+    }
+    let input = compile_expr(context, argument)?;
+    let NativeType::Samples(schema) = &input.output else {
+        return Err(not_implemented("timestamp argument is not a vector"));
+    };
+    if schema.fields.len() != 1 {
+        return Err(not_implemented(
+            "timestamp() over a multi-value input is not supported natively",
+        ));
+    }
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(input),
+        },
+        output,
+    })
+}
+
+/// Compiles `info(v[, {selector}])` as its base `v` and the instant selection of the info series it
+/// reads.
+///
+/// The info series are selected the way Prometheus' `fetchInfoSeries` and `evalSeries` select
+/// them: by the info metric's name and the data matchers, at the reference time the selectors of
+/// `v` share ([`info_input`]), with the statement's lookback. Which of them a base series matches by
+/// its identifying labels is the kernel's.
+fn info_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNode> {
+    let InfoInput { selector, kernel } = info_input(context.stmt, args)?;
+    let base = compile_expr(context, &args[0])?;
+    if base
+        .output
+        .samples()
+        .is_none_or(|schema| schema.eval_grid.is_none())
+    {
+        return Err(DataFusionError::Internal(format!(
+            "info's first argument `{}` compiled to something other than an evaluated vector: the \
+             parser only accepts a vector there",
+            args[0]
+        )));
+    }
+    let info = instant_selection_of(context, &selector, InstantValue::InfoTimestamp)?;
+    let fields = info
+        .output
+        .samples()
+        .map_or(0, |schema| schema.fields.len());
+    // Prometheus reads one sample per info series and point, and the existing planner has no
+    // `info` to follow for several fields.
+    if fields != 1 {
+        return Err(not_implemented(&format!(
+            "info over the info metric `{selector}` with {fields} fields: an info series is read as \
+             one field"
+        )));
+    }
+    let output = base.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(base),
+            info: Box::new(info),
+            selector: kernel,
+        },
+        output,
+    })
+}
+
+/// The info series `info(v[, {selector}])` reads, as a selector, and the selector its kernel
+/// combines by.
+pub(crate) struct InfoInput {
+    /// The info metric with the data matchers, at the reference time the selectors of `v` share.
+    pub selector: VectorSelector,
+    pub kernel: InfoSelector,
+}
+
+/// Splits the arguments of `info` into the selector of its info series and the kernel's selector.
+///
+/// The compiler binds the selector as the call's last input and the planner prepares a scan for it
+/// at the same position, so both read it here. One info metric is one table, so the name has to be
+/// `target_info` (no name matcher) or one `__name__="..."`: a regular expression or a negative
+/// matcher can select several tables. `__field__`, `__schema__` and `__database__` choose what a
+/// selector reads rather than match a label, which Prometheus would read them as, so they are
+/// refused too.
+pub(crate) fn info_input(stmt: &EvalStmt, args: &[Box<PromExpr>]) -> Result<InfoInput> {
+    let (base, labels) = match args {
+        [base] => (base, None),
+        [base, labels] => (base, Some(labels)),
+        _ => {
+            return Err(not_implemented(&format!(
+                "a call to `info` with {} argument(s)",
+                args.len()
+            )));
+        }
+    };
+    let matchers: &[Matcher] = match labels.map(|labels| labels.as_ref()) {
+        None => &[],
+        Some(PromExpr::VectorSelector(VectorSelector {
+            name: None,
+            matchers,
+            offset: None,
+            at: None,
+        })) if matchers.or_matchers.is_empty() => &matchers.matchers,
+        Some(other) => {
+            return Err(not_implemented(&format!(
+                "`info` whose second argument `{other}` is not one label selector without a name \
+                 or modifiers"
+            )));
+        }
+    };
+    let (names, data): (Vec<&Matcher>, Vec<&Matcher>) = matchers
+        .iter()
+        .partition(|matcher| matcher.name == "__name__");
+    let metric = match names.as_slice() {
+        [] => "target_info".to_string(),
+        [name] if name.op == ParserMatchOp::Equal => name.value.clone(),
+        _ => {
+            return Err(not_implemented(
+                "`info` over the info metrics a regular expression, a negative matcher or several \
+                 `__name__` matchers select, which can be several tables",
+            ));
+        }
+    };
+    if data.iter().any(|matcher| {
+        matches!(
+            matcher.name.as_str(),
+            "__field__" | "__schema__" | "__database__"
+        )
+    }) {
+        return Err(not_implemented(
+            "`info` with a `__field__`, `__schema__` or `__database__` matcher, which selects \
+             what is read rather than a data label",
+        ));
+    }
+    let (at, offset_ms) = info_reference(stmt, base)?;
+    let offset = match offset_ms {
+        0 => None,
+        ms if ms > 0 => Some(Offset::Pos(Duration::from_millis(ms.unsigned_abs()))),
+        ms => Some(Offset::Neg(Duration::from_millis(ms.unsigned_abs()))),
+    };
+    let kernel = InfoSelector {
+        name_matchers: names
+            .iter()
+            .map(|matcher| (match_op(&matcher.op), Arc::from(matcher.value.as_str())))
+            .collect(),
+        data_labels: data
+            .iter()
+            .map(|matcher| Arc::from(matcher.name.as_str()))
+            .collect(),
+        keep_unmatched: data.iter().all(|matcher| matcher.is_match("")),
+    };
+    Ok(InfoInput {
+        selector: VectorSelector {
+            name: Some(metric),
+            matchers: Matchers::new(data.into_iter().cloned().collect()),
+            offset,
+            at,
+        },
+        kernel,
+    })
+}
+
+/// The `@` anchor and offset the info series are selected at: those of the first selector of
+/// `expr` when every vector-producing path of it reaches a selector with the same effective
+/// reference time, and none otherwise, as Prometheus `infoSeriesSelectTimestampAndOffset` decides.
+///
+/// A selector inside subqueries adds their offsets until one of them anchors it with `@`. A path
+/// that produces a vector without a selector, such as `vector(1)`, is evaluated at the step itself,
+/// so it leaves no shared reference.
+fn info_reference(stmt: &EvalStmt, expr: &PromExpr) -> Result<(Option<AtModifier>, i64)> {
+    #[derive(Default)]
+    struct Walk {
+        /// The first selector's anchor, its resolved time and its offset.
+        first: Option<(Option<AtModifier>, Option<i64>, i64)>,
+        uniform: bool,
+        reference_free: bool,
+    }
+
+    fn inspect<'a>(
+        stmt: &EvalStmt,
+        expr: &'a PromExpr,
+        subqueries: &mut Vec<&'a SubqueryExpr>,
+        walk: &mut Walk,
+    ) -> Result<bool> {
+        if !matches!(expr.value_type(), ValueType::Vector | ValueType::Matrix) {
+            return Ok(false);
+        }
+        let selector = match expr {
+            PromExpr::VectorSelector(selector) => Some(selector),
+            PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => Some(vs),
+            _ => None,
+        };
+        if let Some(selector) = selector {
+            let mut at = selector.at.clone();
+            let mut offset = selector_offset_ms(&selector.offset)?;
+            for subquery in subqueries.iter().rev() {
+                if at.is_some() {
+                    break;
+                }
+                offset = offset
+                    .checked_add(selector_offset_ms(&subquery.offset)?)
+                    .ok_or_else(|| DataFusionError::Plan("selector offset overflows".into()))?;
+                at = subquery.at.clone();
+            }
+            let at_ms = selector_anchor_ms(&at, stmt)?;
+            match &walk.first {
+                None => walk.first = Some((at, at_ms, offset)),
+                Some((_, first_at, first_offset)) => {
+                    let same = match (first_at, at_ms) {
+                        (None, None) => *first_offset == offset,
+                        (Some(first_at), Some(at)) => {
+                            i128::from(*first_at) - i128::from(*first_offset)
+                                == i128::from(at) - i128::from(offset)
+                        }
+                        _ => false,
+                    };
+                    walk.uniform &= same;
+                }
+            }
+            return Ok(true);
+        }
+        let children: Vec<&PromExpr> = match expr {
+            PromExpr::Paren(paren) => vec![&paren.expr],
+            PromExpr::Unary(unary) => vec![&unary.expr],
+            PromExpr::Binary(binary) => vec![&binary.lhs, &binary.rhs],
+            PromExpr::Aggregate(aggregate) => aggregate
+                .param
+                .iter()
+                .chain([&aggregate.expr])
+                .map(|child| child.as_ref())
+                .collect(),
+            // The second argument of a nested `info` is selector syntax, not a vector it evaluates.
+            PromExpr::Call(call) if call.func.name == "info" => call
+                .args
+                .args
+                .iter()
+                .take(1)
+                .map(|arg| arg.as_ref())
+                .collect(),
+            PromExpr::Call(call) => call.args.args.iter().map(|arg| arg.as_ref()).collect(),
+            PromExpr::Subquery(subquery) => {
+                subqueries.push(subquery);
+                let found = inspect(stmt, &subquery.expr, subqueries, walk);
+                subqueries.pop();
+                let found = found?;
+                walk.reference_free |= !found;
+                return Ok(found);
+            }
+            other => {
+                return Err(not_implemented(&format!(
+                    "`info` over `{other}`, whose reference time is not derived here"
+                )));
+            }
+        };
+        let mut found = false;
+        for child in children {
+            found |= inspect(stmt, child, subqueries, walk)?;
+        }
+        walk.reference_free |= !found;
+        Ok(found)
+    }
+
+    let mut walk = Walk {
+        uniform: true,
+        ..Default::default()
+    };
+    inspect(stmt, expr, &mut Vec::new(), &mut walk)?;
+    match walk.first {
+        Some((at, _, offset)) if walk.uniform && !walk.reference_free => Ok((at, offset)),
+        _ => Ok((None, 0)),
+    }
+}
+
+fn match_op(op: &ParserMatchOp) -> MatchOp {
+    match op {
+        ParserMatchOp::Equal => MatchOp::Equal,
+        ParserMatchOp::NotEqual => MatchOp::NotEqual,
+        ParserMatchOp::Re(_) => MatchOp::Regex,
+        ParserMatchOp::NotRe(_) => MatchOp::NotRegex,
+    }
+}
+
+/// Compiles a range, pointwise, histogram or label function call.
+///
+/// The name lists are disjoint, and a range function is decided first because it binds its own
+/// window rather than its argument's value. A name in neither list is refused here, which is where
+/// the difference between "this compiler cannot fold this function" and "this name means nothing"
+/// is still visible.
+fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
+    if call.func.name == "timestamp" {
+        return timestamp_call(context, &call.args.args);
+    }
+    if call.func.name == "info" {
+        return info_call(context, &call.args.args);
+    }
+    // `absent_over_time` reads a matrix where `absent` reads a vector, so it cannot ride the vector
+    // path below: the operation it binds is `absent`'s own, over a presence read of the window.
+    if call.func.name == ABSENT_OVER_TIME {
+        return absent_over_time_call(context, &call.args.args);
+    }
+    let Call { func, args } = call;
+    if let Some(node) = scalar_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
+    if let Some(signature) = range_signature(func.name) {
+        return window_call(context, func.name, signature, &args.args);
+    }
+    if let Some(node) = parameterized_histogram_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
+    if let Some((op, vector)) = vector_op(func.name, &args.args)? {
+        return vector_call(context, func.name, op, vector);
+    }
+    if let Some(node) = scalar_function_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
+    // The name is looked up before the call's arguments are read, so a name this compiler has no
+    // kernel for is refused as such whichever arguments it was given, and the rejection names the
+    // name rather than describing a vector it never wrote. `pi()` does not reach here: it is a
+    // constant the statement itself decides, so it already folded in `compile_expr`.
+    if let Some(node) = parameterized_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
+    if let Some((op, vector)) = math_op(func.name, &args.args)? {
+        return map_call(context, func.name, MapOp::Math(op), vector);
+    }
+    if let Some(function) = histogram_function(func.name) {
+        let [vector] = args.args.as_slice() else {
+            return Err(not_implemented(&format!(
+                "a call to `{}` with {} argument(s), where it takes its vector",
+                func.name,
+                args.args.len()
+            )));
+        };
+        return map_call(context, func.name, MapOp::Histogram(function), vector);
+    }
+    if let Some((rewrite, vector)) = label_rewrite(func.name, &args.args)? {
+        return map_call(context, func.name, MapOp::Label(Arc::new(rewrite)), vector);
+    }
+    Err(not_implemented(&format!(
+        "a call to `{}`, which has no native kernel",
+        func.name
+    )))
+}
+
+/// Binds `time()`, `vector(s)` and a date function called without an argument, or
+/// returns `None` when the call is none of them.
+///
+/// A date function without an argument is `f(vector(time()))` in Prometheus, but it reads the
+/// evaluation timestamp truncated to whole seconds rather than the float `time()` reports, so it is
+/// bound as the evaluation time's own date and then handed on as a vector.
+fn scalar_call(
+    context: &Context,
+    name: &str,
+    args: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    let grid = || Arc::clone(&context.grid);
+    let eval_time = |date| NativeNode {
+        expr: NativeExpr::EvalTime { date },
+        output: NativeType::Scalar(grid()),
+    };
+    let node = match (name, args) {
+        ("time", []) => eval_time(None),
+        ("vector", [scalar]) => vector_of(
+            compile_expr(context, scalar)?,
+            &grid(),
+            &context.value_field,
+        ),
+        ("scalar", [vector]) => {
+            if vector.value_type() != ValueType::Vector {
+                return Err(not_implemented("scalar() requires a vector argument"));
+            }
+            let input = compile_expr(context, vector)?;
+            let NativeType::Samples(schema) = &input.output else {
+                return Err(not_implemented("scalar() requires an evaluated vector"));
+            };
+            let Some(input_grid) = schema.eval_grid.clone() else {
+                return Err(not_implemented("scalar() requires an evaluated vector"));
+            };
+            NativeNode {
+                expr: NativeExpr::ScalarOf {
+                    input: Box::new(input),
+                },
+                output: NativeType::Scalar(input_grid),
+            }
+        }
+        (name, []) => match math_signature(name) {
+            Some(MathSignature::Unary(MathOp::Date(date))) => {
+                vector_of(eval_time(Some(date)), &grid(), &context.value_field)
+            }
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(node))
+}
+
+/// Binds `max_of(a, b)` or `min_of(a, b)`, whose arguments are both scalars, or returns `None` for
+/// any other call.
+///
+/// Prometheus types both as `(scalar, scalar) -> scalar`, so what the call wrote is two scalar
+/// expressions rather than a vector and its parameters: the first argument is the map's input and
+/// the second is its one parameter, and the answer is a scalar on the grid they are evaluated on. A
+/// constant argument is bound as the number it folds to ([`compile_expr`]); as the input, that
+/// number is the one chunk the map materializes, so a call of two constants reads no input at all.
+/// A vector argument is refused here: it is not a shape the kernel could compute, and a function of
+/// two scalars has no vector form to fold.
+fn scalar_function_call(
+    context: &Context,
+    name: &str,
+    args: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    let op = match name {
+        "max_of" => ParameterizedOp::MaxOf,
+        "min_of" => ParameterizedOp::MinOf,
+        _ => return Ok(None),
+    };
+    let [left, right] = args else {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` with {} argument(s), where it takes two scalars",
+            args.len()
+        )));
+    };
+    for argument in [left, right] {
+        if argument.value_type() != ValueType::Scalar {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` whose argument `{argument}` is a {}, where the function takes \
+                 scalars",
+                argument.value_type()
+            )));
+        }
+    }
+    let input = compile_expr(context, left)?;
+    let output_grid = match &input.output {
+        NativeType::Scalar(grid) => Arc::clone(grid),
+        // A scalar expression compiles to a scalar, so this is a backstop rather than a shape a
+        // statement reaches.
+        _ => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` whose argument `{left}` does not evaluate to a scalar"
+            )));
+        }
+    };
+    let parameter = compile_expr(context, right)?;
+    match &parameter.output {
+        NativeType::Scalar(grid) if grid.spec() == output_grid.spec() => {}
+        NativeType::Scalar(_) => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` whose arguments are evaluated on grids that differ"
+            )));
+        }
+        _ => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` whose argument `{right}` does not evaluate to a scalar"
+            )));
+        }
+    }
+    Ok(Some(NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(input),
+            op,
+            parameters: vec![parameter],
+        },
+        output: NativeType::Scalar(output_grid),
+    }))
+}
+
+/// Binds `round`, `clamp`, `clamp_min` or `clamp_max` whose parameters are not all constants, or
+/// returns `None` for any other call. Prometheus reads each parameter at every step, so each one is
+/// bound as the scalar node it compiles to; with constant parameters the call is a [`MathOp`].
+fn parameterized_call(
+    context: &Context,
+    name: &str,
+    args: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    let op = match name {
+        "round" => ParameterizedOp::Round,
+        "clamp" => ParameterizedOp::Clamp,
+        "clamp_min" => ParameterizedOp::ClampMin,
+        "clamp_max" => ParameterizedOp::ClampMax,
+        _ => return Ok(None),
+    };
+    let Some((vector, parameters)) = args.split_first() else {
+        return Ok(None);
+    };
+    if parameters.len() != op.arity()
+        || parameters
+            .iter()
+            .all(|parameter| constant_value(parameter).is_some())
+    {
+        return Ok(None);
+    }
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose first argument is `{vector}`, which is a {}, where the \
+             function takes a vector",
+            vector.value_type()
+        )));
+    }
+    let input = compile_expr(context, vector)?;
+    let parameters = parameters
+        .iter()
+        .map(|parameter| compile_expr(context, parameter))
+        .collect::<Result<Vec<_>>>()?;
+    let output = input.output.clone();
+    Ok(Some(NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(input),
+            op,
+            parameters,
+        },
+        output,
+    }))
+}
+
+/// `vector(s)`: the scalar `input` as one series without labels, under one value field.
+fn vector_of(input: NativeNode, grid: &Arc<EvalGrid>, value_field: &str) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::VectorOf {
+            input: Box::new(input),
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec {
+                name: Arc::from(value_field),
+            }]),
+            eval_grid: Some(Arc::clone(grid)),
+        })),
+    }
+}
+
+/// The field `vector(s)` reports its value under: a scalar names no column, so it is the planner's
+/// default value column.
+const VECTOR_FIELD: &str = "value";
+
+/// Binds a range function over the matrix it is given, and the window that matrix opens.
+///
+/// Where the matrix sits is the signature's, not a convention: `quantile_over_time(0.9, x[5m])` writes
+/// its constant before the matrix, while `predict_linear(x[5m], 300)` and
+/// `double_exponential_smoothing(x[5m], 0.5, 0.1)` write theirs after it, and a function with no
+/// constants at all reads the matrix first. [`RangeSignature::selector_index`] is that position, and
+/// everything else the call wrote is a constant — which keeps the position it was written at, so a
+/// rejection names the argument the query wrote rather than the constant's offset among the constants.
+///
+/// The matrix is either shape: a range selector, which reads raw samples, or a subquery, which
+/// evaluates its own expression on a grid of its own.
+fn window_call(
+    context: &Context,
+    name: &str,
+    signature: RangeSignature,
+    args: &[Box<PromExpr>],
+) -> Result<NativeNode> {
+    // The count is the signature's, so the rejection names what this function takes rather than
+    // what one argument happens to be.
+    let expected = signature.arity();
+    if args.len() != expected {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` with {} argument(s), where it takes {expected}: {}",
+            args.len(),
+            signature.arguments()
+        )));
+    }
+    // The matrix sits where the signature says it does, and everything else is a constant. Reading it
+    // by position rather than by "the last argument" is what lets `predict_linear(x[5m], 300)` and
+    // `quantile_over_time(0.9, x[5m])` share one path.
+    let selector_index = signature.selector_index();
+    // The selector stays in its original argument position for signature binding, while either
+    // matrix form can provide the samples folded by the range function.
+    let argument = &args[selector_index];
+    let function = signature.bind(name, args)?;
+    match unparen(argument) {
+        PromExpr::MatrixSelector(MatrixSelector { vs, range }) => {
+            window_selection(context, function, vs, range)
+        }
+        PromExpr::Subquery(subquery) => subquery_window(context, name, function, subquery),
+        other => Err(not_implemented(&format!(
+            "a call to `{name}` whose matrix is `{other}`, where it has to be a range \
+             selector like `x[5m]` or a subquery like `x[5m:1m]`"
+        ))),
+    }
+}
+
+/// Wraps `op` over the value of `vector`, which is the first argument of a math, native histogram
+/// or label function.
+///
+/// The output is the input's own type: a pointwise function moves no value to another grid point
+/// and reports one value per field it was given, so the map's schema is the input's allocation
+/// rather than a copy that merely agrees with it. [`NativeTree::validate`] does not require that
+/// sharing: it compares the map's grid with its input's by [`EvalGrid::spec`] and its field count
+/// with its input's, so a map that allocated an equal grid of its own would validate the same way.
+/// The only comparison by identity is an input node's, whose output has to be the very binding it
+/// was bound to.
+fn map_call(context: &Context, name: &str, op: MapOp, vector: &PromExpr) -> Result<NativeNode> {
+    // A map is pointwise over a vector, so the function's first argument has to be one. The parser
+    // checks the same thing and the tree's validation checks the compiled input's type again, but
+    // neither can name the argument the client wrote: this is the check that can.
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose first argument is `{vector}`, which is a {}, where the \
+             function takes a vector",
+            vector.value_type()
+        )));
+    }
+    let input = compile_expr(context, vector)?;
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(input),
+            op: BoundMap {
+                ops: Arc::from([op]),
+            },
+        },
+        output,
+    })
+}
+
+/// Wraps the vector operation `op` over the value of `vector`, which keeps its type as a map does.
+fn vector_call(
+    context: &Context,
+    name: &str,
+    op: BoundVectorOp,
+    vector: &PromExpr,
+) -> Result<NativeNode> {
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose vector argument is `{vector}`, which is a {}, where the \
+             function takes a vector",
+            vector.value_type()
+        )));
+    }
+    let input = compile_expr(context, vector)?;
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(input),
+            op,
+        },
+        output,
+    })
+}
+
+/// Compiles a classic histogram call with at least one varying scalar argument.
+fn parameterized_histogram_call(
+    context: &Context,
+    name: &str,
+    arguments: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    if !matches!(name, "histogram_quantile" | "histogram_fraction") {
+        return Ok(None);
+    }
+    let Some((vector, args)) = arguments.split_last() else {
+        return Ok(None);
+    };
+    let expected = if name == "histogram_quantile" { 1 } else { 2 };
+    if args.len() != expected || args.iter().all(|arg| constant_value(arg).is_some()) {
+        return Ok(None);
+    }
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose vector argument is `{vector}` is not a vector"
+        )));
+    }
+    let function = if name == "histogram_quantile" {
+        HistogramFunction::Quantile(
+            args.first()
+                .and_then(|arg| constant_value(arg))
+                .unwrap_or(0.0),
+        )
+    } else {
+        HistogramFunction::Fraction {
+            lower: args
+                .first()
+                .and_then(|arg| constant_value(arg))
+                .unwrap_or(0.0),
+            upper: args
+                .get(1)
+                .and_then(|arg| constant_value(arg))
+                .unwrap_or(0.0),
+        }
+    };
+    let input = compile_expr(context, vector)?;
+    let output = input.output.clone();
+    let parameters = args
+        .iter()
+        .map(|arg| compile_expr(context, arg))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(function),
+            parameters,
+        },
+        output,
+    }))
+}
+
+/// The PromQL name of `absent_over_time`, which is not a range function here: it reads a matrix but
+/// answers with `absent`'s vector operation rather than with one value per series.
+const ABSENT_OVER_TIME: &str = "absent_over_time";
+
+/// The range function `absent_over_time` folds a window with, to learn whether a series has a sample
+/// in it.
+///
+/// `absent` answers at every point its input holds no series at, so the matrix has to become one
+/// series per series holding a sample: a range function at all, rather than a value no series
+/// states. Which range function is therefore a question of which points a window reports, and
+/// `present_over_time` and `last_over_time` report the same ones — a window with at least one
+/// sample. The name is what separates them: `present_over_time` drops the metric name, and a
+/// selector written without one is discovered as one source per metric, so two metrics carrying the
+/// same ordinary labels would arrive at the fold as one label set. The window refuses two values of
+/// one label set at one point, because everything above it reads them as one series: the query
+/// would fail where Prometheus answers with the empty vector. Keeping the name keeps those two
+/// series apart, and `absent` reads presence alone, so the value this fold computes is not part of
+/// the answer.
+const PRESENCE_FOLD: RangeFunction = RangeFunction::LastOverTime;
+
+/// Binds `absent_over_time(m[d])` into `absent`'s own vector operation, over a presence read of the
+/// window.
+///
+/// Both halves are `absent`'s: the labels come from the matrix selector's matchers exactly as
+/// `absent` derives them from a vector selector's, and the operation tests whether its input holds
+/// a series at each grid point. What differs is only where that input comes from — a matrix folds a
+/// window rather than selecting an instant — which is why the call is bound here and not by
+/// [`vector_call`]: `absent_over_time` reads a matrix, and nothing in it is a vector expression the
+/// recursion could compile.
+///
+/// The existing plan answers this call per series with a UDF, which needs a metric name to read a
+/// table from; a selector written without one names its metrics only by the labels that pick them,
+/// which is exactly the shape `absent_over_time` is asked for when nothing matches.
+fn absent_over_time_call(context: &Context, arguments: &[Box<PromExpr>]) -> Result<NativeNode> {
+    let [matrix] = arguments else {
+        return Err(not_implemented(&format!(
+            "a call to `{ABSENT_OVER_TIME}` with {} argument(s), where it takes one matrix",
+            arguments.len()
+        )));
+    };
+    let labels = absent_labels_of(matrix)?;
+    let input = match unparen(matrix) {
+        PromExpr::MatrixSelector(MatrixSelector { vs, range }) => {
+            window_selection(context, PRESENCE_FOLD, vs, range)?
+        }
+        PromExpr::Subquery(subquery) => {
+            subquery_window(context, ABSENT_OVER_TIME, PRESENCE_FOLD, subquery)?
+        }
+        other => {
+            return Err(not_implemented(&format!(
+                "a call to `{ABSENT_OVER_TIME}` whose matrix is `{other}`, where it has to be a \
+                 range selector like `x[5m]` or a subquery like `x[5m:1m]`"
+            )));
+        }
+    };
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(input),
+            op: BoundVectorOp::Absent { labels },
+        },
+        output,
+    })
+}
+
+/// The vector operation a sort, `absent` or a classic histogram function binds, and the vector it reads,
+/// or `None` when `name` is none of them.
+fn vector_op<'a>(
+    name: &str,
+    arguments: &'a [Box<PromExpr>],
+) -> Result<Option<(BoundVectorOp, &'a PromExpr)>> {
+    let order = match name {
+        "sort" => Some(SortOrder::Asc),
+        "sort_desc" => Some(SortOrder::Desc),
+        "sort_by_label" | "sort_by_label_desc" => None,
+        "histogram_quantile" | "histogram_fraction" => {
+            let Some((vector, constants)) = arguments.split_last() else {
+                return Err(not_implemented(&format!(
+                    "a call to `{name}` with no argument"
+                )));
+            };
+            let function = match constants {
+                [quantile] if name == "histogram_quantile" => {
+                    HistogramFunction::Quantile(constant_argument(name, quantile, 0)?)
+                }
+                [lower, upper] if name == "histogram_fraction" => HistogramFunction::Fraction {
+                    lower: constant_argument(name, lower, 0)?,
+                    upper: constant_argument(name, upper, 1)?,
+                },
+                _ => {
+                    return Err(not_implemented(&format!(
+                        "a call to `{name}` with {} argument(s)",
+                        arguments.len()
+                    )));
+                }
+            };
+            return Ok(Some((BoundVectorOp::Histogram(function), vector)));
+        }
+        "absent" => {
+            let [vector] = arguments else {
+                return Err(not_implemented(&format!(
+                    "a call to `absent` with {} argument(s)",
+                    arguments.len()
+                )));
+            };
+            let labels = absent_labels_of(vector)?;
+            return Ok(Some((BoundVectorOp::Absent { labels }, vector)));
+        }
+        _ => return Ok(None),
+    };
+    let Some((vector, strings)) = arguments.split_first() else {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` with no argument"
+        )));
+    };
+    let order = match order {
+        Some(order) if strings.is_empty() => order,
+        Some(_) => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` with {} argument(s)",
+                arguments.len()
+            )));
+        }
+        None => {
+            let labels = strings
+                .iter()
+                .map(|argument| match unparen(argument) {
+                    PromExpr::StringLiteral(StringLiteral { val }) => Ok(Arc::from(val.as_str())),
+                    other => Err(not_implemented(&format!(
+                        "a call to `{name}` whose argument `{other}` is not a string literal"
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if name == "sort_by_label" {
+                SortOrder::ByLabel(labels)
+            } else {
+                SortOrder::ByLabelDesc(labels)
+            }
+        }
+    };
+    Ok(Some((BoundVectorOp::Sort(order), vector)))
+}
+
+/// The labels `absent(expr)` and `absent_over_time(m[d])` answer with, as Prometheus
+/// `createLabelsForAbsentFunction` derives them: from the matchers of a vector or range selector,
+/// and none for any other expression.
+///
+/// Both selectors carry the same matchers, and Prometheus derives the labels from them the same way
+/// in either position, so the range selector of `absent_over_time` reads exactly as the vector
+/// selector of `absent` does.
+///
+/// `__field__`, `__schema__` and `__database__` choose what is read rather than match a label, so
+/// they are not labels of the answer, as in the existing planner.
+fn absent_labels_of(expr: &PromExpr) -> Result<SeriesLabels> {
+    let (selector, alternatives) = match unparen(expr) {
+        PromExpr::VectorSelector(selector) => (&selector.matchers, &selector.matchers.or_matchers),
+        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
+            (&vs.matchers, &vs.matchers.or_matchers)
+        }
+        _ => return absent_labels(&[]),
+    };
+    if !alternatives.is_empty() {
+        return Err(not_implemented(&format!(
+            "`absent` or `absent_over_time` over `{expr}`, whose matchers are alternatives"
+        )));
+    }
+    let matchers = selector
+        .matchers
+        .iter()
+        .filter(|matcher| {
+            !matches!(
+                matcher.name.as_str(),
+                "__field__" | "__schema__" | "__database__"
+            )
+        })
+        .map(|matcher| LabelMatcher {
+            name: Arc::from(matcher.name.as_str()),
+            op: match_op(&matcher.op),
+            value: Arc::from(matcher.value.as_str()),
+            matches_empty: matcher.is_match(""),
+        })
+        .collect::<Vec<_>>();
+    absent_labels(&matchers)
+}
+
+/// Binds `function` over the range selector `vs[range]` into a window over the raw input.
+///
+/// Both shapes reach this: the range, the offset, the anchor, the grid and the output are the same
+/// whichever function reads them, so a parameterised function only decides *what* folds the window,
+/// never *which* window is folded.
+fn window_selection(
+    context: &Context,
+    function: RangeFunction,
+    vs: &VectorSelector,
+    range: &Duration,
+) -> Result<NativeNode> {
+    // An `@` anchor is step-invariant: every step folds the same samples, which the window's
+    // `anchor_ms` tells `RangeEvaluator` to replay over the grid.
+    let range_ms = range_millis(range.as_millis())?;
+    let offset_ms = selector_offset_ms(&vs.offset)?;
+    let anchor_ms = selector_anchor_ms(&vs.at, context.stmt)?;
+    // The grid is the last thing built: a query refused above, or a window that cannot exist,
+    // never pays for a grid nothing would read.
+    let output_grid = Arc::clone(&context.grid);
+
+    let (grid_start_ms, grid_end_ms) = grid_endpoints(&output_grid)?;
+    let (source_index, schema) = bind_selector(
+        context,
+        SelectorRequirement {
+            metric: vs.name.clone(),
+            matchers: vs.matchers.clone(),
+            offset_ms,
+            at_ms: anchor_ms,
+            grid_start_ms,
+            grid_end_ms,
+            timing: SelectorTiming::Window { range_ms },
+        },
+    )?;
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: Arc::clone(&schema.fields),
+        eval_grid: Some(Arc::clone(&output_grid)),
+    }));
+    let raw = NativeType::Samples(Arc::clone(&schema));
+
+    Ok(NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    output: raw.clone(),
+                    source_index,
+                    ordering: context.ordering,
+                }),
+                output: raw,
+            }),
+            op: BoundWindow {
+                function,
+                window: RangeWindow {
+                    range_ms,
+                    offset_ms,
+                    anchor_ms,
+                    modifier: None,
+                },
+                // The input is raw samples, so it has no grid of its own.
+                input_grid: None,
+                output_grid,
+            },
+        },
+        output,
+    })
+}
+
+/// The step a subquery names when it names none, as in `x[5m:]`.
+///
+/// Prometheus falls back to the global evaluation interval, whose default is a minute, rather than to
+/// the statement's own step. The existing planner folds the same default; the constant is restated
+/// here because that one is private to the planner, and it is a Prometheus protocol constant rather
+/// than a number either caller may choose.
+const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
+
+/// The grid a subquery's inner expression is evaluated on, and the window that reads it.
+///
+/// Both halves of the native route need the same answer: the compiler binds the grid into the node,
+/// where it tells the window which points its input was evaluated at, and the planner binds the tree
+/// it compiles to the grid its rows carry. A second derivation would let the two disagree about the
+/// default step or the conversion of the range, and a tree bound to a grid it was not compiled on
+/// cannot be planned, so the numbers are derived here once.
+pub(crate) struct SubqueryGrid {
+    /// The interval the range function folds, and how far back from the anchor it reads.
+    pub(crate) window: RangeWindow,
+    /// The grid `subquery.expr` is evaluated on.
+    pub(crate) grid: Arc<EvalGrid>,
+}
+
+/// Derives the [`SubqueryGrid`] of `subquery`, whose outer statement is evaluated on `outer`.
+///
+/// The child grid is one point per `step` over the interval the subquery's window reads, which its
+/// `@` anchor, offset and range decide; without an anchor it is the statement's own range. Every
+/// number is converted checked, so a range or a step too large to name a millisecond is reported as
+/// itself rather than wrapped into a different interval.
+///
+/// `None` when the anchored interval contains no step boundary, which names no evaluation point at
+/// all. Declining is the caller's decision: the compiler reports the shape it cannot fold, while the
+/// planner keeps the plan the existing path builds.
+pub(crate) fn subquery_child_grid(
+    stmt: &EvalStmt,
+    outer: &EvalGrid,
+    subquery: &SubqueryExpr,
+) -> Result<Option<SubqueryGrid>> {
+    // The anchor is resolved by the same function a range selector's is, so `start()`, `end()` and a
+    // literal — including a negative one — mean the same thing in both shapes.
+    let anchor_ms = selector_anchor_ms(&subquery.at, stmt)?;
+    let range_ms = range_millis(subquery.range.as_millis())?;
+    // A subquery step of zero names no evaluation point at all, so it is reported as its own value
+    // rather than as an empty grid.
+    let step_ms = match subquery.step {
+        Some(step) => millis(step.as_millis()).ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "the subquery's step of {}ms is out of range",
+                step.as_millis()
+            ))
+        })?,
+        None => DEFAULT_SUBQUERY_STEP_MS,
+    };
+    if step_ms <= 0 {
+        return Err(DataFusionError::Plan(format!(
+            "the subquery's step is {step_ms}ms, and a step has to be longer than zero"
+        )));
+    }
+    let offset_ms = selector_offset_ms(&subquery.offset)?;
+    let window = RangeWindow {
+        range_ms,
+        offset_ms,
+        anchor_ms,
+        modifier: None,
+    };
+    let Some(spec) = subquery_grid(outer.spec(), window, step_ms)? else {
+        return Ok(None);
+    };
+    // Keep subquery grids deferred: selector binding needs only their spec endpoints, not a
+    // materialized timestamp vector proportional to the range.
+    let grid = Arc::new(EvalGrid::try_deferred(spec).map_err(grid_error)?);
+    Ok(Some(SubqueryGrid { window, grid }))
+}
+
+/// Binds `function` over `subquery`, whose inner expression is evaluated on a grid of its own.
+///
+/// A range function folds a matrix, and PromQL writes a matrix two ways. A range selector reads raw
+/// samples from the scan; a subquery builds one by evaluating an expression. That is why this node
+/// declares `input_grid`: `rate(x[5m:1m])` samples `x` at one-minute steps over the five-minute
+/// lookback, and the window folds those points rather than raw samples. The inner expression is
+/// compiled against the subquery's grid for the same reason — a selector inside it has to land where
+/// the window will read it.
+///
+/// An `@` anchor makes the subquery step-invariant: every output point reads the same interval,
+/// `(anchor - offset - range, anchor - offset]`. The child grid is built for that interval, while
+/// the output grid remains the statement's grid; the anchor, range and offset are bound together in
+/// the window.
+fn subquery_window(
+    context: &Context,
+    name: &str,
+    function: RangeFunction,
+    subquery: &SubqueryExpr,
+) -> Result<NativeNode> {
+    let SubqueryExpr { expr, .. } = subquery;
+    // A subquery evaluates an expression and hands the window one value per grid point per field, so
+    // the expression inside it has to be a vector: a scalar has no fields for the window to fold.
+    if expr.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` over the subquery `{subquery}`, whose expression is a {}, where a \
+             subquery has to evaluate a vector",
+            expr.value_type()
+        )));
+    }
+    let Some(SubqueryGrid {
+        window,
+        grid: child_grid,
+    }) = subquery_child_grid(context.stmt, &context.grid, subquery)?
+    else {
+        return Err(not_implemented(&format!(
+            "the subquery `{subquery}`, which names no evaluation point in its anchored interval or \
+             the statement's range"
+        )));
+    };
+    let inner = compile_expr(
+        &Context {
+            stmt: context.stmt,
+            bindings: context.bindings,
+            inputs: context.inputs,
+            ordering: context.ordering,
+            grid: Arc::clone(&child_grid),
+            value_field: Arc::clone(&context.value_field),
+            source_kind: context.source_kind,
+        },
+        expr,
+    )?;
+
+    let inner_schema = inner
+        .output
+        .samples()
+        .ok_or_else(|| DataFusionError::Internal("subquery body did not produce samples".into()))?;
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: Arc::clone(&inner_schema.fields),
+        eval_grid: Some(Arc::clone(&context.grid)),
+    }));
+
+    Ok(NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function,
+                window,
+                // The one field that tells this window from a raw one: its input was evaluated on the
+                // subquery's grid rather than read from the scan.
+                input_grid: Some(child_grid),
+                output_grid: Arc::clone(&context.grid),
+            },
+        },
+        output,
+    })
+}
+
+/// Compiles a bare selector into an instant selection over the raw input.
+///
+/// The lookback, the offset and the grid are the whole of an instant selection: it reports the last
+/// sample at or before each grid point, within the statement's lookback.
+fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<NativeNode> {
+    instant_selection_of(context, selector, InstantValue::Sample)
+}
+
+fn instant_selection_of(
+    context: &Context,
+    selector: &VectorSelector,
+    value: InstantValue,
+) -> Result<NativeNode> {
+    let lookback_ms = lookback_millis(context.stmt.lookback_delta.as_millis())?;
+    let offset_ms = selector_offset_ms(&selector.offset)?;
+    let at_ms = selector_anchor_ms(&selector.at, context.stmt)?;
+    let output_grid = Arc::clone(&context.grid);
+    let (grid_start_ms, grid_end_ms) = grid_endpoints(&output_grid)?;
+    let (source_index, schema) = bind_selector(
+        context,
+        SelectorRequirement {
+            metric: selector.name.clone(),
+            matchers: selector.matchers.clone(),
+            offset_ms,
+            at_ms,
+            grid_start_ms,
+            grid_end_ms,
+            timing: SelectorTiming::Instant { lookback_ms },
+        },
+    )?;
+    if value == InstantValue::Timestamp && schema.fields.len() != 1 {
+        return Err(not_implemented(
+            "timestamp() over a multi-value input is not supported natively",
+        ));
+    }
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: Arc::clone(&schema.fields),
+        eval_grid: Some(Arc::clone(&output_grid)),
+    }));
+    let raw = NativeType::Samples(Arc::clone(&schema));
+    Ok(NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    output: raw.clone(),
+                    source_index,
+                    ordering: context.ordering,
+                }),
+                output: raw,
+            }),
+            op: BoundInstant {
+                lookback_ms,
+                offset_ms,
+                at_ms,
+                value,
+                output_grid,
+            },
+        },
+        output,
+    })
+}
+
+fn bind_selector(
+    context: &Context,
+    requirement: SelectorRequirement,
+) -> Result<(usize, Arc<SeriesSchema>)> {
+    let schema = (context.bindings)(&requirement)?;
+    let source_index = context.inputs.borrow().len();
+    context.inputs.borrow_mut().push(CompiledInput {
+        source_index,
+        requirement,
+        schema: Arc::clone(&schema),
+        ordering: context.ordering,
+    });
+    Ok((source_index, schema))
+}
+
+fn grid_endpoints(grid: &EvalGrid) -> Result<(i64, i64)> {
+    let spec = grid.spec();
+    let end = i128::from(spec.start_ms) + i128::from(spec.len - 1) * i128::from(spec.step_ms);
+    let end = i64::try_from(end)
+        .map_err(|_| DataFusionError::Internal("evaluation grid endpoint overflows".into()))?;
+    Ok((spec.start_ms, end))
+}
+
+/// The grid the statement is evaluated on: `(end - start) / step + 1` points, the last of which
+/// does not pass `end`.
+///
+/// Visible to the planner because the binding a [`NativeTree`] is planned against has to name the
+/// same grid the tree itself was compiled on, and [`compile`]'s callers therefore read it here
+/// rather than deriving the grid a second time.
+pub(crate) fn statement_grid(stmt: &EvalStmt) -> Result<Arc<EvalGrid>> {
+    let start_ms = signed_millis_since_epoch(stmt.start)?;
+    let end_ms = signed_millis_since_epoch(stmt.end)?;
+    // The step is narrowed before [`GridSpec`] sees it, so an interval to which no millisecond
+    // step corresponds is reported as its own value rather than as a step of zero.
+    let step_ms = millis(stmt.interval.as_millis()).ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "the statement's evaluation step of {}ms is out of range",
+            stmt.interval.as_millis()
+        ))
+    })?;
+    // A positive step, ordered endpoints and an inclusive length that fits are the grid's contract,
+    // so [`GridSpec`] owns them; re-deriving any of them here would be a second copy of it.
+    let spec = GridSpec::try_from_range(start_ms, end_ms, step_ms).map_err(|error| {
+        DataFusionError::Plan(format!(
+            "the statement's grid of {start_ms}ms..{end_ms}ms at {step_ms}ms per step is invalid: \
+             {error}"
+        ))
+    })?;
+    Ok(Arc::new(EvalGrid::try_deferred(spec).map_err(grid_error)?))
+}
+
+/// The window length of a range selector, which has to be longer than zero to select anything.
+fn range_millis(range: u128) -> Result<i64> {
+    let range_ms = millis(range).ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "the range selector's window of {range}ms is out of range"
+        ))
+    })?;
+    if range_ms <= 0 {
+        return Err(DataFusionError::Plan(format!(
+            "the range selector's window is {range_ms}ms, and a window has to be longer than zero"
+        )));
+    }
+    Ok(range_ms)
+}
+
+/// The statement's lookback in milliseconds, which is how far back an instant selection reads.
+fn lookback_millis(lookback: u128) -> Result<i64> {
+    millis(lookback).ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "the statement's lookback of {lookback}ms is out of range"
+        ))
+    })
+}
+
+/// The selector's `@` anchor in milliseconds since the Unix epoch, or `None` when it has none.
+///
+/// `start()` and `end()` stay symbolic in the AST, because only the statement knows which evaluation
+/// range they name, so they are resolved against `stmt.start` and `stmt.end` here. The offset is not
+/// folded in: [`RangeWindow`] keeps anchor and offset apart and ends the window at
+/// `anchor_ms - offset_ms` at run time.
+///
+/// An anchor decouples the window's read range from the statement's: it reads
+/// `(anchor_ms - offset_ms - range_ms, anchor_ms - offset_ms]`, which for an anchor like `@ 1234` can
+/// lie entirely outside `[stmt.start - range_ms, stmt.end]`. Whoever binds the scan therefore has to
+/// derive its range from the window's anchor, offset and range rather than from `stmt.start` and
+/// `stmt.end`; a scan bound to the statement alone leaves such a window with no samples, and the
+/// query silently returns empty instead of failing.
+fn selector_anchor_ms(at: &Option<AtModifier>, stmt: &EvalStmt) -> Result<Option<i64>> {
+    match at {
+        None => Ok(None),
+        Some(AtModifier::Start) => Ok(Some(signed_millis_since_epoch(stmt.start)?)),
+        Some(AtModifier::End) => Ok(Some(signed_millis_since_epoch(stmt.end)?)),
+        Some(AtModifier::At(time)) => Ok(Some(signed_millis_since_epoch(*time)?)),
+    }
+}
+
+/// The selector's offset in milliseconds; positive reads earlier samples.
+fn selector_offset_ms(offset: &Option<Offset>) -> Result<i64> {
+    let Some(offset) = offset else {
+        return Ok(0);
+    };
+    let (magnitude, sign) = match offset {
+        Offset::Pos(duration) => (duration.as_millis(), 1),
+        Offset::Neg(duration) => (duration.as_millis(), -1),
+    };
+    millis(magnitude)
+        .and_then(|magnitude| magnitude.checked_mul(sign))
+        .ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "the selector's offset of {magnitude}ms is out of range"
+            ))
+        })
+}
+
+/// A millisecond magnitude as an `i64`, or `None` when it does not fit.
+fn millis(millis: u128) -> Option<i64> {
+    i64::try_from(millis).ok()
+}
+
+fn grid_error(error: datatypes::error::Error) -> DataFusionError {
+    DataFusionError::Plan(format!("the statement's grid is invalid: {error}"))
+}
+
+/// What a call to a range function has to be: where its range selector sits, how many constants it
+/// reads, and how they bind.
+///
+/// The selector's position is a variant rather than a convention because PromQL does not put it in
+/// one place: `quantile_over_time(0.9, x[5m])` writes its quantile before the selector, while
+/// `predict_linear(x[5m], 300)` and `double_exponential_smoothing(x[5m], 0.5, 0.1)` write theirs
+/// after it. A single "parameters come first" rule would read the selector as a constant in the
+/// second group and reject an ordinary query, so each shape states its own layout.
+#[derive(Clone, Copy)]
+enum RangeSignature {
+    /// A function that reads only its range selector, as in `rate(x[5m])`.
+    Selector(RangeFunction),
+    /// One constant, then the range selector, as in `quantile_over_time(0.9, x[5m])`.
+    ConstantBeforeSelector(fn(f64) -> RangeFunction),
+    /// The range selector, then one constant, as in `predict_linear(x[5m], 300)`.
+    ConstantAfterSelector(fn(f64) -> RangeFunction),
+    /// The range selector, then two constants, as in
+    /// `double_exponential_smoothing(x[5m], 0.5, 0.1)`.
+    TwoConstantsAfterSelector(fn(f64, f64) -> RangeFunction),
+}
+
+impl RangeSignature {
+    /// The position of the range selector among the call's arguments.
+    fn selector_index(self) -> usize {
+        match self {
+            Self::Selector(_)
+            | Self::ConstantAfterSelector(_)
+            | Self::TwoConstantsAfterSelector(_) => 0,
+            Self::ConstantBeforeSelector(_) => 1,
+        }
+    }
+
+    /// How many constants the function reads.
+    fn constants(self) -> usize {
+        match self {
+            Self::Selector(_) => 0,
+            Self::ConstantBeforeSelector(_) | Self::ConstantAfterSelector(_) => 1,
+            Self::TwoConstantsAfterSelector(_) => 2,
+        }
+    }
+
+    /// How many arguments the call writes, its range selector counted in.
+    fn arity(self) -> usize {
+        self.constants() + 1
+    }
+
+    /// What the call's arguments are, for the arity rejection to name them.
+    fn arguments(self) -> &'static str {
+        match self {
+            Self::Selector(_) => "its range selector",
+            Self::ConstantBeforeSelector(_) => "a number and its range selector",
+            Self::ConstantAfterSelector(_) => "its range selector and a number",
+            Self::TwoConstantsAfterSelector(_) => "its range selector and two numbers",
+        }
+    }
+
+    /// Binds the function from the call's arguments, which have already passed the arity check.
+    fn bind(self, name: &str, args: &[Box<PromExpr>]) -> Result<RangeFunction> {
+        Ok(match self {
+            Self::Selector(function) => function,
+            Self::ConstantBeforeSelector(bind) => bind(constant_argument(name, &args[0], 0)?),
+            Self::ConstantAfterSelector(bind) => bind(constant_argument(name, &args[1], 1)?),
+            Self::TwoConstantsAfterSelector(bind) => bind(
+                constant_argument(name, &args[1], 1)?,
+                constant_argument(name, &args[2], 2)?,
+            ),
+        })
+    }
+}
+
+/// The signature the PromQL name calls, or `None` when this compiler has no range kernel for it.
+///
+/// The map is explicit on purpose, as in [`range_function`]: a name that is not listed is rejected,
+/// so supporting one more function is a decision made in one place rather than a consequence of a
+/// name looking familiar. A parameterised function is named here rather than in the map, because
+/// its name alone cannot produce the variant the tree binds.
+fn range_signature(name: &str) -> Option<RangeSignature> {
+    match name {
+        "quantile_over_time" => Some(RangeSignature::ConstantBeforeSelector(
+            RangeFunction::QuantileOverTime,
+        )),
+        // These two write their constants after the selector, which is the opposite order to
+        // `quantile_over_time`.
+        "predict_linear" => Some(RangeSignature::ConstantAfterSelector(
+            RangeFunction::PredictLinear,
+        )),
+        "double_exponential_smoothing" => Some(RangeSignature::TwoConstantsAfterSelector(
+            |smoothing, trend| RangeFunction::DoubleExponentialSmoothing { smoothing, trend },
+        )),
+        _ => range_function(name).map(RangeSignature::Selector),
+    }
+}
+
+/// What a call to a math function has to be: the constants it reads after its vector, and how to
+/// bind them.
+///
+/// The shapes are separated by how many constants the function reads, because that is the only
+/// thing the variants differ in: a name maps to one kernel, and the constants are bound from the
+/// call. `round` is the one function whose constant may be left out, so it is its own shape: the
+/// default is a decision about the function rather than about the constant.
+#[derive(Clone, Copy)]
+enum MathSignature {
+    /// A function of its vector alone, as in `abs`.
+    Unary(MathOp),
+    /// A function of its vector and one constant, as in `clamp_min`.
+    OneConstant(fn(f64) -> MathOp),
+    /// A function of its vector and one constant it may be called without, as in `round`.
+    DefaultedConstant {
+        default: f64,
+        bind: fn(f64) -> MathOp,
+    },
+    /// A function of its vector and two constants, as in `clamp`.
+    TwoConstants(fn(f64, f64) -> MathOp),
+}
+
+impl MathSignature {
+    /// How many constants the function reads when every one of them is written.
+    fn parameters(self) -> usize {
+        match self {
+            Self::Unary(_) => 0,
+            Self::OneConstant(_) | Self::DefaultedConstant { .. } => 1,
+            Self::TwoConstants(_) => 2,
+        }
+    }
+
+    /// How many constants the function has to be given.
+    fn required(self) -> usize {
+        match self {
+            Self::DefaultedConstant { .. } => 0,
+            _ => self.parameters(),
+        }
+    }
+
+    /// What the call's arguments are, for the arity rejection to name them.
+    fn arguments(self) -> &'static str {
+        match self {
+            Self::Unary(_) => "its vector",
+            Self::OneConstant(_) => "its vector and one constant",
+            Self::DefaultedConstant { .. } => "its vector and one optional constant",
+            Self::TwoConstants(_) => "its vector and two constants",
+        }
+    }
+}
+
+/// The signature the PromQL name calls, or `None` when this compiler has no math kernel for it.
+///
+/// The map is explicit on purpose, as in [`range_function`]: a name that is not listed is refused
+/// rather than treated as math because it looks mathematical, so adding one more function is a
+/// decision made in one place. A name in this list is a promise that its kernel exists, which is why
+/// arity is a property of the variant rather than of the caller.
+fn math_signature(name: &str) -> Option<MathSignature> {
+    match name {
+        "abs" => Some(MathSignature::Unary(MathOp::Abs)),
+        "ceil" => Some(MathSignature::Unary(MathOp::Ceil)),
+        "floor" => Some(MathSignature::Unary(MathOp::Floor)),
+        "sqrt" => Some(MathSignature::Unary(MathOp::Sqrt)),
+        "exp" => Some(MathSignature::Unary(MathOp::Exp)),
+        "ln" => Some(MathSignature::Unary(MathOp::Ln)),
+        "log2" => Some(MathSignature::Unary(MathOp::Log2)),
+        "log10" => Some(MathSignature::Unary(MathOp::Log10)),
+        "sin" => Some(MathSignature::Unary(MathOp::Sin)),
+        "cos" => Some(MathSignature::Unary(MathOp::Cos)),
+        "tan" => Some(MathSignature::Unary(MathOp::Tan)),
+        "asin" => Some(MathSignature::Unary(MathOp::Asin)),
+        "acos" => Some(MathSignature::Unary(MathOp::Acos)),
+        "atan" => Some(MathSignature::Unary(MathOp::Atan)),
+        "sinh" => Some(MathSignature::Unary(MathOp::Sinh)),
+        "cosh" => Some(MathSignature::Unary(MathOp::Cosh)),
+        "tanh" => Some(MathSignature::Unary(MathOp::Tanh)),
+        "asinh" => Some(MathSignature::Unary(MathOp::Asinh)),
+        "acosh" => Some(MathSignature::Unary(MathOp::Acosh)),
+        "atanh" => Some(MathSignature::Unary(MathOp::Atanh)),
+        "deg" => Some(MathSignature::Unary(MathOp::Deg)),
+        "rad" => Some(MathSignature::Unary(MathOp::Rad)),
+        "sgn" => Some(MathSignature::Unary(MathOp::Sgn)),
+        // A date function takes the vector its values are read from; without one it reads the
+        // evaluation time, which has no input to map and is refused by `math_op`.
+        "day_of_month" => Some(MathSignature::Unary(MathOp::Date(DateFunction::DayOfMonth))),
+        "day_of_week" => Some(MathSignature::Unary(MathOp::Date(DateFunction::DayOfWeek))),
+        "day_of_year" => Some(MathSignature::Unary(MathOp::Date(DateFunction::DayOfYear))),
+        "days_in_month" => Some(MathSignature::Unary(MathOp::Date(
+            DateFunction::DaysInMonth,
+        ))),
+        "hour" => Some(MathSignature::Unary(MathOp::Date(DateFunction::Hour))),
+        "minute" => Some(MathSignature::Unary(MathOp::Date(DateFunction::Minute))),
+        "month" => Some(MathSignature::Unary(MathOp::Date(DateFunction::Month))),
+        "year" => Some(MathSignature::Unary(MathOp::Date(DateFunction::Year))),
+        // `round`'s nearest defaults to one, so `round(x)` is `round(x, 1)` and its variant always
+        // carries the number it rounds to.
+        "round" => Some(MathSignature::DefaultedConstant {
+            default: 1.0,
+            bind: |nearest| MathOp::Round { nearest },
+        }),
+        "clamp" => Some(MathSignature::TwoConstants(|min, max| MathOp::Clamp {
+            min,
+            max,
+        })),
+        "clamp_min" => Some(MathSignature::OneConstant(|min| MathOp::ClampMin { min })),
+        "clamp_max" => Some(MathSignature::OneConstant(|max| MathOp::ClampMax { max })),
+        _ => None,
+    }
+}
+
+/// The pointwise kernel `name` denotes over its vector, and that vector, or `None` when this
+/// compiler has no math kernel for that name.
+///
+/// A name that is not in [`math_signature`] is not math: the caller reports that it has no kernel
+/// instead of compiling it into a kernel that would compute something else. `arguments` is the
+/// call's whole argument list, because the vector is its first argument: the arity is the
+/// signature's and counts the vector in, so a call with no argument at all is refused as a call
+/// that wrote none rather than as a shape this compiler cannot bind. The arguments after the vector
+/// are the call's constants, in the order they were written, and each is folded to the number it
+/// means by [`constant_value`], because the tree binds a kernel's constants and has no field for an
+/// expression.
+fn math_op<'a>(
+    name: &str,
+    arguments: &'a [Box<PromExpr>],
+) -> Result<Option<(MathOp, &'a PromExpr)>> {
+    let Some(signature) = math_signature(name) else {
+        return Ok(None);
+    };
+    // The vector is the function's first argument, so a call that wrote no argument at all is
+    // refused by the same arity check as one that wrote too few constants.
+    let Some((vector, parameters)) = arguments.split_first() else {
+        return Err(arity_error(name, signature, 0));
+    };
+    let given = parameters.len() + 1;
+    if given < signature.required() + 1 || given > signature.parameters() + 1 {
+        return Err(arity_error(name, signature, given));
+    }
+    // The vector is the first argument, so the constants are read from the second onwards.
+    let op = match signature {
+        MathSignature::Unary(op) => op,
+        MathSignature::OneConstant(bind) => bind(constant_argument(name, &parameters[0], 1)?),
+        MathSignature::DefaultedConstant { default, bind } => bind(match parameters.first() {
+            Some(parameter) => constant_argument(name, parameter, 1)?,
+            None => default,
+        }),
+        MathSignature::TwoConstants(bind) => bind(
+            constant_argument(name, &parameters[0], 1)?,
+            constant_argument(name, &parameters[1], 2)?,
+        ),
+    };
+    Ok(Some((op, vector)))
+}
+
+/// The native histogram function `name` denotes, or `None` when it is not one.
+///
+/// These read only native histogram samples and drop the float ones, as Prometheus'
+/// `simpleHistogramFunc` does; `histogram_quantile` and `histogram_fraction` also read classic
+/// bucket series and are not listed.
+fn histogram_function(name: &str) -> Option<NativeHistogramFunction> {
+    match name {
+        "histogram_count" => Some(NativeHistogramFunction::Count),
+        "histogram_sum" => Some(NativeHistogramFunction::Sum),
+        "histogram_avg" => Some(NativeHistogramFunction::Avg),
+        "histogram_stddev" => Some(NativeHistogramFunction::StdDev),
+        "histogram_stdvar" => Some(NativeHistogramFunction::StdVar),
+        _ => None,
+    }
+}
+
+/// The label change `label_replace` or `label_join` makes, and the vector it is made to, or `None`
+/// when `name` is neither.
+///
+/// The parser checks the argument types and counts; what is left to check is the arguments'
+/// content, which [`LabelRewrite`] does as Prometheus does at evaluation, so an invalid regular
+/// expression or an empty label name fails the statement here as it would there.
+fn label_rewrite<'a>(
+    name: &str,
+    arguments: &'a [Box<PromExpr>],
+) -> Result<Option<(LabelRewrite, &'a PromExpr)>> {
+    if !matches!(name, "label_replace" | "label_join") {
+        return Ok(None);
+    }
+    let Some((vector, strings)) = arguments.split_first() else {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` with no argument"
+        )));
+    };
+    let strings = strings
+        .iter()
+        .map(|argument| match unparen(argument) {
+            PromExpr::StringLiteral(StringLiteral { val }) => Ok(val.as_str()),
+            other => Err(not_implemented(&format!(
+                "a call to `{name}` whose argument `{other}` is not a string literal"
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let rewrite = match (name, strings.as_slice()) {
+        ("label_replace", [dst, replacement, src, regex]) => {
+            LabelRewrite::replace(dst, replacement, src, regex)?
+        }
+        ("label_join", [dst, separator, src @ ..]) => LabelRewrite::join(dst, separator, src)?,
+        _ => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` with {} argument(s)",
+                arguments.len()
+            )));
+        }
+    };
+    Ok(Some((rewrite, vector)))
+}
+
+/// The rejection of a math call that wrote `given` arguments where `signature` takes another count.
+///
+/// The count is the signature's, so the message says what this function takes rather than what one
+/// argument happens to be. The vector is counted in: it is the function's first argument, and a
+/// reader counting the call's arguments should not have to add it themselves.
+fn arity_error(name: &str, signature: MathSignature, given: usize) -> DataFusionError {
+    not_implemented(&format!(
+        "a call to `{name}` with {given} argument(s), where it takes {}",
+        signature.arguments()
+    ))
+}
+
+/// The constant `argument` folds to, or a rejection naming the argument and where it was read.
+///
+/// A parameter is a constant of the statement: a quantile, a rounding step or a clamp bound is a
+/// field of the tree, so a parameter whose value is only known at run time — `time()` being the real
+/// case — has nowhere to go. It is refused rather than answered from the wrong number, and the
+/// rejection names the expression, because that is what the query has to change.
+///
+/// `name` is whoever reads the argument: a call's function name, or an aggregator's, since
+/// `quantile(0.9, x)` reads a constant too. The rejection therefore names that and the position
+/// rather than calling everything a call, which would be false for an aggregate.
+///
+/// A quantile outside `[0, 1]` is not refused here: Prometheus binds it and the kernel reports
+/// `-Infinity` below zero and `+Infinity` above one, so refusing it would be this compiler inventing
+/// a rule the query engine does not have.
+fn constant_argument(name: &str, argument: &PromExpr, position: usize) -> Result<f64> {
+    constant_value(argument).ok_or_else(|| {
+        not_implemented(&format!(
+            "`{name}`, whose {} is `{argument}`, where it has to be a constant expression this \
+             compiler folds to a number literal",
+            argument_position(position)
+        ))
+    })
+}
+
+/// How a rejection names the argument a parameter was read from.
+///
+/// The three positions are the ones a supported call can write: a math function's vector and the two
+/// constants behind it, or a range function's selector and the constants on either side of it. Every
+/// caller passes the literal position it read, so there is no fourth position to name and no default
+/// to invent one for.
+fn argument_position(position: usize) -> &'static str {
+    const POSITIONS: [&str; 3] = ["first argument", "second argument", "third argument"];
+    POSITIONS[position]
+}
+
+/// Whether a binary operation carries a modifier this compiler refuses to bind.
+///
+/// A scalar carries no labels, so there is nothing to match or name, and the tree's matching has no
+/// field for a fill value: binding the operation would compute it without the modifier the query
+/// asked for. The fold and [`binary_operation`] share this test rather than restating it, because a
+/// fold that computed a constant without reading its modifier would answer a query the dispatch
+/// below refuses.
+fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
+    modifier.is_some_and(|modifier| {
+        modifier.matching.is_some()
+            || modifier.card != VectorMatchCardinality::OneToOne
+            || modifier.fill_values != VectorMatchFillValues::default()
+    })
+}
+
+/// The number `expr` folds to, or `None` when its value is not the statement's to know.
+///
+/// Only what the statement itself decides is folded: a number literal, a group around one, a negated
+/// one, `pi()`, and arithmetic whose two operands both fold. Any other call, a selector, a range
+/// selector, an aggregate and a subquery are `None`, because their value comes from the data or from
+/// the evaluation time, and a kernel's constant is a field of the tree rather than something bound
+/// while it runs. Returning `None` rather than an error is what lets the caller report where the
+/// expression was found, which is the useful half of the refusal.
+///
+/// `pi()` belongs on the folding side because the statement itself decides it: it is one number, not
+/// a value read from the data. Folding it is what makes `pi() * x` the multiplication by
+/// [`std::f64::consts::PI`] it means, `clamp_max(x, pi())` a kernel constant like `clamp_max(x, 3)`,
+/// and `quantile(pi() / 4, x)` a parameter this compiler can bind. The number is the one the promql
+/// crate's `map_pi` answers the previous route with — both are `std::f64::consts::PI` — so the two
+/// routes cannot disagree about what `pi()` is.
+///
+/// Arithmetic uses the kernel operation named by [`BinaryOp::kind`], including
+/// [`ArithmeticOp::calculate`]'s platform math behavior; defining `%`, `^` or `atan2` again here
+/// would be a second answer for the two to disagree over. Set operators do not fold.
+/// Visible to the planner, which asks whether a statement's value is a constant before binding it.
+pub(crate) fn constant_value(expr: &PromExpr) -> Option<f64> {
+    match expr {
+        PromExpr::NumberLiteral(NumberLiteral { val }) => Some(*val),
+        PromExpr::Paren(paren) => constant_value(&paren.expr),
+        PromExpr::Unary(unary) => constant_value(&unary.expr).map(|value| -value),
+        PromExpr::Binary(binary) => {
+            // A modifier is read before the operands are folded: `x * (1 + fill(0) 2)` asks for a
+            // fill, and folding the inner addition would answer `x * 3` with the fill gone. The
+            // expression is left unfolded so the dispatch below refuses it with the reason it
+            // writes, which is also why this is a `None` rather than an error here.
+            if refuses_modifier(binary.modifier.as_ref()) {
+                return None;
+            }
+            let left = constant_value(&binary.lhs)?;
+            let right = constant_value(&binary.rhs)?;
+            match binary_op(&binary.op)?.kind() {
+                BinaryKind::Arithmetic(op) => Some(op.calculate(left, right)),
+                // A comparison of two constants is the number it reports when it is written with
+                // `bool`: Prometheus reads `1 > bool 2` as `0`, which is the kernel's own
+                // comparison. Without `bool` there is no number to report -- `1 > 2` is a parse
+                // error in Prometheus -- so it is left unfolded and the dispatch refuses it.
+                BinaryKind::Comparison(op) => binary
+                    .return_bool()
+                    .then(|| f64::from(op.apply(left, right))),
+            }
+        }
+        // A selector, a range selector, an aggregate and a subquery read data; `time()`,
+        // `scalar(v)` and the rest of the calls read something this compiler cannot know before the
+        // query runs. `pi()` is not one of them: it is the one call whose value the statement itself
+        // fixes, so it folds here as a literal does.
+        PromExpr::Call(call) if call.func.name == "pi" && call.args.args.is_empty() => {
+            Some(std::f64::consts::PI)
+        }
+        _ => None,
+    }
+}
+
+/// The range function a PromQL name denotes, or `None` when this compiler has no kernel for it.
+///
+/// The map is explicit on purpose: a name that is not listed here is rejected, so supporting one
+/// more function is a decision made in one place rather than a consequence of a name looking
+/// familiar.
+fn range_function(name: &str) -> Option<RangeFunction> {
+    match name {
+        "rate" => Some(RangeFunction::Rate),
+        "increase" => Some(RangeFunction::Increase),
+        "delta" => Some(RangeFunction::Delta),
+        "irate" => Some(RangeFunction::Irate),
+        "idelta" => Some(RangeFunction::Idelta),
+        "avg_over_time" => Some(RangeFunction::AvgOverTime),
+        "min_over_time" => Some(RangeFunction::MinOverTime),
+        "max_over_time" => Some(RangeFunction::MaxOverTime),
+        "sum_over_time" => Some(RangeFunction::SumOverTime),
+        "count_over_time" => Some(RangeFunction::CountOverTime),
+        "last_over_time" => Some(RangeFunction::LastOverTime),
+        "present_over_time" => Some(RangeFunction::PresentOverTime),
+        "stddev_over_time" => Some(RangeFunction::StddevOverTime),
+        "stdvar_over_time" => Some(RangeFunction::StdvarOverTime),
+        "resets" => Some(RangeFunction::Resets),
+        "changes" => Some(RangeFunction::Changes),
+        "deriv" => Some(RangeFunction::Deriv),
+        // These functions are supported unconditionally by this native compiler.
+        "first_over_time" => Some(RangeFunction::FirstOverTime),
+        "mad_over_time" => Some(RangeFunction::MadOverTime),
+        "ts_of_first_over_time" => Some(RangeFunction::TsOfFirstOverTime),
+        "ts_of_last_over_time" => Some(RangeFunction::TsOfLastOverTime),
+        "ts_of_min_over_time" => Some(RangeFunction::TsOfMinOverTime),
+        "ts_of_max_over_time" => Some(RangeFunction::TsOfMaxOverTime),
+        _ => None,
+    }
+}
+
+/// The expression a parenthesised one wraps, however many parentheses were written.
+///
+/// Parentheses group, so they say nothing about the expression inside them: `rate((x[5m]))` asks
+/// for exactly what `rate(x[5m])` asks for. Refusing it would reject a statement on the way it was
+/// typed rather than on what it means. A range selector is not an expression this compiler
+/// compiles on its own, so the call that reads one looks through the grouping itself.
+fn unparen(mut expr: &PromExpr) -> &PromExpr {
+    while let PromExpr::Paren(paren) = expr {
+        expr = &paren.expr;
+    }
+    expr
+}
+
+/// A rejection of a shape outside [`SUPPORTED`].
+fn not_implemented(found: &str) -> DataFusionError {
+    DataFusionError::NotImplemented(format!(
+        "the native PromQL compiler supports only {SUPPORTED} for now, but found {found}"
+    ))
+}
+
+#[cfg(test)]
+mod tests;

@@ -370,6 +370,13 @@ metadata_cache_tti = "5m"
 
 ## The query engine options.
 [query]
+
+## Enable experimental native PromQL execution for compatible standalone queries.
+## Requires in-process region transport. This is the engine-wide default: a
+## session SET query.experimental_native_promql = true or a per-request
+## query.experimental_native_promql option overrides it, in that order.
+## Default: false
+#+ experimental_native_promql = false
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
@@ -464,6 +471,8 @@ max_log_files = 720
 
 ## The maximum total size of managed log files in `dir`.
 ## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+## Requires symbolic links in the log directory; initialization fails if they cannot be created.
+## On Windows, enable Developer Mode or leave this at `0B`.
 max_log_dir_size = "0B"
 
 ## Whether to enable per-region metrics.

@@ -12,8 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod aggregate;
 pub mod error;
+pub mod evaluated;
 pub mod extension_plan;
 pub mod functions;
+mod go_format;
+mod go_sort;
+#[cfg(test)]
+mod golden;
+pub mod grid_series;
+pub mod histogram_eval;
+pub mod info;
+pub mod instant_eval;
+pub mod map;
+pub mod map_label;
+pub mod map_time;
 mod metrics;
+pub mod native;
 pub mod range_array;
+pub mod range_eval;
+pub mod select;
+pub mod source;
+pub mod vector_match;
