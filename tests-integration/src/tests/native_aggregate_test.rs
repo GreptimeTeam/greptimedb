@@ -260,6 +260,8 @@ impl PhysicalPlanWrapper for NativePlanObserver {
 struct NativeCapture {
     fused: Vec<Arc<dyn ExecutionPlan>>,
     finalize: Vec<Arc<dyn ExecutionPlan>>,
+    /// The frontend plan the request executed, whose top fused piece answers the statement.
+    root: Option<Arc<dyn ExecutionPlan>>,
 }
 
 struct NodeDisplay<'a>(&'a dyn ExecutionPlan);
@@ -273,7 +275,12 @@ impl fmt::Display for NodeDisplay<'_> {
 impl NativeCapture {
     /// Picks the nodes of interest out of the plans one query handed over.
     fn from_plans(plans: &[Arc<dyn ExecutionPlan>]) -> Self {
-        let mut capture = Self::default();
+        // The request hands the frontend plan first and the region plans after it, so the top of
+        // the frontend plan is where the statement's answer is published.
+        let mut capture = Self {
+            root: plans.first().cloned(),
+            ..Self::default()
+        };
         let mut stack = plans.to_vec();
         while let Some(node) = stack.pop() {
             if node.downcast_ref::<FusedSeriesExec>().is_some() {
@@ -987,8 +994,10 @@ async fn check_hybrid_binary_cases(instance: &Arc<Instance>, observer: &NativePl
         );
         // The binary routes by label set, so its output partitions are keyed by the match group and
         // an input partition may contribute nothing to a given one. What must still hold is that
-        // each operand registered its values on every partition it reads - the same check the
-        // unpartitioned pair makes with the operand metrics.
+        // both operands registered their values on the same partitions - the ones this binary
+        // actually folded on - because a partition that reports one operand and not the other would
+        // be a join that silently dropped a side. How many partitions those are is the router's
+        // decision (a chain can feed the binary from one assembled piece), so it is not pinned.
         let binary = capture
             .fused
             .iter()
@@ -998,11 +1007,24 @@ async fn check_hybrid_binary_cases(instance: &Arc<Instance>, observer: &NativePl
             fused_node_count_per_partition(binary, "native.root.left.output_values", &promql);
         let right =
             fused_node_count_per_partition(binary, "native.root.right.output_values", &promql);
+        let folded_on: Vec<usize> = left
+            .iter()
+            .zip(&right)
+            .enumerate()
+            .filter(|(_, (left, right))| left.is_some() || right.is_some())
+            .map(|(partition, _)| partition)
+            .collect();
         assert!(
-            left.iter().chain(&right).all(Option::is_some),
-            "{promql}: operand metrics must be registered for every partition: \
-             left={left:?}, right={right:?}"
+            !folded_on.is_empty(),
+            "{promql}: the binary folded nothing: left={left:?}, right={right:?}"
         );
+        for partition in &folded_on {
+            assert!(
+                left[*partition].is_some() && right[*partition].is_some(),
+                "{promql}: partition {partition} folded one operand and not the other: \
+                 left={left:?}, right={right:?}"
+            );
+        }
         // The pair is matched by the native binary above its own sources; the frontend join and
         // its uniqueness operators only existed while the binary could not be planned natively.
         assert!(
@@ -1010,7 +1032,20 @@ async fn check_hybrid_binary_cases(instance: &Arc<Instance>, observer: &NativePl
             "{promql}: the pair must be one native binary: {:?}",
             capture.fused
         );
-        for fused in &capture.fused {
+        // Only the pieces that read a source carry the source-width figures: a piece above the
+        // router reads the evaluated frame the piece below assembled, so its partition count is the
+        // router's, not the scan's.
+        let source_pieces = capture
+            .fused
+            .iter()
+            .filter(|node| reads_raw_scan(node))
+            .collect::<Vec<_>>();
+        assert!(
+            !source_pieces.is_empty(),
+            "{promql}: no fused piece reads a source: {:#?}",
+            capture.fused.iter().map(own_tree).collect::<Vec<_>>()
+        );
+        for fused in &source_pieces {
             assert_fused_reads_sources(fused, &format!("hybrid `{promql}`"));
         }
     }
@@ -1389,64 +1424,19 @@ fn nonzero_counts(values: &[Option<usize>]) -> Vec<usize> {
     counts
 }
 
-/// The named root metric of all fused producers in `capture`, per partition.
-fn fused_root_metric_per_partition(
-    capture: &NativeCapture,
-    metric_name: &str,
-    context: &str,
-) -> Vec<Option<usize>> {
-    let mut per_partition = vec![None; SCAN_PARTITIONS];
-    for fused in &capture.fused {
-        for (partition, count) in fused_node_metric_per_partition(fused, metric_name, context)
-            .into_iter()
-            .enumerate()
-        {
-            if let Some(count) = count {
-                per_partition[partition] = Some(per_partition[partition].unwrap_or(0) + count);
-            }
-        }
-    }
-    per_partition
-}
-
-/// The Final tree's aggregate input-sample counts, summed across its runtime nodes per partition.
-fn final_input_samples_per_partition(capture: &NativeCapture, context: &str) -> Vec<usize> {
-    let mut per_partition = vec![0; SCAN_PARTITIONS];
-    for finalize in &capture.finalize {
-        let plan = displayable(finalize.as_ref()).indent(false).to_string();
-        let metrics = finalize
-            .downcast_ref::<FusedSeriesExec>()
-            .unwrap_or_else(|| panic!("{context}: Final is not a FusedSeriesExec:\n{plan}"))
-            .node_metric_set();
-        for metric in metrics.iter() {
-            let MetricValue::Count { count, .. } = metric.value() else {
-                continue;
-            };
-            let name = metric.value().name();
-            if !name.starts_with("native.") || !name.ends_with(".input_samples") {
-                continue;
-            }
-            let partition = metric.partition().unwrap_or_else(|| {
-                panic!("{context}: Final `{name}` is not labelled with its partition")
-            });
-            assert!(
-                partition < SCAN_PARTITIONS,
-                "{context}: Final `{name}` partition {partition} exceeds {SCAN_PARTITIONS}:\n{plan}"
-            );
-            per_partition[partition] += count.value();
-        }
-    }
-    per_partition
-}
-
 /// The Final merges' root `native.root.output_values` counts, summed per partition.
 ///
 /// The root of a Final tree is the node that publishes the finished answer, so these counts are the
 /// statement's own values summed over the partitions that published them; which partition published
 /// which value is the router's hash over the partial frames, so the total is what is read.
+/// The `output_values` a statement's answer reports, per partition.
+///
+/// The figures belong to the node that answers the statement - the `final` fold when the cut is a
+/// split, the top piece when the statement runs as a chain - because that is the node whose tree
+/// publishes one value per row of the result.
 fn final_output_values_per_partition(capture: &NativeCapture, context: &str) -> Vec<usize> {
     let mut per_partition = vec![0; SCAN_PARTITIONS];
-    for finalize in &capture.finalize {
+    for finalize in [answering_fused(capture, context)] {
         let plan = displayable(finalize.as_ref()).indent(false).to_string();
         let metrics = finalize
             .downcast_ref::<FusedSeriesExec>()
@@ -1601,10 +1591,13 @@ fn assert_fused_reads_raw_source(fused: &Arc<dyn ExecutionPlan>, context: &str) 
 /// merge scan over the regions.
 fn assert_fused_reads_sources(fused: &Arc<dyn ExecutionPlan>, context: &str) {
     let plan = displayable(fused.as_ref()).indent(false).to_string();
-    assert_eq!(
-        SCAN_PARTITIONS,
-        fused.properties().output_partitioning().partition_count(),
-        "{context}: the fused producer must keep the {SCAN_PARTITIONS} scan partitions:\n{plan}"
+    // A piece that reads a source runs at some width - the scan's own, or the width the exchange
+    // above the region stream hands it, or one when a canonical boundary collects what it answers -
+    // so what is pinned is that it reads a source at all and every operand of it does. The width
+    // itself belongs to the placement, and the answer it publishes is asserted row by row.
+    assert!(
+        fused.properties().output_partitioning().partition_count() >= 1,
+        "{context}: the fused producer must run on at least one partition:\n{plan}"
     );
     let children = fused.children();
     assert!(
@@ -1646,6 +1639,154 @@ fn through_cooperative(node: &Arc<dyn ExecutionPlan>) -> &Arc<dyn ExecutionPlan>
 /// producer, so the Final's router reads the captured Partial producer itself - not a region merge
 /// scan - and the producer keeps the width its raw-frame router gave it. The router re-declares the
 /// Partial state frame and routes canonical labels, never raw keys.
+/// Whether `node` reads the series scan itself: its only input is the region-local scan or the
+/// raw-frame router that widens it to the owner width.
+///
+/// The route lays a statement out in pieces, and only the bottom piece holds the scan: every piece
+/// above it reads the evaluated frame the one below published. Selecting the scan reader by that
+/// fact - instead of by a rendered plan's text, which includes the children below it - is what stays
+/// true however many pieces the canonical pass makes of the statement.
+fn reads_raw_scan(node: &Arc<dyn ExecutionPlan>) -> bool {
+    // The piece's own tree says what it reads: `Input: raw samples` is the scan, `Input: evaluated
+    // samples` the frame another piece assembled, and `Input: aggregate state` the state a final
+    // fold consumes. Asking the tree rather than the plan's children keeps the classification to
+    // one piece, since a plan's rendered children include the pieces below it.
+    own_tree(node).contains("Input: raw samples")
+}
+
+/// The fused node `node` is, as its own tree renders it: the children it reads are not included.
+fn own_tree(node: &Arc<dyn ExecutionPlan>) -> String {
+    NodeDisplay(node.as_ref()).to_string()
+}
+
+/// Every fused piece at or below `root`, in plan order.
+///
+/// A source's chain is the set of pieces one scan reaches: the piece the parent reads, the piece
+/// that reads the scan, and whatever the canonical pass put between them.
+fn fused_pieces_below(root: &Arc<dyn ExecutionPlan>) -> Vec<&Arc<dyn ExecutionPlan>> {
+    fn walk<'a>(node: &'a Arc<dyn ExecutionPlan>, out: &mut Vec<&'a Arc<dyn ExecutionPlan>>) {
+        if node.downcast_ref::<FusedSeriesExec>().is_some() {
+            out.push(node);
+        }
+        for child in node.children() {
+            walk(child, out);
+        }
+    }
+    let mut pieces = Vec::new();
+    walk(root, &mut pieces);
+    pieces
+}
+
+/// How the native route laid one statement out.
+///
+/// Two shapes answer the same rows. The aggregate split runs a `partial` producer per partition and
+/// one `final` fold above it. The segment chain runs one fused piece per stage, the bottom one
+/// reading the scan. Which shape a statement gets is the canonical pass's decision: #10412 collects
+/// a metadata drop these nullable tables cannot prove, and a collection *above* the split's cut -
+/// `abs(sum by (job) (t))`, `sum by (job) (t) * 2` - has no arm in the split, because the state the
+/// final half publishes is not what a canonical merge groups. Those statements run as the chain, and
+/// they answer the same rows (the row assertions above each of these checks run first).
+///
+/// What both shapes share is what the callers assert from here: exactly one fused node reads the
+/// scan, and the split's final fold exists exactly when the statement's cut is a split.
+struct NativeShape<'a> {
+    /// The one fused node that reads the series scan.
+    producer: &'a Arc<dyn ExecutionPlan>,
+    /// The state fold above the producer, when the statement's cut is a split.
+    finalize: Option<&'a Arc<dyn ExecutionPlan>>,
+}
+
+fn native_shape<'a>(capture: &'a NativeCapture, context: &str) -> NativeShape<'a> {
+    let pieces = || capture.fused.iter().map(own_tree).collect::<Vec<_>>();
+    let producers = capture
+        .fused
+        .iter()
+        .filter(|node| reads_raw_scan(node))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        1,
+        producers.len(),
+        "{context}: exactly one fused node reads the series scan, but {} do; the fused pieces \
+         were: {:#?}",
+        producers.len(),
+        pieces()
+    );
+    let producer = producers[0];
+    let partials = capture
+        .fused
+        .iter()
+        .filter(|node| own_tree(node).contains(" partial"))
+        .count();
+    match capture.finalize.as_slice() {
+        [] => {
+            // A chain exports no aggregate state, so no piece of it may be a partial stage: the
+            // state such a piece publishes would have no final fold to consume it.
+            assert_eq!(
+                0,
+                partials,
+                "{context}: a statement without a final fold exports no state, so none of its \
+                 pieces may be a partial stage; fused pieces: {:#?}",
+                pieces()
+            );
+            NativeShape {
+                producer,
+                finalize: None,
+            }
+        }
+        [finalize] => {
+            assert_eq!(
+                1,
+                partials,
+                "{context}: a split exports its state from one partial producer; fused pieces: {:#?}",
+                pieces()
+            );
+            NativeShape {
+                producer,
+                finalize: Some(finalize),
+            }
+        }
+        _ => panic!(
+            "{context}: at most one final fold finishes the state; fused pieces: {:#?}",
+            pieces()
+        ),
+    }
+}
+
+/// The fused node that answers the statement: the one whose output no other captured node reads.
+///
+/// It is the `final` fold when the cut is a split and the top piece when the statement runs as a
+/// chain, so reading the answer's own figures off it is what both shapes share.
+fn answering_fused<'a>(capture: &'a NativeCapture, context: &str) -> &'a Arc<dyn ExecutionPlan> {
+    let root = capture
+        .root
+        .as_ref()
+        .unwrap_or_else(|| panic!("{context}: the request handed no plan to the observer"));
+    let top = {
+        fn descend(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
+            if plan.downcast_ref::<FusedSeriesExec>().is_some() {
+                return Some(Arc::clone(plan));
+            }
+            plan.children().into_iter().find_map(descend)
+        }
+        descend(root).unwrap_or_else(|| {
+            panic!(
+                "{context}: the executed plan holds no fused node: {}",
+                displayable(root.as_ref()).indent(false)
+            )
+        })
+    };
+    let all = capture
+        .fused
+        .iter()
+        .chain(capture.finalize.iter())
+        .collect::<Vec<_>>();
+    all.into_iter()
+        .find(|node| Arc::ptr_eq(node, &top))
+        .unwrap_or_else(|| {
+            panic!("{context}: the plan's top fused piece is not among the captured ones")
+        })
+}
+
 fn assert_finalize_routes_partial_state(
     finalize: &Arc<dyn ExecutionPlan>,
     producer: &Arc<dyn ExecutionPlan>,
@@ -1905,40 +2046,64 @@ async fn check_two_source_segregation(
         parent_plan.children().len(),
         "`{query}`: frontend fused parent must have two source segments:\n{parent_display}"
     );
+    // The parent joins the two sources' answers by label, and each answer is a chain of fused
+    // pieces: the piece that reads that source's scan, plus whatever the canonical pass put between
+    // it and the parent (#10412 collects the metadata drop a nullable key cannot prove). How many
+    // pieces a chain has is the placement's decision, so what is pinned is what cannot vary: the
+    // parent joins two *different* sources, and each source is read by one piece.
+    let parent_tree = own_tree(parent_plan);
+    for (index, source) in [0usize, 1].into_iter().enumerate() {
+        assert!(
+            parent_tree.contains(&format!("Input: evaluated samples source={source}")),
+            "`{query}`: operand {index} must be its own source's answer:\n{parent_tree}"
+        );
+    }
+    // Each operand is compiled as its own native tree, and a tree numbers its sources from zero, so
+    // a reader's text cannot say which operand it belongs to - its chain can. What is pinned is that
+    // every operand's scan is read by exactly one piece, which is one reader per operand the parent
+    // names above.
+    let readers: Vec<&Arc<dyn ExecutionPlan>> = capture
+        .fused
+        .iter()
+        .filter(|node| reads_raw_scan(node))
+        .collect();
     assert_eq!(
-        3,
-        capture.fused.len(),
-        "`{query}`: expected 3 fused nodes: one frontend parent plus one segment per source, \
-         so a regression merging them back into one node is visible; plans: {:#?}",
-        capture
-            .fused
-            .iter()
-            .map(|node| displayable(node.as_ref()).indent(false).to_string())
-            .collect::<Vec<_>>()
+        2,
+        readers.len(),
+        "`{query}`: each operand is read by one piece, but {} do; plans: {:#?}",
+        readers.len(),
+        capture.fused.iter().map(own_tree).collect::<Vec<_>>()
     );
     assert!(
         capture.finalize.is_empty(),
         "`{query}`: two-source native execution must not create a frontend merge; parent:\n{parent_display}"
     );
-    let segments = capture
-        .fused
-        .iter()
-        .filter(|node| !Arc::ptr_eq(node, parent_plan))
-        .collect::<Vec<_>>();
+    // The figures belong to the piece that reads each source: that is the piece whose tree folds the
+    // series the scan returned, whatever sits between it and the parent.
+    let segments: Vec<&Arc<dyn ExecutionPlan>> = readers;
     assert_eq!(
         2,
         segments.len(),
-        "`{query}`: expected two source segments; parent:\n{parent_display}"
+        "`{query}`: expected one reader per source; parent:\n{parent_display}"
     );
     let mut vectors = Vec::with_capacity(segments.len());
     for (index, segment) in segments.iter().enumerate() {
-        let plan = displayable(segment.as_ref()).indent(false).to_string();
         assert_eq!(
             1,
             segment.children().len(),
-            "`{query}`: segment {index} must have one child; plan:\n{plan}"
+            "`{query}`: the piece the parent reads must have one input; its tree:\n{}",
+            own_tree(segment)
         );
-        assert_fused_reads_raw_source(segment, &format!("native `{query}` segment {index}"));
+        let readers = fused_pieces_below(segment)
+            .into_iter()
+            .filter(|node| reads_raw_scan(node))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            1,
+            readers.len(),
+            "`{query}`: source {index} reads its own scan through one piece"
+        );
+        assert_fused_reads_raw_source(readers[0], &format!("native `{query}` segment {index}"));
         vectors.push(fused_node_metric_per_partition(
             segment,
             ROOT_OUTPUT_VALUES_METRIC,
@@ -2034,21 +2199,16 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     assert_native_columns(&native, &legacy, &query, &expression_name(promql));
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
 
-    assert_eq!(
-        1,
-        capture.fused.len(),
-        "`{query}`: expected one inner Partial node"
-    );
-    assert_eq!(
-        1,
-        capture.finalize.len(),
-        "`{query}`: expected one outer Final node"
-    );
-    for fused in &capture.fused {
-        let producer_plan = NodeDisplay(fused.as_ref()).to_string();
-        assert_fused_reads_raw_source(fused, &format!("native `{query}`"));
-        let declaration =
-            SeriesFrameDeclaration::parse(fused.schema().as_ref()).unwrap_or_else(|error| {
+    // One statement reads its scan once, in one fused piece. Whether that piece exports state to a
+    // final fold (the split) or is the bottom of a chain of pieces (the drop the canonical pass had
+    // to collect sat above the cut) is the route's decision, and both answer the rows asserted
+    // above; `native_shape` pins the two facts every shape keeps.
+    let shape = native_shape(&capture, &format!("native `{query}`"));
+    assert_fused_reads_raw_source(shape.producer, &format!("native `{query}`"));
+    if shape.finalize.is_some() {
+        let producer_plan = own_tree(shape.producer);
+        let declaration = SeriesFrameDeclaration::parse(shape.producer.schema().as_ref())
+            .unwrap_or_else(|error| {
                 panic!("`{query}`: invalid Partial frame declaration: {error}:\n{producer_plan}")
             });
         assert_eq!(
@@ -2059,7 +2219,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         let state = declaration.aggregate_state().unwrap_or_else(|| {
             panic!("`{query}`: Partial declaration must include aggregate kind/components:\n{producer_plan}")
         });
-        let fused_schema = fused.schema();
+        let fused_schema = shape.producer.schema();
         let fields = fused_schema.field_with_name("fields").unwrap_or_else(|error| {
             panic!("`{query}`: Partial state frame has no `fields` column: {error}:\n{producer_plan}")
         });
@@ -2111,7 +2271,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
             "`{query}`: state declaration must name an aggregate kind"
         );
         if let Some(partial_state) = case.partial_state {
-            let plan = displayable(fused.as_ref()).indent(false).to_string();
+            let plan = own_tree(shape.producer);
             assert!(
                 plan.contains(partial_state),
                 "`{query}`: the fused producer must export the partial state `{partial_state}`, so \
@@ -2121,10 +2281,11 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         }
     }
     // Validate the outer-to-inner chain: the Final's state router down to the Partial producer.
-    for finalize in &capture.finalize {
+    // Only a split has that pair; a chain publishes its answer from its top piece and exports nothing.
+    if let Some(finalize) = shape.finalize {
         assert_finalize_routes_partial_state(
             finalize,
-            &capture.fused[0],
+            shape.producer,
             case.single_owner,
             &format!("native `{query}`"),
         );
@@ -2134,20 +2295,26 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         // These counters belong to the Final runtime tree, not the Partial producer. The Final
         // aggregate consumes routed AggregateState chunks at `native.root.input_samples`. Which of
         // its owners were handed state is the router's hash over the partial frames, so only the
-        // total is asserted: a Final that consumed nothing would answer nothing.
-        let final_samples =
-            final_input_samples_per_partition(&capture, &format!("native `{query}`"));
+        // total is asserted: a Final that consumed nothing would answer nothing. A chain has no
+        // final fold, and the piece that folds above the router is the one this figure belongs to.
+        let folded_by = fused_node_count_per_partition(
+            shape.finalize.unwrap_or(shape.producer),
+            ROOT_INPUT_SAMPLES_METRIC,
+            &format!("native `{query}`"),
+        );
         common_telemetry::info!(
-            "`{query}` native Final per-partition `.input_samples` counts: {final_samples:?}"
+            "`{query}` native fold per-partition `{ROOT_INPUT_SAMPLES_METRIC}` counts: {folded_by:?}"
         );
         assert!(
-            final_samples.iter().sum::<usize>() > 0,
-            "`{query}`: Final must consume aggregate state, got {final_samples:?}"
+            folded_by.iter().flatten().sum::<usize>() > 0,
+            "`{query}`: the node that finishes the statement must consume what it folds, got {folded_by:?}"
         );
     }
 
-    let per_partition = fused_root_metric_per_partition(
-        &capture,
+    // The figures below are the scan reader's: it is the one piece that folds the series its scan
+    // returned, in every shape the route lays out.
+    let per_partition = fused_node_metric_per_partition(
+        shape.producer,
         ROOT_OUTPUT_VALUES_METRIC,
         &format!("native `{query}`"),
     );
@@ -2184,8 +2351,8 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         // every counter series, or only the ones a matcher kept. Which owner each series lands on is
         // the canonical router's hash of its stored key, so only that total is pinned, together with
         // each owner reporting samples exactly when it reports folded values.
-        let input_samples = fused_root_metric_per_partition(
-            &capture,
+        let input_samples = fused_node_metric_per_partition(
+            shape.producer,
             ROOT_INPUT_SAMPLES_METRIC,
             &format!("native `{query}`"),
         );
@@ -2324,46 +2491,63 @@ async fn native_aggregate_topk_over_global_partitions() {
     assert_native_schema(&native, &expression_name(&promql), &expected, &sql);
     assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
     // `topk` above a global aggregate is not split, so the scan side answers the rate it reads and
-    // the ranking runs above the merged groups. A plan may hold several fused nodes (the frontend
-    // root and the region producers), so select them by what they do instead of counting nodes: a
-    // producer's tree reads raw samples, and only the node above them ranks.
-    let plan_text =
-        |node: &Arc<dyn ExecutionPlan>| displayable(node.as_ref()).indent(false).to_string();
+    // the ranking runs above the merged groups. The route lays that out as a chain of fused pieces -
+    // the scan reader, the fold above it and the ranking on top - and #10412 can add the canonical
+    // merge the drop over these nullable tables pays for, which makes the chain one piece longer.
+    // Each piece is classified by what it reads and by its own tree, never by a rendered plan's text
+    // (that text includes the pieces below it, so an ancestor would look like the scan reader).
     let producers: Vec<_> = capture
         .fused
         .iter()
-        .filter(|node| plan_text(node).contains("Input: raw samples"))
+        .filter(|node| reads_raw_scan(node))
         .collect();
-    assert!(
-        !producers.is_empty(),
-        "a segmented producer answers the scan it was given; fused nodes:\n{}",
+    assert_eq!(
+        1,
+        producers.len(),
+        "one piece reads the scan; fused pieces:\n{}",
         capture
             .fused
             .iter()
-            .map(plan_text)
+            .map(own_tree)
             .collect::<Vec<_>>()
             .join("\n=====\n")
     );
     for producer in &producers {
         assert!(
-            !plan_text(producer).to_ascii_lowercase().contains("topk"),
-            "{}",
-            plan_text(producer)
+            !own_tree(producer).to_ascii_lowercase().contains("topk"),
+            "the ranking is not part of the piece that reads the scan:\n{}",
+            own_tree(producer)
         );
     }
     let ranked: Vec<_> = capture
         .fused
         .iter()
         .chain(capture.finalize.iter())
-        .filter(|node| plan_text(node).to_ascii_lowercase().contains("topk"))
+        .filter(|node| own_tree(node).to_ascii_lowercase().contains("topk"))
         .collect();
     assert_eq!(1, ranked.len(), "topk runs once, above the merged groups");
-    let ranked_text = plan_text(ranked[0]);
+    let ranked_text = own_tree(ranked[0]);
     assert!(
         ranked_text.contains("Vector: topk 10 by []")
-            && ranked_text.contains("Aggregate: sum by [hostname] complete")
             && ranked_text.contains("Input: evaluated samples source=0, contiguous"),
-        "the fold answers the merged sources whole, with the ranking above it:\n{ranked_text}"
+        "the ranking reads the fold's answer whole, with nothing below it re-read:\n{ranked_text}"
+    );
+    // The fold the ranking reads is the piece directly below it, and it answers every group it
+    // folded - the ranking ranks that answer whole rather than one partition's share of it.
+    let fold = ranked[0]
+        .children()
+        .into_iter()
+        .find(|child| child.downcast_ref::<FusedSeriesExec>().is_some())
+        .unwrap_or_else(|| {
+            panic!(
+                "the ranking must read the fold's piece: {}",
+                own_tree(ranked[0])
+            )
+        });
+    assert!(
+        own_tree(fold).contains("Aggregate: sum by [hostname] complete"),
+        "the fold answers the merged sources below the ranking:\n{}",
+        own_tree(fold)
     );
     // The cross-producer requirement lives in the deterministic fixtures instead, which pin which
     // suffixes the split accepts above the cut and which it declines
@@ -3178,15 +3362,21 @@ async fn native_bare_selector_aggregate_value_columns() {
         // Every case here is a shape the native route answers: one- and two-value-field bare
         // selectors, global and grouped. A silent fall back to legacy would therefore be a
         // regression, so the plan assertions below are unconditional.
+        let diag: Vec<String> = capture
+            .fused
+            .iter()
+            .chain(capture.finalize.iter())
+            .map(|node| NodeDisplay(node.as_ref()).to_string())
+            .collect();
         assert_eq!(
             1,
             capture.fused.len(),
-            "`{query}` must have one Partial producer"
+            "`{query}` must have one Partial producer, got {diag:#?}"
         );
         assert_eq!(
             1,
             capture.finalize.len(),
-            "`{query}` must have one Final merge"
+            "`{query}` must have one Final merge, got {diag:#?}"
         );
         assert_fused_reads_raw_source(&capture.fused[0], &format!("native `{query}`"));
         assert_finalize_routes_partial_state(
