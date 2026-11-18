@@ -832,9 +832,9 @@ pub struct RegionStatistic {
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
     /// Total ingested Parquet bytes since the region opened.
-    /// Currently counts only committed flush output.
+    /// Counts committed flush output and uniquely scoped bulk ingestion.
     ///
-    /// Excludes index files, compaction and imported SSTs.
+    /// Excludes index files, compaction, repartition and generic SST imports.
     /// Resets when the region instance is recreated; manifest replay does not increment it.
     /// Accepts the legacy `flushed_parquet_bytes` key; upgrade metasrv before datanodes.
     #[serde(default, alias = "flushed_parquet_bytes")]

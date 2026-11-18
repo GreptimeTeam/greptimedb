@@ -1545,6 +1545,8 @@ impl Waiters {
 #[derive(Debug)]
 pub(crate) enum RegionEditKind {
     Import,
+    /// New externally written data, rather than movement or rewriting of existing data.
+    Ingest,
     #[cfg(feature = "enterprise")]
     Compaction(Box<crate::engine::table_compaction::PublicationContext>),
 }
@@ -1599,6 +1601,8 @@ pub(crate) enum RegionEditOutcome {
 /// Notifies the region of the result of editing its manifest.
 #[derive(Debug)]
 pub(crate) struct RegionEditResult {
+    /// New, uniquely scoped Parquet bytes; applied only after successful publication.
+    pub(crate) ingested_parquet_bytes: u64,
     /// Region id.
     pub(crate) region_id: RegionId,
     /// Prevents a delayed completion from mutating a reopened region with the same id.
