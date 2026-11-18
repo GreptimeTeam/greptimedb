@@ -139,7 +139,8 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=4 REDACTED
-|_|_|_SortExec: TopK(fetch=4), expr=[t@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_SortExec: TopK(fetch=4), expr=[t@1 ASC NULLS LAST], preserve_partitioning=[false], filter=[t@1 < 10] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["i", "t"], "filters": ["i > Int32(2)"], "dyn_filters":REDACTED
 |_|_|_|
@@ -174,7 +175,8 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
-|_|_|_SortExec: TopK(fetch=4), expr=[t@1 DESC], preserve_partitioning=[true] REDACTED
+|_|_|_SortExec: TopK(fetch=4), expr=[t@1 DESC], preserve_partitioning=[false], filter=[t@1 IS NULL OR t@1 > 9] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["i", "t"], "filters": ["i > Int32(2)"], "dyn_filters":REDACTED
 |_|_|_|
