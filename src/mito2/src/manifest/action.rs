@@ -159,6 +159,14 @@ pub(crate) fn cap_wal_release(
 }
 
 impl RegionEdit {
+    /// Whether this edit adds or removes data files or series indexes.
+    pub(crate) fn has_file_changes(&self) -> bool {
+        !self.files_to_add.is_empty()
+            || !self.files_to_remove.is_empty()
+            || !self.series_indexes_to_add.is_empty()
+            || !self.series_indexes_to_remove.is_empty()
+    }
+
     /// Rechecked under the manifest lock before publication, after any concurrent compaction.
     pub(crate) fn validate_narthex_series(&self, manifest: &RegionManifestBuilder) -> Result<()> {
         let region_id = manifest
