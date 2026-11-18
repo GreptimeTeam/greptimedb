@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/promql/range_sparse_empty_trailing.sql
