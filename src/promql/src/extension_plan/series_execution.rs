@@ -24,8 +24,9 @@
 //! implements the trait, and a native consumer that receives one calls
 //! [`SeriesExecutionPlan::execute_series`] instead of decoding a frame. The chunk is the internal
 //! value the operator already holds - a [`RawSeriesChunk`] read from a region, an
-//! [`EvaluatedChunk`] a tree settled on its grid, or an owner's merged publication - so the handover
-//! reuses the buffers instead of encoding them.
+//! [`EvaluatedChunk`] a tree settled on its grid, or a [`StateFrameRow`] a `Partial` exported - so
+//! the handover reuses the buffers instead of encoding them. Every content a native node publishes
+//! travels this way; there is no second path for one of them to be left on.
 //!
 //! What keeps the shortcut structural, rather than a convention an operator has to remember, is
 //! that the capability is a type: [`series_execution_plan`] answers for the operators this crate
@@ -37,12 +38,23 @@
 //! [`ExecutionPlan::execute`] is how it says it reads its frames. There is no second decision to
 //! keep in step with the first.
 //!
+//! Which edge this is, and which edge it is not:
+//!
+//! - In process: the two ends are nodes of one plan in one process, and the consumer called
+//!   [`execute_series`](SeriesExecutionPlan::execute_series) on the operator it was handed as an
+//!   input. That is the whole of where a chunk can travel.
+//! - Still bytes: every edge that leaves the process, or reaches a node this crate does not own. A
+//!   region's scan and the scan a merge sits on still publish `RecordBatch`es, a remote scan answers
+//!   frames, and a root output still converts series back into a batch (`series_to_record_batch`).
+//!   No chunk is serialized and none is sent anywhere, so nothing about the wire changes here.
+//!
 //! Two things the frame path does are not skipped, because they are not about the encoding:
 //!
 //! - The sequence is checked. [`SequenceValidator`] and [`EvaluatedSequenceValidator`] are what a
 //!   frame consumer runs while it decodes; [`checked_series_stream`] runs the same validators over
 //!   the same sequence of chunks, so a producer whose chains are malformed is refused here exactly
-//!   as it is through a frame.
+//!   as it is through a frame. An exported state row has no such chain - its frame consumer runs no
+//!   cross-row validator either - so there is nothing for that content to skip.
 //! - The memory is charged for as long as it is held. A producer that merges an identity reserves
 //!   the bytes it merges into and hands them over with the value ([`SeriesCharge`]), so the pool
 //!   sees them until the consumer drops the chunk that carries them - not until a packer flushed a
@@ -67,8 +79,12 @@ use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::MemoryReservation;
 use datafusion::physical_plan::ExecutionPlan;
+use std::fmt::{self, Formatter};
+
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::StateFrameRow;
 use datatypes::series::raw::RawSeriesChunk;
+use datatypes::series::samples::SeriesSchema;
 use futures::Stream;
 
 use crate::evaluated::EvaluatedChunk;
@@ -77,23 +93,64 @@ use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 
 /// One piece of one series, handed from one native operator to the next.
 ///
-/// The two variants are the two chunk types the native chain already passes between its nodes:
-/// raw samples read from a region, and values a tree evaluated on the grid its output declares.
-/// [`EvaluatedChunk`] is [`Series`](datatypes::series::samples::Series) plus the finality of the
-/// chunk, so it is the evaluated half of this enum rather than a `Series` alone: a chunk that
-/// cannot say whether it closes its series would make the consumer guess, and "no value here" and
-/// "nothing more here" would become the same thing.
+/// The variants are the three contents the native chain passes between its nodes: raw samples read
+/// from a region, values a tree evaluated on the grid its output declares, and one group's exported
+/// aggregate state. [`EvaluatedChunk`] is [`Series`](datatypes::series::samples::Series) plus the
+/// finality of the chunk, so it is the evaluated half of this enum rather than a `Series` alone: a
+/// chunk that cannot say whether it closes its series would make the consumer guess, and "no value
+/// here" and "nothing more here" would become the same thing.
 ///
-/// Aggregate state is deliberately not a variant. A state chunk is exported by a producer,
-/// merged by a group owner behind a router and read by the node that folds it as rows of a frame,
-/// never handed from one in-process node to the next, so a variant for it would be a variant
-/// nothing produces.
+/// [`SeriesChunk::State`] is the content a state frame row carries, and deliberately not a second
+/// encoding of it: [`AggregateStateChunk`] holds the [`StateFrameRow`] a decoding consumer would
+/// have built, so the producer's decoder is the frame path's decoder and the consumer's conversion
+/// is the frame path's conversion. The variant exists because that publication is a value this
+/// crate holds, exactly like the other two, and an in-process consumer reads it as that value.
 #[derive(Debug)]
 pub enum SeriesChunk {
     /// One scan series, with its own timestamps and its finality.
     Raw(RawSeriesChunk),
     /// Values a producer already evaluated on the grid its frame declares.
     Evaluated(EvaluatedChunk),
+    /// One group's exported aggregate state, as the row a `Final` aggregate folds.
+    State(AggregateStateChunk),
+}
+
+/// One row of an exported aggregate state, handed over in process.
+///
+/// Nothing is re-encoded: the row is what [`StateFrameRow`] is - the group, the grid positions it
+/// has contributions at, whether it closes its chain, and the state arrays themselves - and the
+/// series layout it was exported on travels with it, because that layout is what the frame's
+/// declaration would have told a decoding consumer, and a consumer has to be able to check that it
+/// still binds the same series.
+pub struct AggregateStateChunk {
+    /// The exported row.
+    row: StateFrameRow,
+    /// The series layout the export was declared on.
+    series: Arc<SeriesSchema>,
+}
+
+impl AggregateStateChunk {
+    /// One exported row, and the series layout it was declared on.
+    pub(crate) fn new(row: StateFrameRow, series: Arc<SeriesSchema>) -> Self {
+        Self { row, series }
+    }
+
+    /// The exported row, and the series layout it was declared on, to be read together.
+    pub fn into_parts(self) -> (StateFrameRow, Arc<SeriesSchema>) {
+        (self.row, self.series)
+    }
+}
+
+impl fmt::Debug for AggregateStateChunk {
+    /// Which group closes where, not the payload: a `StateFrameRow` keeps its arrays and is not
+    /// `Debug` for the same reason a chunk is not printed sample by sample.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AggregateStateChunk")
+            .field("metric", self.row.metric())
+            .field("is_last", &self.row.is_last())
+            .field("fields", &self.series.fields)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What one handed chunk is charged to, released when the chunk is.
@@ -105,19 +162,20 @@ pub enum SeriesChunk {
 /// account for - never earlier, which would let the pool over-commit, and never for longer, which
 /// would hold memory for a chunk nobody has.
 ///
-/// The three figures are the ones an owner reserves: the charges its inputs carried, the descriptor
-/// naming the identity, and the workspace it merged or reconstructed into. Dropping this value drops
-/// all three, which is the whole of what makes the release correct: there is no call to forget. They
-/// are named as fields nothing reads, because holding them is the entire job - the packer's handoff
-/// named its own reservations the same way, for the same reason.
+/// Two shapes of reservation make up that total. An owner reserves the charges its inputs carried,
+/// the descriptor naming the identity, and the workspace it merged or reconstructed into - all of
+/// them its own. A state export reserves one batch that several rows are cut from, so those rows
+/// share it instead of each holding a copy: that is what [`SeriesCharge::shared`] is, and it is
+/// released when the last chunk holding it is dropped. Dropping this value is the whole of what
+/// makes either release correct - there is no call to forget - which is why the fields are named as
+/// fields nothing reads: holding them is the entire job. The packer's handoff named its own
+/// reservations the same way, for the same reason.
 #[derive(Debug)]
 pub struct SeriesCharge {
-    /// What each fragment was charged before the owner merged it.
-    _fragments: Vec<MemoryReservation>,
-    /// The owner's descriptor of the identity it is publishing.
-    _descriptor: MemoryReservation,
-    /// The workspace the merged value was built in, when it needed one.
-    _workspace: Option<MemoryReservation>,
+    /// The reservations this publication holds outright.
+    _owned: Vec<MemoryReservation>,
+    /// The reservations it shares with the other chunks cut from the same publication.
+    _shared: Vec<Arc<MemoryReservation>>,
 }
 
 impl SeriesCharge {
@@ -127,10 +185,23 @@ impl SeriesCharge {
         descriptor: MemoryReservation,
         workspace: Option<MemoryReservation>,
     ) -> Self {
+        let mut owned = fragments;
+        owned.push(descriptor);
+        owned.extend(workspace);
         Self {
-            _fragments: fragments,
-            _descriptor: descriptor,
-            _workspace: workspace,
+            _owned: owned,
+            _shared: Vec::new(),
+        }
+    }
+
+    /// The charge of a publication that several chunks are cut from.
+    ///
+    /// Each of those chunks holds a clone of every reservation here, so the bytes stay charged for
+    /// as long as any of them is alive and are released when the last one is dropped.
+    pub(crate) fn shared(shared: Vec<Arc<MemoryReservation>>) -> Self {
+        Self {
+            _owned: Vec::new(),
+            _shared: shared,
         }
     }
 }
@@ -248,10 +319,9 @@ pub fn series_execution_plan(plan: &dyn ExecutionPlan) -> Option<&dyn SeriesExec
     if let Some(source) = plan.downcast_ref::<RawSeriesSourceExec>() {
         return Some(source as &dyn SeriesExecutionPlan);
     }
-    // A router is asked only for the contents it publishes as chunks. Raw and evaluated frames are
-    // an owner's merged publication, which is a value this crate holds; aggregate state is a row of
-    // an exported group, which the router forwards as the frame it received, and asking for it as a
-    // chunk would be a variant nothing produces.
+    // A router is asked for every content it publishes: an owner's merged raw identity, the series
+    // an owner settled on its grid, and the row of a group an owner exported are all values this
+    // crate holds, so all three are read in process and none of them is left on a frame path.
     plan.downcast_ref::<SeriesRepartitionExec>()
         .filter(|router| router.hands_over_series())
         .map(|router| router as &dyn SeriesExecutionPlan)
@@ -269,6 +339,11 @@ pub fn series_execution_plan(plan: &dyn ExecutionPlan) -> Option<&dyn SeriesExec
 /// still be wrong: a router publishes what its owners merged, and a second publication of one
 /// identity would be as wrong in process as it is across a frame. So the same validators run here,
 /// over the same sequence, and the shortcut refuses what the frame would have refused.
+///
+/// A state publication is the one content with no such check to run, on either path: the frame
+/// consumer's state stream decodes each exported row and hands it on, so there is nothing it would
+/// refuse that the handover must refuse too. What both paths do enforce is enforced where the row is
+/// decoded - in the producer's handover stream - and this stream passes state rows through.
 ///
 /// `raw_ordering` is the ordering the producer declares for its raw frames - the one a decoding
 /// consumer would read out of the frame schema. It is not inferred from the chunks.
@@ -319,6 +394,13 @@ impl Stream for CheckedSeries {
         let checked = match handed.chunk() {
             SeriesChunk::Raw(chunk) => this.raw.validate(chunk),
             SeriesChunk::Evaluated(chunk) => this.evaluated.validate(&chunk.series, chunk.is_last),
+            // A state publication has no chain of chunks to check, on either path: the frame
+            // consumer's state stream decodes each exported row and hands it on, running no
+            // cross-row validator at all, so there is nothing it would refuse that this would
+            // accept. What both paths do enforce - the declaration is this revision's, the batch
+            // carries the declared schema, and the declared ordering is contiguous - is enforced
+            // where the row is decoded, in the producer's handover stream.
+            SeriesChunk::State(_) => Ok(()),
         };
         match checked {
             Ok(()) => Poll::Ready(Some(Ok(handed))),

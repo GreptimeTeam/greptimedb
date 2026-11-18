@@ -103,8 +103,8 @@ use table::table::scan::RegionScanExec;
 mod frame_output;
 
 use super::{
-    FieldKind, FusedInputKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec,
-    OutputColumn, POLL_BUDGET, canonical_histogram, series_to_record_batch,
+    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, OutputColumn,
+    POLL_BUDGET, canonical_histogram, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::raw_series_source::tests::{per_series_scan, raw_source};
@@ -10050,16 +10050,14 @@ fn node_counters(plan: &Arc<dyn ExecutionPlan>) -> Vec<(String, usize)> {
 ///
 /// This is the question the node asks itself, one input at a time, before it decides how to read that
 /// input - so a test that says "this plan goes through the handover" states what the node does,
-/// rather than what some build-time flag was set to. A state input is never handed over, whatever
-/// else its operator could answer: a state publication is a row of a frame.
+/// rather than what some build-time flag was set to. There is no content the node reads another way:
+/// every input whose operator answers is read in process, aggregate state included.
 fn uses_in_process_series(plan: &Arc<dyn ExecutionPlan>) -> bool {
     let fused = plan
         .downcast_ref::<FusedSeriesExec>()
         .expect("the plan under test is one fused node");
-    (0..fused.inputs.len()).any(|source| {
-        fused.source_kinds[source] != FusedInputKind::AggregateState
-            && series_execution_plan(fused.inputs[source].0.as_ref()).is_some()
-    })
+    (0..fused.inputs.len())
+        .any(|source| series_execution_plan(fused.inputs[source].0.as_ref()).is_some())
 }
 
 /// The frames each partition of `plan` publishes, in order, read once.
@@ -10523,14 +10521,85 @@ async fn a_three_owner_evaluated_router_hands_over_what_its_frames_decode_to() {
     .expect("the composition finishes");
 }
 
-/// A state input is read as frames, whatever its operator could hand over.
+/// A state input is read in process, like every other content a native operator publishes.
 ///
-/// `SeriesChunk` deliberately has no variant for aggregate state, because a state publication is a
-/// row of an exported group on the schema its producer wrote - a frame, read by the node that folds
-/// it. So the router that routes state answers nothing here, and the node above it decodes frames:
-/// the state path stays off the handover, which is the shape this test pins.
+/// `SeriesChunk::State` is the exported row itself, not a second encoding of it, so the node folds
+/// the row its operator hands over instead of decoding a frame on a state path of its own.
 #[test]
-fn a_state_input_is_read_as_frames() {
+fn a_state_input_is_read_in_process() {
+    let router: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(state_producer(), 2)
+            .expect("the producer declares aggregate-state frames"),
+    );
+    assert!(
+        series_execution_plan(router.as_ref()).is_some(),
+        "a state publication is a row this crate holds, so it is handed over"
+    );
+    let fused = final_state_over(router);
+    assert!(
+        uses_in_process_series(&fused),
+        "the state input is handed over, not decoded from a frame"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate state over the same handover
+// ---------------------------------------------------------------------------
+
+/// One exported state row as these tests compare it.
+///
+/// Which group it belongs to, where it has contributions, and whether it closes its chain: the
+/// payload is compared where it is read, by the answer the two paths fold.
+#[derive(Clone, Debug, PartialEq)]
+struct DecodedState {
+    metric: SeriesLabels,
+    runs: Vec<(usize, usize)>,
+    is_last: bool,
+}
+
+/// `row` as these tests compare it.
+fn decoded_state(row: &StateFrameRow) -> DecodedState {
+    DecodedState {
+        metric: row.metric().clone(),
+        runs: row
+            .time()
+            .runs()
+            .map(|run| (run.position, run.len))
+            .collect(),
+        is_last: row.is_last(),
+    }
+}
+
+/// `rows` in a fixed order, so two lists of them can be compared as sets.
+fn state_rows_sorted(mut rows: Vec<DecodedState>) -> Vec<DecodedState> {
+    rows.sort_by_key(|row| format!("{:?}|{:?}", row.metric, row.runs));
+    rows
+}
+
+/// A real `Partial` producer over two partitions, both carrying the same group.
+///
+/// Grouping by `job` puts both partitions' state in one group, so the router routes both rows to the
+/// owner that folds them and the `Final` above has to merge what it is given: that merge is what
+/// this differential is about.
+fn state_producer() -> Arc<dyn ExecutionPlan> {
+    let rows = series_samples(1.0);
+    let first = [(HOST, "web-0"), (JOB, "shared")];
+    let second = [(HOST, "web-1"), (JOB, "shared")];
+    let partitions = vec![
+        frames(&[labelled_chunk("web-0", &first, &rows[..4], true)]),
+        vec![frame(&labelled_chunk("web-1", &second, &rows, true))],
+    ];
+    partial_plan(
+        rate_tree(),
+        memory_exec_partitioned(partitions),
+        partial_op(AggregateKind::Sum, &[JOB]),
+        &[JOB],
+    )
+    .expect("a rate tree with a partial sum is executable")
+}
+
+/// A real `Final` fold over `input`, answering rows: the aggregate that reads exported state.
+fn final_state_over(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
     let state = Arc::new(AggregateStateSchema {
         group: Grouping::By(Arc::new([Arc::from(JOB)])),
         kind: AggregateStateKind::Sum,
@@ -10538,42 +10607,197 @@ fn a_state_input_is_read_as_frames() {
         accumulators: raw_schema().fields.clone(),
         grid: grid(),
     });
-    // What the producer of this input publishes: the state frame the partial half exports, which is
-    // the layout the node above reads a row of an exported group on.
-    let state_frames = canonical_state_frame_schema(&state_tree(
-        AggregateStage::Partial,
-        NativeType::Samples(Arc::new(SeriesSchema {
-            fields: raw_schema().fields.clone(),
-            eval_grid: Some(grid()),
-        })),
-    ));
-    let tree = state_tree(
-        AggregateStage::Final,
-        NativeType::AggregateState(Arc::clone(&state)),
+    let tree = state_tree(AggregateStage::Final, NativeType::AggregateState(state));
+    plan_of(fused(tree), input).expect("the runtime executes a final fold")
+}
+
+/// The state rows `owner` of `plan` hands over, as these tests compare them.
+async fn handed_state_rows(plan: &Arc<dyn ExecutionPlan>, owner: usize) -> Vec<DecodedState> {
+    let handed = series_execution_plan(plan.as_ref())
+        .expect("the router hands its rows over")
+        .execute_series(owner, SessionContext::default().task_ctx())
+        .expect("the owner hands its rows over")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the rows arrive");
+    handed
+        .into_iter()
+        .map(|handed| match handed.into_parts().0 {
+            SeriesChunk::State(chunk) => decoded_state(&chunk.into_parts().0),
+            other => panic!("a state owner handed over {other:?}"),
+        })
+        .collect()
+}
+
+/// The state rows `batches` decode to, as a consumer behind the boundary recovers them.
+async fn state_rows_decoded(schema: SchemaRef, batches: Vec<RecordBatch>) -> Vec<DecodedState> {
+    let declaration =
+        SeriesFrameDeclaration::parse(schema.as_ref()).expect("the export declares a series frame");
+    let state = declaration
+        .aggregate_state()
+        .expect("the export declares aggregate state");
+    let binding = Arc::new(
+        datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+            state.kind,
+            state.components.to_vec(),
+        )
+        .expect("the declared layout is legal"),
     );
-    let producer: Arc<dyn ExecutionPlan> = memory_exec_partitioned_with(
-        Arc::new(state_frames.as_arrow().clone()),
-        vec![vec![], vec![]],
+    let series = Arc::new(declaration.series().clone());
+    let leaf = memory_exec_partitioned_with(schema, vec![batches]);
+    let frames = leaf
+        .execute(0, SessionContext::default().task_ctx())
+        .expect("the export's frames are re-read");
+    unpack_aggregate_state(frames, Some(binding), Some(series))
+        .expect("the export decodes")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the rows decode")
+        .iter()
+        .map(decoded_state)
+        .collect()
+}
+
+/// A state publication is one publication read two ways: the rows have to be the same, and so does
+/// the fold above them.
+///
+/// The rows are compared per owner - the group they name, the grid positions they carry and their
+/// finality, labels included - and the fold is compared per owner as the rows it answers, because
+/// that is where the payload is read.
+#[tokio::test]
+async fn a_state_router_hands_over_the_rows_its_frames_decode_to() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        // The frame side: one router's export, read owner by owner, which is both what a boundary
+        // consumer decodes and the fixture the frame path below is given.
+        let publishing: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(state_producer(), 2)
+                .expect("the producer declares aggregate-state frames"),
+        );
+        let published = published_frames(&publishing).await;
+        assert_eq!(2, published.len(), "one publication per owner");
+
+        // The chunk side reads the same fixture through a router of its own.
+        let handing: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(state_producer(), 2)
+                .expect("the producer declares aggregate-state frames"),
+        );
+        let mut in_process = Vec::new();
+        for owner in 0..2 {
+            in_process.push(handed_state_rows(&handing, owner).await);
+        }
+        let handed = in_process.iter().flatten().count();
+        assert!(handed > 0, "the producer exports at least one group");
+        for (owner, handed) in in_process.iter().enumerate() {
+            let from_frames =
+                state_rows_decoded(publishing.schema(), published[owner].clone()).await;
+            assert_eq!(
+                state_rows_sorted(from_frames),
+                state_rows_sorted(handed.clone()),
+                "owner {owner} hands over the rows its frames decode to"
+            );
+        }
+        // Every exported row closes its chain: a partial producer exports a group once.
+        assert!(
+            in_process.iter().flatten().all(|row| row.is_last),
+            "the export closes what it publishes: {in_process:?}"
+        );
+
+        // And the fold above: the same tree over the rows and over the frames answers the same rows
+        // per owner, which is where the payload itself is read.
+        let over_frames =
+            final_state_over(memory_exec_partitioned_with(publishing.schema(), published));
+        let in_process = final_state_over(Arc::new(
+            SeriesRepartitionExec::try_new(state_producer(), 2)
+                .expect("the producer declares aggregate-state frames"),
+        ) as Arc<dyn ExecutionPlan>);
+        assert!(
+            uses_in_process_series(&in_process),
+            "a state input is handed over like any other content"
+        );
+        // And so is the framed fixture: a `Final` normalizes every state input onto a router, and a
+        // router now hands its rows over whatever its content, so there is no state consumer left
+        // that decodes a frame here. The frame branch of `execute` stays for the one state producer
+        // this crate does not own - a merge scan reading another process's frames - which a
+        // single-process fixture cannot build, so this comparison runs through the frames the
+        // producer published and the rows they decode back to.
+        assert!(
+            uses_in_process_series(&over_frames),
+            "a state input is normalized onto a router, which hands its rows over"
+        );
+        let frame_rows = polled_partition_rows(&over_frames).await;
+        let chunk_rows = polled_partition_rows(&in_process).await;
+        assert_eq!(2, chunk_rows.len(), "the fold runs once per owner");
+        for owner in 0..chunk_rows.len() {
+            assert!(chunk_rows[owner].1, "owner {owner} reports its end");
+            let mut answered_over_frames = frame_rows[owner].0.clone();
+            answered_over_frames
+                .sort_by(|left, right| left.partial_cmp(right).expect("rows compare"));
+            let mut answered_over_chunks = chunk_rows[owner].0.clone();
+            answered_over_chunks
+                .sort_by(|left, right| left.partial_cmp(right).expect("rows compare"));
+            assert_eq!(
+                answered_over_frames, answered_over_chunks,
+                "owner {owner} folds the same answer over the rows and over the frames"
+            );
+        }
+        assert!(
+            chunk_rows.iter().any(|(rows, _)| !rows.is_empty()),
+            "the fixture folds something"
+        );
+    })
+    .await
+    .expect("the composition finishes");
+}
+
+/// A state chunk's charge is released with the chunk, exactly as an evaluated one's is.
+///
+/// The state frame path keeps the router's reservation until the poll after the batch it backed, so
+/// `Final` can admit what it kept of it. A handed-over row has no batch to flush and no next poll to
+/// wait for: the reservation travels with the row, which is the same moment - the row is admitted by
+/// the push that reads it, and the charge goes when the value it accounts for goes.
+#[tokio::test]
+async fn a_handed_state_chunk_holds_its_charge_until_it_is_dropped() {
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let context = task_context(&pool);
+    let plan: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(state_producer(), 2)
+            .expect("the producer declares aggregate-state frames"),
     );
-    let router: Arc<dyn ExecutionPlan> = Arc::new(
-        SeriesRepartitionExec::try_new(producer, 2).expect("a state producer routes as state"),
-    );
+    let mut chunks = series_execution_plan(plan.as_ref())
+        .expect("the router hands its rows over")
+        .execute_series(0, Arc::clone(&context))
+        .expect("the output is claimed once");
+
+    let first = futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+        .await
+        .expect("the producer exports a row")
+        .expect("the row arrives");
     assert!(
-        series_execution_plan(router.as_ref()).is_none(),
-        "a state publication is a frame row, so it is read as a frame"
+        matches!(first.chunk(), SeriesChunk::State(_)),
+        "a state owner hands over state rows"
     );
-    let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
-        tree.clone(),
-        binding(&tree),
-        vec![input_plan(frame_schema())],
-        canonical_frame_schema(&tree),
-        FusedOutputFormat::SeriesFrame,
-    )
-    .expect("Final accepts an aggregate-state input binding");
-    let fused = plan_of(node, router).expect("the runtime executes a final fold");
+    let held = pool.reserved();
     assert!(
-        !uses_in_process_series(&fused),
-        "the state input is decoded from its frames, not handed over"
+        held > 0,
+        "a held state row keeps the export it points into charged"
     );
+
+    drop(first);
+    let after = pool.reserved();
+    assert!(
+        after < held,
+        "dropping the state row releases what it was charged: {held} held, {after} still reserved"
+    );
+
+    // The rest of the export, then the rows themselves: nothing is left charged once both are gone.
+    let mut rest = chunks
+        .by_ref()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the export ends instead of failing");
+    rest.clear();
+    drop(chunks);
+    // The other owner of this router is never claimed, so the read it belongs to ends with the plan.
+    drop(plan);
+    assert_eq!(0, pool.reserved(), "the finished export holds nothing");
 }

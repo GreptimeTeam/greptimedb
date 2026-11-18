@@ -279,10 +279,10 @@ impl Stream for DeclaredSeries {
                 // This node answers raw chunks and nothing else. Another variant would mean the
                 // frame path and the in-process path no longer describe the same output, so it is
                 // reported rather than reinterpreted.
-                SeriesChunk::Evaluated(_) => Poll::Ready(Some(Err(BoxedError::new(
-                    common_query::error::Error::from(DataFusionError::Execution(
-                        "RawSeriesSourceExec handed over an evaluated chunk".to_string(),
-                    )),
+                other => Poll::Ready(Some(Err(BoxedError::new(
+                    common_query::error::Error::from(DataFusionError::Execution(format!(
+                        "RawSeriesSourceExec handed over {other:?}"
+                    ))),
                 )))),
             },
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),

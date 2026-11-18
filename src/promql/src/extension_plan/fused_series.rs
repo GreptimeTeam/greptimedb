@@ -22,7 +22,9 @@
 //! ([`crate::extension_plan::SeriesExecutionPlan`]), which is the same chunks with no round trip
 //! through a batch. The decision is per input and taken by asking the input
 //! ([`crate::extension_plan::series_execution_plan`]): one source can be read in process while
-//! another is decoded from its frames, because each input is either one of ours or it is not.
+//! another is decoded from its frames, because each input is either one of ours or it is not. Every
+//! content a native input publishes goes the same way, aggregate state included: a state row is
+//! handed over as the row it is, not left on a frame path of its own.
 //!
 //! Both halves show their own compiled tree in `EXPLAIN`, rendered by [`NativeTree`]'s display.
 //! The logical node shows its tree without metrics; the physical node includes each tree node's
@@ -107,8 +109,8 @@ use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::metrics::{NodeMetricsSnapshot, is_node_metric};
 use crate::native::plan::{
-    AggregateStage, BoundMap, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, reads_across_series,
+    AggregateStage, AggregateStateSchema, BoundInput, BoundMap, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType, reads_across_series,
 };
 use crate::native::state::{StateChunk, state_row_from_frame_row};
 use crate::source::materialize_raw_labels;
@@ -3013,20 +3015,27 @@ impl ExecutionPlan for FusedSeriesExec {
             // One input, one answer, asked of the input itself: an operator that can hand its
             // chunks over is asked for them, and everything else is asked for its frames. Asking
             // the input is what makes the two paths one decision - calling `execute_series` *is*
-            // the statement that this input is read in process.
-            //
-            // Aggregate state is the one content no handover carries (a state publication is a row
-            // of an exported group, and `SeriesChunk` deliberately has no variant for it), so a
-            // state source is read from its frames whatever else it could answer.
-            if kind != FusedInputKind::AggregateState
-                && let Some(series_plan) = series_execution_plan(input.as_ref())
-            {
+            // the statement that this input is read in process - and it is asked of every content
+            // alike, aggregate state included.
+            if let Some(series_plan) = series_execution_plan(input.as_ref()) {
                 let chunks = series_plan.execute_series(partition, Arc::clone(&context))?;
                 let chunks = checked_series_stream(chunks, *ordering);
+                // What the frame path would compare a state publication against before it folds a
+                // row of it: the series layout this node binds, and - per row, inside
+                // `in_process_feed` - the state layout this node's aggregate declared.
+                let state = match kind {
+                    FusedInputKind::AggregateState => {
+                        Some(state_binding_of(&bound_inputs, source)?)
+                    }
+                    FusedInputKind::Raw | FusedInputKind::Evaluated => None,
+                };
+                let series = Arc::clone(&self.series_schemas[source]);
                 streams.push(
                     chunks
                         .map(move |item| {
-                            item.and_then(|chunk| in_process_feed(source, kind, chunk))
+                            item.and_then(|chunk| {
+                                in_process_feed(source, kind, &series, state.as_ref(), chunk)
+                            })
                         })
                         .boxed(),
                 );
@@ -3055,19 +3064,7 @@ impl ExecutionPlan for FusedSeriesExec {
                     );
                 }
                 FusedInputKind::AggregateState => {
-                    let bound = bound_inputs
-                        .iter()
-                        .find(|bound| bound.source_index == source)
-                        .ok_or_else(|| {
-                            DataFusionError::Plan(format!(
-                                "FusedSeries state source {source} has no bound input"
-                            ))
-                        })?;
-                    let NativeType::AggregateState(binding) = bound.output.clone() else {
-                        return Err(DataFusionError::Plan(format!(
-                            "FusedSeries source {source} is declared aggregate state but its binding is not"
-                        )));
-                    };
+                    let binding = state_binding_of(&bound_inputs, source)?;
                     let declared = Arc::new(
                         datatypes::series::aggregate_state::AggregateStateSchema::try_new(
                             binding.kind,
@@ -3344,18 +3341,33 @@ struct FusedFeed {
 fn in_process_feed(
     source: usize,
     kind: FusedInputKind,
+    series: &Arc<SeriesSchema>,
+    state: Option<&Arc<AggregateStateSchema>>,
     handed: HandedSeriesChunk,
 ) -> Result<FusedFeed, BoxedError> {
     let (chunk, charge) = handed.into_parts();
     let chunk = match (kind, chunk) {
         (FusedInputKind::Raw, SeriesChunk::Raw(chunk)) => FusedChunk::Raw(chunk),
         (FusedInputKind::Evaluated, SeriesChunk::Evaluated(chunk)) => FusedChunk::Evaluated(chunk),
+        (FusedInputKind::AggregateState, SeriesChunk::State(chunk)) => {
+            let Some(binding) = state else {
+                return Err(failed(format!(
+                    "FusedSeries state source {source} binds no aggregate state"
+                )));
+            };
+            let (row, declared) = chunk.into_parts();
+            // The two checks the frame path makes before it folds a state row, on the same two
+            // properties: the series the export was declared on is the one this node binds, and the
+            // row's state is the kind and component layout this node's aggregate declared.
+            ensure_declared_series(&declared, series, source)?;
+            let row = state_row_from_frame_row(row, binding)
+                .map_err(|error| BoxedError::new(common_query::error::Error::from(error)))?;
+            FusedChunk::State(StateChunk::Row(row))
+        }
         (kind, chunk) => {
-            return Err(BoxedError::new(common_query::error::Error::from(
-                DataFusionError::Execution(format!(
-                    "FusedSeries source {source} is bound to {kind:?} but its operator handed over \
-                     {chunk:?}"
-                )),
+            return Err(failed(format!(
+                "FusedSeries source {source} is bound to {kind:?} but its operator handed over \
+                 {chunk:?}"
             )));
         }
     };
@@ -3364,6 +3376,63 @@ fn in_process_feed(
         chunk,
         charge,
     })
+}
+
+/// The aggregate-state binding `source` was compiled with.
+///
+/// Both entry points read it from the same place, so a source declared aggregate state is folded
+/// against the layout its tree declared whether its operator published frames or rows.
+fn state_binding_of(
+    inputs: &[&BoundInput],
+    source: usize,
+) -> DataFusionResult<Arc<AggregateStateSchema>> {
+    let bound = inputs
+        .iter()
+        .find(|bound| bound.source_index == source)
+        .ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "FusedSeries state source {source} has no bound input"
+            ))
+        })?;
+    let NativeType::AggregateState(binding) = bound.output.clone() else {
+        return Err(DataFusionError::Plan(format!(
+            "FusedSeries source {source} is declared aggregate state but its binding is not"
+        )));
+    };
+    Ok(binding)
+}
+
+/// `declared` is the series layout `expected` binds, as `unpack_aggregate_state` checks it.
+///
+/// A frame says which series its state is of in its declaration; a chunk carries that declaration's
+/// series schema instead, so the check the decoder makes on the frame is made here on the same two
+/// properties: the field names in order, and the evaluation grid.
+fn ensure_declared_series(
+    declared: &SeriesSchema,
+    expected: &SeriesSchema,
+    source: usize,
+) -> Result<(), BoxedError> {
+    let same_fields = expected.fields.len() == declared.fields.len()
+        && expected
+            .fields
+            .iter()
+            .zip(declared.fields.iter())
+            .all(|(left, right)| left.name == right.name);
+    let same_grid = expected.eval_grid.as_ref().map(|grid| grid.spec())
+        == declared.eval_grid.as_ref().map(|grid| grid.spec());
+    if same_fields && same_grid {
+        return Ok(());
+    }
+    Err(failed(format!(
+        "FusedSeries source {source} was handed state of a series layout it does not bind"
+    )))
+}
+
+/// A failure in the handover's own error type.
+fn failed(reason: String) -> BoxedError {
+    BoxedError::new(common_query::error::Error::from(
+        DataFusionError::Execution(reason),
+    ))
 }
 
 /// The native histogram column of one evaluated field.

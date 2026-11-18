@@ -153,7 +153,8 @@ use twox_hash::XxHash64;
 
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::series_execution::{
-    HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk, SeriesExecutionPlan,
+    AggregateStateChunk, HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk,
+    SeriesExecutionPlan,
 };
 use crate::grid_series::{label_set, merge_same_labelset};
 use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
@@ -434,12 +435,15 @@ impl SeriesRepartitionExec {
 
     /// Whether what this node publishes is a chunk a native consumer can read in process.
     ///
-    /// Raw and evaluated publications are values this crate holds: an owner's merged series, or the
-    /// reconstructed samples of one raw identity. Aggregate state is not - a state publication is a
-    /// row of an exported group on the schema the producer wrote, read as a frame by the node that
-    /// folds it - so a consumer asks for that as frames, which is what this answers.
+    /// Every content is. A raw publication is the merged samples of one stored identity, an
+    /// evaluated one the series an owner settled on its grid, and a state one the row of a group
+    /// that owner exported - each a value this crate holds, and each read in process by the node
+    /// that consumes it. The match is spelled out rather than `true` so a fourth content has to
+    /// answer here too.
     pub fn hands_over_series(&self) -> bool {
-        matches!(self.content, FrameContent::Raw | FrameContent::Evaluated)
+        match self.content {
+            FrameContent::Raw | FrameContent::Evaluated | FrameContent::AggregateState => true,
+        }
     }
 
     /// The queue of `partition` and the lease on this read that reading it takes.
@@ -499,6 +503,45 @@ impl SeriesRepartitionExec {
             self.ordering,
             self.identity_completion,
         )
+    }
+
+    /// One claimed output's exported state, as the rows the queue carries.
+    ///
+    /// The decoder is built from the schema this node publishes, which is the schema a frame
+    /// consumer would parse, and it is run once on an empty batch before the read starts: a
+    /// declaration this revision cannot read is refused here rather than on the first row, which is
+    /// exactly what `unpack_aggregate_state` does for the frame path.
+    fn state_chunk_stream(
+        &self,
+        receiver: mpsc::UnboundedReceiver<Queued>,
+        lease: OutputLease,
+    ) -> DataFusionResult<StateChunkOutputStream> {
+        let frame_schema = self.input.schema();
+        let declaration = SeriesFrameDeclaration::parse(frame_schema.as_ref())
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        let state = declaration.aggregate_state().ok_or_else(|| {
+            DataFusionError::Execution(
+                "SeriesRepartition aggregate-state output declares no aggregate state".to_string(),
+            )
+        })?;
+        let decoder = SeriesFrameDecoder::try_new_aggregate_state(
+            state,
+            &self.series_schema,
+            FrameLabelMode::Explicit,
+        )
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        decoder
+            .decode_aggregate_state(&RecordBatch::new_empty(Arc::clone(&frame_schema)))
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        Ok(StateChunkOutputStream {
+            decoder,
+            frame_schema,
+            series: Arc::clone(&self.series_schema),
+            receiver,
+            lease,
+            pending: VecDeque::new(),
+            reported: false,
+        })
     }
 }
 
@@ -649,24 +692,157 @@ impl SeriesExecutionPlan for SeriesRepartitionExec {
     /// ([`SeriesCharge`]), because the consumer holds the bytes those reservations account for: the
     /// frame path holds them in the packer's handoff until the batch is flushed, and there is no
     /// packer here to hold them.
+    ///
+    /// A state publication is the one content this node does not merge: it forwards the exported row
+    /// of a group its child folded, on the same queue and the same lease as the frames it would have
+    /// published ([`StateChunkOutputStream`]), so the two entry points stay one read of one output.
     fn execute_series(
         &self,
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableSeriesStream> {
-        if !self.hands_over_series() {
-            return Err(DataFusionError::Execution(format!(
-                "SeriesRepartition output partition {partition} publishes {} frames, which are read \
-                 as frames",
-                self.content.as_str()
-            )));
-        }
         let (receiver, lease) = self.claim_output(partition, &context)?;
-        let inner = self.partition_stream(receiver, lease, &context);
-        Ok(Box::pin(ChunkOutputStream {
-            inner: Some(Box::pin(inner)),
-            content: self.content,
-        }))
+        match self.content {
+            FrameContent::Raw | FrameContent::Evaluated => {
+                let inner = self.partition_stream(receiver, lease, &context);
+                Ok(Box::pin(ChunkOutputStream {
+                    inner: Some(Box::pin(inner)),
+                    content: self.content,
+                }))
+            }
+            FrameContent::AggregateState => Ok(Box::pin(self.state_chunk_stream(receiver, lease)?)),
+        }
+    }
+}
+
+/// One owner's exported state, as the rows it is.
+///
+/// The queue, the lease and the charge are [`StateBatchOutputStream`]'s: this node does not merge
+/// state, it forwards the row a group was exported as. The only thing that changes is the form -
+/// the batch the queue carries is decoded into the rows it holds, by the same
+/// [`SeriesFrameDeclaration`] decoder a frame consumer would have used, and each row is handed over
+/// with the charge of the batch it points into. So a consumer reads the same rows either way, and
+/// the batch is never re-encoded.
+struct StateChunkOutputStream {
+    /// The decoder the exported batches are read with, which is the frame path's decoder.
+    decoder: SeriesFrameDecoder,
+    /// The schema every exported batch carries, checked before it is decoded.
+    frame_schema: SchemaRef,
+    /// The series layout the export was declared on, handed over with each row.
+    series: Arc<SeriesSchema>,
+    /// The owner's queue, shared with the frames this output would otherwise publish.
+    receiver: mpsc::UnboundedReceiver<Queued>,
+    /// The claim on this read, released when this output ends.
+    lease: OutputLease,
+    /// Rows decoded from the batch last taken off the queue, in the order the frame carries them.
+    pending: VecDeque<HandedSeriesChunk>,
+    reported: bool,
+}
+
+/// How many empty exported batches one poll reads before yielding, mirroring the frame consumer's
+/// own guard so a producer of empty batches cannot hold the task.
+const MAX_EMPTY_STATE_BATCHES_PER_POLL: usize = 32;
+
+impl StateChunkOutputStream {
+    /// Ends this output with a failure, draining the queue and releasing the rows it still held.
+    ///
+    /// The frame output ends exactly this way: the read fails once, every queued item is dropped
+    /// with its charge, and the output reports the first failure rather than a second one.
+    fn failed(
+        &mut self,
+        reason: impl Into<String>,
+    ) -> Poll<Option<Result<HandedSeriesChunk, BoxedError>>> {
+        let reason = reason.into();
+        self.lease
+            .fail(Arc::new(DataFusionError::Execution(reason.clone())));
+        self.reported = true;
+        self.receiver.close();
+        while self.receiver.try_recv().is_ok() {}
+        self.pending.clear();
+        Poll::Ready(Some(Err(boxed(DataFusionError::Execution(reason)))))
+    }
+}
+
+impl Stream for StateChunkOutputStream {
+    type Item = Result<HandedSeriesChunk, BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        if this.reported {
+            return Poll::Ready(None);
+        }
+        let mut empty_batches = 0;
+        loop {
+            if let Some(chunk) = this.pending.pop_front() {
+                return Poll::Ready(Some(Ok(chunk)));
+            }
+            if let Ending::Failed(error) = this.lease.shared.ending() {
+                this.reported = true;
+                this.receiver.close();
+                while this.receiver.try_recv().is_ok() {}
+                return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
+            }
+            match this.receiver.poll_recv(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Queued::StateBatch {
+                    batch,
+                    row,
+                    _charge,
+                    _metadata,
+                })) => {
+                    // The queue publishes either the whole batch or the one row a multi-output
+                    // routing selected, exactly as the frame output reads it.
+                    let batch = match row {
+                        Some(row) => batch.slice(row, 1),
+                        None => batch.as_ref().clone(),
+                    };
+                    if batch.schema().as_ref() != this.frame_schema.as_ref() {
+                        return this.failed("aggregate state frame schema mismatch");
+                    }
+                    let rows = match this.decoder.decode_aggregate_state(&batch) {
+                        Ok(rows) => rows,
+                        Err(error) => return this.failed(error.to_string()),
+                    };
+                    if rows.is_empty() {
+                        empty_batches += 1;
+                        if empty_batches == MAX_EMPTY_STATE_BATCHES_PER_POLL {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        continue;
+                    }
+                    // One batch, one reservation, shared by every row cut from it: the bytes are
+                    // live while any of those rows is, and released when the last one is dropped.
+                    let series = Arc::clone(&this.series);
+                    let metadata = Arc::new(_metadata);
+                    let chunks = rows.into_iter().map(|row| {
+                        HandedSeriesChunk::charged(
+                            SeriesChunk::State(AggregateStateChunk::new(row, Arc::clone(&series))),
+                            SeriesCharge::shared(vec![Arc::clone(&_charge), Arc::clone(&metadata)]),
+                        )
+                    });
+                    this.pending.extend(chunks);
+                }
+                Poll::Ready(Some(Queued::Eof { .. })) => {
+                    // The shared ending and the queue's closure establish completion; this message
+                    // is only a queue-order barrier.
+                }
+                Poll::Ready(Some(Queued::Chain { .. })) => {
+                    return this.failed("series router received a non-state message");
+                }
+                Poll::Ready(None) => {
+                    this.reported = true;
+                    this.pending.clear();
+                    return match this.lease.ending() {
+                        Some(Err(error)) => Poll::Ready(Some(Err(boxed(
+                            DataFusionError::External(Box::new(error)),
+                        )))),
+                        Some(Ok(_)) => unreachable!(),
+                        None => Poll::Ready(None),
+                    };
+                }
+            }
+        }
     }
 }
 

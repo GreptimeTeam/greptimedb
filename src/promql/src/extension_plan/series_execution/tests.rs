@@ -15,8 +15,10 @@
 //! What the guard has to answer: the operators that can hand chunks over, and nothing else.
 //!
 //! The consumer's fast path is only as safe as this answer, so the cases that keep it structural
-//! are the ones that must say no: a region scan answering frames, a router publishing a content it
-//! cannot hand over, and a wrapper that forwards whatever its input produces.
+//! are the ones that must say no: a region scan answering frames, a router over a content this
+//! crate does not produce, and a wrapper that forwards whatever its input produces. Every content a
+//! router does produce - raw, evaluated, aggregate state - is answered for, because every one of
+//! them is a value this crate holds.
 
 use std::sync::Arc;
 
@@ -106,30 +108,35 @@ fn a_router_hands_over_the_contents_it_publishes_as_chunks() {
     );
 }
 
-/// Aggregate state is read as a frame, whichever node publishes it.
+/// Every content a router publishes is handed over, aggregate state included.
 ///
-/// This pins the shape the trait's contract states: a state publication is a row of an exported
-/// group on the schema its producer wrote, and [`SeriesChunk`](super::SeriesChunk) deliberately has
-/// no variant for it. So the router that routes state answers `None` here and the node above it
-/// decodes the frames it receives - the state path stays off the handover instead of riding a
-/// variant nothing produces.
+/// This is the shape the trait states: a state publication is the row of a group its producer
+/// exported, and the router carries it exactly as it carries a raw identity or an evaluated series -
+/// on the same queue, the same lease and the same charge. Nothing is left on a frame path of its own,
+/// which is why the router answers for all three rather than holding one of them back.
 #[test]
-fn aggregate_state_is_read_as_frames() {
-    let state: Arc<dyn ExecutionPlan> = Arc::new(
-        SeriesRepartitionExec::try_new(state_frames(), 2)
-            .expect("the child declares an aggregate-state frame"),
-    );
-    assert!(
-        series_execution_plan(state.as_ref()).is_none(),
-        "a state publication is a frame row, so it is read as a frame"
-    );
-    assert!(
-        !state
-            .downcast_ref::<SeriesRepartitionExec>()
-            .expect("the state plan is a router")
-            .hands_over_series(),
-        "the same answer, stated by the router's own content"
-    );
+fn every_content_a_router_publishes_is_handed_over() {
+    let contents: [(&str, Arc<dyn ExecutionPlan>); 3] = [
+        ("raw", raw_source(per_series_scan(2))),
+        ("evaluated", evaluated_frames()),
+        ("aggregate state", state_frames()),
+    ];
+    for (name, child) in contents {
+        let router: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(child, 2)
+                .expect("the fixture publishes a routeable frame"),
+        );
+        let answered = series_execution_plan(router.as_ref())
+            .unwrap_or_else(|| panic!("a router over {name} hands its publication over"));
+        assert!(
+            answered
+                .as_any()
+                .downcast_ref::<SeriesRepartitionExec>()
+                .expect("the answer is the router itself")
+                .hands_over_series(),
+            "the router over {name} says it hands over"
+        );
+    }
 }
 
 #[test]
