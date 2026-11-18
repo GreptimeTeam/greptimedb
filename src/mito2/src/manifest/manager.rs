@@ -276,7 +276,7 @@ impl RegionManifestManager {
                 flushed_entry_id: Some(flushed_entry_id),
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             }));
         }
 
@@ -692,6 +692,31 @@ impl RegionManifestManager {
             .await
     }
 
+    fn validate_series_actions(
+        &self,
+        base: &RegionManifest,
+        actions: &[RegionMetaAction],
+    ) -> Result<()> {
+        if !actions.iter().any(|action| matches!(action, RegionMetaAction::Edit(edit) if !edit.series_indexes_to_add.is_empty() || edit.files_to_add.iter().any(|f| matches!(f.format, file::FileFormat::NarthexSeriesIndex(_))))) {
+            return Ok(());
+        }
+        let mut view = RegionManifestBuilder::from_shared_manifest(
+            Some(base.clone()),
+            self.file_metadata_interner.clone(),
+        );
+        for action in actions {
+            if let RegionMetaAction::Edit(edit) = action {
+                edit.validate_narthex_series(&view)?;
+            }
+            self.apply_actions(
+                &mut view,
+                self.last_version(),
+                std::iter::once(action.clone()),
+            );
+        }
+        Ok(())
+    }
+
     /// Saves `bytes`, the encoded `actions`, as the next version and applies the actions.
     async fn commit(
         &mut self,
@@ -700,6 +725,7 @@ impl RegionManifestManager {
         mut allow_checkpoint: bool,
         must_verify: impl FnOnce() -> bool,
     ) -> Result<ManifestVersion> {
+        self.validate_series_actions(&self.manifest, &actions)?;
         let conditional = self.store.is_conditional_publication();
         let version = if conditional {
             self.last_version() + 1
@@ -795,6 +821,7 @@ impl RegionManifestManager {
         }
 
         let base = self.staged.view.as_ref().unwrap_or(&self.manifest);
+        self.validate_series_actions(base, &action_list.actions)?;
         let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
             Some(base.as_ref().clone()),
             self.file_metadata_interner.clone(),
@@ -1203,7 +1230,7 @@ mod test {
                         flushed_entry_id: None,
                         flushed_sequence: None,
                         committed_sequence: None,
-                        wal_recovery: Default::default(),
+                        ..Default::default()
                     })]),
                     false,
                 )

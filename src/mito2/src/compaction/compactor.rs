@@ -545,7 +545,7 @@ impl CompactionContext {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
@@ -1736,7 +1736,7 @@ mod tests {
                         compaction_time_window: None,
                         flushed_entry_id: None,
                         flushed_sequence: None,
-                        wal_recovery: Default::default(),
+                        ..Default::default()
                     })),
                     false,
                 )

@@ -858,7 +858,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 flushed_entry_id: Some(discarded_entry_id),
                 flushed_sequence: Some(discarded_sequence),
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             };
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
             let result = match durability_barrier.wait(discarded_entry_id).await {
@@ -972,10 +972,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
     let region_id = region.region_id;
     snafu::ensure!(
-        edit.files_to_add
-            .iter()
-            .chain(&edit.files_to_remove)
-            .all(|file| matches!(file.format, file::FileFormat::Parquet)),
+        edit.series_indexes_to_add.is_empty()
+            && edit.series_indexes_to_remove.is_empty()
+            && edit
+                .files_to_add
+                .iter()
+                .chain(&edit.files_to_remove)
+                .all(|file| matches!(file.format, file::FileFormat::Parquet)),
         crate::error::InvalidRequestSnafu {
             region_id,
             reason: "Importing authoritative Narthex artifacts is unsupported",

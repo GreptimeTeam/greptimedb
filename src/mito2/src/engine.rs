@@ -2003,7 +2003,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -2016,7 +2016,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -2029,7 +2029,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -2042,7 +2042,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -2055,7 +2055,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -2066,7 +2066,7 @@ mod tests {
             flushed_entry_id: Some(1),
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -2077,7 +2077,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: Some(1),
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {

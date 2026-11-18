@@ -30,6 +30,7 @@ use crate::sst::primary_key::PrimaryKeyRangeMapper;
 pub(crate) struct SstVersion {
     /// SST metadata organized by levels.
     levels: Arc<LevelMetaArray>,
+    series_indexes: Arc<HashMap<FileId, FileHandle>>,
     primary_key_mapper: Arc<PrimaryKeyRangeMapper>,
 }
 
@@ -40,7 +41,39 @@ impl SstVersion {
     pub(crate) fn new(metadata: RegionMetadataRef) -> SstVersion {
         SstVersion {
             levels: Arc::new(new_level_meta_vec()),
+            series_indexes: Arc::new(HashMap::new()),
             primary_key_mapper: Arc::new(PrimaryKeyRangeMapper::new(metadata)),
+        }
+    }
+
+    pub(crate) fn series_indexes(&self) -> &HashMap<FileId, FileHandle> {
+        &self.series_indexes
+    }
+
+    pub(crate) fn add_series_indexes(
+        &mut self,
+        purger: FilePurgerRef,
+        files: impl Iterator<Item = impl Into<FileMetaRef>>,
+    ) {
+        let indexes = Arc::make_mut(&mut self.series_indexes);
+        for file in files {
+            let file = file.into();
+            indexes
+                .entry(file.file_id)
+                .or_insert_with(|| FileHandle::new(file, purger.clone()));
+        }
+    }
+
+    pub(crate) fn remove_series_indexes(&mut self, ids: impl Iterator<Item = file::RegionFileId>) {
+        let indexes = Arc::make_mut(&mut self.series_indexes);
+        for id in ids {
+            if indexes
+                .get(&id.file_id())
+                .is_some_and(|file| file.file_id() == id)
+                && let Some(file) = indexes.remove(&id.file_id())
+            {
+                file.mark_deleted();
+            }
         }
     }
 
@@ -125,6 +158,13 @@ impl SstVersion {
     /// # Panics
     /// Panics if the level of [FileMeta] has no storage slot.
     pub(crate) fn remove_files(&mut self, files_to_remove: impl Iterator<Item = FileMeta>) {
+        let files_to_remove: Vec<_> = files_to_remove.collect();
+        Arc::make_mut(&mut self.series_indexes).retain(|_, file| {
+            let retire = matches!(&file.meta_ref().format, file::FileFormat::NarthexSeriesIndex(index)
+                if index.sources.iter().any(|source| files_to_remove.iter().any(|removed| removed.file_id() == *source)));
+            if retire { file.mark_deleted(); }
+            !retire
+        });
         let levels = Arc::make_mut(&mut self.levels);
         for file in files_to_remove {
             let Some(slot) = file::level_slot(file.level) else {
@@ -138,6 +178,9 @@ impl SstVersion {
 
     /// Marks all SSTs in this version as deleted.
     pub(crate) fn mark_all_deleted(&self) {
+        for file in self.series_indexes.values() {
+            file.mark_deleted();
+        }
         for level_meta in self.levels.iter() {
             for file_handle in level_meta.files.values() {
                 file_handle.mark_deleted();
