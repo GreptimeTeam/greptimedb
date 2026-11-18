@@ -1342,7 +1342,8 @@ pub(crate) enum IndexPublication {
 pub(crate) enum TailPublication {
     /// The edit was committed.
     Committed(ManifestVersion),
-    /// The region is altering or applying an edit.
+    /// The region is altering or applying an edit, or, without conditional publication, a
+    /// replay's earlier update may be saved without being applied.
     Busy,
     /// The region is no longer a writable leader, or its manifest no longer records the
     /// expected tails.

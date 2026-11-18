@@ -224,7 +224,7 @@ impl FunctionState {
                 Ok(ROWS)
             }
 
-            /// Returns the node id, offset per form, so callers can check which form was called.
+            /// Returns the node id; the table form adds ROWS, so tests can tell the forms apart.
             async fn discard_pending_tails(
                 &self,
                 _region_id: RegionId,

@@ -34,6 +34,10 @@ use crate::helper::{cast_u64, one_of_sigs2};
 /// Discards the pending WAL tails that a datanode wrote from a region or from all regions
 /// of a table, without replaying them. Returns the number of discarded tails.
 ///
+/// A region's flushed entry id is raised to the largest bound of the tails it discards, so
+/// the region reopens after a crash only if its datanode's WAL durably holds history past that
+/// bound. The function does not check this: whoever records the tails ensures it.
+///
 /// - `region_id` or `table_name`: the region or the table.
 /// - `node_id`: the datanode that wrote the tails.
 #[admin_fn(

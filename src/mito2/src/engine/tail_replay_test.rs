@@ -2453,6 +2453,44 @@ async fn test_discard_stays_busy_after_an_uncertain_replay_ends() {
     );
 }
 
+/// A replay's commit that succeeds after one with an uncertain result clears the uncertainty,
+/// so a discard of the tail the replay keeps succeeds.
+#[tokio::test]
+async fn test_discard_kept_tail_after_replay_recommits() {
+    let version = Arc::new(AtomicU64::new(u64::MAX));
+    let region = TestRegion::new(
+        "tail-discard-recommitted",
+        false,
+        Some(lose_delta_response(version.clone())),
+    )
+    .await;
+    let remote_upto = region.write_remote_rows(region.region_id, 6, 9).await;
+    // Another node's listed tail stays from its last entry read until the region is leased.
+    let remote = remote_tail(0, remote_upto + 1, UptoKind::Listed);
+    region
+        .reopen_with_tails(vec![
+            own_tail(0, region.entries[1], UptoKind::Reported),
+            remote.clone(),
+        ])
+        .await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    version.store(next_manifest_version(&mito_region).await, Ordering::Relaxed);
+    region.catchup().await;
+    // The first commit lands but reports an error, and its retry commits.
+    let kept = PendingTail {
+        after: remote_upto,
+        ..remote
+    };
+    wait_until(|| region.version().pending_tails == vec![kept.clone()]).await;
+    assert_eq!(2, region.listener.commits());
+
+    assert_eq!(
+        1,
+        region.discard_pending_tails(REMOTE_NODE_ID).await.unwrap()
+    );
+    assert!(!region.has_pending_tails());
+}
+
 /// With conditional publication, a discard over a replay's update that was saved but reported
 /// an error conflicts with it, and the region reloads from storage without the tails.
 #[tokio::test]

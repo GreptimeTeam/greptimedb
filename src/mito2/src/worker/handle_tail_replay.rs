@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Starting, applying and ending background replays of pending WAL tails.
+//! Starting, applying and ending background replays of pending WAL tails, and discarding
+//! pending tails without replaying them.
 
 use std::sync::Arc;
 
@@ -79,9 +80,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// sends 0 and changes nothing.
     ///
     /// The edit removes the tails, keeps the others in order and raises the flushed entry id
-    /// to the largest `upto` of the removed tails, for a listed tail too. Entries of this node
-    /// at or below it are then never replayed, which relies on the obligation of whoever
-    /// records a tail (see
+    /// to the largest `upto` of the removed tails, for a listed tail too, which can lie above
+    /// every entry this node wrote. Replaying the WAL at open then skips entries of this node
+    /// at or below it, except those its remaining tails cover, which a background replay
+    /// still reads, and an open of the region after a crash requires this node's WAL to
+    /// durably hold history past it. Whoever records a tail keeps this node's later entries
+    /// above it and makes that history durable; the discard checks neither (see
     /// [RegionManifest::wal_replay_start](crate::manifest::action::RegionManifest::wal_replay_start)).
     ///
     /// The edit is committed outside the worker against the tails the version records now, so

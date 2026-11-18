@@ -2320,10 +2320,11 @@ mod tests {
     }
 
     #[test]
-    fn test_make_region_truncate_rejects_unknown_kind() {
+    fn test_make_region_truncate_rejects_unknown_kind_as_missing() {
         use prost::Message;
-        // An empty message in field 99, a kind this version does not know.
+        // An empty message in field 99, a kind this version does not know, which decoding drops.
         let truncate = TruncateRequest::decode([0x08, 0x01, 0x9a, 0x06, 0x00].as_slice()).unwrap();
+        assert_eq!(vec![0x08, 0x01], truncate.encode_to_vec());
         let error = RegionRequest::try_from_request_body(region_request::Body::Truncate(truncate))
             .unwrap_err();
         assert!(
