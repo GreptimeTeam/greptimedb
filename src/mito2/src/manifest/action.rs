@@ -167,69 +167,6 @@ impl RegionEdit {
             || !self.series_indexes_to_remove.is_empty()
     }
 
-    /// Checks artifact inventories, roles and immutable identities before publication.
-    pub(crate) fn validate_file_metadata(&self, manifest: &RegionManifestBuilder) -> Result<()> {
-        let region_id = manifest
-            .metadata
-            .as_ref()
-            .context(RegionMetadataNotFoundSnafu)?
-            .region_id;
-        snafu::ensure!(
-            self.files_to_add
-                .iter()
-                .all(|file| !matches!(file.format, file::FileFormat::NarthexSeriesIndex(_))),
-            crate::error::InvalidRequestSnafu {
-                region_id,
-                reason: "Series indexes cannot be data SSTs"
-            }
-        );
-        snafu::ensure!(
-            self.files_to_add
-                .iter()
-                .chain(&self.series_indexes_to_add)
-                .all(FileMeta::valid_inventory),
-            crate::error::InvalidRequestSnafu {
-                region_id,
-                reason: "Invalid Narthex artifact inventory"
-            }
-        );
-        snafu::ensure!(
-            self.files_to_add.iter().all(|file| !manifest
-                .series_indexes
-                .contains_key(&file.file_id)
-                && manifest
-                    .files
-                    .get(&file.file_id)
-                    .is_none_or(|previous| previous.format == file.format)),
-            crate::error::InvalidRequestSnafu {
-                region_id,
-                reason: "Conflicting immutable artifact identity"
-            }
-        );
-        let mut index_ids = HashSet::new();
-        for file in &self.series_indexes_to_add {
-            snafu::ensure!(
-                matches!(file.format, file::FileFormat::NarthexSeriesIndex(_))
-                    && index_ids.insert(file.file_id)
-                    && file.region_id.table_id() == region_id.table_id()
-                    && !manifest.files.contains_key(&file.file_id)
-                    && !self
-                        .files_to_add
-                        .iter()
-                        .any(|data| data.file_id == file.file_id)
-                    && manifest
-                        .series_indexes
-                        .get(&file.file_id)
-                        .is_none_or(|existing| existing.as_ref() == file),
-                crate::error::InvalidRequestSnafu {
-                    region_id,
-                    reason: "Invalid series index metadata or conflicting immutable identity"
-                }
-            );
-        }
-        Ok(())
-    }
-
     /// Shared reclassification must be add-only for a file ID: the manifest removes
     /// by ID, while the in-memory Version removes from the specified level.
     pub(crate) fn validate_shared_reclassification(&self, region_id: RegionId) -> Result<()> {
@@ -527,9 +464,15 @@ impl RegionManifestBuilder {
             let file = self.file_metadata_interner.intern(file.into());
             self.series_indexes.insert(file.file_id, file);
         }
-        removed_files.extend(
-            self.retire_series_indexes(&edit.files_to_remove, &edit.series_indexes_to_remove),
-        );
+        for id in edit.series_indexes_to_remove {
+            if let std::collections::hash_map::Entry::Occupied(entry) =
+                self.series_indexes.entry(id.file_id())
+                && entry.get().file_id() == id
+            {
+                entry.remove();
+                removed_files.push(RemovedFile::Narthex(id.file_id()));
+            }
+        }
         removed_files.extend(
             edit.files_to_remove
                 .iter()
@@ -567,20 +510,6 @@ impl RegionManifestBuilder {
         }
     }
 
-    fn retire_series_indexes(
-        &mut self,
-        samples: &[FileMeta],
-        indexes: &[file::RegionFileId],
-    ) -> Vec<RemovedFile> {
-        if self.series_indexes.is_empty() {
-            return Vec::new();
-        }
-        let samples: HashSet<_> = samples.iter().map(FileMeta::file_id).collect();
-        self.series_indexes.extract_if(|_, file| {
-            indexes.contains(&file.file_id()) || matches!(&file.format, file::FileFormat::NarthexSeriesIndex(index) if index.sources.iter().any(|id| samples.contains(id)))
-        }).map(|(id, _)| RemovedFile::Narthex(id)).collect()
-    }
-
     pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
         self.manifest_version = manifest_version;
         match truncate.kind {
@@ -611,7 +540,6 @@ impl RegionManifestBuilder {
                 self.series_indexes.clear();
             }
             TruncateKind::Partial { files_to_remove } => {
-                let retired = self.retire_series_indexes(&files_to_remove, &[]);
                 // With GC disabled, VersionControl may still hold an older
                 // FileMeta and LocalFilePurger can miss a just-committed newer
                 // index generation. We accept this narrow local-mode orphan
@@ -621,7 +549,6 @@ impl RegionManifestBuilder {
                     files_to_remove
                         .iter()
                         .map(|file| self.removed_file(file))
-                        .chain(retired)
                         .collect(),
                     truncate
                         .timestamp_ms
@@ -1739,12 +1666,8 @@ mod tests {
         assert!(encoded["files_to_add"][0]["format"]["narthex_samples"].is_object());
         assert!(encoded["series_indexes_to_add"][0]["format"]["narthex_series_index"].is_object());
         let mut builder = manifest_builder();
-        edit.validate_file_metadata(&manifest_builder()).unwrap();
         assert_eq!(edit.files_to_add.len(), 2);
         assert_eq!(edit.series_indexes_to_add.len(), 1);
-        let mut invalid = edit.clone();
-        invalid.files_to_add[0].file_size += 1;
-        assert!(invalid.validate_file_metadata(&manifest_builder()).is_err());
         let index = edit.series_indexes_to_add[0].clone();
         let first = edit.files_to_add[0].clone();
         builder.apply_edit(1, edit);
@@ -1764,7 +1687,7 @@ mod tests {
         );
         let replaced = builder.try_build().unwrap();
         assert_eq!(replaced.files.len(), 1);
-        assert!(replaced.series_indexes.is_empty());
+        assert_eq!(replaced.series_indexes[&index.file_id].as_ref(), &index);
         assert_eq!(checkpoint.series_indexes.len(), 1);
         let legacy = include_bytes!(
             "../../../../tests/compatibility/manifest/table_compaction/legacy-edit.json"

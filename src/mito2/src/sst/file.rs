@@ -285,8 +285,10 @@ pub struct NarthexSeriesIndexMeta {
     pub manifest_size: u64,
     /// Parts in part-ID order, starting at zero.
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
-    /// Source sample files recorded by the experimental builder. Publication does
-    /// not certify that the index contains every series from those files.
+    /// Sample files recorded by the experimental builder. The manifest neither
+    /// validates coverage nor retires indexes when samples are replaced. Both
+    /// policies depend on how production series files will be organized and
+    /// maintained across compaction.
     pub sources: Vec<RegionFileId>,
 }
 
@@ -521,20 +523,6 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
-    /// Checks that a Narthex inventory describes one complete immutable artifact.
-    pub(crate) fn valid_inventory(&self) -> bool {
-        let (manifest, parts) = match &self.format {
-            FileFormat::Parquet => return true,
-            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.parts),
-            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.parts),
-        };
-        !parts.is_empty()
-            && parts
-                .iter()
-                .try_fold(manifest, |total, part| total.checked_add(part.file_size))
-                == Some(self.file_size)
-    }
-
     /// Returns whether this file's row sequences are trusted in the target region.
     ///
     /// Foreign files use their target-local sequence barrier; local files require
