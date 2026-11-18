@@ -22,19 +22,10 @@
             "num_series": 1,
             "sequence": 7,
             "format": {
-              "native": {
-                "manifest": {
-                  "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641201/manifest.json",
-                  "file_size": 10
-                },
-                "parts": [
-                  {
-                    "part_id": 0,
-                    "object": {
-                      "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641201/part-0.samples",
-                      "file_size": 20
-                    }
-                  }
+              "narthex_samples": {
+                "manifest_size": 10,
+                "part_sizes": [
+                  20
                 ]
               }
             }
@@ -58,19 +49,10 @@
             "num_series": 1,
             "sequence": 7,
             "format": {
-              "native": {
-                "manifest": {
-                  "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641202/manifest.json",
-                  "file_size": 10
-                },
-                "parts": [
-                  {
-                    "part_id": 0,
-                    "object": {
-                      "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641202/part-0.samples",
-                      "file_size": 20
-                    }
-                  }
+              "narthex_samples": {
+                "manifest_size": 10,
+                "part_sizes": [
+                  20
                 ]
               }
             }
@@ -97,17 +79,7 @@
             "num_series": 1,
             "sequence": 7,
             "format": {
-              "native_series": {
-                "manifest": {
-                  "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641203/manifest.json",
-                  "file_size": 10
-                },
-                "parts": [
-                  {
-                    "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641203/part-0.series",
-                    "file_size": 30
-                  }
-                ],
+              "narthex_series_index": {
                 "sources": [
                   {
                     "region_id": 98784247841,
@@ -117,6 +89,10 @@
                     "region_id": 98784247841,
                     "file_id": "4b220a70-2b03-4641-9687-b65d94641202"
                   }
+                ],
+                "manifest_size": 10,
+                "part_sizes": [
+                  30
                 ]
               }
             }

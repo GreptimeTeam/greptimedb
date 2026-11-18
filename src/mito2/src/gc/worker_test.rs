@@ -1877,22 +1877,14 @@ async fn test_full_listing_gc_skips_region(#[case] cause: &str) {
     assert_eq!(1, hook.gc_calls.load(Ordering::Relaxed));
 }
 
-#[rstest::rstest]
-#[case(false)]
-#[case(true)]
 #[tokio::test]
-async fn test_narthex_artifact_gc_inventory_and_references(#[case] legacy: bool) {
+async fn test_narthex_artifact_gc_inventory_and_references() {
     let env = IndexGcTestEnv::new(true).await;
     let region_id = env.meta.region_id;
     let layer = &env.region.access_layer;
     let id = FileId::random();
     let region_dir = layer.build_region_dir(region_id);
-    let parent = if legacy {
-        location::legacy_native_dir(&region_dir)
-    } else {
-        region_dir
-    };
-    let prefix = location::narthex_file_dir(&parent, id);
+    let prefix = location::narthex_file_dir(&region_dir, id);
     let paths = [
         format!("{prefix}manifest.json"),
         format!("{prefix}part-0"),

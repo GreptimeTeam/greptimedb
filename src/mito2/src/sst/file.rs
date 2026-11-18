@@ -14,7 +14,7 @@
 
 //! Structures to describe metadata of files.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
@@ -248,9 +248,7 @@ pub type PartitionExprRef = MetadataRef<PartitionExpr>;
 pub enum FileFormat {
     #[default]
     Parquet,
-    #[serde(alias = "native", alias = "metrics_samples")]
     NarthexSamples(Box<NarthexSamplesMeta>),
-    #[serde(alias = "native_series", alias = "metrics_series_index")]
     NarthexSeriesIndex(Box<NarthexSeriesIndexMeta>),
 }
 
@@ -267,37 +265,20 @@ pub struct NarthexSamplesMeta {
     /// Imported rows use the destination file admission sequence.
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_file_sequence: bool,
-    pub manifest: NarthexObjectMeta,
-    pub parts: Vec<NarthexSamplesPart>,
+    /// Encoded size of manifest.json.
+    pub manifest_size: u64,
+    /// Encoded sizes in part-ID order, starting at zero.
+    pub part_sizes: SmallVec<[u64; 1]>,
 }
 
 /// Immutable narthex series index. Coverage identifies samples; it does not own them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NarthexSeriesIndexMeta {
-    pub manifest: NarthexObjectMeta,
-    pub parts: Vec<NarthexObjectMeta>,
+    /// Encoded size of manifest.json.
+    pub manifest_size: u64,
+    /// Encoded sizes in part-ID order, starting at zero.
+    pub part_sizes: SmallVec<[u64; 1]>,
     pub sources: Vec<RegionFileId>,
-}
-
-/// One narthex object's location and encoded size.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NarthexObjectMeta {
-    pub path: String,
-    pub file_size: u64,
-}
-
-/// One independently readable samples part.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NarthexSamplesPart {
-    pub part_id: u32,
-    pub object: NarthexObjectMeta,
-}
-
-impl NarthexSamplesMeta {
-    /// Enumerates the complete object inventory, including the manifest.
-    pub fn objects(&self) -> impl Iterator<Item = &NarthexObjectMeta> {
-        std::iter::once(&self.manifest).chain(self.parts.iter().map(|part| &part.object))
-    }
 }
 
 /// Metadata of a SST file.
@@ -533,53 +514,13 @@ fn is_zero(version: &u8) -> bool {
 impl FileMeta {
     /// Checks that a Narthex inventory describes one complete immutable artifact.
     pub(crate) fn valid_inventory(&self) -> bool {
-        fn valid_parts<'a>(
-            file: &FileMeta,
-            manifest: &NarthexObjectMeta,
-            parts: impl Iterator<Item = &'a NarthexObjectMeta>,
-        ) -> bool {
-            let Some((dir, "manifest.json")) = manifest.path.rsplit_once('/') else {
-                return false;
-            };
-            if location::parse_narthex_file_id(&manifest.path) != Some(file.file_id)
-                || dir
-                    .split('/')
-                    .any(|component| matches!(component, "." | ".."))
-            {
-                return false;
-            }
-            let mut paths = HashSet::new();
-            let mut size = manifest.file_size;
-            for part in parts {
-                if location::parent_dir(&part.path) != location::parent_dir(&manifest.path)
-                    || location::parse_narthex_file_id(&part.path) != Some(file.file_id)
-                    || part.path == manifest.path
-                    || !paths.insert(&part.path)
-                {
-                    return false;
-                }
-                let Some(total) = size.checked_add(part.file_size) else {
-                    return false;
-                };
-                size = total;
-            }
-            !paths.is_empty() && size == file.file_size
-        }
-        match &self.format {
-            FileFormat::Parquet => true,
-            FileFormat::NarthexSamples(meta) => {
-                let mut ids = HashSet::new();
-                meta.parts.iter().all(|part| ids.insert(part.part_id))
-                    && valid_parts(
-                        self,
-                        &meta.manifest,
-                        meta.parts.iter().map(|part| &part.object),
-                    )
-            }
-            FileFormat::NarthexSeriesIndex(meta) => {
-                valid_parts(self, &meta.manifest, meta.parts.iter())
-            }
-        }
+        let (manifest, parts) = match &self.format {
+            FileFormat::Parquet => return true,
+            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.part_sizes),
+            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.part_sizes),
+        };
+        !parts.is_empty()
+            && parts.iter().copied().try_fold(manifest, u64::checked_add) == Some(self.file_size)
     }
 
     /// Returns whether this file's row sequences are trusted in the target region.
@@ -1431,18 +1372,8 @@ mod tests {
                 .map(|field| serde_json::from_value::<Vec<FileMeta>>(edit[field].clone()).unwrap())
         };
         let canonical = decode(include_str!(
-            "../../../../tests/compatibility/manifest/native_metric_storage/narthex-delta.json"
+            "../../../../tests/compatibility/manifest/narthex/delta.json"
         ));
-        for alias in [
-            include_str!(
-                "../../../../tests/compatibility/manifest/native_metric_storage/delta.json"
-            ),
-            include_str!(
-                "../../../../tests/compatibility/manifest/native_metric_storage/metrics-delta.json"
-            ),
-        ] {
-            assert_eq!(decode(alias), canonical);
-        }
         for (files, name) in canonical
             .iter()
             .zip(["narthex_samples", "narthex_series_index"])

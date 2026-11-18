@@ -1742,28 +1742,11 @@ mod tests {
     }
 
     #[test]
-    fn test_native_metric_manifest_fixture() {
-        let bytes = include_bytes!(
-            "../../../../tests/compatibility/manifest/native_metric_storage/delta.json"
-        );
+    fn test_narthex_manifest_fixture() {
+        let bytes = include_bytes!("../../../../tests/compatibility/manifest/narthex/delta.json");
         let (_, _, edit) = RegionMetaActionList::decode(bytes)
             .unwrap()
             .split_region_change_and_edit();
-        // The frozen prototype remains readable, while new manifests use Narthex names.
-        let metrics_bytes = include_bytes!(
-            "../../../../tests/compatibility/manifest/native_metric_storage/metrics-delta.json"
-        );
-        let (_, _, metrics_edit) = RegionMetaActionList::decode(metrics_bytes)
-            .unwrap()
-            .split_region_change_and_edit();
-        assert_eq!(edit, metrics_edit);
-        let narthex_bytes = include_bytes!(
-            "../../../../tests/compatibility/manifest/native_metric_storage/narthex-delta.json"
-        );
-        let (_, _, narthex_edit) = RegionMetaActionList::decode(narthex_bytes)
-            .unwrap()
-            .split_region_change_and_edit();
-        assert_eq!(edit, narthex_edit);
         let encoded = serde_json::to_value(&edit).unwrap();
         assert!(encoded["files_to_add"][0]["format"]["narthex_samples"].is_object());
         assert!(encoded["series_indexes_to_add"][0]["format"]["narthex_series_index"].is_object());

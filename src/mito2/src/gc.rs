@@ -892,18 +892,6 @@ impl LocalGcWorker {
                 true
             }
         });
-        let legacy = location::legacy_native_dir(&self.access_layer.build_region_dir(region_id));
-        match self.access_layer.object_store().lister(&legacy).await {
-            Ok(mut lister) => {
-                while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
-                    if entry.metadata().is_dir() && location::is_narthex_file_dir(entry.path()) {
-                        narthex_dirs.push(entry.path().to_string());
-                    }
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context(OpenDalSnafu),
-        }
         for dir in narthex_dirs {
             let mut lister = self
                 .access_layer

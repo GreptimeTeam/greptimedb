@@ -49,16 +49,6 @@ pub(crate) fn narthex_file_dir(region_dir: &str, file_id: FileId) -> String {
     util::join_dir(region_dir, &file_id.to_string())
 }
 
-/// Previous PoC layout, retained only for discovery and reclamation of existing artifacts.
-pub(crate) fn legacy_native_dir(region_dir: &str) -> String {
-    util::join_dir(region_dir, "native")
-}
-
-/// Parent directory, including its trailing separator.
-pub(crate) fn parent_dir(path: &str) -> Option<&str> {
-    path.rfind('/').map(|index| &path[..=index])
-}
-
 /// Recognizes an artifact directory in a region listing.
 pub(crate) fn is_narthex_file_dir(path: &str) -> bool {
     path.trim_end_matches('/')
@@ -68,7 +58,6 @@ pub(crate) fn is_narthex_file_dir(path: &str) -> bool {
 }
 
 /// Recovers the physical owner from a listed artifact object, without FileMeta.
-/// Both layouts place objects directly beneath their immutable file ID.
 pub(crate) fn parse_narthex_file_id(path: &str) -> Option<FileId> {
     let (parent, name) = path.rsplit_once('/')?;
     if name.is_empty() || name == "." || name == ".." {
@@ -185,16 +174,11 @@ mod tests {
         let id = FileId::random();
         let dir = narthex_file_dir("table/region/", id);
         assert_eq!(dir, format!("table/region/{id}/"));
-        for parent in [
-            "table/region/".to_string(),
-            legacy_native_dir("table/region/"),
-        ] {
-            let dir = narthex_file_dir(&parent, id);
+        {
             assert!(is_narthex_file_dir(&dir));
             for name in ["manifest.json", "part-0.samples", "part-0.series"] {
                 let path = format!("{dir}{name}");
                 assert_eq!(parse_narthex_file_id(&path), Some(id));
-                assert_eq!(parent_dir(&path), Some(dir.as_str()));
             }
             assert_eq!(parse_narthex_file_id(&dir), None);
         }
