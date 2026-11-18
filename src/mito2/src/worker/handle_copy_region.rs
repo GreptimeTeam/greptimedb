@@ -99,7 +99,7 @@ impl<S> RegionWorkerLoop<S> {
                         }) =>
                 {
                     // Shared references and narthex artifacts enter the serialized
-                    // edit lane for admission sequences and coverage validation.
+                    // edit lane for destination admission sequences.
                     // The response lists installed references, including shared SSTs
                     // whose objects stay in place; it is not a physical COPY count.
                     let copied_file_ids = region_edit

@@ -160,7 +160,7 @@ pub(crate) async fn write_samples(
 }
 
 /// Explicit PoC builder: merge sample keys with the existing SeqScan before writing
-/// a durable series index. Publication is a separate manifest edit that rechecks coverage.
+/// a durable series index. A separate manifest edit publishes the result.
 #[cfg(test)]
 pub(crate) async fn write_series(
     layer: &AccessLayer,

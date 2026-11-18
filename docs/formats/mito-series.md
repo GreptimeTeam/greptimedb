@@ -17,6 +17,14 @@ With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact own
 Each part record contains its encoded `file_size` in bytes. Series indexes reference region-qualified sample file IDs without owning those
 samples. Both artifact types use ordinary SST lifetimes and reclamation.
 
+The test builder records the sample file IDs it used. The region manifest accepts
+that list without checking whether those files are still live or whether the
+index contains every series in them. If compaction replaces a source while a
+build is running, the finished index can therefore refer to a retired file.
+Readers skip such an index and discover series from the samples. Before enabling
+production index builds, define how a builder establishes complete coverage and
+when an index can be reused across compaction.
+
 The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
 paths, source-SST coverage, daily consolidation, and local-cache rollout described
 below apply to that sidecar mode. They do not make authoritative Narthex samples
