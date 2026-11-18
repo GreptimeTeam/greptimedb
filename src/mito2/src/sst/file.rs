@@ -258,6 +258,13 @@ impl FileFormat {
     }
 }
 
+/// Region-manifest metadata for one immutable Narthex part.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarthexPartMeta {
+    /// Encoded size of the part in bytes.
+    pub file_size: u64,
+}
+
 /// Narthex samples objects owned by one immutable file ID.
 /// Common bounds, statistics and sequence semantics remain in [`FileMeta`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,8 +274,8 @@ pub struct NarthexSamplesMeta {
     pub use_file_sequence: bool,
     /// Encoded size of manifest.json.
     pub manifest_size: u64,
-    /// Encoded sizes in part-ID order, starting at zero.
-    pub part_sizes: SmallVec<[u64; 1]>,
+    /// Parts in part-ID order, starting at zero.
+    pub parts: SmallVec<[NarthexPartMeta; 1]>,
 }
 
 /// Immutable narthex series index. Coverage identifies samples; it does not own them.
@@ -276,8 +283,8 @@ pub struct NarthexSamplesMeta {
 pub struct NarthexSeriesIndexMeta {
     /// Encoded size of manifest.json.
     pub manifest_size: u64,
-    /// Encoded sizes in part-ID order, starting at zero.
-    pub part_sizes: SmallVec<[u64; 1]>,
+    /// Parts in part-ID order, starting at zero.
+    pub parts: SmallVec<[NarthexPartMeta; 1]>,
     pub sources: Vec<RegionFileId>,
 }
 
@@ -516,11 +523,14 @@ impl FileMeta {
     pub(crate) fn valid_inventory(&self) -> bool {
         let (manifest, parts) = match &self.format {
             FileFormat::Parquet => return true,
-            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.part_sizes),
-            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.part_sizes),
+            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.parts),
+            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.parts),
         };
         !parts.is_empty()
-            && parts.iter().copied().try_fold(manifest, u64::checked_add) == Some(self.file_size)
+            && parts
+                .iter()
+                .try_fold(manifest, |total, part| total.checked_add(part.file_size))
+                == Some(self.file_size)
     }
 
     /// Returns whether this file's row sequences are trusted in the target region.

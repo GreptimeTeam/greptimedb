@@ -24,8 +24,10 @@
             "format": {
               "narthex_samples": {
                 "manifest_size": 10,
-                "part_sizes": [
-                  20
+                "parts": [
+                  {
+                    "file_size": 20
+                  }
                 ]
               }
             }
@@ -51,8 +53,10 @@
             "format": {
               "narthex_samples": {
                 "manifest_size": 10,
-                "part_sizes": [
-                  20
+                "parts": [
+                  {
+                    "file_size": 20
+                  }
                 ]
               }
             }
@@ -91,8 +95,10 @@
                   }
                 ],
                 "manifest_size": 10,
-                "part_sizes": [
-                  30
+                "parts": [
+                  {
+                    "file_size": 30
+                  }
                 ]
               }
             }
