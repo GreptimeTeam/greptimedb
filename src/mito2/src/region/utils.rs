@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
-use futures::future::try_join_all;
+use futures::future::join_all;
 use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
@@ -273,7 +273,8 @@ impl RegionFileCopier {
             });
         }
 
-        if let Err(err) = try_join_all(tasks).await {
+        // Finish sibling copies before deleting partially written target objects.
+        if let Some(err) = join_all(tasks).await.into_iter().find_map(Result::err) {
             error!(err; "Failed to copy files from region {} to region {}", source_region_id, target_region_id);
             self.clean_target_region(target_region_id, file_ids).await;
             return Err(err);

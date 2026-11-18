@@ -26,8 +26,8 @@ use datatypes::arrow::record_batch::RecordBatch;
 use snafu::ResultExt;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
-use super::{MAX_ROWS, codec, invalid, require};
 use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, Result};
+use crate::series_index::samples::{MAX_ROWS, codec, invalid, require};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NarthexBulkPart {
