@@ -132,7 +132,7 @@ pub struct RegionStat {
     pub max_timestamp: Option<Timestamp>,
     /// Whether the region still has WAL ranges to recover. Omitted from the serialized form
     /// when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "store_api::is_false")]
     pub has_pending_tails: bool,
 }
 

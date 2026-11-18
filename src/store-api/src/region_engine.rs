@@ -860,7 +860,7 @@ pub struct RegionStatistic {
     pub metadata_topic_latest_entry_id: u64,
     /// Whether the region still has WAL ranges to recover. Omitted from the serialized form
     /// when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "crate::is_false")]
     pub has_pending_tails: bool,
 }
 

@@ -1246,9 +1246,9 @@ impl ErrorExt for Error {
             | Error::PeerUnavailable { .. }
             | Error::PusherNotFound { .. } => StatusCode::Unexpected,
             Error::MailboxTimeout { .. } | Error::ExceededDeadline { .. } => StatusCode::Cancelled,
+            Error::RepartitionPendingTails { .. } => StatusCode::RegionNotReady,
             Error::PruneTaskAlreadyRunning { .. }
             | Error::DrainDatanodeRunning { .. }
-            | Error::RepartitionPendingTails { .. }
             | Error::RetryLater { .. }
             | Error::MailboxChannelClosed { .. }
             | Error::IsNotLeader { .. } => StatusCode::IllegalState,
