@@ -182,6 +182,7 @@ impl<'a> TargetWriter<'a> {
             .as_ref()
             .and_then(|footer| extract_primary_key_range(footer, &self.target.metadata));
         Ok(FileMeta {
+            format: Default::default(),
             region_id: self.target.metadata.region_id,
             file_id: info.file_id,
             time_range: info.time_range,

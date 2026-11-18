@@ -398,25 +398,29 @@ fn should_force_remove_region_dir(path_type: PathType, partial_drop: bool) -> bo
 }
 
 // TODO(ruihang): place the marker in a separate dir
-/// Removes region dir if there is no parquet files, returns whether the directory is removed.
+/// Removes a region directory once no authoritative SST objects remain.
 /// If `force = true`, always removes the dir.
 pub(crate) async fn remove_region_dir_once(
     region_path: &str,
     object_store: &ObjectStore,
     force: bool,
 ) -> Result<bool> {
-    // list all files under the given region path to check if there are un-deleted parquet files
-    let mut has_parquet_file = false;
-    // record all paths that neither ends with .parquet nor the marker file
+    // Narthex SSTs have objects below their file-ID directories.
+    let mut has_sst_file = false;
+    // Record non-SST files to remove before the dropping marker.
     let mut files_to_remove_first = vec![];
     let mut files = object_store
         .lister_with(region_path)
+        .recursive(true)
         .await
         .context(OpenDalSnafu)?;
     while let Some(file) = files.try_next().await.context(OpenDalSnafu)? {
-        if !force && file.path().ends_with(".parquet") {
-            // If not in force mode, we only remove the region dir if there is no parquet file
-            has_parquet_file = true;
+        if !force
+            && (file.path().ends_with(".parquet")
+                || crate::sst::location::parse_narthex_file_id(file.path()).is_some())
+        {
+            // Readers may still pin either narthex samples or series indexes.
+            has_sst_file = true;
             break;
         } else if !file.path().ends_with(DROPPING_MARKER_FILE) {
             let meta = file.metadata();
@@ -426,8 +430,8 @@ pub(crate) async fn remove_region_dir_once(
         }
     }
 
-    if !has_parquet_file {
-        // no parquet file found, delete the region path
+    if !has_sst_file {
+        // No authoritative SST objects remain; delete the region path.
         // first delete all files other than the marker
         object_store
             .delete_iter(files_to_remove_first)
@@ -442,5 +446,41 @@ pub(crate) async fn remove_region_dir_once(
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_narthex_objects_prevent_region_directory_removal() {
+        let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+        let region = "test/region/";
+        let id = store_api::storage::FileId::random();
+        let marker = format!("{region}{DROPPING_MARKER_FILE}");
+        let samples = format!(
+            "{}part-0.samples",
+            crate::sst::location::narthex_file_dir(region, id)
+        );
+        let series = format!(
+            "{}part-0.series",
+            crate::sst::location::narthex_file_dir(region, id)
+        );
+        store.write(&marker, Bytes::new()).await.unwrap();
+        for path in [&samples, &series] {
+            store
+                .write(path, Bytes::from_static(b"test"))
+                .await
+                .unwrap();
+        }
+        assert!(!remove_region_dir_once(region, &store, false).await.unwrap());
+        store.delete(&samples).await.unwrap();
+        assert!(!remove_region_dir_once(region, &store, false).await.unwrap());
+        assert!(store.exists(&series).await.unwrap());
+        assert!(store.exists(&marker).await.unwrap());
+        store.delete(&series).await.unwrap();
+        assert!(remove_region_dir_once(region, &store, false).await.unwrap());
+        assert!(!store.exists(&marker).await.unwrap());
     }
 }

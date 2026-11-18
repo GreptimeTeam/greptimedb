@@ -891,6 +891,7 @@ impl DefaultSstMerger {
                 };
 
                 Ok(FileMeta {
+                    format: Default::default(),
                     region_id,
                     file_id: sst_info.file_id,
                     time_range: sst_info.time_range,

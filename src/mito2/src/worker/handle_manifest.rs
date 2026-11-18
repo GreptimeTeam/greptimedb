@@ -971,6 +971,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
     let region_id = region.region_id;
+    snafu::ensure!(
+        edit.files_to_add
+            .iter()
+            .chain(&edit.files_to_remove)
+            .all(|file| matches!(file.format, file::FileFormat::Parquet)),
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: "Importing authoritative Narthex artifacts is unsupported",
+        }
+    );
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
     let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;

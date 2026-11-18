@@ -1,0 +1,130 @@
+{
+  "actions": [
+    {
+      "Edit": {
+        "files_to_add": [
+          {
+            "region_id": 98784247841,
+            "file_id": "4b220a70-2b03-4641-9687-b65d94641201",
+            "time_range": [
+              {
+                "value": 0,
+                "unit": "Millisecond"
+              },
+              {
+                "value": 10,
+                "unit": "Millisecond"
+              }
+            ],
+            "level": 0,
+            "file_size": 30,
+            "num_rows": 2,
+            "num_series": 1,
+            "sequence": 7,
+            "format": {
+              "narthex_samples": {
+                "manifest": {
+                  "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641201/manifest.json",
+                  "file_size": 10
+                },
+                "parts": [
+                  {
+                    "part_id": 0,
+                    "object": {
+                      "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641201/part-0.samples",
+                      "file_size": 20
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "region_id": 98784247841,
+            "file_id": "4b220a70-2b03-4641-9687-b65d94641202",
+            "time_range": [
+              {
+                "value": 0,
+                "unit": "Millisecond"
+              },
+              {
+                "value": 10,
+                "unit": "Millisecond"
+              }
+            ],
+            "level": 0,
+            "file_size": 30,
+            "num_rows": 2,
+            "num_series": 1,
+            "sequence": 7,
+            "format": {
+              "narthex_samples": {
+                "manifest": {
+                  "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641202/manifest.json",
+                  "file_size": 10
+                },
+                "parts": [
+                  {
+                    "part_id": 0,
+                    "object": {
+                      "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641202/part-0.samples",
+                      "file_size": 20
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "files_to_remove": [],
+        "series_indexes_to_add": [
+          {
+            "region_id": 98784247841,
+            "file_id": "4b220a70-2b03-4641-9687-b65d94641203",
+            "time_range": [
+              {
+                "value": 0,
+                "unit": "Millisecond"
+              },
+              {
+                "value": 10,
+                "unit": "Millisecond"
+              }
+            ],
+            "level": 0,
+            "file_size": 40,
+            "num_rows": 0,
+            "num_series": 1,
+            "sequence": 7,
+            "format": {
+              "narthex_series_index": {
+                "manifest": {
+                  "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641203/manifest.json",
+                  "file_size": 10
+                },
+                "parts": [
+                  {
+                    "path": "regions/98784247841/native/4b220a70-2b03-4641-9687-b65d94641203/part-0.series",
+                    "file_size": 30
+                  }
+                ],
+                "sources": [
+                  {
+                    "region_id": 98784247841,
+                    "file_id": "4b220a70-2b03-4641-9687-b65d94641201"
+                  },
+                  {
+                    "region_id": 98784247841,
+                    "file_id": "4b220a70-2b03-4641-9687-b65d94641202"
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "series_indexes_to_remove": [],
+        "compaction_time_window": null
+      }
+    }
+  ]
+}

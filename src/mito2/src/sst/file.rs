@@ -157,7 +157,7 @@ pub type IndexTypes = SmallVec<[IndexType; 6]>;
 /// Cross-region file id.
 ///
 /// It contains a region id and a file id. The string representation is `{region_id}/{file_id}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RegionFileId {
     /// The region that creates the file.
     region_id: RegionId,
@@ -242,10 +242,71 @@ pub type FileMetaRef = MetadataRef<FileMeta>;
 /// Shared immutable partition expression.
 pub type PartitionExprRef = MetadataRef<PartitionExpr>;
 
+/// Physical encoding of an immutable SST. Legacy manifests contain Parquet files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FileFormat {
+    #[default]
+    Parquet,
+    #[serde(alias = "native", alias = "metrics_samples")]
+    NarthexSamples(NarthexSamplesMeta),
+    #[serde(alias = "native_series", alias = "metrics_series_index")]
+    NarthexSeriesIndex(NarthexSeriesIndexMeta),
+}
+
+impl FileFormat {
+    fn is_parquet(&self) -> bool {
+        matches!(self, Self::Parquet)
+    }
+}
+
+/// Narthex samples objects owned by one immutable file ID.
+/// Common bounds, statistics and sequence semantics remain in [`FileMeta`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarthexSamplesMeta {
+    /// Imported rows use the destination file admission sequence.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_file_sequence: bool,
+    pub manifest: NarthexObjectMeta,
+    pub parts: Vec<NarthexSamplesPart>,
+}
+
+/// Immutable narthex series index. Coverage identifies samples; it does not own them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarthexSeriesIndexMeta {
+    pub manifest: NarthexObjectMeta,
+    pub parts: Vec<NarthexObjectMeta>,
+    pub sources: Vec<RegionFileId>,
+}
+
+/// One narthex object's location and encoded size.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarthexObjectMeta {
+    pub path: String,
+    pub file_size: u64,
+}
+
+/// One independently readable samples part.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarthexSamplesPart {
+    pub part_id: u32,
+    pub object: NarthexObjectMeta,
+}
+
+impl NarthexSamplesMeta {
+    /// Enumerates the complete object inventory, including the manifest.
+    pub fn objects(&self) -> impl Iterator<Item = &NarthexObjectMeta> {
+        std::iter::once(&self.manifest).chain(self.parts.iter().map(|part| &part.object))
+    }
+}
+
 /// Metadata of a SST file.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FileMeta {
+    /// Physical encoding, omitted for legacy Parquet files.
+    #[serde(default, skip_serializing_if = "FileFormat::is_parquet")]
+    pub format: FileFormat,
     /// Region that created the file. The region id may not be the id of the current region.
     pub region_id: RegionId,
     /// Compared to normal file names, FileId ignore the extension
@@ -366,6 +427,7 @@ impl Debug for FileMeta {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("FileMeta");
         debug_struct
+            .field("format", &self.format)
             .field("region_id", &self.region_id)
             .field("file_id", &DebugFmt(|f| write!(f, "{} ", self.file_id)))
             .field(
@@ -1263,6 +1325,47 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
 
     use super::*;
+
+    #[test]
+    fn test_narthex_file_metadata_compatibility() {
+        let legacy = serde_json::to_value(FileMeta::default()).unwrap();
+        assert!(legacy.get("format").is_none());
+        assert_eq!(
+            serde_json::from_value::<FileMeta>(legacy).unwrap().format,
+            FileFormat::Parquet
+        );
+
+        let decode = |fixture: &str| {
+            let json: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            let edit = &json["actions"][0]["Edit"];
+            ["files_to_add", "series_indexes_to_add"]
+                .map(|field| serde_json::from_value::<Vec<FileMeta>>(edit[field].clone()).unwrap())
+        };
+        let canonical = decode(include_str!(
+            "../../../../tests/compatibility/manifest/native_metric_storage/narthex-delta.json"
+        ));
+        for alias in [
+            include_str!(
+                "../../../../tests/compatibility/manifest/native_metric_storage/delta.json"
+            ),
+            include_str!(
+                "../../../../tests/compatibility/manifest/native_metric_storage/metrics-delta.json"
+            ),
+        ] {
+            assert_eq!(decode(alias), canonical);
+        }
+        for (files, name) in canonical
+            .iter()
+            .zip(["narthex_samples", "narthex_series_index"])
+        {
+            assert!(!files.is_empty());
+            for file in files {
+                let json = serde_json::to_value(file).unwrap();
+                assert!(json["format"].get(name).is_some());
+                assert_eq!(&serde_json::from_value::<FileMeta>(json).unwrap(), file);
+            }
+        }
+    }
 
     #[test]
     fn test_shared_metadata_keeps_independent_lifetimes() {
