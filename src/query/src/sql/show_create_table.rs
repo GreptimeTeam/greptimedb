@@ -33,7 +33,9 @@ use sql::dialect::GreptimeDbDialect;
 use sql::parser::ParserContext;
 use sql::statements::create::{Column, ColumnExtensions, CreateTable, TableConstraint};
 use sql::statements::{self, OptionMap, concrete_data_type_to_sql_data_type};
-use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, is_metric_engine, is_metric_engine_internal_column,
+};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
     COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, RELATIONAL_CONNECTION_KEY,
@@ -46,9 +48,18 @@ use crate::error::{
     GetSkippingIndexOptionsSnafu, Result, SqlSnafu,
 };
 
+fn is_metric_logical_table(table_meta: &TableMeta) -> bool {
+    is_metric_engine(&table_meta.engine)
+        && table_meta
+            .options
+            .extra_options
+            .contains_key(LOGICAL_TABLE_METADATA_KEY)
+}
+
 /// Generates CREATE TABLE options from given table metadata and schema-level options.
 fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptions>) -> OptionMap {
     let table_opts = &table_meta.options;
+    let logical_metric = is_metric_logical_table(table_meta);
     let mut options = OptionMap::default();
     if let Some(write_buffer_size) = table_opts.write_buffer_size {
         options.insert(
@@ -56,15 +67,21 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
             write_buffer_size.to_string(),
         );
     }
-    if let Some(ttl) = table_opts.ttl.map(|t| t.to_string()) {
-        options.insert(TTL_KEY.to_string(), ttl);
-    } else if let Some(database_ttl) = schema_options
-        .as_ref()
-        .and_then(|o| o.ttl)
-        .map(|ttl| ttl.to_string())
+    // Logical metric tables do not store retention. Omit a retention TTL,
+    // including the database TTL fallback, so exported DDL can be replayed.
+    // Keep an explicit `ttl=instant`, which selects flow-only ingestion.
+    if let Some(ttl) = table_opts.ttl {
+        if !logical_metric || ttl.is_instant() {
+            options.insert(TTL_KEY.to_string(), ttl.to_string());
+        }
+    } else if !logical_metric
+        && let Some(database_ttl) = schema_options
+            .as_ref()
+            .and_then(|o| o.ttl)
+            .map(|ttl| ttl.to_string())
     {
         options.insert(TTL_KEY.to_string(), database_ttl);
-    };
+    }
     for (k, v) in table_opts
         .extra_options
         .iter()
@@ -622,5 +639,40 @@ WITH(
         assert!(sql.contains("connection = '******'"));
         assert!(sql.contains("remote_table = 'sample'"));
         assert!(!sql.contains("secret"));
+    }
+
+    #[test]
+    fn test_show_create_omits_stored_retention_ttl_on_logical_table() {
+        use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+
+        // Logical tables created before retention was moved to the physical
+        // table still carry it in their metadata.
+        let schema = SchemaRef::new(Schema::new(vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let mut options = TableOptions {
+            ttl: Some(Duration::from_secs(86_400).into()),
+            ..Default::default()
+        };
+        options
+            .extra_options
+            .insert(LOGICAL_TABLE_METADATA_KEY.to_string(), "phy".to_string());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .next_column_id(1)
+            .options(options)
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+
+        let options = create_sql_options(&meta, None);
+        assert!(options.get(TTL_KEY).is_none());
     }
 }
