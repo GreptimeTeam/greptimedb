@@ -147,8 +147,9 @@ impl ParallelizeScan {
     }
 }
 
-/// Deals ranges to partitions round-robin in time order: newest first when
-/// `descending`, oldest first otherwise.
+/// Assigns ranges in time order, newest first when `descending`, each to the partition
+/// with the fewest rows so far. Every partition starts with one of the newest ranges,
+/// and the rows stay balanced when range sizes vary.
 fn assign_partition_ranges_by_time(
     mut ranges: Vec<PartitionRange>,
     expected_partition_num: usize,
@@ -160,8 +161,13 @@ fn assign_partition_ranges_by_time(
         ranges.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.end.cmp(&b.end)));
     }
     let mut partition_ranges = vec![vec![]; expected_partition_num];
-    for (i, range) in ranges.into_iter().enumerate() {
-        partition_ranges[i % expected_partition_num].push(range);
+    let mut partition_rows = vec![0; expected_partition_num];
+    for range in ranges {
+        let target = (0..expected_partition_num)
+            .min_by_key(|&i| (partition_rows[i], i))
+            .unwrap();
+        partition_rows[target] += range.num_rows;
+        partition_ranges[target].push(range);
     }
     partition_ranges
 }
@@ -195,6 +201,28 @@ mod test {
         assert_eq!(vec![5, 6, 7], firsts(&by_time));
         let by_time = assign_partition_ranges_by_time(ranges, 3, false);
         assert_eq!(vec![0, 1, 2], firsts(&by_time));
+    }
+
+    #[test]
+    fn test_assign_by_time_balances_rows() {
+        // When fewer than `fetch` rows match, every range is read, so dealing these
+        // round-robin would leave one partition with 2000 rows and the other with 2.
+        let ranges: Vec<_> = [1000, 1, 1000, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(i, num_rows)| PartitionRange {
+                start: Timestamp::new(i as i64 * 10, TimeUnit::Second),
+                end: Timestamp::new(i as i64 * 10 + 10, TimeUnit::Second),
+                num_rows,
+                identifier: i,
+            })
+            .collect();
+        let partitions = assign_partition_ranges_by_time(ranges, 2, false);
+        let rows: Vec<usize> = partitions
+            .iter()
+            .map(|p| p.iter().map(|r| r.num_rows).sum())
+            .collect();
+        assert_eq!(vec![1001, 1001], rows);
     }
 
     #[test]
