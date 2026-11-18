@@ -27,9 +27,7 @@ use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::series_index::format::SamplesFormat;
 use crate::series_index::samples::ColumnarSamplesFormat;
-use crate::sst::file::{
-    FileFormat, NarthexObjectMeta, NarthexSamplesMeta, NarthexSamplesPart, RegionFileId,
-};
+use crate::sst::file::{FileFormat, NarthexSamplesMeta, RegionFileId};
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::writer::SstWriteGuard;
@@ -127,25 +125,10 @@ pub(crate) async fn write_samples(
         return Ok(Default::default());
     }
     let artifact = writer.finish().await?;
-    let mut manifest = None;
-    let mut parts = Vec::new();
-    for object in artifact.objects {
-        let narthex = NarthexObjectMeta {
-            path: object.path,
-            file_size: object.file_size,
-        };
-        if narthex.path.ends_with("manifest.json") {
-            manifest = Some(narthex);
-        } else {
-            parts.push(NarthexSamplesPart {
-                part_id: parts.len() as u32,
-                object: narthex,
-            });
-        }
-    }
-    let manifest = manifest.ok_or_else(|| {
+    // The samples codec returns its manifest first, then parts in ID order.
+    let (manifest, parts) = artifact.objects.split_first().ok_or_else(|| {
         InvalidRecordBatchSnafu {
-            reason: "narthex writer did not return a manifest".to_string(),
+            reason: "missing Narthex samples manifest",
         }
         .build()
     })?;
@@ -153,8 +136,8 @@ pub(crate) async fn write_samples(
     Ok(smallvec::smallvec![SstInfo {
         format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
             use_file_sequence: false,
-            manifest,
-            parts
+            manifest_size: manifest.file_size,
+            part_sizes: parts.iter().map(|part| part.file_size).collect()
         })),
         file_id: id,
         time_range: (
@@ -202,16 +185,16 @@ pub(crate) async fn write_series(
                 crate::series_index::columnar::invalid("empty narthex index source set")
             })?,
         format: FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
-            manifest: NarthexObjectMeta {
-                path: format!("{prefix}manifest.json"),
-                file_size: 0,
-            },
-            parts: Vec::new(),
+            manifest_size: 0,
+            part_sizes: Default::default(),
             sources: sources.iter().map(|file| file.file_id()).collect(),
         })),
         ..Default::default()
     };
-    let entry = crate::series_index::narthex_series_entry(&file)?;
+    let entry = crate::series_index::narthex_series_entry(
+        &file,
+        &layer.build_region_dir(metadata.region_id),
+    )?;
     let mut writer = ColumnarSeriesFormat::default().narthex_writer(
         metadata,
         layer.object_store().clone(),
@@ -231,17 +214,12 @@ pub(crate) async fn write_series(
     let artifact = writer.finish().await?;
     file.file_size = artifact.file_size;
     if let FileFormat::NarthexSeriesIndex(index) = &mut file.format {
-        for object in artifact.objects {
-            let object = NarthexObjectMeta {
-                path: object.path,
-                file_size: object.file_size,
-            };
-            if object.path == index.manifest.path {
-                index.manifest = object;
-            } else {
-                index.parts.push(object);
-            }
-        }
+        // The series codec returns its manifest after the ordered parts.
+        let (manifest, parts) = artifact.objects.split_last().ok_or_else(|| {
+            crate::series_index::columnar::invalid("missing Narthex series manifest")
+        })?;
+        index.manifest_size = manifest.file_size;
+        index.part_sizes = parts.iter().map(|part| part.file_size).collect();
     }
     Ok(file)
 }

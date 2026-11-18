@@ -49,6 +49,11 @@ pub(crate) fn narthex_file_dir(region_dir: &str, file_id: FileId) -> String {
     util::join_dir(region_dir, &file_id.to_string())
 }
 
+/// Parent directory of an object-store key, including the trailing separator.
+pub(crate) fn parent_dir(path: &str) -> Option<&str> {
+    path.rfind('/').map(|index| &path[..=index])
+}
+
 /// Recognizes an artifact directory in a region listing.
 pub(crate) fn is_narthex_file_dir(path: &str) -> bool {
     path.trim_end_matches('/')

@@ -2416,9 +2416,7 @@ mod keys;
 /// Narthex readers use the SST lifetime, not the local sidecar purger.
 #[tokio::test]
 async fn narthex_file_reader_pins_sst_lifetime() {
-    use crate::sst::file::{
-        FileFormat, FileHandle, FileMeta, NarthexObjectMeta, NarthexSamplesMeta, NarthexSamplesPart,
-    };
+    use crate::sst::file::{FileFormat, FileHandle, FileMeta, NarthexSamplesMeta};
     use crate::sst::file_purger::FilePurger;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2432,7 +2430,7 @@ async fn narthex_file_reader_pins_sst_lifetime() {
     let store = store();
     let meta = metadata();
     let id = FileId::random();
-    let prefix = format!("table/region/native/{id}/");
+    let prefix = format!("table/region/{id}/");
     let rows = vec![
         (1, 2, 100, 7, 0, Some(1.5f64.to_bits())),
         (1, 2, 101, 8, 0, None),
@@ -2443,29 +2441,11 @@ async fn narthex_file_reader_pins_sst_lifetime() {
         .unwrap();
     writer.write(&batch(&meta, &rows, false)).await.unwrap();
     let artifact = writer.finish().await.unwrap();
-    let object = |o: &crate::series_index::artifact::ArtifactObject| NarthexObjectMeta {
-        path: o.path.clone(),
-        file_size: o.file_size,
-    };
+    let (manifest, parts) = artifact.objects.split_first().unwrap();
     let narthex = NarthexSamplesMeta {
         use_file_sequence: false,
-        manifest: object(
-            artifact
-                .objects
-                .iter()
-                .find(|o| o.path.ends_with("manifest.json"))
-                .unwrap(),
-        ),
-        parts: artifact
-            .objects
-            .iter()
-            .filter(|o| o.path.ends_with(".samples"))
-            .enumerate()
-            .map(|(i, o)| NarthexSamplesPart {
-                part_id: i as u32,
-                object: object(o),
-            })
-            .collect(),
+        manifest_size: manifest.file_size,
+        part_sizes: parts.iter().map(|part| part.file_size).collect(),
     };
     let file_meta = FileMeta {
         region_id: meta.region_id,
@@ -2480,7 +2460,7 @@ async fn narthex_file_reader_pins_sst_lifetime() {
     assert_eq!(file_meta, restored);
     let purged = Arc::new(AtomicUsize::new(0));
     let file = FileHandle::new(restored, Arc::new(CountingPurger(purged.clone())));
-    let handle = SamplesFileHandle::from_narthex(file.clone()).unwrap();
+    let handle = SamplesFileHandle::from_narthex(file.clone(), "table/region/").unwrap();
     let reader = reader::SamplesReader::open(store, handle).await.unwrap();
     file.mark_deleted();
     drop(file);

@@ -802,6 +802,7 @@ async fn test_narthex_copy_and_remap(
             .await
             .unwrap();
     }
+    let source_dir = owner.access_layer.build_region_dir(source);
     let before = owner.manifest_ctx.manifest().await;
     if fail_copy {
         let missing = before
@@ -809,8 +810,7 @@ async fn test_narthex_copy_and_remap(
             .values()
             .next()
             .unwrap()
-            .format
-            .narthex_objects()
+            .narthex_objects(&source_dir)
             .unwrap()[0]
             .path
             .clone();
@@ -837,7 +837,7 @@ async fn test_narthex_copy_and_remap(
         let to = owner.access_layer.build_region_dir(target);
         for object in before
             .all_files()
-            .flat_map(|file| file.format.narthex_objects().unwrap())
+            .flat_map(|file| file.narthex_objects(&source_dir).unwrap())
         {
             let target_path = format!("{to}{}", object.path.strip_prefix(&from).unwrap());
             assert!(
@@ -921,13 +921,15 @@ async fn test_narthex_copy_and_remap(
             meta.file_id,
         );
         assert!(
-            meta.format
-                .narthex_objects()
+            meta.narthex_objects(&destination.access_layer.build_region_dir(physical_owner))
                 .unwrap()
                 .iter()
                 .all(|object| object.path.starts_with(&prefix))
         );
-        for object in meta.format.narthex_objects().unwrap() {
+        for object in meta
+            .narthex_objects(&destination.access_layer.build_region_dir(physical_owner))
+            .unwrap()
+        {
             let actual = destination
                 .access_layer
                 .object_store()
@@ -967,7 +969,7 @@ async fn test_narthex_copy_and_remap(
     if !remap {
         let paths: Vec<_> = before
             .all_files()
-            .flat_map(|file| file.format.narthex_objects().unwrap())
+            .flat_map(|file| file.narthex_objects(&source_dir).unwrap())
             .map(|object| object.path.clone())
             .collect();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {

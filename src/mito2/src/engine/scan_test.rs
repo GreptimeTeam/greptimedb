@@ -286,6 +286,7 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
         );
         let old_index = crate::series_index::SeriesIndexFileHandle::from_narthex(
             region.version().ssts.series_indexes()[&index_id].clone(),
+            &region.access_layer.build_region_dir(region_id),
         )?;
         let index_reader = crate::series_index::columnar::reader::ColumnarReader::open(
             region.access_layer.object_store().clone(),
@@ -303,7 +304,10 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
             .clone();
         let samples_reader = crate::series_index::samples::reader::SamplesReader::open(
             region.access_layer.object_store().clone(),
-            crate::series_index::artifact::SamplesFileHandle::from_narthex(old_samples)?,
+            crate::series_index::artifact::SamplesFileHandle::from_narthex(
+                old_samples,
+                &region.access_layer.build_region_dir(region_id),
+            )?,
         )
         .await?;
         let inputs: std::collections::HashSet<_> = region

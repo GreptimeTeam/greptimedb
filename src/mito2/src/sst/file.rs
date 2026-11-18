@@ -253,26 +253,6 @@ pub enum FileFormat {
 }
 
 impl FileFormat {
-    /// All objects in deletion order (manifest last), for authoritative narthex artifacts.
-    pub(crate) fn narthex_objects(&self) -> Option<Vec<&NarthexObjectMeta>> {
-        match self {
-            Self::Parquet => None,
-            Self::NarthexSamples(meta) => Some(
-                meta.parts
-                    .iter()
-                    .map(|part| &part.object)
-                    .chain(std::iter::once(&meta.manifest))
-                    .collect(),
-            ),
-            Self::NarthexSeriesIndex(meta) => Some(
-                meta.parts
-                    .iter()
-                    .chain(std::iter::once(&meta.manifest))
-                    .collect(),
-            ),
-        }
-    }
-
     fn is_parquet(&self) -> bool {
         matches!(self, Self::Parquet)
     }
@@ -536,9 +516,43 @@ impl FileMeta {
     pub fn file_path(&self, table_dir: &str, path_type: PathType) -> String {
         match &self.format {
             FileFormat::Parquet => location::sst_file_path(table_dir, self.file_id(), path_type),
-            FileFormat::NarthexSamples(narthex) => narthex.manifest.path.clone(),
-            FileFormat::NarthexSeriesIndex(narthex) => narthex.manifest.path.clone(),
+            _ => {
+                let region_dir =
+                    location::region_dir_from_table_dir(table_dir, self.region_id, path_type);
+                format!(
+                    "{}manifest.json",
+                    location::narthex_file_dir(&region_dir, self.file_id)
+                )
+            }
         }
+    }
+
+    /// Resolves the ordered part inventory and manifest against the physical owner's directory.
+    pub(crate) fn narthex_objects(
+        &self,
+        region_dir: &str,
+    ) -> Option<Vec<crate::series_index::artifact::ArtifactObject>> {
+        use crate::series_index::artifact::ArtifactObject;
+        let (manifest, parts, extension) = match &self.format {
+            FileFormat::Parquet => return None,
+            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.part_sizes, "samples"),
+            FileFormat::NarthexSeriesIndex(meta) => {
+                (meta.manifest_size, &meta.part_sizes, "series")
+            }
+        };
+        let dir = location::narthex_file_dir(region_dir, self.file_id);
+        let mut objects = Vec::with_capacity(parts.len() + 1);
+        for (id, &file_size) in parts.iter().enumerate() {
+            objects.push(ArtifactObject {
+                path: format!("{dir}part-{id}.{extension}"),
+                file_size,
+            });
+        }
+        objects.push(ArtifactObject {
+            path: format!("{dir}manifest.json"),
+            file_size: manifest,
+        });
+        Some(objects)
     }
 
     /// Checks that a Narthex inventory describes one complete immutable artifact.
@@ -1394,6 +1408,42 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
 
     use super::*;
+
+    #[test]
+    fn test_narthex_part_paths_follow_inventory_order() {
+        let samples = FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+            use_file_sequence: false,
+            manifest_size: 5,
+            part_sizes: smallvec::smallvec![11, 7],
+        }));
+        let series = FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
+            sources: vec![],
+            manifest_size: 5,
+            part_sizes: smallvec::smallvec![11, 7],
+        }));
+        for (format, extension) in [(samples, "samples"), (series, "series")] {
+            let meta = FileMeta {
+                format,
+                file_size: 23,
+                ..Default::default()
+            };
+            assert!(meta.valid_inventory());
+            let dir = format!("owner/{}/", meta.file_id);
+            let objects = meta.narthex_objects("owner/").unwrap();
+            let entries: Vec<_> = objects
+                .into_iter()
+                .map(|object| (object.path, object.file_size))
+                .collect();
+            assert_eq!(
+                entries,
+                [
+                    (format!("{dir}part-0.{extension}"), 11),
+                    (format!("{dir}part-1.{extension}"), 7),
+                    (format!("{dir}manifest.json"), 5),
+                ]
+            );
+        }
+    }
 
     #[test]
     fn test_narthex_file_metadata_compatibility() {

@@ -71,8 +71,6 @@ pub enum FormatType {
     /// Flat Parquet format.
     Flat,
     /// Narthex samples and optional series indexes.
-    #[serde(alias = "native", alias = "metrics")]
-    #[strum(serialize = "narthex", serialize = "metrics", serialize = "native")]
     Narthex,
 }
 
@@ -532,20 +530,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_narthex_format_name_and_legacy_alias() {
-        for name in ["narthex", "metrics", "native"] {
-            assert_eq!(name.parse::<FormatType>().unwrap(), FormatType::Narthex);
-            let options = crate::region::options::RegionOptions::try_from_options(
-                store_api::storage::RegionId::new(0, 0),
-                &HashMap::from([("sst_format".to_string(), name.to_string())]),
-            )
-            .unwrap();
-            assert_eq!(options.sst_format, Some(FormatType::Narthex));
-            assert_eq!(
-                serde_json::from_value::<FormatType>(json!(name)).unwrap(),
-                FormatType::Narthex
-            );
-        }
+    fn test_narthex_format_name() {
+        let name = "narthex";
+        assert_eq!(name.parse::<FormatType>().unwrap(), FormatType::Narthex);
+        let options = crate::region::options::RegionOptions::try_from_options(
+            store_api::storage::RegionId::new(0, 0),
+            &HashMap::from([("sst_format".to_string(), name.to_string())]),
+        )
+        .unwrap();
+        assert_eq!(options.sst_format, Some(FormatType::Narthex));
+        assert_eq!(
+            serde_json::from_value::<FormatType>(json!(name)).unwrap(),
+            FormatType::Narthex
+        );
         assert_eq!(
             serde_json::to_value(FormatType::Narthex).unwrap(),
             json!("narthex")

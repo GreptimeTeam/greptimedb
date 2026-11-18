@@ -148,28 +148,21 @@ impl SamplesFileHandle {
     }
 
     /// Pins an authoritative SST instead of giving the sidecar purger ownership.
-    pub(crate) fn from_narthex(file: crate::sst::file::FileHandle) -> crate::error::Result<Self> {
-        let crate::sst::file::FileFormat::NarthexSamples(narthex) = &file.meta_ref().format else {
+    pub(crate) fn from_narthex(
+        file: crate::sst::file::FileHandle,
+        region_dir: &str,
+    ) -> crate::error::Result<Self> {
+        let crate::sst::file::FileFormat::NarthexSamples(_) = &file.meta_ref().format else {
             return crate::error::UnsupportedOperationSnafu {
                 err_msg: "Expected narthex samples file",
             }
             .fail();
         };
-        let objects: Vec<_> = narthex
-            .objects()
-            .map(|object| ArtifactObject {
-                path: object.path.clone(),
-                file_size: object.file_size,
-            })
-            .collect();
-        let file_size = objects.iter().try_fold(0u64, |total, object| {
-            total.checked_add(object.file_size).ok_or_else(|| {
-                crate::error::UnsupportedOperationSnafu {
-                    err_msg: "Narthex samples size overflow",
-                }
-                .build()
-            })
-        })?;
+        let objects = file
+            .meta_ref()
+            .narthex_objects(region_dir)
+            .expect("matched Narthex samples");
+        let file_size = file.meta_ref().file_size;
         let file_id = file.file_id();
         Ok(Self(Arc::new(SamplesFileInner {
             file_id,
@@ -198,10 +191,16 @@ impl SamplesFileHandle {
     }
 
     pub(crate) fn manifest_path(&self) -> String {
-        if let SamplesLifetime::Narthex(file) = &self.0.lifetime
-            && let crate::sst::file::FileFormat::NarthexSamples(narthex) = &file.meta_ref().format
-        {
-            return narthex.manifest.path.clone();
+        if matches!(self.0.lifetime, SamplesLifetime::Narthex(_)) {
+            return self
+                .0
+                .entry
+                .artifact
+                .objects
+                .last()
+                .expect("Narthex manifest")
+                .path
+                .clone();
         }
         format!(
             "{}manifest.json",

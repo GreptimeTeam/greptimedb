@@ -31,8 +31,9 @@ use crate::sst::file::RegionFileId;
 /// Narthex admission and scan selection use the region-qualified `sources` instead.
 pub(crate) fn narthex_series_entry(
     file: &crate::sst::file::FileMeta,
+    region_dir: &str,
 ) -> crate::error::Result<SeriesIndexEntry> {
-    use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
+    use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata};
     let crate::sst::file::FileFormat::NarthexSeriesIndex(index) = &file.format else {
         return Err(crate::series_index::columnar::invalid(
             "expected narthex series metadata",
@@ -42,15 +43,9 @@ pub(crate) fn narthex_series_entry(
         artifact: Some(ArtifactMetadata {
             format: ArtifactFormat::ColumnarSeries,
             generation: file.file_id,
-            objects: index
-                .parts
-                .iter()
-                .chain(std::iter::once(&index.manifest))
-                .map(|object| ArtifactObject {
-                    path: object.path.clone(),
-                    file_size: object.file_size,
-                })
-                .collect(),
+            objects: file
+                .narthex_objects(region_dir)
+                .expect("matched Narthex series index"),
             file_size: file.file_size,
         }),
         file_size: file.file_size,
@@ -101,8 +96,11 @@ impl SeriesIndexFileHandle {
         }
     }
 
-    pub(crate) fn from_narthex(file: crate::sst::file::FileHandle) -> crate::error::Result<Self> {
-        let entry = narthex_series_entry(file.meta_ref())?;
+    pub(crate) fn from_narthex(
+        file: crate::sst::file::FileHandle,
+        region_dir: &str,
+    ) -> crate::error::Result<Self> {
+        let entry = narthex_series_entry(file.meta_ref(), region_dir)?;
         Ok(Self {
             inner: Arc::new(SeriesIndexFileHandleInner {
                 file_id: file.file_id(),
@@ -115,10 +113,18 @@ impl SeriesIndexFileHandle {
     }
 
     pub(crate) fn manifest_path(&self) -> String {
-        if let Some(file) = &self.inner.narthex_file
-            && let crate::sst::file::FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format
-        {
-            return index.manifest.path.clone();
+        if self.inner.narthex_file.is_some() {
+            return self
+                .inner
+                .entry
+                .artifact
+                .as_ref()
+                .expect("Narthex artifact")
+                .objects
+                .last()
+                .expect("Narthex manifest")
+                .path
+                .clone();
         }
         format!(
             "{}/series/{}/manifest.json",

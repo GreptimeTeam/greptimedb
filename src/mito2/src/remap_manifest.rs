@@ -22,6 +22,7 @@ use store_api::storage::RegionId;
 use crate::error;
 pub use crate::error::{Error, Result};
 use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
+use crate::sst::file::FileFormat;
 
 /// Remaps file references from old region manifests to new region manifests.
 pub struct RemapManifest {
@@ -162,14 +163,20 @@ impl RemapManifest {
     ) -> Result<()> {
         for (file_id, file_meta) in &source_manifest.files {
             if let Some(existing) = target_manifest.files.get(file_id)
-                && (existing.format.narthex_objects().is_some()
-                    || file_meta.format.narthex_objects().is_some())
+                && (!matches!(existing.format, FileFormat::Parquet)
+                    || !matches!(file_meta.format, FileFormat::Parquet))
             {
                 // Admission sequences may differ by logical region; physical
                 // ownership and object inventory must still agree in all builds.
+                let same_inventory = match (&existing.format, &file_meta.format) {
+                    (FileFormat::NarthexSamples(left), FileFormat::NarthexSamples(right)) => {
+                        left.manifest_size == right.manifest_size
+                            && left.part_sizes == right.part_sizes
+                    }
+                    _ => false,
+                };
                 ensure!(
-                    existing.region_id == file_meta.region_id
-                        && existing.format.narthex_objects() == file_meta.format.narthex_objects(),
+                    existing.region_id == file_meta.region_id && same_inventory,
                     error::InconsistentFileSnafu {
                         file_id: *file_id,
                         reason: "narthex samples identity mismatch",

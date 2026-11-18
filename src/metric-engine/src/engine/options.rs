@@ -78,7 +78,7 @@ pub fn set_data_region_options(options: &mut HashMap<String, String>) {
     // explicit Narthex storage while keeping the existing Parquet default.
     options.insert("memtable.type".to_string(), "bulk".to_string());
     let sst_format = match options.get("sst_format").map(String::as_str) {
-        Some("narthex" | "metrics" | "native") => "narthex",
+        Some("narthex") => "narthex",
         _ => "flat",
     };
     options.insert("sst_format".to_string(), sst_format.to_string());
@@ -163,13 +163,12 @@ mod tests {
 
     #[test]
     fn test_set_data_region_options_preserves_narthex_storage() {
-        for format in ["narthex", "metrics", "native"] {
-            let mut options = HashMap::from([("sst_format".to_string(), format.to_string())]);
-            set_data_region_options(&mut options);
-            assert_eq!(options.get("sst_format").unwrap(), "narthex");
-            assert_eq!(options.get("memtable.type").unwrap(), "bulk");
-            assert_eq!(options.get(PRIMARY_KEY_ENCODING).unwrap(), "sparse");
-        }
+        let format = "narthex";
+        let mut options = HashMap::from([("sst_format".to_string(), format.to_string())]);
+        set_data_region_options(&mut options);
+        assert_eq!(options.get("sst_format").unwrap(), "narthex");
+        assert_eq!(options.get("memtable.type").unwrap(), "bulk");
+        assert_eq!(options.get(PRIMARY_KEY_ENCODING).unwrap(), "sparse");
     }
 
     #[test]

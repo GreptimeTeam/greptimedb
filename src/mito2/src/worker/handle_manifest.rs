@@ -1064,20 +1064,12 @@ async fn edit_region(
 ) -> Result<()> {
     let region_id = region.region_id;
     for file in edit.files_to_add.iter().chain(&edit.series_indexes_to_add) {
-        if let Some(objects) = file.format.narthex_objects() {
-            let region_dir = region.access_layer.build_region_dir(file.region_id);
-            let canonical = location::narthex_file_dir(&region_dir, file.file_id);
-            let prototype =
-                location::narthex_file_dir(&location::legacy_native_dir(&region_dir), file.file_id);
+        if !matches!(file.format, file::FileFormat::Parquet) {
             snafu::ensure!(
                 region.version_control.current().version.options.sst_format
                     == Some(crate::sst::FormatType::Narthex)
                     && file.region_id.table_id() == region_id.table_id()
-                    && file.valid_inventory()
-                    && objects.iter().all(|object| {
-                        location::parent_dir(&object.path)
-                            .is_some_and(|parent| parent == canonical || parent == prototype)
-                    }),
+                    && file.valid_inventory(),
                 crate::error::InvalidRequestSnafu {
                     region_id,
                     reason: "Invalid Narthex artifact for destination region"
@@ -1089,7 +1081,10 @@ async fn edit_region(
         if matches!(samples.format, file::FileFormat::NarthexSamples(_)) {
             use crate::series_index::format::SamplesFormatReader;
             let handle = file::FileHandle::new(samples.clone(), region.file_purger.clone());
-            let handle = crate::series_index::artifact::SamplesFileHandle::from_narthex(handle)?;
+            let handle = crate::series_index::artifact::SamplesFileHandle::from_narthex(
+                handle,
+                &region.access_layer.build_region_dir(samples.region_id),
+            )?;
             let reader = crate::series_index::samples::reader::SamplesReader::open(
                 region.access_layer.object_store().clone(),
                 handle,
@@ -1103,7 +1098,10 @@ async fn edit_region(
     }
     for index in &edit.series_indexes_to_add {
         let handle = file::FileHandle::new(index.clone(), region.file_purger.clone());
-        let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(handle)?;
+        let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
+            handle,
+            &region.access_layer.build_region_dir(index.region_id),
+        )?;
         use crate::series_index::format::FormatReader;
         let reader = crate::series_index::columnar::reader::ColumnarReader::open(
             region.access_layer.object_store().clone(),

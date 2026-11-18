@@ -27,7 +27,7 @@ use crate::request::{
     BackgroundNotify, CopyRegionFromFinished, CopyRegionFromRequest, WorkerRequest,
 };
 use crate::sst::file::{self, FileMeta};
-use crate::sst::location::{self, region_dir_from_table_dir};
+use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime};
 
 impl<S> RegionWorkerLoop<S> {
@@ -372,14 +372,15 @@ async fn prepare_narthex_copy(
     source: &FileMeta,
 ) -> Result<(FileMeta, Vec<FileDescriptor>)> {
     use crate::series_index::columnar::{invalid, require};
-    use crate::sst::file::{FileFormat, NarthexObjectMeta};
+    use crate::sst::file::FileFormat;
 
     let layer = region.access_layer();
-    let source_manifest = match &source.format {
-        FileFormat::NarthexSamples(narthex) => &narthex.manifest,
-        FileFormat::NarthexSeriesIndex(narthex) => &narthex.manifest,
-        FileFormat::Parquet => return Err(invalid("expected narthex copy source")),
-    };
+    let source_objects = source
+        .narthex_objects(&layer.build_region_dir(source.region_id))
+        .ok_or_else(|| invalid("expected Narthex copy source"))?;
+    let (source_manifest, parts) = source_objects
+        .split_last()
+        .expect("Narthex inventory includes manifest");
     let bytes = layer
         .object_store()
         .read(&source_manifest.path)
@@ -397,49 +398,28 @@ async fn prepare_narthex_copy(
     let bytes = bytes::Bytes::from(
         serde_json::to_vec(&manifest).map_err(|error| invalid(error.to_string()))?,
     );
-    let source_prefix = location::parent_dir(&source_manifest.path)
-        .ok_or_else(|| invalid("narthex manifest has no parent directory"))?;
-    let target_prefix =
-        location::narthex_file_dir(&layer.build_region_dir(region.region_id), source.file_id);
-    let mut descriptors = Vec::new();
-    let mut remap = |object: &mut NarthexObjectMeta| -> Result<()> {
-        let name = object
-            .path
-            .strip_prefix(source_prefix)
-            .ok_or_else(|| invalid("narthex copy object outside owner namespace"))?;
-        let target = format!("{target_prefix}{name}");
-        let manifest = (object.path == source_manifest.path).then(|| bytes.clone());
-        let size = manifest
-            .as_ref()
-            .map_or(object.file_size, |bytes| bytes.len() as u64);
-        descriptors.push(FileDescriptor::NarthexObject {
-            source: object.path.clone(),
-            target: target.clone(),
-            size,
-            manifest,
-        });
-        *object = NarthexObjectMeta {
-            path: target,
-            file_size: size,
-        };
-        Ok(())
-    };
+    let target_region_dir = layer.build_region_dir(region.region_id);
     let mut copied = remap_copied_file_meta(source, region.region_id);
+    let manifest_size = bytes.len() as u64;
     match &mut copied.format {
-        FileFormat::NarthexSamples(narthex) => {
-            for part in &mut narthex.parts {
-                remap(&mut part.object)?;
-            }
-            remap(&mut narthex.manifest)?;
-        }
-        FileFormat::NarthexSeriesIndex(narthex) => {
-            for part in &mut narthex.parts {
-                remap(part)?;
-            }
-            remap(&mut narthex.manifest)?;
-        }
-        FileFormat::Parquet => return Err(invalid("expected narthex copy source")),
+        FileFormat::NarthexSamples(meta) => meta.manifest_size = manifest_size,
+        FileFormat::NarthexSeriesIndex(meta) => meta.manifest_size = manifest_size,
+        FileFormat::Parquet => return Err(invalid("expected Narthex copy source")),
     }
+    let targets = copied
+        .narthex_objects(&target_region_dir)
+        .expect("Narthex copy");
+    let descriptors: Vec<_> = source_objects
+        .iter()
+        .zip(targets)
+        .enumerate()
+        .map(|(i, (object, target))| FileDescriptor::NarthexObject {
+            source: object.path.clone(),
+            target: target.path,
+            size: target.file_size,
+            manifest: (i == parts.len()).then(|| bytes.clone()),
+        })
+        .collect();
     copied.file_size = descriptors.iter().try_fold(0u64, |size, object| {
         size.checked_add(object.size())
             .ok_or_else(|| invalid("narthex copy size overflow"))

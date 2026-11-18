@@ -2972,28 +2972,27 @@ mod tests {
         use futures::StreamExt;
 
         use super::ManifestSstProjection;
-        use crate::sst::file::{FileFormat, FileMeta, NarthexObjectMeta, NarthexSamplesMeta};
+        use crate::sst::file::{FileFormat, FileMeta, NarthexSamplesMeta};
 
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
-        let path = "shared/native/00000000-0000-0000-0000-000000000001/manifest.json";
+        let id = FileId::random();
+        let path = format!(
+            "{}manifest.json",
+            crate::sst::location::narthex_file_dir(
+                &region.access_layer.build_region_dir(region.region_id),
+                id
+            )
+        );
         let mut edit = empty_edit();
         edit.files_to_add.push(FileMeta {
-            file_id: crate::sst::location::parse_narthex_file_id(path).unwrap(),
+            file_id: id,
+            region_id: region.region_id,
             file_size: 2,
             format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
                 use_file_sequence: false,
-                manifest: NarthexObjectMeta {
-                    path: path.to_string(),
-                    file_size: 1,
-                },
-                parts: vec![crate::sst::file::NarthexSamplesPart {
-                    part_id: 0,
-                    object: NarthexObjectMeta {
-                        path: path.replace("manifest.json", "part-0.samples"),
-                        file_size: 1,
-                    },
-                }],
+                manifest_size: 1,
+                part_sizes: smallvec::smallvec![1],
             })),
             ..Default::default()
         });
@@ -3011,7 +3010,7 @@ mod tests {
 
         for filters in [
             MetadataFilter::new(&[]),
-            MetadataFilter::new(&[col("file_path").eq(lit(path))]),
+            MetadataFilter::new(&[col("file_path").eq(lit(path.as_str()))]),
         ] {
             let mut stream = region.manifest_sst_stream(filters, ManifestSstProjection::new(None));
             assert_eq!(stream.next().await.unwrap().file_path, path);

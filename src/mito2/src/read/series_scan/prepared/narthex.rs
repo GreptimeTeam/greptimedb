@@ -122,7 +122,13 @@ pub(crate) async fn open_sources(
         }
         let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
             context.input.access_layer.object_store().clone(),
-            crate::series_index::SeriesIndexFileHandle::from_narthex(file.clone())?,
+            crate::series_index::SeriesIndexFileHandle::from_narthex(
+                file.clone(),
+                &context
+                    .input
+                    .access_layer
+                    .build_region_dir(file.meta_ref().region_id),
+            )?,
             context
                 .input
                 .cache_strategy
@@ -147,7 +153,13 @@ pub(crate) async fn open_sources(
         let namespace = file.meta_ref().file_id;
         let reader = SamplesReader::open_cached(
             context.input.access_layer.object_store().clone(),
-            SamplesFileHandle::from_narthex(file.clone())?,
+            SamplesFileHandle::from_narthex(
+                file.clone(),
+                &context
+                    .input
+                    .access_layer
+                    .build_region_dir(file.meta_ref().region_id),
+            )?,
             context.input.cache_strategy.columnar_metadata(namespace),
         )
         .await?;

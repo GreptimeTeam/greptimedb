@@ -2,26 +2,20 @@
 
 The **Narthex format**, selected by `sst_format = 'narthex'`, is optimized
 for Prometheus-style metric data. It separates series identities and string tags
-from timestamped numeric samples. `native` and `metrics` remain accepted as
-legacy option aliases.
+from timestamped numeric samples.
 
 The format has two artifact roles: `NarthexSamples` owns sample data, and
 `NarthexSeriesIndex` indexes series and references the samples it covers.
 Region manifests serialize these roles as `narthex_samples` and
-`narthex_series_index`, accepting the former `native`/`native_series` and
-`metrics_samples`/`metrics_series_index` names on read. This naming change does not
-change file magic, codec identifiers,
-artifact format identifiers (`columnar-series` and `columnar-samples`), or encoded
-part payloads.
+`narthex_series_index`.
 
 ## Authoritative storage and derived sidecars
 
 With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
 `<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
-`part-<n>.series` objects. The region manifest records object paths and sizes;
+`part-<n>.series` objects. The region manifest records the manifest size and ordered part sizes;
 series indexes reference region-qualified sample file IDs without owning those
 samples. Both artifact types use ordinary SST lifetimes and reclamation.
-Existing `native/<file_id>/` paths remain readable and are not relocated.
 
 The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
 paths, source-SST coverage, daily consolidation, and local-cache rollout described

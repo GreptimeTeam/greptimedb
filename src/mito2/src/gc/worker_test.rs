@@ -2110,8 +2110,11 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
     let mut sample_reader = Some(
         crate::series_index::samples::reader::SamplesReader::open(
             layer.object_store().clone(),
-            crate::series_index::artifact::SamplesFileHandle::from_narthex(sources[0].clone())
-                .unwrap(),
+            crate::series_index::artifact::SamplesFileHandle::from_narthex(
+                sources[0].clone(),
+                &layer.build_region_dir(owner),
+            )
+            .unwrap(),
         )
         .await
         .unwrap(),
@@ -2121,6 +2124,7 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
             layer.object_store().clone(),
             crate::series_index::SeriesIndexFileHandle::from_narthex(
                 region.version().ssts.series_indexes()[&index.file_id].clone(),
+                &layer.build_region_dir(owner),
             )
             .unwrap(),
         )
@@ -2131,8 +2135,7 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
         .iter()
         .chain(std::iter::once(&index))
         .map(|file| {
-            file.format
-                .narthex_objects()
+            file.narthex_objects(&layer.build_region_dir(file.region_id))
                 .unwrap()
                 .iter()
                 .map(|object| object.path.clone())
