@@ -12087,7 +12087,6 @@ dependencies = [
  "snafu 0.8.6",
  "sql",
  "sqlparser",
- "stacker",
  "store-api",
  "substrait 1.4.0-alpha.0",
  "table",
