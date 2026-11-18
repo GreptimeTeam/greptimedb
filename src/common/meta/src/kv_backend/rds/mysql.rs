@@ -432,7 +432,9 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         query_executor: &mut ExecutorImpl<'_, MySqlClient>,
         req: BatchGetRequest,
     ) -> Result<BatchGetResponse> {
-        let keys = req.keys;
+        let mut keys = req.keys;
+        keys.sort_unstable();
+        keys.dedup();
         let mut kvs = Vec::new();
         let mut params = Vec::with_capacity(keys.len().min(*RDS_BATCH_SIZE));
         for keys in keys.chunks(*RDS_BATCH_SIZE) {
@@ -911,6 +913,42 @@ mod tests {
                     .kvs
                     .is_empty()
             );
+        }
+        drop_table(&store.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_batch_get_deduplicates_keys_before_chunking() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("get_duplicate_keys");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let client = store.executor_factory.default_executor().await.unwrap();
+        let mut executor = ExecutorImpl::Default(client.clone());
+        let kvs = vec![KeyValue {
+            key: b"key".to_vec(),
+            value: b"value".to_vec(),
+        }];
+        store
+            .batch_put_with_query_executor(
+                &mut executor,
+                BatchPutRequest {
+                    kvs: kvs.clone(),
+                    prev_kv: false,
+                },
+            )
+            .await
+            .unwrap();
+        for count in [1, *RDS_BATCH_SIZE, *RDS_BATCH_SIZE + 1] {
+            let response = store
+                .batch_get_with_query_executor(
+                    &mut executor,
+                    BatchGetRequest {
+                        keys: vec![b"key".to_vec(); count],
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.kvs, kvs);
         }
         drop_table(&store.executor_factory.pool, &table).await;
     }

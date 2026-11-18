@@ -130,7 +130,7 @@ services:
       - ./certs:/certs:ro
       - ./mysql/my.cnf:/opt/bitnami/mysql/conf/my_custom.cnf:ro
     environment:
-      - MYSQL_DATABASE=mysql
+      - MYSQL_DATABASE=greptime_test
       - MYSQL_USER=greptimedb
       - MYSQL_PASSWORD=admin
       - MYSQL_ROOT_PASSWORD=admin
