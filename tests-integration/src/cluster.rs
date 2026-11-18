@@ -159,6 +159,8 @@ pub struct GreptimeDbCluster {
     pub kv_backend: KvBackendRef,
     pub metasrv: Arc<Metasrv>,
     pub frontend: Arc<Frontend>,
+    metasrv_connection: MockInfo,
+    datanode_clients: Arc<NodeClients>,
 }
 
 impl GreptimeDbCluster {
@@ -266,6 +268,7 @@ pub struct GreptimeDbClusterBuilder {
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
     plugins: Plugins,
+    datanode_plugins: Arc<dyn Fn(DatanodeId) -> Plugins + Send + Sync>,
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
     real_datanode_grpc_addr: bool,
@@ -307,6 +310,7 @@ impl GreptimeDbClusterBuilder {
             shared_home_dir: None,
             meta_selector: None,
             plugins: Plugins::default(),
+            datanode_plugins: Arc::new(|_| Plugins::default()),
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
             real_datanode_grpc_addr: false,
@@ -530,9 +534,47 @@ impl GreptimeDbClusterBuilder {
             datanode_rpc_stats,
             network_do_get,
             kv_backend: self.kv_backend.clone(),
-            metasrv: metasrv.metasrv,
+            metasrv: metasrv.metasrv.clone(),
+            metasrv_connection: metasrv,
+            datanode_clients,
             frontend: Arc::new(frontend),
         }
+    }
+
+    /// Creates a fresh plugin registry for each datanode start, including restarts.
+    /// Datanode construction adds internal plugins, so registries cannot be shared.
+    #[must_use]
+    pub fn with_datanode_plugins(
+        mut self,
+        plugins: impl Fn(DatanodeId) -> Plugins + Send + Sync + 'static,
+    ) -> Self {
+        self.datanode_plugins = Arc::new(plugins);
+        self
+    }
+
+    /// Restarts one in-process datanode and reconnects the shared client pool.
+    /// Real TCP listeners are not restartable by this harness.
+    pub async fn restart_datanode(&self, cluster: &mut GreptimeDbCluster, node_id: DatanodeId) {
+        assert!(!self.real_datanode_grpc_addr);
+        let mut old = cluster.datanode_instances.remove(&node_id).unwrap();
+        old.shutdown().await.unwrap();
+        drop(old);
+        let options = cluster
+            .datanode_options
+            .iter()
+            .find(|options| options.node_id == Some(node_id))
+            .unwrap()
+            .clone();
+        let instance = self
+            .create_datanode(options.clone(), cluster.metasrv_connection.clone())
+            .await;
+        let (addr, client) =
+            create_datanode_client(&instance, &options.grpc.server_addr, None).await;
+        cluster
+            .datanode_clients
+            .insert_client(Peer::new(node_id, addr), client)
+            .await;
+        cluster.datanode_instances.insert(node_id, instance);
     }
 
     pub async fn build(&self, start_frontend_servers: bool) -> GreptimeDbCluster {
@@ -671,7 +713,8 @@ impl GreptimeDbClusterBuilder {
         let layered_cache_registry =
             Arc::new(build_datanode_layered_cache_registry(meta_backend.clone()));
 
-        let mut builder = DatanodeBuilder::new(opts.clone(), Plugins::default(), meta_backend);
+        let plugins = (self.datanode_plugins)(opts.node_id.unwrap());
+        let mut builder = DatanodeBuilder::new(opts.clone(), plugins, meta_backend);
         builder
             .with_cache_registry(layered_cache_registry.clone())
             .with_meta_client(meta_client);
@@ -1139,6 +1182,132 @@ mod tests {
             (stats.requests(), stats.active(), stats.peak_active()),
             (2, 0, 1)
         );
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_object_store_cluster_entry_and_restart() {
+        use crate::test_util::{execute_sql, execute_sql_and_expect, get_test_store_config};
+        use client::OutputData;
+        use common_wal::config::object_store::{
+            EnableObjectStoreWal, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig,
+        };
+
+        let home = Arc::new(create_temp_dir("object-store-cluster-entry"));
+        let (storage, _guard) = get_test_store_config(&StorageType::File);
+        let config = ObjectStoreWalConfig {
+            prefix: "cluster/wal".into(),
+            ..Default::default()
+        };
+        let plugins = Plugins::new();
+        plugins.insert(EnableObjectStoreWal);
+        let builder = GreptimeDbClusterBuilder::new("object-store-cluster-entry")
+            .await
+            .with_datanodes(2)
+            .with_store_config(storage)
+            .with_shared_home_dir(home.clone())
+            .with_metasrv_wal_config(MetasrvWalConfig::ObjectStore(config.clone()))
+            .with_datanode_wal_config(DatanodeWalConfig::ObjectStore(config.clone()))
+            .with_plugins(plugins)
+            .with_datanode_plugins(|_| {
+                let plugins = Plugins::new();
+                plugins.insert(EnableObjectStoreWal);
+                plugins
+            });
+        let mut cluster = builder.build(false).await;
+        execute_sql(cluster.fe_instance(), "CREATE TABLE oswal_entry (i INT PRIMARY KEY, ts TIMESTAMP TIME INDEX) PARTITION ON COLUMNS (i) (i < 10, i >= 10)").await;
+        assert!(matches!(
+            execute_sql(
+                cluster.fe_instance(),
+                "INSERT INTO oswal_entry VALUES (1, 0), (11, 0)"
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(2)
+        ));
+        let expected = r#"+----+---------------------+
+| i  | ts                  |
++----+---------------------+
+| 1  | 1970-01-01T00:00:00 |
+| 11 | 1970-01-01T00:00:00 |
++----+---------------------+"#;
+        execute_sql_and_expect(
+            cluster.fe_instance(),
+            "SELECT * FROM oswal_entry ORDER BY i",
+            expected,
+        )
+        .await;
+        let table = cluster
+            .fe_instance()
+            .catalog_manager()
+            .table("greptime", "public", "oswal_entry", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let table_id = table.table_info().table_id();
+        let stores =
+            DatanodeBuilder::build_object_store_manager(&cluster.datanode_options[0].storage, 1)
+                .await
+                .unwrap();
+        for node_id in [1, 2] {
+            let key = common_meta::key::datanode_table::DatanodeTableKey::new(node_id, table_id);
+            let metadata = cluster
+                .metasrv
+                .table_metadata_manager()
+                .datanode_table_manager()
+                .get(&key)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!metadata.regions.is_empty());
+            assert!(metadata.region_info.region_wal_options.values().all(|options| {
+                matches!(options, common_wal::options::WalOptions::ObjectStore(options) if options.prefix == config.prefix)
+            }));
+            let prefix = format!(
+                "{}/objects/",
+                config.node_prefix(node_id, FIXED_DIRECTORY_GENERATION)
+            );
+            assert!(
+                !stores
+                    .default_object_store()
+                    .list(&prefix)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            builder.restart_datanode(&mut cluster, node_id).await;
+            execute_sql_and_expect(
+                cluster.fe_instance(),
+                "SELECT * FROM oswal_entry ORDER BY i",
+                expected,
+            )
+            .await;
+        }
+        assert!(matches!(
+            execute_sql(
+                cluster.fe_instance(),
+                "INSERT INTO oswal_entry VALUES (2, 0), (12, 0)"
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(2)
+        ));
+        execute_sql_and_expect(
+            cluster.fe_instance(),
+            "SELECT * FROM oswal_entry ORDER BY i",
+            r#"+----+---------------------+
+| i  | ts                  |
++----+---------------------+
+| 1  | 1970-01-01T00:00:00 |
+| 2  | 1970-01-01T00:00:00 |
+| 11 | 1970-01-01T00:00:00 |
+| 12 | 1970-01-01T00:00:00 |
++----+---------------------+"#,
+        )
+        .await;
+        for node in cluster.datanode_instances.values_mut() {
+            node.shutdown().await.unwrap();
+        }
     }
 
     const HEALTH_REFRESH_INTERVAL: Duration = Duration::from_millis(10);

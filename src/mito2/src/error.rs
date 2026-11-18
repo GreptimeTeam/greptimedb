@@ -558,6 +558,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to resolve the WAL provider, region_id: {}", region_id))]
+    ResolveWalProvider {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     // Shared error for each writer in the write group.
     #[snafu(display("Failed to write region"))]
     WriteGroup { source: Arc<Error> },
@@ -1671,6 +1679,7 @@ impl ErrorExt for Error {
             | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
+            | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
@@ -1911,6 +1920,7 @@ impl ErrorExt for Error {
             | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
+            | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),

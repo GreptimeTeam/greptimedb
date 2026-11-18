@@ -55,6 +55,13 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         Vec::new()
     }
 
+    /// Resolves a metadata provider into the namespace used by this store.
+    /// Backends with node-local namespaces validate the configured root here.
+    /// Providers already naming a concrete namespace remain compatible.
+    fn resolve_provider(&self, provider: Provider) -> Result<Provider, Self::Error> {
+        Ok(provider)
+    }
+
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 

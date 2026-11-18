@@ -16,7 +16,7 @@ pg_kvbackend = [
     "dep:rustls",
 ]
 mysql_kvbackend = ["dep:sqlx", "dep:rustls"]
-enterprise = ["prost-types"]
+enterprise = ["common-wal/enterprise", "prost-types"]
 
 [lints]
 workspace = true

@@ -979,6 +979,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid object store WAL prefix {:?}: {}", prefix, reason))]
+    InvalidObjectStoreWalPrefix {
+        prefix: String,
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid topic name prefix: {}", prefix))]
     InvalidTopicNamePrefix {
         prefix: String,
@@ -1303,6 +1311,7 @@ impl ErrorExt for Error {
             | InvalidSetDatabaseOption { .. }
             | InvalidUnsetDatabaseOption { .. }
             | InvalidTopicNamePrefix { .. }
+            | InvalidObjectStoreWalPrefix { .. }
             | InvalidFileExtension { .. }
             | InvalidFileName { .. }
             | InvalidFlowRequestBody { .. }

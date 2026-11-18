@@ -380,7 +380,7 @@ impl RegionOpener {
         // Safety: must be set before calling this method.
         let mut options = self.options.take().unwrap();
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
-        let provider = self.provider::<S>(&options.wal_options)?;
+        let provider = self.provider(wal, &options.wal_options)?;
         let metadata = Arc::new(metadata);
         // Sets the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
@@ -544,8 +544,9 @@ impl RegionOpener {
         Ok(region)
     }
 
-    fn provider<S: LogStore>(&self, wal_options: &WalOptions) -> Result<Provider> {
-        provider_from_wal_options::<S>(self.region_id, wal_options)
+    fn provider<S: LogStore>(&self, wal: &Wal<S>, wal_options: &WalOptions) -> Result<Provider> {
+        let provider = provider_from_wal_options::<S>(self.region_id, wal_options)?;
+        wal.resolve_provider(self.region_id, provider)
     }
 
     /// Tries to open the region and returns `None` if the region directory is empty.
@@ -599,7 +600,7 @@ impl RegionOpener {
         region_options.validate_column_compression(&metadata)?;
 
         let region_id = self.region_id;
-        let provider = self.provider::<S>(&region_options.wal_options)?;
+        let provider = self.provider(wal, &region_options.wal_options)?;
         let wal_entry_reader = self
             .wal_entry_reader
             .take()
