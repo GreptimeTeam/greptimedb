@@ -240,11 +240,9 @@ impl StatementExecutor {
         };
 
         if let (Some((budget, token)), Some(packed)) = (managed, packed) {
-            let path = packed.path().to_owned();
             return stream_to_managed_parquet_with_packed(
                 stream,
                 ManagedParquetDestination::Packed(packed),
-                &path,
                 budget,
                 token,
             )
@@ -260,8 +258,10 @@ impl StatementExecutor {
         if let Some((budget, token)) = managed {
             stream_to_managed_parquet_with_packed(
                 stream,
-                ManagedParquetDestination::Object(backend.object_store),
-                &filename,
+                ManagedParquetDestination::Object {
+                    store: backend.object_store,
+                    path: filename,
+                },
                 budget,
                 token,
             )
@@ -272,9 +272,19 @@ impl StatementExecutor {
     }
 }
 
+/// File destinations own their object key; packed streams use their writer's key.
 enum ManagedParquetDestination {
-    Object(ObjectStore),
+    Object { store: ObjectStore, path: String },
     Packed(PackedTableWriter),
+}
+
+impl ManagedParquetDestination {
+    fn path(&self) -> &str {
+        match self {
+            Self::Object { path, .. } => path,
+            Self::Packed(packed) => packed.path(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -287,8 +297,10 @@ pub(crate) async fn stream_to_managed_parquet(
 ) -> Result<usize> {
     stream_to_managed_parquet_with_packed(
         stream,
-        ManagedParquetDestination::Object(store),
-        path,
+        ManagedParquetDestination::Object {
+            store,
+            path: path.to_owned(),
+        },
         budget,
         token,
     )
@@ -298,7 +310,6 @@ pub(crate) async fn stream_to_managed_parquet(
 async fn stream_to_managed_parquet_with_packed(
     mut stream: SendableRecordBatchStream,
     destination: ManagedParquetDestination,
-    path: &str,
     budget: &ExportWriteBudget,
     token: &CancellationToken,
 ) -> Result<usize> {
@@ -319,6 +330,8 @@ async fn stream_to_managed_parquet_with_packed(
     } else {
         expanded_schema.clone()
     };
+    let destination_path = destination.path().to_owned();
+    let path = destination_path.as_str();
     let packed_destination = matches!(destination, ManagedParquetDestination::Packed(_));
     let mut writer = match destination {
         ManagedParquetDestination::Packed(packed) => ParquetFileWriter::open_packed(
@@ -328,7 +341,7 @@ async fn stream_to_managed_parquet_with_packed(
             ),
             packed,
         ),
-        ManagedParquetDestination::Object(store) => {
+        ManagedParquetDestination::Object { store, .. } => {
             ParquetFileWriter::open(output_schema.arrow_schema().clone(), store, path, 1, None)
                 .await
         }

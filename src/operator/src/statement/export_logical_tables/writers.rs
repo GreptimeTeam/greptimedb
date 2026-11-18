@@ -15,10 +15,8 @@
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
-use common_datasource::packed_writer::PackedWriterRef;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
-use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinHandle;
@@ -26,8 +24,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{self, Result};
 use crate::statement::export_logical_tables::{
-    ActiveWriter, LogicalTableExportLimits, LogicalTableProjection, check_cancelled,
-    map_writer_error,
+    ActiveWriter, LogicalExportDestination, LogicalTableExportLimits, LogicalTableProjection,
+    check_cancelled, map_writer_error,
 };
 
 const PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
@@ -112,7 +110,6 @@ pub(crate) struct Payload {
 }
 
 pub(crate) struct TableWriters {
-    pub(crate) packed: Option<PackedWriterRef>,
     current: Option<(u32, mpsc::Sender<Payload>)>,
     tasks: FuturesUnordered<JoinHandle<Result<()>>>,
     budget: Arc<ExportWriteBudget>,
@@ -122,7 +119,6 @@ impl TableWriters {
     pub(crate) fn new(budget: Arc<ExportWriteBudget>) -> Self {
         Self {
             current: None,
-            packed: None,
             tasks: FuturesUnordered::new(),
             budget,
         }
@@ -145,7 +141,7 @@ impl TableWriters {
         &mut self,
         id: u32,
         table: &LogicalTableProjection,
-        store: &ObjectStore,
+        destination: &LogicalExportDestination,
         limits: LogicalTableExportLimits,
         token: &CancellationToken,
     ) -> Result<()> {
@@ -153,10 +149,13 @@ impl TableWriters {
         self.close_input();
         let permit = self.budget.writer(token).await?;
         self.reap_for_admission(token).await?;
-        let writer = if let Some(packed) = &self.packed {
-            ActiveWriter::open_packed(table, id, limits, packed.clone())?
-        } else {
-            ActiveWriter::open(table, store, limits).await?
+        let writer = match destination {
+            LogicalExportDestination::Packed(packed) => {
+                ActiveWriter::open_packed(table, id, limits, packed.clone())?
+            }
+            LogicalExportDestination::Object(store) => {
+                ActiveWriter::open(table, store, limits).await?
+            }
         };
         let (sender, receiver) = mpsc::channel(2);
         self.current = Some((id, sender));
