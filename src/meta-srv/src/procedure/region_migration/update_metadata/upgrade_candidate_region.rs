@@ -372,8 +372,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_failed_upgrade_broadcasts_invalidation() {
-        // The procedure iterates the tables of a batch in hash order, so the attempt is repeated
-        // until the table that fails comes after the one that is switched.
+        // The procedure iterates the tables of a batch in the order of a `HashMap` with a random
+        // hasher (`PersistentContext::table_regions`), so the attempt is repeated until the table
+        // that fails comes after the one that is switched. Each attempt orders the two tables
+        // independently, so all 64 miss with probability 2^-64; a map with a fixed order could
+        // make this test fail every time.
         for _ in 0..64 {
             let mut state = Box::new(UpdateMetadata::Upgrade);
             let mut env = TestingEnv::new();

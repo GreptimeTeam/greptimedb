@@ -17,7 +17,7 @@ use std::any::Any;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::{info, warn};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
@@ -66,12 +66,8 @@ impl State for RegionMigrationStart {
         self.filter_unmigrated_regions(&mut region_routes, to_peer);
 
         // A procedure that stopped right after it switched the routes has not broadcast them.
-        if region_routes.len() != region_ids.len()
-            && let Err(err) = ctx.invalidate_table_cache().await
-        {
-            warn!(
-                "Failed to broadcast the invalidate table cache message for the migrated regions, error: {err:?}"
-            );
+        if region_routes.len() != region_ids.len() {
+            ctx.invalidate_table_cache().await?;
         }
 
         // No region to migrate, skip the migration.

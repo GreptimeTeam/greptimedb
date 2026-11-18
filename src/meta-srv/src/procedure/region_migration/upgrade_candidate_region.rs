@@ -256,9 +256,9 @@ impl UpgradeCandidateRegion {
                 .context(error::ExceededDeadlineSnafu {
                     operation: "Upgrade region",
                 })?;
-        let region_ids = &Self::pending_regions(ctx);
+        let region_ids = Self::pending_regions(ctx);
         let upgrade_instruction = self
-            .build_upgrade_region_instruction(ctx, region_ids, operation_timeout)
+            .build_upgrade_region_instruction(ctx, &region_ids, operation_timeout)
             .await?;
 
         let candidate = &ctx.persistent_ctx.to_peer;

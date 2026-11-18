@@ -892,6 +892,7 @@ impl RegionMigrationProcedure {
         let table_regions = ctx.persistent_ctx.table_regions();
         // Regions whose route was switched to the target before the procedure aborted.
         let mut switched_regions = Vec::new();
+        let mut cleared_downgrading = false;
         for (table_id, regions) in table_regions {
             let table_lock = TableLock::Write(table_id).into();
             let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
@@ -934,7 +935,12 @@ impl RegionMigrationProcedure {
                     .with_context(|_| error::RetryLaterWithSourceSnafu {
                         reason: format!("Failed to update the table route during the rollback downgraded leader region: {regions:?}"),
                     })?;
+                cleared_downgrading = true;
             }
+        }
+        // Clients may have cached the routes that carried the cleared marks.
+        if cleared_downgrading {
+            ctx.invalidate_table_cache().await?;
         }
         self.context
             .deregister_failure_detectors_for_candidate_regions()
@@ -1378,9 +1384,10 @@ mod tests {
         // changed to neither the source nor the target. The other region keeps the downgrading
         // mark, on the source or, in a state the route switch does not produce, on the target.
         for downgraded_leader in [1, 2] {
-            let env = TestingEnv::new();
+            let mut env = TestingEnv::new();
             let mut persistent_ctx = new_persistent_context();
             persistent_ctx.region_ids = env.create_batch_with_moved_leader(downgraded_leader).await;
+            let mut rx = env.frontend_receiver().await;
 
             let mut procedure = recover_procedure(&env, persistent_ctx);
             let ctx = TestingEnv::procedure_context();
@@ -1388,7 +1395,10 @@ mod tests {
             assert!(!status.is_done());
             let err = procedure.execute(&ctx).await.unwrap_err();
             assert!(!err.is_retry_later());
+            while rx.try_recv().is_ok() {}
             procedure.rollback(&ctx).await.unwrap();
+            // The routes no longer carry the marks that clients may have cached.
+            assert_table_cache_invalidated(&mut rx, &[1024]);
 
             let table_route = env
                 .table_metadata_manager()
