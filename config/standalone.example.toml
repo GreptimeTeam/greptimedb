@@ -437,8 +437,6 @@ overwrite_entry_start_id = false
 #+ storage_provider = ""
 
 ## The path prefix of the WAL objects inside the storage provider.
-## In distributed mode, metasrv and all datanodes must use the same public root prefix and shared object storage.
-## A mismatched prefix prevents regions from opening; do not configure per-node root prefixes.
 ## The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.
 ## **It's only used when the provider is `experimental_object_store`**.
 #+ prefix = "wal"

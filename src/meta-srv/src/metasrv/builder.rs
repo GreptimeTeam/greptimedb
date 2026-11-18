@@ -314,7 +314,7 @@ impl MetasrvBuilder {
                     .and_then(|plugins| plugins.get::<EnableObjectStoreWal>())
                     .is_some(),
                 error::InvalidArgumentsSnafu {
-                    err_msg: "Distributed object store WAL requires the enterprise enablement plugin",
+                    err_msg: "WAL provider `experimental_object_store` requires the `EnableObjectStoreWal` plugin",
                 }
             );
         }
@@ -561,7 +561,7 @@ impl MetasrvBuilder {
             None
         };
 
-        // Kafka pruning is independent of whether another provider supports failover.
+        // Kafka WAL prune ticker and manager.
         let wal_prune_ticker = if let Some(remote_wal_options) = options.wal.remote_wal_options()
             && options.wal.enable_active_wal_pruning()
         {
@@ -808,7 +808,11 @@ mod tests {
             ..Default::default()
         };
         let result = MetasrvBuilder::new().options(options.clone()).build().await;
-        assert!(matches!(result, Err(error::Error::InvalidArguments { .. })));
+        assert!(matches!(
+            result,
+            Err(error::Error::InvalidArguments { err_msg, .. })
+                if err_msg == "WAL provider `experimental_object_store` requires the `EnableObjectStoreWal` plugin"
+        ));
         let plugins = Plugins::new();
         plugins.insert(EnableObjectStoreWal);
         let metasrv = MetasrvBuilder::new()

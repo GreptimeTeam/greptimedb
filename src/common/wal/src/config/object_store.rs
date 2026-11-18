@@ -26,8 +26,8 @@ pub const FIXED_DIRECTORY_GENERATION: u64 = 0;
 /// Plugin marker allowing metasrv and its datanodes to use object-store WAL.
 ///
 /// OSS does not register this marker. Cluster integration registers it only after
-/// the distributed WAL prerequisites are available; it does not itself configure
-/// storage or implement region failover.
+/// the distributed WAL prerequisites, including handoff and takeover, are available.
+/// It does not itself configure storage or implement region failover.
 #[derive(Debug, Clone, Copy)]
 pub struct EnableObjectStoreWal;
 
