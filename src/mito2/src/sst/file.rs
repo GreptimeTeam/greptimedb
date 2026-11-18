@@ -542,17 +542,15 @@ impl FileMeta {
         use crate::series_index::artifact::ArtifactObject;
         let (manifest, parts, extension) = match &self.format {
             FileFormat::Parquet => return None,
-            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.part_sizes, "samples"),
-            FileFormat::NarthexSeriesIndex(meta) => {
-                (meta.manifest_size, &meta.part_sizes, "series")
-            }
+            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.parts, "samples"),
+            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.parts, "series"),
         };
         let dir = location::narthex_file_dir(region_dir, self.file_id);
         let mut objects = Vec::with_capacity(parts.len() + 1);
-        for (id, &file_size) in parts.iter().enumerate() {
+        for (id, part) in parts.iter().enumerate() {
             objects.push(ArtifactObject {
                 path: format!("{dir}part-{id}.{extension}"),
-                file_size,
+                file_size: part.file_size,
             });
         }
         objects.push(ArtifactObject {
@@ -1424,12 +1422,18 @@ mod tests {
         let samples = FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
             use_file_sequence: false,
             manifest_size: 5,
-            part_sizes: smallvec::smallvec![11, 7],
+            parts: smallvec::smallvec![
+                NarthexPartMeta { file_size: 11 },
+                NarthexPartMeta { file_size: 7 }
+            ],
         }));
         let series = FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
             sources: vec![],
             manifest_size: 5,
-            part_sizes: smallvec::smallvec![11, 7],
+            parts: smallvec::smallvec![
+                NarthexPartMeta { file_size: 11 },
+                NarthexPartMeta { file_size: 7 }
+            ],
         }));
         for (format, extension) in [(samples, "samples"), (series, "series")] {
             let meta = FileMeta {

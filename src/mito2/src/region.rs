@@ -2972,7 +2972,7 @@ mod tests {
         use futures::StreamExt;
 
         use super::ManifestSstProjection;
-        use crate::sst::file::{FileFormat, FileMeta, NarthexSamplesMeta};
+        use crate::sst::file::{FileFormat, FileMeta, NarthexPartMeta, NarthexSamplesMeta};
 
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
@@ -2992,7 +2992,7 @@ mod tests {
             format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
                 use_file_sequence: false,
                 manifest_size: 1,
-                part_sizes: smallvec::smallvec![1],
+                parts: smallvec::smallvec![NarthexPartMeta { file_size: 1 }],
             })),
             ..Default::default()
         });

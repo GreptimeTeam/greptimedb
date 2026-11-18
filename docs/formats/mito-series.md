@@ -13,8 +13,8 @@ Region manifests serialize these roles as `narthex_samples` and
 
 With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
 `<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
-`part-<n>.series` objects. The region manifest records the manifest size and ordered part sizes;
-series indexes reference region-qualified sample file IDs without owning those
+`part-<n>.series` objects. The region manifest records the manifest size and a `parts` array in part-ID order.
+Each part record contains its encoded `file_size` in bytes. Series indexes reference region-qualified sample file IDs without owning those
 samples. Both artifact types use ordinary SST lifetimes and reclamation.
 
 The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog

@@ -27,7 +27,7 @@ use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::series_index::format::SamplesFormat;
 use crate::series_index::samples::ColumnarSamplesFormat;
-use crate::sst::file::{FileFormat, NarthexSamplesMeta, RegionFileId};
+use crate::sst::file::{FileFormat, NarthexPartMeta, NarthexSamplesMeta, RegionFileId};
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::writer::SstWriteGuard;
@@ -149,7 +149,12 @@ pub(crate) async fn write_samples(
         format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
             use_file_sequence: false,
             manifest_size: manifest.file_size,
-            part_sizes: parts.iter().map(|part| part.file_size).collect()
+            parts: parts
+                .iter()
+                .map(|part| NarthexPartMeta {
+                    file_size: part.file_size
+                })
+                .collect()
         })),
     }])
 }
@@ -186,7 +191,7 @@ pub(crate) async fn write_series(
             })?,
         format: FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
             manifest_size: 0,
-            part_sizes: Default::default(),
+            parts: Default::default(),
             sources: sources.iter().map(|file| file.file_id()).collect(),
         })),
         ..Default::default()
@@ -219,7 +224,12 @@ pub(crate) async fn write_series(
             crate::series_index::columnar::invalid("missing Narthex series manifest")
         })?;
         index.manifest_size = manifest.file_size;
-        index.part_sizes = parts.iter().map(|part| part.file_size).collect();
+        index.parts = parts
+            .iter()
+            .map(|part| NarthexPartMeta {
+                file_size: part.file_size,
+            })
+            .collect();
     }
     Ok(file)
 }

@@ -2416,7 +2416,7 @@ mod keys;
 /// Narthex readers use the SST lifetime, not the local sidecar purger.
 #[tokio::test]
 async fn narthex_file_reader_pins_sst_lifetime() {
-    use crate::sst::file::{FileFormat, FileHandle, FileMeta, NarthexSamplesMeta};
+    use crate::sst::file::{FileFormat, FileHandle, FileMeta, NarthexPartMeta, NarthexSamplesMeta};
     use crate::sst::file_purger::FilePurger;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2445,7 +2445,12 @@ async fn narthex_file_reader_pins_sst_lifetime() {
     let narthex = NarthexSamplesMeta {
         use_file_sequence: false,
         manifest_size: manifest.file_size,
-        part_sizes: parts.iter().map(|part| part.file_size).collect(),
+        parts: parts
+            .iter()
+            .map(|part| NarthexPartMeta {
+                file_size: part.file_size,
+            })
+            .collect(),
     };
     let file_meta = FileMeta {
         region_id: meta.region_id,
