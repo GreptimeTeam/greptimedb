@@ -268,21 +268,6 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
     !sources.is_empty()
 }
 
-/// Whether any canonical merge in `node` answers with histogram samples, given the kind its input
-/// carries.
-///
-/// A merge collects the pieces of one label set and hands on the samples it was given, so its answer
-/// kind is its child's. A histogram answer standing on a merge would travel through the canonical
-/// boundary carrying histogram frames, a pairing no execution exercises yet: the planner keeps such
-/// a statement on the existing plan until that pairing is covered, and it has to look at every
-/// merge, not only a root one.
-pub fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
-    node.any(&|node| {
-        matches!(node.expr, NativeExpr::Merge { .. })
-            && node.output_field_kind(Some(input_kind)) == Some(FieldKind::Histogram)
-    })
-}
-
 /// Whether the merge producer's entire prefix can run on each scan partition independently.
 pub fn canonical_local_prefix(node: &NativeNode) -> bool {
     match &node.expr {
