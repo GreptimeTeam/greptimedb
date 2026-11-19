@@ -66,8 +66,8 @@ use servers::error::{self as server_error, ExecuteQuerySnafu, UnexpectedResultSn
 use snafu::ResultExt;
 
 use crate::query_cache::{
-    CachedAnnotations, ChunkPlan, DirectSpan, FillCursor, Lookup, QueryIdentity, RollupCache,
-    TimeChunk, TimeChunkKey,
+    CachedAnnotations, ChunkPlan, DirectSpan, FillCursor, Lookup, MissReason, QueryIdentity,
+    RollupCache, TimeChunk, TimeChunkKey,
 };
 
 /// Executes one PromQL evaluation subwindow.
@@ -98,6 +98,8 @@ pub(crate) struct WindowOutput {
     pub rows: RecordBatches,
     /// The PromQL annotations the window's read recorded.
     pub annotations: CachedAnnotations,
+    /// Table IDs bound by the executed plan.
+    pub source_table_ids: Vec<u32>,
 }
 
 /// What a cache-aware range execution produced.
@@ -166,7 +168,14 @@ where
     let mut warnings = Vec::new();
     let mut infos = Vec::new();
     for span in ascending_spans(planned.chunks(), planned.direct()) {
-        let window = match span {
+        if let Some(expected) = source_table_id
+            && executor.source_table_id().await != Some(expected)
+        {
+            // A table incarnation changed after validation. Do not mix old and
+            // replacement rows; let the caller run its original plan.
+            return Ok(RangeOutcome::Bypassed);
+        }
+        let Some(window) = (match span {
             Span::Chunk(key) => {
                 chunk_rows(
                     executor,
@@ -181,7 +190,9 @@ where
                 )
                 .await?
             }
-            Span::Direct(direct) => execute_span(executor, stmt, &grid, direct.span()).await?,
+            Span::Direct(direct) => Some(execute_span(executor, stmt, &grid, direct.span()).await?),
+        }) else {
+            return Ok(RangeOutcome::Bypassed);
         };
         warnings.extend(window.annotations.warnings().iter().cloned());
         infos.extend(window.annotations.infos().iter().cloned());
@@ -206,20 +217,20 @@ async fn chunk_rows<E>(
     dependency_history_ms: i64,
     source_epoch: u64,
     source_table_id: Option<u32>,
-) -> server_error::Result<WindowOutput>
+) -> server_error::Result<Option<WindowOutput>>
 where
     E: WindowExecutor + ?Sized,
 {
     // A transition after validation makes both the cached payload and any new
-    // fill unvalidated. Execute this chunk without touching the cache rather than
-    // risk a hit under the old identity; its fill would be rejected anyway.
+    // fill unvalidated. Bypass the entire request rather than mix rows from two
+    // source incarnations.
     if cache.source_epoch() != source_epoch {
-        return execute_span(executor, stmt, grid, key.chunk()).await;
+        return Ok(None);
     }
     if let Some(expected) = source_table_id
         && executor.source_table_id().await != Some(expected)
     {
-        return execute_span(executor, stmt, grid, key.chunk()).await;
+        return Ok(None);
     }
     let fill: FillCursor = match cache.lookup_fenced(key, now, source_epoch) {
         Lookup::Hit {
@@ -229,26 +240,37 @@ where
         } => {
             // The rows and the messages of one read are served together, so a hit
             // reports what the read it replaces reported.
-            return Ok(WindowOutput {
+            return Ok(Some(WindowOutput {
                 rows: clone_rows(&payload)?,
                 annotations: (*annotations).clone(),
-            });
+                source_table_ids: Vec::new(),
+            }));
         }
+        Lookup::Miss(MissReason::SourceChanged) => return Ok(None),
         Lookup::Bypass(_) | Lookup::Miss(_) => match cache.fill_cursor(now) {
             Ok(fill) => fill.with_source_epoch(source_epoch),
             // No fill may be validated right now (an unhealthy or stale authority):
             // read the chunk without keeping it rather than failing a query the
             // original path answers.
-            Err(_) => return execute_span(executor, stmt, grid, key.chunk()).await,
+            Err(_) => {
+                return execute_span(executor, stmt, grid, key.chunk())
+                    .await
+                    .map(Some);
+            }
         },
     };
     let window = execute_span(executor, stmt, grid, key.chunk()).await?;
     if let Some(expected) = source_table_id
-        && executor.source_table_id().await != Some(expected)
+        && (window.source_table_ids.is_empty()
+            || window
+                .source_table_ids
+                .iter()
+                .any(|table_id| *table_id != expected))
     {
-        // The name resolved to a different incarnation while the window ran. The
-        // rows answer the current query but must not be published under the name.
-        return Ok(window);
+        // The executed plan bound a different incarnation from the one validated.
+        // The rows answer the plan that ran but must not be published under the
+        // validated name.
+        return Ok(None);
     }
     // Only a fully consumed chunk is inserted: `execute_span` returns rows it read to
     // the end, and a failure returned above without inserting anything. Its
@@ -266,7 +288,7 @@ where
         Arc::new(window.annotations.clone()),
         dependency,
     );
-    Ok(window)
+    Ok(Some(window))
 }
 
 /// A copy of `rows`, which the cache hands out by shared reference.
@@ -563,6 +585,7 @@ mod tests {
             Ok(WindowOutput {
                 rows: rows_of(&stmt),
                 annotations,
+                source_table_ids: Vec::new(),
             })
         }
     }
