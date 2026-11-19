@@ -54,6 +54,154 @@ fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
         .and(col(col_name).lt(Value::Int64(end)))
 }
 
+/// A repartition can keep a region's own files in place: the region id survives, so the
+/// bytes, the numbers and the `preserve_row_sequence` marker all stay as they are.
+///
+/// The staging exit re-marks the barrier of every file it makes visible, and it must not
+/// clear that marker for a file this region already owned. A local file without trusted
+/// per-row numbering denies the whole region its exact `(C, H]` range
+/// (`read/scan_region.rs::exact_sequence_range` fails closed on it), so the rows written
+/// after the repartition could never be read again — the file never left, only its
+/// publisher changed.
+#[tokio::test]
+async fn test_apply_staging_manifest_keeps_the_marker_of_a_kept_file() {
+    let mut env = TestEnv::with_prefix("apply-staging-keeps-kept-file-marker").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key("0", 0, 3, 0),
+        },
+    )
+    .await;
+    engine
+        .handle_request(region, RegionRequest::Flush(RegionFlushRequest::default()))
+        .await
+        .unwrap();
+
+    let kept_file_id = {
+        let version = engine.get_region(region).unwrap().version();
+        let files = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .collect::<Vec<_>>();
+        assert_eq!(1, files.len());
+        let kept = files[0].meta_ref();
+        assert_eq!(region, kept.region_id);
+        assert!(
+            kept.preserve_row_sequence,
+            "a flushed file of a preserving region states its numbering"
+        );
+        kept.file_id
+    };
+
+    // Repartition the region into itself under a new partition expression: the files stay
+    // where they are, and only the expression the region applies changes.
+    let partition_expr = float_range_expr("field_0", -100.0, 100.0)
+        .as_json_str()
+        .unwrap();
+    // The region owns the staging session as well as the layout that stays in it, which is
+    // what a repartition that keeps a region in place does. The session clears the region's
+    // staging directory, so the layout is remapped only after it starts.
+    engine
+        .handle_request(
+            region,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+    let remapped = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: region,
+            input_regions: vec![region],
+            region_mapping: [(region, vec![region])].into_iter().collect(),
+            new_partition_exprs: [(region, partition_expr.clone())].into_iter().collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr,
+                central_region_id: region,
+                manifest_path: remapped.manifest_paths[&region].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The file never changed hands, so the exit re-stamped its barrier and kept the marker.
+    let version = engine.get_region(region).unwrap().version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(1, files.len());
+    let kept = files[0].meta_ref();
+    assert_eq!(kept_file_id, kept.file_id);
+    assert_eq!(region, kept.region_id, "the file is still this region's");
+    assert!(
+        kept.preserve_row_sequence,
+        "a file that stayed in the region keeps the numbering this region allocated for it"
+    );
+
+    // The exact delta is still served after the repartition: the kept rows plus the row
+    // written afterwards, which the region numbers above the exit's admission.
+    put_rows(
+        &engine,
+        region,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key("1", 3, 4, 99),
+        },
+    )
+    .await;
+    engine
+        .handle_request(region, RegionRequest::Flush(RegionFlushRequest::default()))
+        .await
+        .unwrap();
+    let stream = engine
+        .scan_to_stream(
+            region,
+            ScanRequest {
+                exact_sequence_range: true,
+                read_row_sequence: true,
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(100),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        4,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "the repartition must not deny the region its exact (C, H] range"
+    );
+}
+
 #[tokio::test]
 async fn test_apply_staging_manifest_sequence_domain() {
     common_telemetry::init_default_ut_logging();
@@ -178,13 +326,21 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(
         .manifest()
         .await;
     assert_eq!(manifest.files.len(), 1);
-    assert_eq!(manifest.committed_sequence, Some(1));
+    // The staging exit allocates the holder's admission `B` (the staging apply's
+    // allocation, 1, plus one) and raises the committed watermark to at least `B`
+    // in the same action list, so the persisted manifest proves `H >= B`.
+    assert_eq!(manifest.committed_sequence, Some(2));
     let imported_file = manifest.files.values().next().unwrap();
     assert_eq!(imported_file.region_id, source);
+    // The staging exit re-marks every merged file at the published boundary (2), so
+    // file-level pruning can never skip data that only the exit made visible.
     assert_eq!(
         imported_file.sequence,
-        Some(std::num::NonZeroU64::new(1).unwrap())
+        Some(std::num::NonZeroU64::new(2).unwrap())
     );
+    // The re-mark is a holder-side statement: the source file carried no substituted
+    // cut, and copying the bytes verbatim must not invent one.
+    assert_eq!(None, imported_file.substituted_up_to);
 
     put_rows(
         &engine,
@@ -259,12 +415,18 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(
             .find(|file| output_ids.contains(&file.meta_ref().file_id))
             .expect("target-owned compaction output");
         assert!(output.meta_ref().preserve_row_sequence);
-        // The imported rows are virtualized at target barrier 1 and the local
-        // row has physical sequence 2, so the output frontier is 2.
+        // The staging exit publishes its own boundary (2) and raises the committed
+        // watermark to it in the same publish, while ordinary writes are queued by its
+        // publish window. The local row written afterwards therefore has sequence 3 and
+        // the output frontier is 3.
         assert_eq!(
-            Some(std::num::NonZeroU64::new(2).unwrap()),
+            Some(std::num::NonZeroU64::new(3).unwrap()),
             output.meta_ref().sequence
         );
+        // The imported input is `source`'s file, so this region's reader substituted its
+        // handle bound (2) for every one of its rows. The output's own frontier is 3, but
+        // the cut reaches the constant those rows now carry.
+        assert_eq!(Some(2), output.meta_ref().substituted_up_to);
 
         let mut reader = engine
             .get_region(target)
@@ -285,36 +447,97 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(
             .as_any()
             .downcast_ref::<UInt64Array>()
             .expect("sequence column");
-        // The target partition excludes source field_0 = 0, leaving two
-        // imported rows at barrier 1 and the local row at sequence 2.
+        // The staging exit re-marked the imported file at the published boundary (2),
+        // and the target partition excludes source field_0 = 0: two imported rows at
+        // barrier 2 plus the local row at sequence 3.
         assert_eq!(
             2,
-            sequences.values().iter().filter(|&&seq| seq == 1).count()
+            sequences.values().iter().filter(|&&seq| seq == 2).count()
         );
         assert_eq!(
             1,
-            sequences.values().iter().filter(|&&seq| seq == 2).count()
+            sequences.values().iter().filter(|&&seq| seq == 3).count()
         );
 
-        for (min, max, expected_rows) in [(0, 1, 2), (1, 2, 1)] {
-            let stream = engine
-                .scan_to_stream(
-                    target,
-                    ScanRequest {
-                        exact_sequence_range: true,
-                        memtable_min_sequence: Some(min),
-                        memtable_max_sequence: Some(max),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            let batches = RecordBatches::try_collect(stream).await.unwrap();
-            assert_eq!(
-                expected_rows,
-                batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
-            );
-        }
+        // Neither end of a repartition records an invalidation boundary, so a cursor at
+        // the very bottom (0) is still served: the rows it has not consumed were copied,
+        // not renumbered, and what the holder substituted per file is stated by the
+        // output's `substituted_up_to` (asserted below). The two imported rows it reads
+        // physically carry the exit's admission constant (2) because the reader
+        // substitutes a foreign file at the handle's bound in the default mode.
+        let stream = engine
+            .scan_to_stream(
+                target,
+                ScanRequest {
+                    exact_sequence_range: true,
+                    memtable_min_sequence: Some(0),
+                    memtable_max_sequence: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            2,
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            "staging apply and exit record no boundary, so no cursor is rejected"
+        );
+
+        // A cursor at the staged apply's former allocation (1) resumes as well: the
+        // only reason it could be rejected is a boundary this chain does not record.
+        let stream = engine
+            .scan_to_stream(
+                target,
+                ScanRequest {
+                    exact_sequence_range: true,
+                    memtable_min_sequence: Some(1),
+                    memtable_max_sequence: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            2,
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            "a repartition leaves the cursor readable instead of invalidating it"
+        );
+
+        // A cursor at the exit's admission (2) is served: only rows published after it
+        // are in the delta.
+        put_rows(
+            &engine,
+            target,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows_for_key("2", 5, 6, 99),
+            },
+        )
+        .await;
+        engine
+            .handle_request(target, RegionRequest::Flush(RegionFlushRequest::default()))
+            .await
+            .unwrap();
+        let stream = engine
+            .scan_to_stream(
+                target,
+                ScanRequest {
+                    exact_sequence_range: true,
+                    memtable_min_sequence: Some(2),
+                    memtable_max_sequence: Some(5),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            2,
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            "the (2, 5] delta holds the local row (seq 3) and the new row (seq 4)"
+        );
     }
 }
 

@@ -730,8 +730,17 @@ async fn test_failed_region_edit_preserves_sequence() {
     assert_eq!((current.last_sequence, current.committed_sequence), (4, 4));
 }
 
+/// The marker an edit applies to an added file is judged by **ownership**.
+///
+/// A file that stays in this region (`region_id ==` this region) kept its bytes and the
+/// numbers this region allocated for it: a repartition's staging apply lands here as an
+/// edit too, and clearing the marker of such a file would deny every later exact `(C, H]`
+/// read of the region although the file never left (`read/scan_region.rs::exact_sequence_range`
+/// fails closed on a local file with no trusted per-row numbering). A file adopted from
+/// another region is attributed by the creator's cursor and by its own substituted cut, so
+/// its marker is cleared. Both keep the destination sequence the edit assigns.
 #[tokio::test]
-async fn test_region_edit_clears_preserve_row_sequence() {
+async fn test_region_edit_keeps_local_and_clears_adopted_preserve_row_sequence() {
     let mut env = TestEnv::new().await;
     let (engine, _) = create_engine_with_request_listener(&mut env).await;
 
@@ -745,25 +754,40 @@ async fn test_region_edit_clears_preserve_row_sequence() {
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
 
-    let file_id = FileId::random();
-    let mut edit = test_region_edit(region.region_id, file_id);
-    // The caller claims the file preserves per-row sequences...
+    let local_file_id = FileId::random();
+    let foreign_file_id = FileId::random();
+    let mut edit = test_region_edit(region.region_id, local_file_id);
+    // The caller states that both files preserve per-row sequences...
     edit.files_to_add[0].preserve_row_sequence = true;
+    edit.files_to_add.push(FileMeta {
+        region_id: RegionId::new(1, 2),
+        file_id: foreign_file_id,
+        level: 0,
+        preserve_row_sequence: true,
+        ..Default::default()
+    });
 
     engine.edit_region(region.region_id, edit).await.unwrap();
 
-    // ...but a generic region edit assigns a new destination sequence domain
-    // without proving or rewriting the physical per-row sequence column, so the
-    // marker must be cleared while the assigned sequence stays committed + 1.
+    // ...but only the local one keeps that statement: it is this region's own file, so its
+    // numbers were allocated here. The adopted file's numbers belong to its creator, so the
+    // statement cannot be kept.
     let version = region.version();
-    let file = version.ssts.levels()[0]
-        .files
+    let files = &version.ssts.levels()[0].files;
+    let local = files
         .iter()
-        .find(|(id, _)| **id == file_id)
+        .find(|(id, _)| **id == local_file_id)
         .unwrap()
         .1;
-    assert!(!file.meta_ref().preserve_row_sequence);
-    assert_eq!(Some(1), file.meta_ref().sequence.map(|s| s.get()));
+    assert!(local.meta_ref().preserve_row_sequence);
+    assert_eq!(Some(1), local.meta_ref().sequence.map(|s| s.get()));
+    let foreign = files
+        .iter()
+        .find(|(id, _)| **id == foreign_file_id)
+        .unwrap()
+        .1;
+    assert!(!foreign.meta_ref().preserve_row_sequence);
+    assert_eq!(Some(1), foreign.meta_ref().sequence.map(|s| s.get()));
 }
 
 async fn wait_until_region_is_in_editing(region: &MitoRegionRef) {

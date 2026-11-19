@@ -668,10 +668,14 @@ impl SeriesScan {
             metrics,
         );
 
-        Ok(Box::pin(RecordBatchStreamWrapper::new(
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamWrapper::new(
             input.mapper.output_schema(),
             Box::pin(record_batch_stream),
-        )))
+        ));
+        // No substitution and no observed slices travel with this result: the per-series
+        // path never reads physical row sequences (`ScanRegion::series_scan` refuses
+        // `ScanRequest::read_row_sequence`), so there is no proof to carry.
+        Ok(stream)
     }
 
     #[tracing::instrument(

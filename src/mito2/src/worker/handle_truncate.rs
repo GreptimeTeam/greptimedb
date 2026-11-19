@@ -81,7 +81,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let truncated_entry_id = version_data.last_entry_id;
                 let truncated_sequence = version_data.committed_sequence;
 
-                // Write region truncated to manifest.
+                // Write region truncated to manifest. Truncation drops rows, but the
+                // rows it keeps carry their own numbers, so the action records no
+                // sequence boundary.
                 let truncate = RegionTruncate {
                     region_id,
                     kind: TruncateKind::All {

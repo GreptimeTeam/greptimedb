@@ -41,6 +41,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::stream::spawn_compact_stream;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
+use crate::sst::parquet::format::need_override_sequence;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
 use crate::sst::parquet::{decoded_input_size, row_group_size_for};
@@ -62,8 +63,16 @@ pub(crate) struct CompactionSstReaderBuilder<'a> {
 impl CompactionSstReaderBuilder<'_> {
     /// Build a [FlatSource] that yields Arrow `RecordBatch`s from reading all the input SST files,
     /// for compaction. The schema of the [FlatSource] is unified.
+    ///
+    /// Returns the footer fact `need_override_sequence` of every input, in input order (`None`
+    /// for a file that is gone), so the caller can state the merged column's
+    /// [`FileMeta::substituted_up_to`](crate::sst::file::FileMeta::substituted_up_to) without
+    /// reading the footers a second time.
+    ///
+    /// A gone input contributes neither rows nor a substituted constant, so `None` is a fact
+    /// the caller has to skip rather than a footer that merely is not an override.
     #[cfg(test)]
-    pub(crate) async fn build_flat_sst_reader(self) -> Result<FlatSource> {
+    pub(crate) async fn build_flat_sst_reader(self) -> Result<(FlatSource, Vec<Option<bool>>)> {
         let parquet_metadata = self.collect_parquet_metadata().await?;
         self.build_flat_sst_reader_from(parquet_metadata).await
     }
@@ -73,17 +82,31 @@ impl CompactionSstReaderBuilder<'_> {
     pub(crate) async fn build_flat_sst_reader_and_row_group_size(
         self,
         configured: usize,
-    ) -> Result<(FlatSource, usize)> {
+    ) -> Result<(FlatSource, usize, Vec<Option<bool>>)> {
         let parquet_metadata = self.collect_parquet_metadata().await?;
-        let (rows, bytes) = decoded_input_size(parquet_metadata.iter().map(Arc::as_ref));
-        let source = self.build_flat_sst_reader_from(parquet_metadata).await?;
-        Ok((source, row_group_size_for(rows, bytes, configured)))
+        let (rows, bytes) = decoded_input_size(
+            parquet_metadata
+                .iter()
+                .flatten()
+                .map(|footer| footer.as_ref()),
+        );
+        let (source, legacy_overrides) = self.build_flat_sst_reader_from(parquet_metadata).await?;
+        Ok((
+            source,
+            row_group_size_for(rows, bytes, configured),
+            legacy_overrides,
+        ))
     }
 
     async fn build_flat_sst_reader_from(
         self,
-        parquet_metadata: Vec<Arc<ParquetMetaData>>,
-    ) -> Result<FlatSource> {
+        parquet_metadata: Vec<Option<Arc<ParquetMetaData>>>,
+    ) -> Result<(FlatSource, Vec<Option<bool>>)> {
+        let legacy_overrides = parquet_metadata
+            .iter()
+            .map(|footer| footer.as_ref().map(|footer| need_override_sequence(footer)))
+            .collect::<Vec<_>>();
+        let parquet_metadata = parquet_metadata.into_iter().flatten().collect::<Vec<_>>();
         let plans = collect_json2_rewrite_plans_from_parquet(&self.metadata, &parquet_metadata)?;
         let scan_input = self.build_scan_input(&parquet_metadata, &plans)?;
 
@@ -95,7 +118,7 @@ impl CompactionSstReaderBuilder<'_> {
             .build_flat_reader_for_compaction()
             .boxed()
             .await?;
-        Ok(FlatSource::new_stream(schema, stream))
+        Ok((FlatSource::new_stream(schema, stream), legacy_overrides))
     }
 
     fn build_scan_input(
@@ -171,8 +194,9 @@ impl CompactionSstReaderBuilder<'_> {
         Ok(scan_input.build())
     }
 
-    /// Reads the footers of all inputs concurrently, keeping the input order.
-    async fn collect_parquet_metadata(&self) -> Result<Vec<Arc<ParquetMetaData>>> {
+    /// Reads the footers of all inputs concurrently, keeping the input order. A file that
+    /// is gone yields `None`, which contributes neither rows nor a substituted constant.
+    async fn collect_parquet_metadata(&self) -> Result<Vec<Option<Arc<ParquetMetaData>>>> {
         let reads: Vec<_> = self
             .inputs
             .iter()
@@ -182,7 +206,7 @@ impl CompactionSstReaderBuilder<'_> {
             .buffered(MAX_CONCURRENT_METADATA_READS)
             .try_collect()
             .await?;
-        Ok(metadata.into_iter().flatten().collect())
+        Ok(metadata)
     }
 
     /// Reads the parquet metadata of `file_handle`, or `None` if the file is gone.
@@ -341,7 +365,7 @@ mod tests {
         let inputs: Vec<_> = version.ssts.levels()[0].files().cloned().collect();
         assert_eq!(2, inputs.len());
 
-        let mut source = CompactionSstReaderBuilder {
+        let (mut source, legacy_overrides) = CompactionSstReaderBuilder {
             metadata: version.metadata.clone(),
             sst_layer: region.access_layer.clone(),
             cache: engine.cache_manager(),
@@ -355,6 +379,8 @@ mod tests {
         .build_flat_sst_reader()
         .await
         .unwrap();
+        // A flush writes the allocated sequences, so no input is an all-zero legacy file.
+        assert_eq!(vec![Some(false), Some(false)], legacy_overrides);
         let mut num_batches = 0;
         let mut num_rows = 0;
         while let Some(batch) = source.next_batch().await.unwrap() {
@@ -431,7 +457,7 @@ mod tests {
             .unwrap();
         assert!(encoded < 1024 * 1024, "{encoded}");
 
-        let (_, row_group_size) = CompactionSstReaderBuilder {
+        let (_, row_group_size, _) = CompactionSstReaderBuilder {
             metadata: version.metadata.clone(),
             sst_layer: region.access_layer.clone(),
             cache: engine.cache_manager(),
