@@ -89,7 +89,8 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Index extensions**: shared contracts and provider validation live in `sst/index/registry.rs`;
   typed sketch options are enterprise-gated. Lifecycle and failure tests live in
-  `engine/index_build_test.rs` and `compaction/`.
+  `engine/index_build_test.rs` and `compaction/`. A background rebuild must not replace a file
+  that carries extension indexes (`worker/handle_rebuild_index.rs::needs_background_indexes`).
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may
