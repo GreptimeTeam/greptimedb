@@ -86,6 +86,7 @@ use promql_parser::util::{ExprVisitor, walk_expr};
 use query::QueryEngineRef;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
+use query::promql::window::windowed_source_table;
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
@@ -1681,8 +1682,9 @@ impl Instance {
     /// The reusable half of this request: every dimension two requests must agree on
     /// before one may answer the other's points.
     ///
-    /// [`None`] when a dimension does not fit the identity's integer fields, because
-    /// a narrowed value would key the same span under a different grid.
+    /// [`None`] when the expression has no admitted source table or a dimension
+    /// does not fit the identity's integer fields, because a narrowed value would
+    /// key the same span under a different grid.
     fn range_query_identity(
         query: &PromQuery,
         eval_stmt: &EvalStmt,
@@ -1696,6 +1698,7 @@ impl Instance {
             catalog: query_ctx.current_catalog().to_string(),
             schema: query_ctx.current_schema(),
             query: query.query.clone(),
+            source_table: windowed_source_table(&eval_stmt.expr).ok()?.to_string(),
             step_ms: i64::try_from(eval_stmt.interval.as_millis()).ok()?,
             lookback_ms: i64::try_from(eval_stmt.lookback_delta.as_millis()).ok()?,
             route: plan_route(plan),
@@ -3484,6 +3487,61 @@ mod tests {
             step: "60".to_string(),
             lookback: "60".to_string(),
             alias: None,
+        }
+    }
+
+    #[test]
+    fn range_query_identity_uses_source_from_the_statement_across_sliding_windows() {
+        let mut query = metric_range_query("sum(rate(cpu[5m]))");
+        let stmt = EvalStmt {
+            expr: promql_parser::parser::parse(&query.query).unwrap(),
+            start: std::time::UNIX_EPOCH + Duration::from_secs(36_000),
+            end: std::time::UNIX_EPOCH + Duration::from_secs(37_740),
+            interval: Duration::from_secs(60),
+            lookback_delta: Duration::from_secs(60),
+        };
+        let context = test_query_ctx(1);
+        let plan = LogicalPlanBuilder::empty(false).build().unwrap();
+        let first = Instance::range_query_identity(&query, &stmt, None, false, &plan, &context)
+            .expect("the expression names one admitted table");
+        assert_eq!(first.source_table, "cpu");
+
+        query.start = "36300".to_string();
+        query.end = "38040".to_string();
+        let mut sliding = stmt.clone();
+        sliding.start += Duration::from_secs(300);
+        sliding.end += Duration::from_secs(300);
+        let second = Instance::range_query_identity(&query, &sliding, None, false, &plan, &context)
+            .expect("the sliding expression names the same table");
+        assert_eq!(first, second);
+        assert_eq!(second.source_table, "cpu");
+
+        // The statement expression, not the original query text, is authoritative.
+        sliding.expr = promql_parser::parser::parse("sum(rate(memory[5m]))").unwrap();
+        let other = Instance::range_query_identity(&query, &sliding, None, false, &plan, &context)
+            .expect("the statement names a table");
+        assert_eq!(other.source_table, "memory");
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn range_query_identity_bypasses_when_the_source_is_unknown() {
+        let context = test_query_ctx(1);
+        let plan = LogicalPlanBuilder::empty(false).build().unwrap();
+        for text in ["cpu + memory", "avg(cpu)", "{host=\"a\"}"] {
+            let query = metric_range_query(text);
+            let stmt = EvalStmt {
+                expr: promql_parser::parser::parse(text).unwrap(),
+                start: std::time::UNIX_EPOCH,
+                end: std::time::UNIX_EPOCH + Duration::from_secs(300),
+                interval: Duration::from_secs(60),
+                lookback_delta: Duration::from_secs(60),
+            };
+            assert!(
+                Instance::range_query_identity(&query, &stmt, None, false, &plan, &context)
+                    .is_none(),
+                "{text}"
+            );
         }
     }
 

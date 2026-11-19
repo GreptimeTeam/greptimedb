@@ -63,7 +63,8 @@
 //! reached. [`RollupCache::invalidate_range`] answers that for one identity: it
 //! removes every entry of that identity whose *input dependency* overlaps a dirty
 //! range, leaves every disjoint chunk and every other identity resident, and
-//! returns how many it removed.
+//! returns how many it removed. [`RollupCache::invalidate_table_range`] instead
+//! removes overlapping entries across all identities for a named source table.
 //!
 //! The input dependency is the span of source data the payload was materialized
 //! from, recorded when the entry is stored. Deriving it from the evaluation
@@ -109,7 +110,7 @@
 //! minutes of samples *before* the chunk start. Nothing here narrows that history.
 //!
 //! Not implemented: the storage sequence probe behind a [`CacheAuthority`], its
-//! call into [`RollupCache::invalidate_range`], the query-path wiring, and any
+//! call into invalidation, the query-path invalidation wiring, and any
 //! configuration option.
 
 #![allow(dead_code)] // Wired into the query path by a later milestone.
@@ -162,9 +163,9 @@ pub enum QueryRoute {
 /// would let one request answer another's points, which is why the list is
 /// exhaustive rather than minimal.
 ///
-/// The query text is redacted in [`fmt::Debug`], since a query name and its
-/// selectors can carry tenant data; the alias and the read preference are not
-/// query text and are printed.
+/// The query text and source table are redacted in [`fmt::Debug`], since a query
+/// name and its selectors can carry tenant data; the alias and the read preference
+/// are not query text and are printed.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct QueryIdentity {
     /// The tenant the query runs as.
@@ -175,6 +176,8 @@ pub struct QueryIdentity {
     pub schema: String,
     /// The query text exactly as the caller wrote it.
     pub query: String,
+    /// The admitted expression's named source table, without catalog or schema.
+    pub source_table: String,
     /// The evaluation step, in milliseconds.
     ///
     /// It has to be the step the statement is evaluated with: a chunk keyed on one
@@ -209,6 +212,7 @@ impl fmt::Debug for QueryIdentity {
             .field("catalog", &self.catalog)
             .field("schema", &self.schema)
             .field("query", &REDACTED_QUERY)
+            .field("source_table", &REDACTED_QUERY)
             .field("step_ms", &self.step_ms)
             .field("lookback_ms", &self.lookback_ms)
             .field("route", &self.route)
@@ -978,9 +982,8 @@ pub struct RollupCache {
     entries: Cache<TimeChunkKey, Entry>,
     /// How many invalidations have run, which is what a fill is validated against.
     ///
-    /// It is advanced by [`RollupCache::invalidate_range`] and never read as a
-    /// clock: only the ordering between the epoch a fill captured and the current
-    /// one matters.
+    /// It is advanced by both invalidation methods and never read as a clock: only
+    /// the ordering between the epoch a fill captured and the current one matters.
     invalidation_epoch: AtomicU64,
 }
 
@@ -1146,17 +1149,15 @@ impl RollupCache {
     /// [`RollupCache::insert_annotated`] with the input span the payload was
     /// materialized from.
     ///
-    /// `dependency` is the span of source data the read touched, which
-    /// [`RollupCache::invalidate_range`] compares against a dirty range. It must
-    /// contain the chunk's own span, and is wider than it whenever the evaluation
-    /// folded history before the chunk start (a lookback window, or the range of
-    /// `rate(x[5m])`); an entry whose dependency is only the chunk is invalidated
-    /// only by a range that reaches its output points.
+    /// `dependency` is the span of source data the read touched, which invalidation
+    /// compares against a dirty range. It must contain the chunk's own span, and is
+    /// wider than it whenever the evaluation folded history before the chunk start
+    /// (a lookback window, or the range of `rate(x[5m])`); an entry whose dependency
+    /// is only the chunk is invalidated only by a range that reaches its output points.
     ///
-    /// The insertion is guarded by `fill`: a fill overtaken by a
-    /// [`RollupCache::invalidate_range`] is dropped, even though its key and cursor
-    /// are still current, because the read behind it may have returned exactly what
-    /// that invalidation removed.
+    /// The insertion is guarded by `fill`: a fill overtaken by an invalidation is
+    /// dropped, even though its key and cursor are still current, because the read
+    /// behind it may have returned exactly what that invalidation removed.
     pub fn insert_with_dependency(
         &self,
         key: TimeChunkKey,
@@ -1268,6 +1269,29 @@ impl RollupCache {
             .count()
     }
 
+    /// Drops entries for `table` whose input dependencies overlap `input_span`,
+    /// regardless of their query identity, and returns the number removed.
+    ///
+    /// The table is the exact named source table in [`QueryIdentity`]; matching it
+    /// across catalogs and schemas is conservative. As in [`Self::invalidate_range`],
+    /// both spans are half-open, the epoch advances once even if nothing is removed,
+    /// and a concurrent fill that started before invalidation cannot be stored.
+    /// The scan and removals are not atomic, so a newer fill may also be removed.
+    pub fn invalidate_table_range(&self, table: &str, input_span: TimeChunk) -> usize {
+        self.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
+
+        let mut dirty = Vec::new();
+        for (key, entry) in self.entries.iter() {
+            if key.identity().source_table == table && overlaps(entry.dependency, input_span) {
+                dirty.push(key);
+            }
+        }
+        dirty
+            .into_iter()
+            .filter(|key| self.entries.remove(key.as_ref()).is_some())
+            .count()
+    }
+
     /// The cursor a lookup at `now` may serve, or why it may serve none.
     fn authorized_cursor(&self, now: SystemTime) -> Result<u64, MissReason> {
         let Some(authority) = &self.authority else {
@@ -1358,6 +1382,7 @@ mod tests {
             catalog: "greptime".to_string(),
             schema: "public".to_string(),
             query: "rate(http_requests_total[5m])".to_string(),
+            source_table: "http_requests_total".to_string(),
             step_ms: STEP_MS,
             lookback_ms: 300_000,
             route: QueryRoute::Legacy,
@@ -1797,6 +1822,10 @@ mod tests {
                 ..base.clone()
             },
             QueryIdentity {
+                source_table: "other".to_string(),
+                ..base.clone()
+            },
+            QueryIdentity {
                 step_ms: STEP_MS * 2,
                 ..base.clone()
             },
@@ -1841,6 +1870,16 @@ mod tests {
         let printed = format!("{:?}", identity());
         assert!(printed.contains(REDACTED_QUERY), "{printed}");
         assert!(!printed.contains("http_requests_total"), "{printed}");
+        let distinct_table = QueryIdentity {
+            source_table: "private_table".to_string(),
+            ..identity()
+        };
+        let printed = format!("{distinct_table:?}");
+        assert!(
+            printed.contains("source_table: \"<redacted>\""),
+            "{printed}"
+        );
+        assert!(!printed.contains("private_table"), "{printed}");
 
         let chunk = chunk_key();
         assert!(!format!("{chunk:?}").contains("http_requests_total"));
@@ -2358,6 +2397,113 @@ mod tests {
             cache.lookup(&other_key, now),
             Lookup::Miss(MissReason::NotFound)
         );
+    }
+
+    #[test]
+    fn table_invalidation_removes_overlapping_dependencies_across_identities() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let fill = cache.fill_cursor(now).unwrap();
+        let table_a = QueryIdentity {
+            query: "rate(table_a[5m])".to_string(),
+            source_table: "table_a".to_string(),
+            ..identity()
+        };
+        let another_a = QueryIdentity {
+            query: "sum(rate(table_a[10m]))".to_string(),
+            step_ms: STEP_MS * 2,
+            ..table_a.clone()
+        };
+        let other_schema_a = QueryIdentity {
+            schema: "another_schema".to_string(),
+            ..table_a.clone()
+        };
+        let table_b = QueryIdentity {
+            query: "rate(table_b[5m])".to_string(),
+            source_table: "table_b".to_string(),
+            ..identity()
+        };
+        let first = TimeChunkKey::new(table_a.clone(), TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS));
+        let shifted = TimeChunkKey::new(
+            another_a,
+            TimeChunk::new(HEAD_MS + CHUNK_MS, HEAD_MS + 2 * CHUNK_MS),
+        );
+        let other_schema = TimeChunkKey::new(other_schema_a, first.chunk());
+        let other_table = TimeChunkKey::new(table_b, first.chunk());
+        let disjoint = TimeChunkKey::new(
+            table_a,
+            TimeChunk::new(HEAD_MS + 3 * CHUNK_MS, HEAD_MS + 4 * CHUNK_MS),
+        );
+        let dirty = TimeChunk::new(HEAD_MS - CHUNK_MS, HEAD_MS - CHUNK_MS + 1);
+
+        // All but `disjoint` read the dirty history, which is before their output.
+        for key in [&first, &shifted, &other_schema, &other_table] {
+            let dependency = TimeChunk::new(dirty.start_ms(), key.chunk().end_ms());
+            assert_eq!(
+                cache.insert_with_dependency(
+                    key.clone(),
+                    fill,
+                    payload(),
+                    Arc::default(),
+                    dependency,
+                ),
+                Insert::Stored
+            );
+        }
+        assert_eq!(
+            cache.insert(disjoint.clone(), fill, payload()),
+            Insert::Stored
+        );
+        assert_eq!(cache.entry_count(), 5);
+
+        assert_eq!(cache.invalidate_table_range("table_a", dirty), 3);
+        assert_eq!(cache.invalidation_epoch(), 1);
+        for key in [&first, &shifted, &other_schema] {
+            assert_eq!(cache.lookup(key, now), Lookup::Miss(MissReason::NotFound));
+        }
+        for key in [&other_table, &disjoint] {
+            assert!(matches!(cache.lookup(key, now), Lookup::Hit { .. }));
+        }
+    }
+
+    #[test]
+    fn table_invalidation_advances_epoch_even_when_nothing_is_removed() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let key = chunk_key();
+        let before = cache.fill_cursor(now).unwrap();
+        assert_eq!(before.epoch(), 0);
+
+        assert_eq!(cache.invalidate_table_range("missing", key.chunk()), 0);
+        assert_eq!(cache.invalidation_epoch(), 1);
+        // The epoch is global: even an outstanding fill for a different table
+        // must be discarded after a table invalidation.
+        assert_eq!(
+            cache.insert(key.clone(), before, payload()),
+            Insert::Rejected
+        );
+
+        let fresh = cache.fill_cursor(now).unwrap();
+        assert_eq!(fresh.epoch(), 1);
+        assert_eq!(cache.insert(key.clone(), fresh, payload()), Insert::Stored);
+        let table = &key.identity().source_table;
+        for span in [
+            TimeChunk::new(HEAD_MS - 1, HEAD_MS),
+            TimeChunk::new(HEAD_MS + CHUNK_MS, HEAD_MS + CHUNK_MS + 1),
+            TimeChunk::new(HEAD_MS, HEAD_MS),
+            TimeChunk::new(HEAD_MS + 1, HEAD_MS),
+        ] {
+            let epoch = cache.invalidation_epoch();
+            assert_eq!(cache.invalidate_table_range(table, span), 0);
+            assert_eq!(cache.invalidation_epoch(), epoch + 1);
+            assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
+        }
+        let epoch = cache.invalidation_epoch();
+        assert_eq!(cache.invalidate_table_range(table, key.chunk()), 1);
+        assert_eq!(cache.invalidation_epoch(), epoch + 1);
+        assert_eq!(cache.lookup(&key, now), Lookup::Miss(MissReason::NotFound));
+        assert_eq!(cache.invalidate_table_range(table, key.chunk()), 0);
+        assert_eq!(cache.invalidation_epoch(), epoch + 2);
     }
 
     #[test]

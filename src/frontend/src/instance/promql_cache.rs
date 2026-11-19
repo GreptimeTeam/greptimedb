@@ -418,6 +418,8 @@ mod tests {
             catalog: "greptime".to_string(),
             schema: "public".to_string(),
             query: query.to_string(),
+            // All admitted test queries read cpu. Bypassed test queries never fill.
+            source_table: "cpu".to_string(),
             step_ms: STEP_MS,
             lookback_ms: 300_000,
             route: QueryRoute::Legacy,
@@ -638,14 +640,17 @@ mod tests {
             // disjoint range ending there leaves the entry resident.
             let start = HEAD_MS - history_ms;
             assert_eq!(
-                cache.invalidate_range(&identity, TimeChunk::new(start - 1, start)),
+                cache.invalidate_table_range(
+                    &identity.source_table,
+                    TimeChunk::new(start - 1, start)
+                ),
                 0,
                 "{query}"
             );
             assert!(matches!(cache.lookup(&key, at(NOW_MS)), Lookup::Hit { .. }));
             let end = HEAD_MS + CHUNK_MS;
             assert_eq!(
-                cache.invalidate_range(&identity, TimeChunk::new(end, end + 1)),
+                cache.invalidate_table_range(&identity.source_table, TimeChunk::new(end, end + 1)),
                 0,
                 "{query}"
             );
@@ -653,7 +658,10 @@ mod tests {
             // A single dirty millisecond inside that history evicts the chunk,
             // even though all its output points come later.
             assert_eq!(
-                cache.invalidate_range(&identity, TimeChunk::new(start, start + 1)),
+                cache.invalidate_table_range(
+                    &identity.source_table,
+                    TimeChunk::new(start, start + 1)
+                ),
                 1,
                 "{query}"
             );

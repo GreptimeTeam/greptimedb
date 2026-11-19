@@ -108,6 +108,17 @@ pub fn is_windowable(expr: &PromExpr) -> bool {
     admit(expr).is_some()
 }
 
+/// The named source table of an expression admitted by the window allowlist.
+///
+/// Selectors name the table directly; `rate` uses its matrix selector's name,
+/// `sum` uses its child's name, and parentheses are transparent. Multi-input,
+/// unnamed, and other expressions outside the allowlist fail closed.
+pub fn windowed_source_table(expr: &PromExpr) -> Result<&str, WindowError> {
+    admit(expr)
+        .map(|admitted| admitted.source_table)
+        .ok_or(WindowError::NotEligible)
+}
+
 /// The maximum input range of an admitted expression, in milliseconds.
 ///
 /// Named selectors return zero; their caller must account for the evaluation
@@ -124,6 +135,8 @@ pub fn max_input_range_ms(expr: &PromExpr) -> Result<i64, WindowError> {
 
 /// What the v1 allowlist admits, beyond the expression being windowable at all.
 struct Admitted<'a> {
+    /// The named selector's source table.
+    source_table: &'a str,
     /// The range of an admitted `rate`'s matrix selector, which planning narrows
     /// to milliseconds before it folds a window of them.
     matrix: Option<&'a MatrixSelector>,
@@ -133,16 +146,16 @@ struct Admitted<'a> {
 fn admit(expr: &PromExpr) -> Option<Admitted<'_>> {
     match expr {
         PromExpr::Paren(ParenExpr { expr }) => admit(expr),
-        PromExpr::VectorSelector(selector) => {
-            named_selector(selector).then_some(Admitted { matrix: None })
-        }
+        PromExpr::VectorSelector(selector) => Some(Admitted {
+            source_table: named_selector(selector)?,
+            matrix: None,
+        }),
         PromExpr::Call(Call { func, args }) if func.name == "rate" && args.args.len() == 1 => {
             match unparen(&args.args[0]) {
-                PromExpr::MatrixSelector(selector) if named_selector(&selector.vs) => {
-                    Some(Admitted {
-                        matrix: Some(selector),
-                    })
-                }
+                PromExpr::MatrixSelector(selector) => Some(Admitted {
+                    source_table: named_selector(&selector.vs)?,
+                    matrix: Some(selector),
+                }),
                 _ => None,
             }
         }
@@ -175,16 +188,19 @@ fn unparen(mut expr: &PromExpr) -> &PromExpr {
     expr
 }
 
-fn named_selector(selector: &VectorSelector) -> bool {
-    selector.name.is_some()
-        && selector.at.is_none()
-        && selector.offset.is_none()
-        && selector.matchers.or_matchers.is_empty()
-        && !selector
+fn named_selector(selector: &VectorSelector) -> Option<&str> {
+    if selector.at.is_some()
+        || selector.offset.is_some()
+        || !selector.matchers.or_matchers.is_empty()
+        || selector
             .matchers
             .matchers
             .iter()
             .any(|matcher| matcher.name == "__name__")
+    {
+        return None;
+    }
+    selector.name.as_deref()
 }
 
 /// A step as the positive whole number of milliseconds planning lays its grid out with.
@@ -720,6 +736,43 @@ mod tests {
         assert_eq!(max_input_range_ms(&largest.expr), Ok(i64::MAX));
         let fractional = stmt_with_range("rate(x[10m])", Duration::from_micros(1_500));
         assert_eq!(max_input_range_ms(&fractional.expr), Ok(1));
+    }
+
+    #[test]
+    fn source_table_follows_the_window_allowlist() {
+        for (query, expected) in [
+            ("cpu", "cpu"),
+            ("cpu{host=\"a\"}", "cpu"),
+            ("rate(requests_total[5m])", "requests_total"),
+            ("rate(((requests_total[5m])))", "requests_total"),
+            ("sum(cpu)", "cpu"),
+            ("sum by (host) (rate(requests_total[5m]))", "requests_total"),
+            ("((sum((sum(rate(((cpu[5m]))))))))", "cpu"),
+        ] {
+            assert_eq!(
+                windowed_source_table(&stmt(query).expr),
+                Ok(expected),
+                "{query}"
+            );
+        }
+
+        for query in [
+            "cpu + memory",
+            "sum(rate(cpu[5m]) + rate(memory[5m]))",
+            "avg(cpu)",
+            "abs(cpu)",
+            "{host=\"a\"}",
+            "{__name__=\"cpu\"}",
+            "cpu offset 1m",
+            "rate(cpu[5m] @ end())",
+            "rate(cpu[5m:30s])",
+        ] {
+            assert_eq!(
+                windowed_source_table(&stmt(query).expr),
+                Err(WindowError::NotEligible),
+                "{query}"
+            );
+        }
     }
 
     /// Parentheses group, so they say nothing about the expression inside them:
