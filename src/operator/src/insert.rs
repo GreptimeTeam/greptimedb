@@ -3743,14 +3743,13 @@ mod tests {
             };
             Ok(RegionResponse::new(rows))
         });
-        let flow_cache = Cache::new(100);
         let inserter = Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
             partition_manager,
             Arc::new(MockDatanodeManager::new(watcher)),
             Arc::new(new_table_flownode_set_cache(
                 String::new(),
-                flow_cache.clone(),
+                Cache::new(100),
                 kv_backend,
             )),
             true,
@@ -3811,8 +3810,10 @@ mod tests {
         assert_eq!(output.meta.cost, if enabled { 17 } else { 0 });
         assert!(matches!(output.data, OutputData::AffectedRows(3)));
         dispatched.try_recv().unwrap();
+        let flow_cache = inserter.table_flownode_set_cache();
         assert!(flow_cache.contains_key(&1));
-        flow_cache.invalidate_all();
+        common_meta::cache_invalidator::CacheInvalidator::invalidate_all(flow_cache.as_ref())
+            .unwrap();
         meter.reject.store(true, Ordering::Relaxed);
         let result = inserter
             .do_request(rows_request(), &table_infos, &ctx)

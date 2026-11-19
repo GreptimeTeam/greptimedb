@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use futures_util::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 
@@ -30,13 +29,16 @@ pub type SchemaCacheRef = Arc<SchemaCache>;
 /// Constructs a [SchemaCache].
 pub fn new_schema_cache(
     name: String,
-    cache: Cache<SchemaName, Arc<SchemaNameValue>>,
+    cache: Cache<(usize, SchemaName), Arc<SchemaNameValue>>,
     kv_backend: KvBackendRef,
 ) -> SchemaCache {
     let schema_manager = SchemaManager::new(kv_backend.clone());
     let init = init_factory(schema_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
+    CacheContainer::new_coordinated(name, cache, init, |token| match token {
+        CacheIdent::SchemaName(name) => Some(name),
+        _ => None,
+    })
 }
 
 fn init_factory(schema_manager: SchemaManager) -> Initializer<SchemaName, Arc<SchemaNameValue>> {
@@ -54,22 +56,4 @@ fn init_factory(schema_manager: SchemaManager) -> Initializer<SchemaName, Arc<Sc
             Ok(Some(Arc::new(schema_value)))
         })
     })
-}
-
-fn invalidator<'a>(
-    cache: &'a Cache<SchemaName, Arc<SchemaNameValue>>,
-    idents: &'a [&CacheIdent],
-) -> BoxFuture<'a, crate::error::Result<()>> {
-    Box::pin(async move {
-        for ident in idents {
-            if let CacheIdent::SchemaName(schema_name) = ident {
-                cache.invalidate(schema_name).await
-            }
-        }
-        Ok(())
-    })
-}
-
-fn filter(ident: &CacheIdent) -> bool {
-    matches!(ident, CacheIdent::SchemaName(_))
 }

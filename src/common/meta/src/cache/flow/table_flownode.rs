@@ -21,8 +21,8 @@ use moka::future::Cache;
 use moka::ops::compute::Op;
 use table::metadata::TableId;
 
+use crate::cache::container::{CoordinatedEntries, CoordinatedInvalidation};
 use crate::cache::{CacheContainer, Initializer};
-use crate::error::Result;
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
 use crate::key::flow::{TableFlowManager, TableFlowManagerRef};
 use crate::key::{FlowId, FlowPartitionId};
@@ -57,13 +57,18 @@ pub type TableFlownodeSetCache = CacheContainer<TableId, FlownodeFlowSet, CacheI
 /// Constructs a [TableFlownodeSetCache].
 pub fn new_table_flownode_set_cache(
     name: String,
-    cache: Cache<TableId, FlownodeFlowSet>,
+    cache: Cache<(usize, TableId), FlownodeFlowSet>,
     kv_backend: KvBackendRef,
 ) -> TableFlownodeSetCache {
     let table_flow_manager = Arc::new(TableFlowManager::new(kv_backend));
     let init = init_factory(table_flow_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
+    CacheContainer::with_coordinated_invalidation(
+        name,
+        cache,
+        init,
+        CoordinatedInvalidation::Events(invalidator),
+    )
 }
 
 fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId, FlownodeFlowSet> {
@@ -103,7 +108,7 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
 }
 
 async fn handle_create_flow(
-    cache: &Cache<TableId, FlownodeFlowSet>,
+    cache: &CoordinatedEntries<'_, TableId, FlownodeFlowSet>,
     CreateFlow {
         flow_id,
         source_table_ids,
@@ -111,33 +116,22 @@ async fn handle_create_flow(
     }: &CreateFlow,
 ) {
     for table_id in source_table_ids {
-        let entry = cache.entry(*table_id);
-        entry
-            .and_compute_with(
-                async |entry: Option<moka::Entry<u32, FlownodeFlowSet>>| match entry {
-                    Some(entry) => {
-                        let mut map = entry.into_value().as_ref().clone();
-                        map.extend(
-                            flow_part2nodes.iter().map(|(part, peer)| {
-                                (FlowIdent::new(*flow_id, *part), peer.clone())
-                            }),
-                        );
-
-                        Op::Put(Arc::new(map))
-                    }
-                    None => {
-                        Op::Put(Arc::new(HashMap::from_iter(flow_part2nodes.iter().map(
-                            |(part, peer)| (FlowIdent::new(*flow_id, *part), peer.clone()),
-                        ))))
-                    }
-                },
-            )
+        cache
+            .compute(table_id, |entry| {
+                let mut map = entry.unwrap_or_default();
+                Arc::make_mut(&mut map).extend(
+                    flow_part2nodes
+                        .iter()
+                        .map(|(part, peer)| (FlowIdent::new(*flow_id, *part), peer.clone())),
+                );
+                Op::Put(map)
+            })
             .await;
     }
 }
 
 async fn handle_drop_flow(
-    cache: &Cache<TableId, FlownodeFlowSet>,
+    cache: &CoordinatedEntries<'_, TableId, FlownodeFlowSet>,
     DropFlow {
         flow_id,
         source_table_ids,
@@ -145,38 +139,37 @@ async fn handle_drop_flow(
     }: &DropFlow,
 ) {
     for table_id in source_table_ids {
-        let entry = cache.entry(*table_id);
-        entry
-            .and_compute_with(
-                async |entry: Option<moka::Entry<u32, FlownodeFlowSet>>| match entry {
-                    Some(entry) => {
-                        let mut set = entry.into_value().as_ref().clone();
-                        for (part, _node) in flow_part2node_id {
-                            let key = FlowIdent::new(*flow_id, *part);
-                            set.remove(&key);
-                        }
+        cache
+            .compute(table_id, |entry| match entry {
+                Some(entry) => {
+                    let mut set = entry.as_ref().clone();
+                    for (part, _node) in flow_part2node_id {
+                        let key = FlowIdent::new(*flow_id, *part);
+                        set.remove(&key);
+                    }
 
-                        Op::Put(Arc::new(set))
-                    }
-                    None => {
-                        // Do nothing
-                        Op::Nop
-                    }
-                },
-            )
+                    Op::Put(Arc::new(set))
+                }
+                None => {
+                    // Do nothing
+                    Op::Nop
+                }
+            })
             .await;
     }
 }
 
 fn invalidator<'a>(
-    cache: &'a Cache<TableId, FlownodeFlowSet>,
-    idents: &'a [&CacheIdent],
-) -> BoxFuture<'a, Result<()>> {
+    cache: CoordinatedEntries<'a, TableId, FlownodeFlowSet>,
+    idents: &'a [CacheIdent],
+) -> BoxFuture<'a, ()> {
     Box::pin(async move {
         for ident in idents {
             match ident {
-                CacheIdent::CreateFlow(create_flow) => handle_create_flow(cache, create_flow).await,
-                CacheIdent::DropFlow(drop_flow) => handle_drop_flow(cache, drop_flow).await,
+                CacheIdent::CreateFlow(create_flow) => {
+                    handle_create_flow(&cache, create_flow).await
+                }
+                CacheIdent::DropFlow(drop_flow) => handle_drop_flow(&cache, drop_flow).await,
                 CacheIdent::FlowNodeAddressChange(node_id) => {
                     info!(
                         "Invalidate flow node cache for node_id in table_flownode: {}",
@@ -187,15 +180,7 @@ fn invalidator<'a>(
                 _ => {}
             }
         }
-        Ok(())
     })
-}
-
-fn filter(ident: &CacheIdent) -> bool {
-    matches!(
-        ident,
-        CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_) | CacheIdent::FlowNodeAddressChange(_)
-    )
 }
 
 #[cfg(test)]
@@ -302,6 +287,46 @@ mod tests {
         assert_eq!(set.len(), 5);
         let set = cache.get(1025).await.unwrap().unwrap();
         assert_eq!(set.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_flow_event_waits_for_source_lookup() {
+        let (started, mut loads) = tokio::sync::mpsc::unbounded_channel();
+        let cache = super::CacheContainer::with_coordinated_invalidation(
+            "test".into(),
+            CacheBuilder::new(8).build(),
+            Arc::new(move |_| {
+                let (resume, gate) = tokio::sync::oneshot::channel();
+                started.send(resume).unwrap();
+                Box::pin(async move {
+                    gate.await.unwrap();
+                    Ok(Some(Arc::new(HashMap::new())))
+                })
+            }),
+            super::CoordinatedInvalidation::Events(super::invalidator),
+        );
+        let mut read = Box::pin(cache.get(1));
+        assert!(futures::poll!(&mut read).is_pending());
+        let resume = loads.try_recv().unwrap();
+        let events = [CacheIdent::CreateFlow(CreateFlow {
+            flow_id: 3,
+            source_table_ids: vec![1, 2],
+            partition_to_peer_mapping: [(0, Peer::empty(7))].into_iter().collect(),
+        })];
+        let mut update = Box::pin(cache.invalidate(&events));
+        assert!(futures::poll!(&mut update).is_pending());
+        resume.send(()).unwrap();
+        assert!(read.await.unwrap().unwrap().is_empty());
+        update.await.unwrap();
+        for set in cache.get_many(&[1, 2]).await.unwrap() {
+            assert_eq!(set.unwrap()[&FlowIdent::new(3, 0)], Peer::empty(7));
+        }
+        cache
+            .invalidate(&[CacheIdent::FlowNodeAddressChange(7)])
+            .await
+            .unwrap();
+        assert!(!cache.contains_key(&1));
+        assert!(!cache.contains_key(&2));
     }
 
     #[tokio::test]

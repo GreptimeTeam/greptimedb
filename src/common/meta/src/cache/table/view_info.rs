@@ -14,14 +14,12 @@
 
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use store_api::storage::TableId;
 
 use crate::cache::{CacheContainer, Initializer};
 use crate::error;
-use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::view_info::{ViewInfoManager, ViewInfoManagerRef, ViewInfoValue};
 use crate::kv_backend::KvBackendRef;
@@ -34,14 +32,14 @@ pub type ViewInfoCacheRef = Arc<ViewInfoCache>;
 /// Constructs a [ViewInfoCache].
 pub fn new_view_info_cache(
     name: String,
-    cache: Cache<TableId, Arc<ViewInfoValue>>,
+    cache: Cache<(usize, TableId), Arc<ViewInfoValue>>,
     kv_backend: KvBackendRef,
 ) -> ViewInfoCache {
     let view_info_manager = Arc::new(ViewInfoManager::new(kv_backend));
     let init = init_factory(view_info_manager.clone());
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter).with_batch_initializer(
-        Arc::new(move |ids| {
+    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_id_key)
+        .with_batch_initializer(Arc::new(move |ids| {
             let manager = view_info_manager.clone();
             Box::pin(async move {
                 Ok(manager
@@ -51,8 +49,7 @@ pub fn new_view_info_cache(
                     .map(|(id, info)| (id, Arc::new(info)))
                     .collect())
             })
-        }),
-    )
+        }))
 }
 
 fn init_factory(view_info_manager: ViewInfoManagerRef) -> Initializer<TableId, Arc<ViewInfoValue>> {
@@ -68,24 +65,6 @@ fn init_factory(view_info_manager: ViewInfoManagerRef) -> Initializer<TableId, A
             Ok(Some(Arc::new(view_info)))
         })
     })
-}
-
-fn invalidator<'a>(
-    cache: &'a Cache<TableId, Arc<ViewInfoValue>>,
-    idents: &'a [&CacheIdent],
-) -> BoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        for ident in idents {
-            if let CacheIdent::TableId(view_id) = ident {
-                cache.invalidate(view_id).await
-            }
-        }
-        Ok(())
-    })
-}
-
-fn filter(ident: &CacheIdent) -> bool {
-    matches!(ident, CacheIdent::TableId(_))
 }
 
 #[cfg(test)]
