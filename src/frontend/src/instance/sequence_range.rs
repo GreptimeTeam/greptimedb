@@ -194,6 +194,9 @@ impl Instance {
         // before the first probe of the new table.
         {
             let mut incarnations = self.source_probe_incarnations.lock().unwrap();
+            // Evict under the incarnation lock: a second request for the recreated
+            // name must not observe the new ID and reach the cache before the old
+            // incarnation's entries are gone.
             if incarnations
                 .insert(table.to_string(), table_id)
                 .is_some_and(|previous| previous != table_id)
@@ -220,12 +223,12 @@ impl Instance {
         }
 
         let qualified_name = table.to_string();
-        let (lower, route_changed, renamed_from) = {
+        let lower = {
             let mut state = self.source_probe_cursors.lock().unwrap();
             // Cursors are per logical table: metric-engine logical tables share a
             // physical region sequence, and one logical table's scan must not
             // advance another's lower bound past rows it has not read.
-            match state.get_mut(&table_id) {
+            let (lower, route_changed, renamed_from) = match state.get_mut(&table_id) {
                 Some(stored) => {
                     let renamed_from = (stored.table_name != qualified_name).then(|| {
                         stored.table_name.clone_from(&qualified_name);
@@ -249,18 +252,18 @@ impl Instance {
                     false,
                     None,
                 ),
+            };
+            // Publish the name transition and the evictions together under the
+            // cursor lock: a concurrent probe must not observe the new name with
+            // the old name's entries still resident.
+            if let Some(old_name) = renamed_from {
+                cache.invalidate_table(&old_name);
             }
+            if route_changed {
+                cache.invalidate_table(source_table);
+            }
+            lower
         };
-        // A rename keeps the table ID but changes the cache key's name. Evict the
-        // old name before probing under the new one.
-        if let Some(old_name) = renamed_from {
-            cache.invalidate_table(&old_name);
-        }
-        // A route change makes every old entry's input regions incomparable. Evict
-        // before reading or advancing anything from the new route.
-        if route_changed {
-            cache.invalidate_table(source_table);
-        }
 
         let (high, min, max) = match self.probe_sequence_range(table, &lower, query_ctx).await {
             Ok(probe) => probe,
