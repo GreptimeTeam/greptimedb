@@ -190,7 +190,21 @@ where
                 )
                 .await?
             }
-            Span::Direct(direct) => Some(execute_span(executor, stmt, &grid, direct.span()).await?),
+            Span::Direct(direct) => {
+                let window = execute_span(executor, stmt, &grid, direct.span()).await?;
+                if let Some(expected) = source_table_id
+                    && (window.source_table_ids.is_empty()
+                        || window
+                            .source_table_ids
+                            .iter()
+                            .any(|table_id| *table_id != expected))
+                {
+                    // The direct window bound a different incarnation. Do not mix
+                    // its rows with cached rows from the validated table.
+                    return Ok(RangeOutcome::Bypassed);
+                }
+                Some(window)
+            }
         }) else {
             return Ok(RangeOutcome::Bypassed);
         };
