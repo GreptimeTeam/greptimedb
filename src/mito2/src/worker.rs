@@ -36,6 +36,9 @@ mod handle_tail_replay;
 mod handle_truncate;
 mod handle_write;
 
+#[cfg(test)]
+pub(crate) use handle_catchup::persist_backfilled_metadata;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;

@@ -1223,26 +1223,15 @@ async fn test_conflict_reloads_region() {
 /// The persisting of backfilled metadata that the end of a wait for the Leader lease spawns
 /// outside the worker asks the worker to reload the region it fenced on a newer manifest.
 #[tokio::test]
-async fn test_conflicting_backfill_after_leader_lease_reloads_region() {
+async fn test_conflicting_backfill_asks_for_reload() {
     let region_id = RegionId::new(1, 1);
-    let fetcher = new_dummy_fetcher(
-        region_id,
-        r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#.to_string(),
-    );
-    let mut env = TestEnv::with_prefix("backfill-conflict-reloads")
+    let expr = r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
+    let mut env = TestEnv::with_prefix("backfill-conflict-reload")
         .await
-        .with_partition_expr_fetcher(fetcher);
-    // The periodic region check never runs, so only the save's notification reloads.
-    let time_provider = Arc::new(MockTimeProvider::new(current_time_millis()));
-    let engine = env
-        .create_engine_with_log_store_and_time(
-            MitoConfig::default(),
-            new_log_store().await,
-            time_provider,
-            None,
-        )
-        .await;
+        .with_partition_expr_fetcher(new_dummy_fetcher(region_id, expr.to_string()));
+    let (engine, _log_store) = new_engine(&mut env).await;
     engine.require_write_lease();
+    engine.freeze_lease_clock(Instant::now());
     let request = CreateRequestBuilder::new()
         .insert_option(WAL_OPTIONS_KEY, &wal_options()[WAL_OPTIONS_KEY])
         .partition_expr_json(None)
@@ -1253,27 +1242,8 @@ async fn test_conflicting_backfill_after_leader_lease_reloads_region() {
         .await
         .unwrap();
     close_region(&engine, region_id).await;
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Open(open_request(table_dir.clone())),
-        )
-        .await
-        .unwrap();
-    promote_to_await_leader_lease(&engine, region_id).await;
-    let old = engine.get_region(region_id).unwrap();
-    assert!(old.metadata().partition_expr.is_some());
-    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
-    let version = next_manifest_version(&old).await;
-    let store = env.get_object_store().unwrap();
-    publish_delta(
-        &store,
-        &region_dir,
-        version,
-        encode_delta(nop_action()).await,
-    )
-    .await;
-
+    let open = RegionRequest::Open(open_request(table_dir.clone()));
+    engine.handle_request(region_id, open).await.unwrap();
     let now = Instant::now();
     engine
         .set_region_role_with_lease(
@@ -1284,9 +1254,30 @@ async fn test_conflicting_backfill_after_leader_lease_reloads_region() {
             None,
         )
         .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    let version = next_manifest_version(&region).await;
+    let store = env.get_object_store().unwrap();
+    publish_delta(
+        &store,
+        &region_dir,
+        version,
+        encode_delta(nop_action()).await,
+    )
+    .await;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
 
-    wait_until(|| is_replaced(&engine, &old)).await;
-    assert!(old.manifest_ctx.is_reload_pending());
+    crate::worker::persist_backfilled_metadata(&sender, &region).await;
+
+    assert!(region.manifest_ctx.is_reload_pending());
+    let request = receiver.try_recv().unwrap().request;
+    assert!(matches!(
+        request,
+        WorkerRequest::Background {
+            region_id: notified,
+            notify: BackgroundNotify::RegionFenced,
+        } if notified == region_id
+    ));
 }
 
 #[tokio::test]

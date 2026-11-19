@@ -279,9 +279,18 @@ fn spawn_persist_backfilled_metadata(
     listener.on_persist_backfilled_metadata_begin(region.region_id);
     let sender = sender.clone();
     common_runtime::spawn_global(async move {
-        region.persist_backfilled_metadata().await;
-        handle_reload::notify_if_fenced(&sender, &region).await;
+        persist_backfilled_metadata(&sender, &region).await;
     });
+}
+
+/// Persists the metadata the opener filled in for `region` and, if the commit fenced the region,
+/// asks its worker through `sender` for the reload.
+pub(crate) async fn persist_backfilled_metadata(
+    sender: &Sender<WorkerRequestWithTime>,
+    region: &MitoRegionRef,
+) {
+    region.persist_backfilled_metadata().await;
+    handle_reload::notify_if_fenced(sender, region).await;
 }
 
 /// Tells the worker that a lease ended the wait of `region` for its Leader lease, without
