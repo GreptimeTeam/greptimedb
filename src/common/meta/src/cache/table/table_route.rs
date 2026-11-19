@@ -43,6 +43,15 @@ impl From<TableRouteValue> for TableRoute {
     }
 }
 
+impl From<&TableRoute> for TableRouteValue {
+    fn from(route: &TableRoute) -> Self {
+        match route {
+            TableRoute::Physical(value) => Self::Physical(value.as_ref().clone()),
+            TableRoute::Logical(value) => Self::Logical(value.as_ref().clone()),
+        }
+    }
+}
+
 impl TableRoute {
     /// Returns true if it's physical table.
     pub fn is_physical(&self) -> bool {

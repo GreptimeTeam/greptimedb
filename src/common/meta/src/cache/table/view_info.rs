@@ -42,12 +42,10 @@ pub fn new_view_info_cache(
         .with_batch_initializer(Arc::new(move |ids| {
             let manager = view_info_manager.clone();
             Box::pin(async move {
-                Ok(manager
+                manager
                     .batch_get(&ids)
-                    .await?
-                    .into_iter()
-                    .map(|(id, info)| (id, Arc::new(info)))
-                    .collect())
+                    .await
+                    .map(crate::cache::share_batch_values)
             })
         }))
 }

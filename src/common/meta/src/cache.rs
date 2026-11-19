@@ -17,6 +17,10 @@ mod flow;
 mod registry;
 mod table;
 
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::sync::Arc;
+
 pub use container::{BatchInitializer, CacheContainer, Initializer, Invalidator, TokenFilter};
 pub use flow::{
     FlowInfoCache, FlowInfoCacheRef, TableFlownodeSetCache, TableFlownodeSetCacheRef,
@@ -32,3 +36,10 @@ pub use table::{
     TableSchemaCacheRef, ViewInfoCache, ViewInfoCacheRef, new_schema_cache, new_table_info_cache,
     new_table_name_cache, new_table_route_cache, new_table_schema_cache, new_view_info_cache,
 };
+
+fn share_batch_values<K: Eq + Hash, V>(values: HashMap<K, V>) -> HashMap<K, Arc<V>> {
+    values
+        .into_iter()
+        .map(|(key, value)| (key, Arc::new(value)))
+        .collect()
+}

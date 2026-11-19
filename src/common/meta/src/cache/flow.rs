@@ -44,20 +44,15 @@ pub fn new_flow_info_cache(
             let manager = single.clone();
             Box::pin(async move { Ok(manager.get(*id).await?.map(Arc::new)) })
         }),
-        |token| match token {
-            CacheIdent::FlowId(id) => Some(id),
-            _ => None,
-        },
+        CacheIdent::flow_id_key,
     )
     .with_batch_initializer(Arc::new(move |ids| {
         let manager = manager.clone();
         Box::pin(async move {
-            Ok(manager
+            manager
                 .batch_get(&ids)
-                .await?
-                .into_iter()
-                .map(|(id, info)| (id, Arc::new(info)))
-                .collect())
+                .await
+                .map(crate::cache::share_batch_values)
         })
     }))
 }

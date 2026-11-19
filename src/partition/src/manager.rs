@@ -147,28 +147,25 @@ impl PartitionRuleManager {
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, Vec<RegionRoute>>> {
-        let routes =
-            TableRouteManager::resolve_physical_table_routes(table_ids, |ids| async move {
-                let routes = self.table_route_cache.get_many(&ids).await?;
-                Ok(routes
-                    .into_iter()
-                    .map(|route| {
-                        route.map(|route| match route.as_ref() {
-                            TableRoute::Physical(value) => {
-                                TableRouteValue::Physical(value.as_ref().clone())
-                            }
-                            TableRoute::Logical(value) => {
-                                TableRouteValue::Logical(value.as_ref().clone())
-                            }
-                        })
-                    })
-                    .collect())
-            })
-            .await
-            .context(error::TableRouteManagerSnafu)?;
+        let routes = TableRouteManager::resolve_physical_table_routes(table_ids, |ids| {
+            self.load_cached_table_routes(ids)
+        })
+        .await
+        .context(error::TableRouteManagerSnafu)?;
         Ok(routes
             .into_iter()
             .map(|(id, route)| (id, route.region_routes))
+            .collect())
+    }
+
+    async fn load_cached_table_routes(
+        &self,
+        ids: Vec<TableId>,
+    ) -> common_meta::error::Result<Vec<Option<TableRouteValue>>> {
+        let routes = self.table_route_cache.get_many(&ids).await?;
+        Ok(routes
+            .into_iter()
+            .map(|route| route.as_deref().map(TableRouteValue::from))
             .collect())
     }
 
