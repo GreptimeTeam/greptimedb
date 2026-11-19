@@ -20,7 +20,7 @@ use common_telemetry::{debug, info};
 use datatypes::schema::{SkippingIndexOptions, SkippingIndexType};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
-use store_api::metadata::ColumnMetadata;
+use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     AddColumn, AffectedRows, AlterKind, RegionAlterRequest, RegionRequest,
@@ -244,17 +244,15 @@ impl DataRegion {
             .map(|result| result.affected_rows)
     }
 
-    pub async fn physical_columns(
+    /// Returns the current physical schema, including columns installed by an ALTER.
+    pub async fn physical_metadata(
         &self,
         physical_region_id: RegionId,
-    ) -> Result<Vec<ColumnMetadata>> {
-        let data_region_id = utils::to_data_region_id(physical_region_id);
-        let metadata = self
-            .mito
-            .get_metadata(data_region_id)
+    ) -> Result<RegionMetadataRef> {
+        self.mito
+            .get_metadata(utils::to_data_region_id(physical_region_id))
             .await
-            .context(MitoReadOperationSnafu)?;
-        Ok(metadata.column_metadatas.clone())
+            .context(MitoReadOperationSnafu)
     }
 
     pub async fn alter_region_options(

@@ -8726,6 +8726,7 @@ dependencies = [
  "futures-util",
  "fxhash",
  "humantime-serde",
+ "intern-arc",
  "itertools 0.14.0",
  "lazy_static",
  "log-store",

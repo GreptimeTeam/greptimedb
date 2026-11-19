@@ -28,9 +28,10 @@ use store_api::storage::RegionId;
 use validate::validate_alter_region_requests;
 
 use crate::engine::MetricEngineInner;
+use crate::engine::region_metadata;
 use crate::error::{
-    AddingFieldColumnSnafu, LogicalRegionNotFoundSnafu, MissingPhysicalColumnSnafu,
-    PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
+    AddingFieldColumnSnafu, LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result,
+    SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id};
 
@@ -166,11 +167,7 @@ impl MetricEngineInner {
         self.add_physical_columns(physical_region_id, new_columns_to_add, index_options)
             .await?;
 
-        let physical_columns = self.data_region.physical_columns(data_region_id).await?;
-        let physical_schema_map = physical_columns
-            .iter()
-            .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
-            .collect::<HashMap<_, _>>();
+        let physical_metadata = self.data_region.physical_metadata(data_region_id).await?;
 
         // The physical region now has every requested column, either because this call
         // added it or because it was already there with the same definition.
@@ -182,35 +179,13 @@ impl MetricEngineInner {
             let mut column_metadata = HashMap::with_capacity(columns.len());
             for col in columns {
                 let column_name = col.column_metadata.column_schema.name.as_str();
-                let metadata =
-                    physical_schema_map
-                        .get(column_name)
-                        .copied()
-                        .with_context(|| MissingPhysicalColumnSnafu {
-                            name: column_name,
-                            region_id: physical_region_id,
-                        })?;
+                let metadata = region_metadata::physical_column(&physical_metadata, column_name)?;
                 column_metadata.insert(column_name, metadata);
             }
             logical_region_columns.push((*region_id, column_metadata));
         }
 
-        let mut new_add_columns = Vec::with_capacity(new_column_indices.len());
-        for name in new_column_indices.keys() {
-            let column_metadata = physical_schema_map.get(name).copied().with_context(|| {
-                MissingPhysicalColumnSnafu {
-                    name: name.to_string(),
-                    region_id: physical_region_id,
-                }
-            })?;
-            new_add_columns.push((name.to_string(), column_metadata.clone()));
-        }
-
-        // The data region has the new columns, whatever happens to the metadata write.
-        self.state
-            .write()
-            .unwrap()
-            .add_physical_columns(data_region_id, new_add_columns);
+        self.cache_new_physical_columns(&physical_metadata, new_column_indices.keys().copied())?;
 
         // Writes logical regions metadata to metadata region
         let result = self
@@ -231,7 +206,8 @@ impl MetricEngineInner {
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-            ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
+            ColumnMetadata::encode_list(&physical_metadata.column_metadatas)
+                .context(SerializeColumnMetadataSnafu)?,
         );
 
         Ok(0)
@@ -256,21 +232,17 @@ impl MetricEngineInner {
                 continue;
             };
 
-            let mut fields = self
+            let existing_columns = self
                 .load_logical_columns(physical_region_id, *region_id)
-                .await?
-                .into_iter()
-                .filter(|col| col.semantic_type == SemanticType::Field)
-                .collect::<Vec<_>>();
-            fields.extend(
-                added_fields
-                    .into_iter()
-                    .map(|col| col.column_metadata.clone()),
-            );
-
+                .await?;
             ensure!(
-                fields.len() == 1
-                    && is_native_histogram_value_type(&fields[0].column_schema.data_type),
+                added_fields.len() == 1
+                    && is_native_histogram_value_type(
+                        &first_added_field.column_metadata.column_schema.data_type
+                    )
+                    && existing_columns
+                        .iter()
+                        .all(|col| col.semantic_type != SemanticType::Field),
                 AddingFieldColumnSnafu {
                     name: first_added_field.column_metadata.column_schema.name.clone(),
                 }

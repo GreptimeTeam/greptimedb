@@ -15,7 +15,6 @@
 //! Open a metric region.
 
 use api::region::RegionResponse;
-use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_telemetry::{error, info, warn};
 use datafusion::common::HashMap;
@@ -382,9 +381,9 @@ impl MetricEngineInner {
             physical_region_id,
             logical_regions
         );
-        let physical_columns = self
+        let physical_metadata = self
             .data_region
-            .physical_columns(physical_region_id)
+            .physical_metadata(physical_region_id)
             .await?;
         let primary_key_encoding = self
             .mito
@@ -393,28 +392,14 @@ impl MetricEngineInner {
                 region_id: physical_region_id,
             })?;
 
+        let time_index_unit = physical_metadata.time_index_type().unit();
+        let physical_columns = physical_metadata
+            .column_metadatas
+            .iter()
+            .map(|col| (col.column_schema.name.clone(), col.clone()))
+            .collect();
         {
             let mut state = self.state.write().unwrap();
-            // recover physical column names
-            // Safety: The physical columns are loaded from the data region, which always
-            // has a time index.
-            let time_index_unit = physical_columns
-                .iter()
-                .find_map(|col| {
-                    if col.semantic_type == SemanticType::Timestamp {
-                        col.column_schema
-                            .data_type
-                            .as_timestamp()
-                            .map(|data_type| data_type.unit())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap();
-            let physical_columns = physical_columns
-                .into_iter()
-                .map(|col| (col.column_schema.name.clone(), col))
-                .collect();
             state.add_physical_region(
                 physical_region_id,
                 physical_columns,

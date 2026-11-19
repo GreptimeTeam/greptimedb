@@ -58,6 +58,7 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
+use crate::engine::region_metadata::ColumnMetadataInterner;
 use crate::error::{
     self, Error, PhysicalRegionNotFoundSnafu, Result, StartRepeatedTaskSnafu,
     UnsupportedRegionRequestSnafu, UnsupportedRemapManifestsRequestSnafu,
@@ -552,6 +553,7 @@ impl MetricEngine {
             mito: mito.clone(),
             metadata_region,
             data_region,
+            column_metadata_interner: ColumnMetadataInterner::default(),
             state: state.clone(),
             row_modifier: RowModifier::default(),
             flush_task: RepeatedTask::new(
@@ -670,6 +672,7 @@ struct MetricEngineInner {
     mito: MitoEngine,
     metadata_region: MetadataRegion,
     data_region: DataRegion,
+    column_metadata_interner: ColumnMetadataInterner,
     state: Arc<RwLock<MetricEngineState>>,
     row_modifier: RowModifier,
     flush_task: RepeatedTask<Error>,
