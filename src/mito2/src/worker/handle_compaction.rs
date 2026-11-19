@@ -27,7 +27,6 @@ use crate::request::{
     BuildIndexRequest, CompactionFailed, CompactionFinished, CompactionUnitNotification, OnFailure,
     OptionOutputTx,
 };
-use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 use crate::worker::handle_rebuild_index::needs_background_indexes;
