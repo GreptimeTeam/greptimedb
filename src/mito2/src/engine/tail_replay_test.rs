@@ -2311,6 +2311,57 @@ async fn test_discard_own_tails_releases_their_wal() {
     assert_eq!(3, count_rows(&region.engine, region.region_id).await);
 }
 
+/// A discard of pending tails is refused while the region awaits its Leader lease, and the same
+/// discard succeeds after the lease.
+#[tokio::test]
+async fn test_discard_awaiting_leader_lease_succeeds_after_it() {
+    let region = TestRegion::new("tail-discard-awaiting-lease", true, None).await;
+    let tails = vec![
+        own_tail(0, region.entries[0], UptoKind::Reported),
+        own_tail(region.entries[0], region.entries[1], UptoKind::Reported),
+    ];
+    region.reopen_with_tails(tails.clone()).await;
+    region
+        .engine
+        .renew_node_lease(Instant::now() + Duration::from_secs(10));
+    region.listener.hold_from(1);
+    region.catchup().await;
+    wait_until(|| region.listener.commits() == 1).await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    assert!(mito_region.manifest_ctx.awaits_leader_lease());
+    let flushed_entry_id = region.version().flushed_entry_id;
+
+    let error = region.discard_pending_tails(NODE_ID).await.unwrap_err();
+
+    assert!(
+        matches!(
+            error.as_any().downcast_ref::<Error>(),
+            Some(Error::RegionLeaseNotReceived { .. })
+        ),
+        "{error:?}"
+    );
+    assert_eq!(StatusCode::RegionNotReady, error.status_code());
+    assert_eq!(tails, region.version().pending_tails);
+    assert_eq!(flushed_entry_id, region.version().flushed_entry_id);
+
+    let now = Instant::now();
+    region
+        .engine
+        .set_region_role_with_lease(
+            region.region_id,
+            RegionRole::Leader,
+            now,
+            now + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+    assert_eq!(2, region.discard_pending_tails(NODE_ID).await.unwrap());
+    let version = region.version();
+    assert!(version.pending_tails.is_empty());
+    assert_eq!(region.entries[1], version.flushed_entry_id);
+    region.listener.hold_from(0);
+}
+
 #[tokio::test]
 async fn test_discard_listed_tail_raises_flushed_entry_id_to_its_bound() {
     let region = TestRegion::new("tail-discard-listed", false, None).await;
