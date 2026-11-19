@@ -22,7 +22,8 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use promql_parser::parser::{
-    Call, EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, VectorSelector,
+    AggregateExpr, Call, EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, VectorSelector,
+    token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -83,10 +84,26 @@ pub fn windowed_eval_stmt(
 /// Admitted:
 /// - a named instant vector selector with no `@` and no `offset`;
 /// - `rate(<named matrix selector>)` with no `@` and no `offset`, however the
-///   argument is parenthesised.
+///   argument is parenthesised;
+/// - `sum(<admitted expr>)`, with or without a `by (...)`/`without (...)`
+///   grouping clause, however the argument is parenthesised. Grouping chooses
+///   which groups a point's value belongs to, not which points the value is
+///   computed for, so it does not change what a window of output points
+///   recomputes.
 ///
-/// Everything else fails closed: aggregates, binaries, subqueries, other
-/// functions, dynamic metric discovery, and any `@`/`offset` modifier.
+/// Everything else fails closed: every other aggregate, binaries, subqueries,
+/// other functions, dynamic metric discovery, and any `@`/`offset` modifier.
+///
+/// `sum` is the one aggregate admitted, and the reason is not popularity: it is
+/// the shape whose value at an output timestamp folds the complete candidate
+/// vector of that timestamp, so recomputing one timestamp's fold answers what
+/// the unsplit statement answers there. That is exactly the shape a Prometheus
+/// dashboard panel is written in (`sum(rate(x[5m]))`), so it is the one worth
+/// admitting first. Everything else stays out until someone makes the same
+/// argument for it: a ranking aggregate such as `topk` or `quantile` answers
+/// with a subset of the candidate vector rather than a fold of it, and "the
+/// fold of a window equals the fold of the whole vector" - the property a caller
+/// of this helper checks - is not the property it would need.
 pub fn is_windowable(expr: &PromExpr) -> bool {
     admit(expr).is_some()
 }
@@ -115,6 +132,18 @@ fn admit(expr: &PromExpr) -> Option<Admitted<'_>> {
                 _ => None,
             }
         }
+        // `sum` without a parameter: the parser gives `topk` and `quantile` the
+        // parameter that makes them ranking aggregates, so requiring `None` here
+        // keeps the admitted aggregate the folding one it means to be. The
+        // grouping modifier is passed over rather than inspected: `by` and
+        // `without` move a value between groups, they do not decide which
+        // timestamps have one.
+        PromExpr::Aggregate(AggregateExpr {
+            op,
+            expr,
+            param: None,
+            ..
+        }) if op.id() == token::T_SUM => admit(expr),
         _ => None,
     }
 }
@@ -582,9 +611,13 @@ mod tests {
     #[test]
     fn a_grid_refuses_what_planning_refuses() {
         assert_eq!(
-            EvalGrid::of(&stmt("sum(rate(x[5m]))")).unwrap_err(),
+            EvalGrid::of(&stmt("avg(rate(x[5m]))")).unwrap_err(),
             WindowError::NotEligible
         );
+
+        // The admitted `sum` changes nothing about the grid itself: it is the same
+        // integer points, read off the same statement.
+        assert!(EvalGrid::of(&stmt("sum(rate(x[5m]))")).is_ok());
 
         let mut backwards = stmt("x");
         backwards.end = backwards.start - Duration::from_secs(1);
@@ -645,7 +678,19 @@ mod tests {
             "rate(x[5m:30s])",
             "rate((x[5m] @ end()))",
             "rate((x[5m] offset 1m))",
-            "sum(rate(x[5m]))",
+            // The one admitted aggregate admits only a windowable child, and only with no
+            // parameter of its own.
+            "avg(rate(x[5m]))",
+            "min(rate(x[5m]))",
+            "max(rate(x[5m]))",
+            "count(rate(x[5m]))",
+            "quantile(0.9, rate(x[5m]))",
+            "sum(topk(5, x))",
+            "sum(rate(x[5m] @ end()))",
+            "sum(rate(x[5m] offset 1m))",
+            "sum(x offset 1m)",
+            "sum(x @ 123)",
+            "sum(rate(x[5m])) + 1",
             "topk(5, x)",
             "{host=\"a\"}",
             "{__name__=\"x\"}",
@@ -657,6 +702,29 @@ mod tests {
                 windowed_eval_stmt(&stmt(query), 0, 1).unwrap_err(),
                 WindowError::NotEligible,
                 "{query}"
+            );
+        }
+    }
+
+    /// `sum` folds the complete candidate vector of each output timestamp, so a window of
+    /// output timestamps recomputes what the unsplit statement would have folded there. The
+    /// grouping modifier moves a value between groups; it does not decide which timestamps
+    /// have one, so `by`/`without` stay admitted.
+    #[test]
+    fn admits_sum_of_windowable_children() {
+        for query in [
+            "sum(rate(x[5m]))",
+            "sum by (host) (rate(x[5m]))",
+            "sum without (host) (rate(x[5m]))",
+            "sum((rate(x[5m])))",
+            "sum(((rate((x[5m])))))",
+            "((sum by (host) ((rate(x[5m])))))",
+            "sum(x)",
+        ] {
+            assert!(is_windowable(&stmt(query).expr), "{query}");
+            assert!(
+                windowed_eval_stmt(&stmt(query), 0, 1).is_ok(),
+                "{query} is windowable and its first point is in the grid"
             );
         }
     }
