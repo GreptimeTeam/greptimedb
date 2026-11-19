@@ -27,7 +27,6 @@ pub mod utils;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
-use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
@@ -36,7 +35,6 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl::allocator::region_routes::RegionRoutesAllocatorRef;
 use common_meta::ddl::allocator::wal_options::WalOptionsAllocatorRef;
-use common_meta::ddl::drop_table::executor::DropTableExecutor;
 use common_meta::ddl::utils::get_region_wal_options;
 use common_meta::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
 use common_meta::instruction::CacheIdent;
@@ -60,7 +58,7 @@ use common_telemetry::{error, info, warn};
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::{RegionNumber, TableId};
+use store_api::storage::TableId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
@@ -169,7 +167,6 @@ pub struct Context {
 
 #[derive(Debug, Clone, Default)]
 pub struct VolatileContext {
-    awaiting_checkpoint: bool,
     pub metrics: Metrics,
     pub dispatch_start_time: Option<Instant>,
 }
@@ -328,48 +325,6 @@ impl Context {
             .context(error::TableRouteNotFoundSnafu { table_id })?;
 
         Ok(table_route_value)
-    }
-
-    /// Reserves a range while the caller holds the table write lock.
-    async fn reserve_region_numbers(
-        &self,
-        current: &DeserializedValueWithBytes<TableRouteValue>,
-        count: NonZeroUsize,
-    ) -> Result<RegionNumber> {
-        let table_id = self.persistent_ctx.table_id;
-        self.table_metadata_manager
-            .table_route_manager()
-            .try_reserve_region_numbers(table_id, current, count)
-            .await
-            .context(error::TableMetadataManagerSnafu)?
-            .with_context(|| error::RetryLaterSnafu {
-                reason: format!(
-                    "Table route changed while reserving region numbers for table {table_id}"
-                ),
-            })
-    }
-
-    /// Retires numbers that an older Execute checkpoint may have used on unknown peers.
-    /// The caller holds the table write lock.
-    async fn fence_legacy_region_numbers(
-        &self,
-        current: &DeserializedValueWithBytes<TableRouteValue>,
-    ) -> Result<()> {
-        let high_water = current
-            .max_region_number()
-            .context(error::TableMetadataManagerSnafu)?;
-        let last = self
-            .persistent_ctx
-            .plans
-            .iter()
-            .flat_map(|plan| &plan.allocated_region_ids)
-            .map(|id| id.region_number())
-            .max()
-            .unwrap_or(high_water);
-        if let Some(count) = NonZeroUsize::new(last.saturating_sub(high_water) as usize) {
-            self.reserve_region_numbers(current, count).await?;
-        }
-        Ok(())
     }
 
     /// Retrieves the table info value for the given table id.
@@ -633,27 +588,14 @@ impl RepartitionProcedure {
     /// Returns allocated region ids that parent rollback should remove.
     ///
     /// Rollback uses an "after region allocation" semantic:
-    /// - in `AllocateRegion`, use the recorded create targets. Legacy plans without
-    ///   recorded peers can only reclaim a fully published set of routes.
-    /// - in `Dispatch`, all allocated regions in the persisted plans belong to the attempt.
+    /// - in `AllocateRegion` and `Dispatch`, all allocated regions belong to the
+    ///   current repartition attempt and must be cleaned up.
     /// - in `Collect`, only the plans referenced by failed or unknown
     ///   sub-procedures should be rolled back.
-    fn rollback_allocated_region_ids(
-        &self,
-        published_legacy: bool,
-    ) -> HashSet<store_api::storage::RegionId> {
-        let allocation = self
-            .state
-            .as_any()
-            .downcast_ref::<allocate_region::AllocateRegion>();
-        if let Some(allocate_region::AllocateRegion::Create(prepared)) = allocation {
-            return prepared
-                .region_routes
-                .iter()
-                .map(|route| route.region.id)
-                .collect();
-        }
-        if published_legacy || self.state.as_any().is::<dispatch::Dispatch>() {
+    fn rollback_allocated_region_ids(&self) -> HashSet<store_api::storage::RegionId> {
+        if self.state.as_any().is::<allocate_region::AllocateRegion>()
+            || self.state.as_any().is::<dispatch::Dispatch>()
+        {
             return self
                 .context
                 .persistent_ctx
@@ -739,122 +681,49 @@ impl RepartitionProcedure {
         Ok(())
     }
 
-    /// Cleans up targets created before the allocation published its table route.
-    async fn cleanup_unpublished_regions(
-        &self,
-        table: &TableName,
-        routed_allocations: &[RegionRoute],
-    ) -> Result<()> {
-        // After dispatch, SSTs may be shared with other regions. Published allocations
-        // must use the normal partial drop and shared-file GC, including on rollback replay.
-        let Some(allocate_region::AllocateRegion::Create(prepared)) =
-            self.state
-                .as_any()
-                .downcast_ref::<allocate_region::AllocateRegion>()
-        else {
-            return Ok(());
-        };
-        let ctx = &self.context;
-        let published = routed_allocations
-            .iter()
-            .map(|route| route.region.id)
-            .collect::<HashSet<_>>();
-        let mut unpublished = prepared
-            .region_routes
-            .iter()
-            .filter(|route| !published.contains(&route.region.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        if unpublished.is_empty() {
-            return Ok(());
-        }
-
-        ctx.table_metadata_manager
-            .table_route_manager()
-            .table_route_storage()
-            .remap_region_routes(&mut unpublished)
-            .await
-            .context(error::TableMetadataManagerSnafu)?;
-        let table_id = ctx.persistent_ctx.table_id;
-        let executor = DropTableExecutor::new(table.clone(), table_id, false);
-        // Drop alone returns success for a closed region. Close the recorded targets
-        // first, then remove their files and WAL even if a datanode restarted.
-        executor
-            .on_close_regions(
-                &ctx.node_manager,
-                &ctx.leader_region_registry,
-                &unpublished,
-                false,
-            )
-            .await
-            .context(error::DeallocateRegionsSnafu { table_id })?;
-        let table_info = ctx.get_table_info_value().await?;
-        executor
-            .on_cleanup_regions_offline(
-                &ctx.node_manager,
-                &ctx.leader_region_registry,
-                &table_info.table_info,
-                &unpublished,
-                &prepared.wal_options,
-            )
-            .await
-            .context(error::DeallocateRegionsSnafu { table_id })
-    }
-
     async fn rollback_inner(&mut self, procedure_ctx: &ProcedureContext) -> Result<()> {
         if !self.should_rollback() {
             return Ok(());
         }
 
         let table_id = self.context.persistent_ctx.table_id;
+        let allocated_region_ids = self.rollback_allocated_region_ids();
 
         let table_lock = TableLock::Write(table_id).into();
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
 
+        self.rollback_partition_metadata().await?;
         let table_route_value = self.context.get_table_route_value().await?;
         let original_region_routes = region_routes(table_id, table_route_value.get_inner_ref())?;
-        let published_legacy = if matches!(
-            self.state
-                .as_any()
-                .downcast_ref::<allocate_region::AllocateRegion>(),
-            Some(allocate_region::AllocateRegion::Execute(_))
-        ) {
-            // Recovery can enter rollback before executing the legacy state again.
-            self.context
-                .fence_legacy_region_numbers(&table_route_value)
-                .await?;
-            allocate_region::ExecutePlan::is_fully_published(&self.context, original_region_routes)?
-        } else {
-            false
-        };
-        let allocated_region_ids = self.rollback_allocated_region_ids(published_legacy);
         let mut current_region_routes = original_region_routes.clone();
         self.rollback_group_metadata_for_selected_plans(&mut current_region_routes)
             .await?;
-        let allocated_region_routes = current_region_routes
-            .iter()
-            .filter(|route| allocated_region_ids.contains(&route.region.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        let table = TableName {
-            catalog_name: self.context.persistent_ctx.catalog_name.clone(),
-            schema_name: self.context.persistent_ctx.schema_name.clone(),
-            table_name: self.context.persistent_ctx.table_name.clone(),
-        };
-        self.cleanup_unpublished_regions(&table, &allocated_region_routes)
-            .await?;
+        let allocated_region_routes = DeallocateRegion::filter_deallocatable_region_routes(
+            table_id,
+            &current_region_routes,
+            &allocated_region_ids,
+        );
         if !allocated_region_routes.is_empty() {
-            DeallocateRegion::deallocate_regions(
+            let table = TableName {
+                catalog_name: self.context.persistent_ctx.catalog_name.clone(),
+                schema_name: self.context.persistent_ctx.schema_name.clone(),
+                table_name: self.context.persistent_ctx.table_name.clone(),
+            };
+            // Memory guards are not required here,
+            // because the table metadata still contains routes for the deallocating regions.
+            if let Err(err) = DeallocateRegion::deallocate_regions(
                 &self.context.node_manager,
                 &self.context.leader_region_registry,
                 table,
                 table_id,
                 &allocated_region_routes,
             )
-            .await?;
+            .await
+            {
+                warn!(err; "Failed to drop allocated regions during repartition rollback, table_id: {}, regions: {:?}", table_id, allocated_region_ids);
+            }
         }
 
-        self.rollback_partition_metadata().await?;
         let new_region_routes =
             DeallocateRegion::generate_region_routes(&current_region_routes, &allocated_region_ids);
 
@@ -889,7 +758,7 @@ impl Procedure for RepartitionProcedure {
         state = %self.state.name(),
         table_id = %self.context.persistent_ctx.table_id
     ))]
-    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
         let state_name = state.name();
         // Log state transition
@@ -898,26 +767,8 @@ impl Procedure for RepartitionProcedure {
             state_name,
             self.context.persistent_ctx.table_id
         );
-        // A failed checkpoint leaves the runner retrying the advanced in-memory state.
-        // Retry the write before sending create requests or dispatching child procedures.
-        if self.context.volatile_ctx.awaiting_checkpoint
-            && matches!(
-                ctx.provider.procedure_state(ctx.procedure_id).await?,
-                Some(common_procedure::ProcedureState::Retrying { .. })
-            )
-        {
-            return Ok(Status::executing(true));
-        }
-        self.context.volatile_ctx.awaiting_checkpoint = false;
-        match state.next(&mut self.context, ctx).await {
+        match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
-                self.context.volatile_ctx.awaiting_checkpoint = matches!(
-                    status,
-                    Status::Executing {
-                        persist: true,
-                        clean_poisons: false
-                    }
-                );
                 *state = next;
                 Ok(status)
             }
@@ -1235,50 +1086,6 @@ mod tests {
             transition_map: vec![vec![0, 1]],
             original_target_routes: vec![],
         }
-    }
-
-    #[tokio::test]
-    async fn test_recover_legacy_repartition_execute() {
-        let env = TestingEnv::new();
-        let table_id = 1;
-        let routes = vec![test_region_route(RegionId::new(table_id, 1), "")];
-        env.create_physical_table_metadata_for_repartition(
-            table_id,
-            routes.clone(),
-            test_region_wal_options(&[1]),
-        )
-        .await;
-        let (tx, mut rx) = mpsc::channel(4);
-        let nodes = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
-        let mut procedure = RepartitionProcedure::from_json(
-            include_str!("../../../../tests/compatibility/meta/repartition/legacy_execute.json"),
-            |persistent_ctx| {
-                let mut ctx = new_parent_context(&env, nodes, table_id);
-                ctx.persistent_ctx = persistent_ctx;
-                ctx
-            },
-        )
-        .unwrap();
-
-        let ctx = TestingEnv::procedure_context();
-        let err = procedure.execute(&ctx).await.unwrap_err();
-        assert!(!err.is_retry_later());
-        procedure.rollback(&ctx).await.unwrap();
-        // The old checkpoint has no record of which peer received the create.
-        assert!(rx.try_recv().is_err());
-        assert_eq!(
-            current_parent_region_routes(&procedure.context).await,
-            routes
-        );
-    }
-
-    async fn persist_allocation_targets(procedure: &mut RepartitionProcedure) {
-        let status = procedure
-            .execute(&TestingEnv::procedure_context())
-            .await
-            .unwrap();
-        assert!(status.need_persist());
-        assert_parent_state::<AllocateRegion>(procedure);
     }
 
     fn with_rollback_metadata(
@@ -1656,22 +1463,7 @@ mod tests {
     async fn test_repartition_rollback_removes_allocated_routes_from_dispatch() {
         let env = TestingEnv::new();
         let table_id = 1024;
-        let (tx, _rx) = mpsc::channel(2);
-        let fail_once = AtomicBool::new(true);
-        let watcher = DatanodeWatcher::new(tx).with_handler(move |_, request| {
-            assert!(
-                matches!(request.body, Some(api::v1::region::region_request::Body::Drop(req))
-                if req.region_id == RegionId::new(table_id, 3).as_u64() && req.partial_drop)
-            );
-            if fail_once.swap(false, Ordering::SeqCst) {
-                return error::UnexpectedSnafu {
-                    err_msg: "drop failed",
-                }
-                .fail();
-            }
-            Ok(api::region::RegionResponse::new(0))
-        });
-        let node_manager = Arc::new(MockDatanodeManager::new(watcher));
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
         let ddl_ctx = env.ddl_context(node_manager);
         let original_region_routes = vec![
             test_region_route(
@@ -1686,7 +1478,7 @@ mod tests {
         ];
         env.create_physical_table_metadata_with_wal_options(
             table_id,
-            original_region_routes.clone(),
+            original_region_routes,
             test_region_wal_options(&[1, 2]),
         )
         .await;
@@ -1722,16 +1514,6 @@ mod tests {
             context,
         };
 
-        assert!(
-            procedure
-                .rollback(&TestingEnv::procedure_context())
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            current_parent_region_routes(&procedure.context).await,
-            original_region_routes
-        );
         procedure
             .rollback(&TestingEnv::procedure_context())
             .await
@@ -1745,187 +1527,61 @@ mod tests {
 
     #[tokio::test]
     async fn test_repartition_rollback_removes_allocated_routes_from_allocate() {
-        let table_id = 1024;
-        let published = test_region_route(
-            RegionId::new(table_id, 3),
-            &range_expr("x", 50, 100).as_json_str().unwrap(),
-        );
-        let allocation = allocate_region::PreparedAllocation {
-            region_routes: vec![published.clone()],
-            wal_options: test_region_wal_options(&[3]),
-        };
-        for state in [
-            AllocateRegion::Create(allocation),
-            AllocateRegion::Execute(allocate_region::ExecutePlan),
-        ] {
-            let env = TestingEnv::new();
-            let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-            let original_routes = vec![
-                test_region_route(
-                    RegionId::new(table_id, 1),
-                    &range_expr("x", 0, 100).as_json_str().unwrap(),
-                ),
-                test_region_route(
-                    RegionId::new(table_id, 2),
-                    &range_expr("x", 100, 200).as_json_str().unwrap(),
-                ),
-            ];
-            let mut routes = original_routes.clone();
-            routes.push(published.clone());
-            env.create_physical_table_metadata_with_wal_options(
-                table_id,
-                routes,
-                test_region_wal_options(&[1, 2, 3]),
-            )
-            .await;
-            let mut context = new_parent_context(&env, node_manager, table_id);
-            context.persistent_ctx.plans = vec![test_plan(table_id)];
-            let mut procedure = RepartitionProcedure {
-                state: Box::new(state),
-                context,
-            };
-
-            procedure
-                .rollback(&TestingEnv::procedure_context())
-                .await
-                .unwrap();
-
-            assert_eq!(
-                current_parent_region_routes(&procedure.context).await,
-                original_routes
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_rollback_unpublished_region_retries_offline_cleanup_on_recorded_peer() {
-        use api::v1::region::region_request::Body;
-        use common_wal::options::WAL_OPTIONS_KEY;
-
-        let table_id = 1024;
-        let region_id = RegionId::new(table_id, 3);
-        let env = TestingEnv::new();
-        let (tx, mut rx) = mpsc::channel(8);
-        let fail_once = AtomicBool::new(true);
-        let watcher = DatanodeWatcher::new(tx).with_handler(move |_, request| {
-            if matches!(request.body, Some(Body::CleanUp(_)))
-                && fail_once.swap(false, Ordering::SeqCst)
-            {
-                return error::UnexpectedSnafu {
-                    err_msg: "offline cleanup failed",
-                }
-                .fail();
-            }
-            Ok(api::region::RegionResponse::new(0))
-        });
-        let node_manager = Arc::new(MockDatanodeManager::new(watcher));
-        let routes = vec![test_region_route(RegionId::new(table_id, 1), "")];
-        env.create_physical_table_metadata_for_repartition(
-            table_id,
-            routes.clone(),
-            test_region_wal_options(&[1]),
-        )
-        .await;
-        let mut context = new_parent_context(&env, node_manager, table_id);
-        context.persistent_ctx.plans = vec![test_plan(table_id)];
-        let wal_options = test_region_wal_options(&[3]);
-        let encoded_wal = serde_json::to_string(wal_options.get(&3).unwrap()).unwrap();
-        let allocation = allocate_region::PreparedAllocation {
-            region_routes: vec![RegionRoute {
-                leader_peer: Some(Peer::empty(7)),
-                ..test_region_route(region_id, "")
-            }],
-            wal_options,
-        };
-        let mut procedure = RepartitionProcedure {
-            state: Box::new(AllocateRegion::Create(allocation)),
-            context,
-        };
-
-        let checkpoint = procedure.dump().unwrap();
-        let ctx = TestingEnv::procedure_context();
-        assert!(procedure.rollback(&ctx).await.is_err());
-        let mut restored = RepartitionProcedure::from_json(&checkpoint, |persistent_ctx| Context {
-            persistent_ctx,
-            ..procedure.context.clone()
-        })
-        .unwrap();
-        restored.rollback(&ctx).await.unwrap();
-
-        for _ in 0..2 {
-            let (peer, request) = rx.try_recv().unwrap();
-            assert_eq!(peer.id, 7);
-            assert!(
-                matches!(request.body, Some(Body::Close(req)) if req.region_id == region_id.as_u64() && !req.flush_on_close)
-            );
-            let (peer, request) = rx.try_recv().unwrap();
-            assert_eq!(peer.id, 7);
-            let Some(Body::CleanUp(req)) = request.body else {
-                panic!("expected offline region cleanup");
-            };
-            assert_eq!(req.region_id, region_id.as_u64());
-            assert_eq!(req.options.get(WAL_OPTIONS_KEY), Some(&encoded_wal));
-        }
-        assert!(rx.try_recv().is_err());
-        assert_eq!(
-            current_parent_region_routes(&restored.context).await,
-            routes
-        );
-    }
-
-    #[tokio::test]
-    async fn test_rollback_legacy_execute_preserves_unowned_region() {
         let env = TestingEnv::new();
         let table_id = 1024;
-        let (tx, mut rx) = mpsc::channel(8);
-        let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
-        let routes = vec![
-            test_region_route(RegionId::new(table_id, 1), ""),
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+        let ddl_ctx = env.ddl_context(node_manager);
+        let original_region_routes = vec![
+            test_region_route(
+                RegionId::new(table_id, 1),
+                &range_expr("x", 0, 100).as_json_str().unwrap(),
+            ),
+            test_region_route(
+                RegionId::new(table_id, 2),
+                &range_expr("x", 50, 100).as_json_str().unwrap(),
+            ),
             test_region_route(RegionId::new(table_id, 3), ""),
         ];
-        env.create_physical_table_metadata(table_id, routes.clone())
-            .await;
-        let mut context = new_parent_context(&env, node_manager, table_id);
-        // One target is visible but cannot be attributed to this procedure. Another
-        // may already have been created on a datanode without being published.
-        let mut plan = test_plan(table_id);
-        plan.target_regions[1].partition_expr = range_expr("x", 50, 75);
-        let unpublished = RegionId::new(table_id, 4);
-        plan.target_regions.push(TargetRegionDescriptor {
-            region_id: unpublished,
-            partition_expr: range_expr("x", 75, 100),
-        });
-        plan.allocated_region_ids.push(unpublished);
-        plan.transition_map[0].push(2);
-        context.persistent_ctx.plans = vec![plan];
+        env.create_physical_table_metadata_with_wal_options(
+            table_id,
+            original_region_routes,
+            test_region_wal_options(&[1, 2]),
+        )
+        .await;
+
+        let mut persistent_ctx = PersistentContext::new(
+            TableName::new("test_catalog", "test_schema", "test_table"),
+            table_id,
+            None,
+        );
+        persistent_ctx.plans = vec![test_plan(table_id)];
+        let context = Context::new(
+            &ddl_ctx,
+            env.mailbox_ctx.mailbox().clone(),
+            env.server_addr.clone(),
+            persistent_ctx,
+        );
         let mut procedure = RepartitionProcedure {
-            state: Box::new(AllocateRegion::Execute(allocate_region::ExecutePlan)),
+            state: Box::new(AllocateRegion::new(vec![])),
             context,
         };
+
         procedure
             .rollback(&TestingEnv::procedure_context())
             .await
             .unwrap();
-        assert_eq!(
-            current_parent_region_routes(&procedure.context).await,
-            routes
-        );
-        let snapshot = procedure.context.get_table_route_value().await.unwrap();
-        assert_eq!(snapshot.max_region_number().unwrap(), 4);
-        procedure
-            .rollback(&TestingEnv::procedure_context())
-            .await
-            .unwrap();
-        let repeated = procedure.context.get_table_route_value().await.unwrap();
-        assert_eq!(repeated.get_raw_bytes(), snapshot.get_raw_bytes());
-        assert!(rx.try_recv().is_err());
+
+        let region_routes = current_parent_region_routes(&procedure.context).await;
+        assert_eq!(region_routes.len(), 2);
+        assert_eq!(region_routes[0].region.id, RegionId::new(table_id, 1));
+        assert_eq!(region_routes[1].region.id, RegionId::new(table_id, 2));
     }
 
     #[tokio::test]
     async fn test_repartition_rollback_from_collect_only_removes_failed_allocated_routes() {
         let env = TestingEnv::new();
         let table_id = 1024;
-        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
         let ddl_ctx = env.ddl_context(node_manager);
         let original_region_routes = vec![
             test_region_route(
@@ -2023,7 +1679,7 @@ mod tests {
     async fn test_repartition_rollback_from_collect_restores_failed_group_metadata_only() {
         let env = TestingEnv::new();
         let table_id = 1024;
-        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
         let ddl_ctx = env.ddl_context(node_manager);
         let original_region_routes = vec![
             test_region_route(
@@ -2140,7 +1796,7 @@ mod tests {
     async fn test_repartition_rollback_from_collect_restores_unknown_group_metadata() {
         let env = TestingEnv::new();
         let table_id = 1024;
-        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
         let ddl_ctx = env.ddl_context(node_manager);
         let original_region_routes = vec![
             test_region_route(
@@ -2229,7 +1885,7 @@ mod tests {
     async fn test_repartition_rollback_is_idempotent() {
         let env = TestingEnv::new();
         let table_id = 1024;
-        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
         let ddl_ctx = env.ddl_context(node_manager);
         let original_region_routes = vec![
             test_region_route(
@@ -2302,7 +1958,7 @@ mod tests {
     async fn test_repartition_rollback_from_collect_restores_failed_merge_group_metadata_only() {
         let env = TestingEnv::new();
         let table_id = 1024;
-        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
         let ddl_ctx = env.ddl_context(node_manager);
         let original_region_routes = vec![
             test_region_route(
@@ -2488,7 +2144,7 @@ mod tests {
         let ctx = TestingEnv::procedure_context();
         let mut first = new_split();
         let mut failed = false;
-        for _ in 0..4 {
+        for _ in 0..3 {
             if let Err(err) = first.execute(&ctx).await {
                 assert!(!err.is_retry_later(), "{err}");
                 failed = true;
@@ -2503,20 +2159,16 @@ mod tests {
         );
 
         let mut creates = Vec::new();
-        let mut cleaned = Vec::new();
         while let Ok((_, request)) = requests.try_recv() {
-            match request.body.unwrap() {
-                Body::Create(r) => creates.push(RegionId::from_u64(r.region_id).region_number()),
-                Body::CleanUp(r) => cleaned.push(RegionId::from_u64(r.region_id).region_number()),
-                _ => {}
+            if let Some(Body::Create(create)) = request.body {
+                creates.push(RegionId::from_u64(create.region_id).region_number());
             }
         }
         creates.sort_unstable();
-        cleaned.sort_unstable();
         assert_eq!(creates, [2, 3]);
 
         let mut second = new_split();
-        for _ in 0..4 {
+        for _ in 0..3 {
             if second.state.as_any().is::<Dispatch>() {
                 break;
             }
@@ -2529,7 +2181,6 @@ mod tests {
             .map(|route| route.region.id.region_number())
             .collect();
         assert_eq!(numbers, [1, 4, 5]);
-        assert_eq!(cleaned, [2, 3]);
     }
 
     #[tokio::test]
@@ -2576,7 +2227,6 @@ mod tests {
         assert!(start_status.need_persist());
         assert_parent_state::<AllocateRegion>(&procedure);
 
-        persist_allocation_targets(&mut procedure).await;
         let allocate_status = procedure
             .execute(&TestingEnv::procedure_context())
             .await
@@ -2738,7 +2388,6 @@ mod tests {
         assert_eq!(plan.transition_map, vec![vec![0, 1]]);
         let target_regions = plan.target_regions.clone();
 
-        persist_allocation_targets(&mut procedure).await;
         let execute_allocate_status = procedure
             .execute(&TestingEnv::procedure_context())
             .await
@@ -2829,7 +2478,6 @@ mod tests {
             .execute(&TestingEnv::procedure_context())
             .await
             .unwrap();
-        persist_allocation_targets(&mut procedure).await;
         procedure
             .execute(&TestingEnv::procedure_context())
             .await
@@ -2889,7 +2537,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let env = TestingEnv::new();
         let table_id = 1024;
-        let (tx, mut rx) = mpsc::channel(8);
+        let (tx, _rx) = mpsc::channel(8);
         let should_retry = Arc::new(AtomicBool::new(true));
         let datanode_handler = DatanodeWatcher::new(tx).with_handler(move |_, _| {
             if should_retry.swap(false, Ordering::SeqCst) {
@@ -2945,26 +2593,6 @@ mod tests {
             .unwrap();
         assert!(start_status.need_persist());
         assert_parent_state::<AllocateRegion>(&procedure);
-
-        persist_allocation_targets(&mut procedure).await;
-
-        // Retry the failed placement checkpoint without issuing any datanode requests.
-        let mut ctx = TestingEnv::procedure_context();
-        ctx.provider = Arc::new(common_procedure_test::MockContextProvider::new(
-            HashMap::from([(
-                ctx.procedure_id,
-                ProcedureState::retrying(Arc::new(ProcedureError::external(MockError::new(
-                    StatusCode::Internal,
-                )))),
-            )]),
-        ));
-        let checkpoint = procedure.dump().unwrap();
-        assert!(procedure.execute(&ctx).await.unwrap().need_persist());
-        assert_eq!(checkpoint, procedure.dump().unwrap());
-        assert!(matches!(
-            rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
 
         let err = procedure
             .execute(&TestingEnv::procedure_context())
@@ -3026,13 +2654,6 @@ mod tests {
                 },
             ]
         );
-
-        let checkpoint = procedure.dump().unwrap();
-        assert!(matches!(
-            procedure.execute(&ctx).await.unwrap(),
-            Status::Executing { persist: true, .. }
-        ));
-        assert_eq!(checkpoint, procedure.dump().unwrap());
 
         let dispatch_status = procedure
             .execute(&TestingEnv::procedure_context())

@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "enterprise")]
+use std::collections::HashSet;
 
 use api::v1::region::{
     CleanUpRequest as PbCleanUpRequest, CloseRequest as PbCloseRegionRequest,
@@ -459,6 +461,7 @@ impl DropTableExecutor {
 
     /// Closes all table regions on datanodes without deleting region files or metadata tombstones.
     /// When `flush_leaders_on_close` is set, only leader regions are flushed before close.
+    #[cfg(feature = "enterprise")]
     pub async fn on_close_regions(
         &self,
         node_manager: &NodeManagerRef,

@@ -836,8 +836,10 @@ impl TableRouteStorage {
         Ok(())
     }
 
-    /// Refreshes peer addresses for persisted placement using the current node-address records.
-    pub async fn remap_region_routes(&self, region_routes: &mut [RegionRoute]) -> Result<()> {
+    pub(crate) async fn remap_region_routes(
+        &self,
+        region_routes: &mut [RegionRoute],
+    ) -> Result<()> {
         let keys = extract_address_keys_from_region_routes(region_routes)
             .into_iter()
             .collect();

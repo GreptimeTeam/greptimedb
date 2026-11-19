@@ -30,7 +30,6 @@ use common_meta::peer::PeerAllocContext;
 use common_meta::rpc::router::RegionRoute;
 use common_meta::wal_provider::{
     RegionWalOptions, acquire_remote_wal_read_locks, refresh_initial_pruned_entry_ids,
-    region_wal_options_serde,
 };
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{debug, info};
@@ -54,9 +53,6 @@ use crate::procedure::repartition::{Context, State};
 #[derive(Debug, Clone, Serialize)]
 pub enum AllocateRegion {
     Build(BuildPlan),
-    Prepare {},
-    Create(PreparedAllocation),
-    /// Checkpoint from before placements were persisted.
     Execute(ExecutePlan),
 }
 
@@ -68,8 +64,6 @@ impl<'de> Deserialize<'de> for AllocateRegion {
         #[derive(Deserialize)]
         enum CurrentAllocateRegion {
             Build(BuildPlan),
-            Prepare {},
-            Create(PreparedAllocation),
             Execute(ExecutePlan),
         }
 
@@ -88,10 +82,6 @@ impl<'de> Deserialize<'de> for AllocateRegion {
         match AllocateRegionRepr::deserialize(deserializer)? {
             AllocateRegionRepr::Current(CurrentAllocateRegion::Build(build_plan)) => {
                 Ok(Self::Build(build_plan))
-            }
-            AllocateRegionRepr::Current(CurrentAllocateRegion::Prepare {}) => Ok(Self::Prepare {}),
-            AllocateRegionRepr::Current(CurrentAllocateRegion::Create(allocation)) => {
-                Ok(Self::Create(allocation))
             }
             AllocateRegionRepr::Current(CurrentAllocateRegion::Execute(execute_plan)) => {
                 Ok(Self::Execute(execute_plan))
@@ -123,8 +113,16 @@ impl BuildPlan {
         // A crash before the plan is persisted can leave a gap, but no datanode
         // can create a region until its number has been durably reserved.
         let mut next_region_number = if let Some(count) = NonZeroUsize::new(to_allocate) {
-            ctx.reserve_region_numbers(&table_route_value, count)
-                .await?
+            ctx.table_metadata_manager
+                .table_route_manager()
+                .try_reserve_region_numbers(table_id, &table_route_value, count)
+                .await
+                .context(error::TableMetadataManagerSnafu)?
+                .with_context(|| error::RetryLaterSnafu {
+                    reason: format!(
+                        "Table route changed while reserving region numbers for table {table_id}"
+                    ),
+                })?
         } else {
             0
         };
@@ -156,22 +154,22 @@ impl BuildPlan {
             timer.elapsed()
         );
         Ok((
-            Box::new(AllocateRegion::Prepare {}),
+            Box::new(AllocateRegion::Execute(ExecutePlan)),
             Status::executing(true),
         ))
     }
 }
 
-/// Datanode and WAL placements shared by create retries and rollback.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PreparedAllocation {
-    pub(crate) region_routes: Vec<RegionRoute>,
-    #[serde(with = "region_wal_options_serde")]
-    pub(crate) wal_options: RegionWalOptions,
-}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutePlan;
 
-impl PreparedAllocation {
-    async fn prepare(ctx: &Context) -> Result<Self> {
+impl ExecutePlan {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         let table_id = ctx.persistent_ctx.table_id;
         let allocate_regions = AllocateRegion::collect_allocate_regions(&ctx.persistent_ctx.plans);
         let region_number_and_partition_exprs =
@@ -236,7 +234,7 @@ impl PreparedAllocation {
         } else {
             false
         };
-        let wal_options = ctx
+        let mut wal_options = ctx
             .wal_options_allocator
             .allocate(
                 &allocate_regions
@@ -247,6 +245,12 @@ impl PreparedAllocation {
             )
             .await
             .context(error::AllocateWalOptionsSnafu { table_id })?;
+        let _remote_wal_lock_guards =
+            acquire_remote_wal_read_locks(procedure_ctx, &wal_options).await;
+        refresh_initial_pruned_entry_ids(&ctx.table_metadata_manager, &mut wal_options)
+            .await
+            .context(error::AllocateWalOptionsSnafu { table_id })?;
+
         let new_region_count = new_allocated_region_routes.len();
         let new_regions_brief: Vec<_> = new_allocated_region_routes
             .iter()
@@ -260,43 +264,6 @@ impl PreparedAllocation {
             "Allocated regions for repartition, table_id: {}, new_region_count: {}, new_regions: {:?}",
             table_id, new_region_count, new_regions_brief
         );
-
-        Ok(Self {
-            region_routes: new_allocated_region_routes,
-            wal_options,
-        })
-    }
-
-    async fn create_regions(&self, ctx: &Context, procedure_ctx: &ProcedureContext) -> Result<()> {
-        let table_id = ctx.persistent_ctx.table_id;
-        let route = ctx.get_table_route_value().await?;
-        let current = route
-            .region_routes()
-            .context(error::TableMetadataManagerSnafu)?;
-        if routes_published(
-            current,
-            self.region_routes
-                .iter()
-                .map(|r| (r.region.id, r.region.partition_expr.as_str())),
-        ) {
-            // Route publication succeeded before the Dispatch checkpoint was written.
-            return Ok(());
-        }
-
-        let table_info_value = ctx.get_table_info_value().await?;
-        let mut new_allocated_region_routes = self.region_routes.clone();
-        ctx.table_metadata_manager
-            .table_route_manager()
-            .table_route_storage()
-            .remap_region_routes(&mut new_allocated_region_routes)
-            .await
-            .context(error::TableMetadataManagerSnafu)?;
-        let mut wal_options = self.wal_options.clone();
-        let _remote_wal_lock_guards =
-            acquire_remote_wal_read_locks(procedure_ctx, &wal_options).await;
-        refresh_initial_pruned_entry_ids(&ctx.table_metadata_manager, &mut wal_options)
-            .await
-            .context(error::AllocateWalOptionsSnafu { table_id })?;
 
         // The table route metadata is not updated yet; register it in memory for region lease renewal.
         let _operating_guards = Context::register_operating_regions(
@@ -323,58 +290,12 @@ impl PreparedAllocation {
         let new_region_routes =
             AllocateRegion::generate_region_routes(region_routes, &new_allocated_region_routes);
         ctx.update_table_route(&table_route_value, new_region_routes, wal_options)
-            .await
+            .await?;
+        ctx.invalidate_table_cache().await?;
+
+        ctx.update_allocate_region_elapsed(timer.elapsed());
+        Ok((Box::new(Dispatch), Status::executing(true)))
     }
-}
-
-/// Allocation checkpoint from before peers and WAL options were recorded.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutePlan;
-
-impl ExecutePlan {
-    /// A legacy Execute checkpoint has no durable placement and may have already issued creates.
-    async fn recover_legacy(ctx: &Context, procedure_ctx: &ProcedureContext) -> Result<()> {
-        let table_id = ctx.persistent_ctx.table_id;
-        let table_lock = TableLock::Write(table_id).into();
-        let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
-        let table_route = ctx.get_table_route_value().await?;
-        let current_routes = table_route
-            .region_routes()
-            .context(error::TableMetadataManagerSnafu)?;
-        if Self::is_fully_published(ctx, current_routes)? {
-            return Ok(());
-        }
-        ctx.fence_legacy_region_numbers(&table_route).await?;
-        error::UnexpectedSnafu {
-            violated: format!("Cannot resume unpublished legacy repartition allocation for table {table_id}: datanode placements were not persisted"),
-        }
-        .fail()
-    }
-
-    /// Checks whether the route contains every planned region with its expected partition.
-    pub(crate) fn is_fully_published(ctx: &Context, routes: &[RegionRoute]) -> Result<bool> {
-        let allocated = AllocateRegion::collect_allocate_regions(&ctx.persistent_ctx.plans);
-        let targets = AllocateRegion::prepare_region_allocation_data(&allocated)?;
-        let table_id = ctx.persistent_ctx.table_id;
-        Ok(routes_published(
-            routes,
-            targets
-                .iter()
-                .map(|(number, expr)| (RegionId::new(table_id, *number), expr.as_str())),
-        ))
-    }
-}
-
-fn routes_published<'a>(
-    routes: &[RegionRoute],
-    targets: impl Iterator<Item = (RegionId, &'a str)>,
-) -> bool {
-    let published: HashMap<_, _> = routes
-        .iter()
-        .map(|r| (r.region.id, r.region.partition_expr.as_str()))
-        .collect();
-    let mut targets = targets.peekable();
-    targets.peek().is_some() && targets.all(|(id, expr)| published.get(&id) == Some(&expr))
 }
 
 #[async_trait::async_trait]
@@ -385,20 +306,10 @@ impl State for AllocateRegion {
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        let timer = Instant::now();
         match self {
-            Self::Build(plan) => return plan.next(ctx, procedure_ctx).await,
-            Self::Prepare {} => {
-                let allocation = PreparedAllocation::prepare(ctx).await?;
-                ctx.update_allocate_region_elapsed(timer.elapsed());
-                return Ok((Box::new(Self::Create(allocation)), Status::executing(true)));
-            }
-            Self::Create(allocation) => allocation.create_regions(ctx, procedure_ctx).await?,
-            Self::Execute(_) => ExecutePlan::recover_legacy(ctx, procedure_ctx).await?,
+            AllocateRegion::Build(build_plan) => build_plan.next(ctx, procedure_ctx).await,
+            AllocateRegion::Execute(execute_plan) => execute_plan.next(ctx, procedure_ctx).await,
         }
-        ctx.invalidate_table_cache().await?;
-        ctx.update_allocate_region_elapsed(timer.elapsed());
-        Ok((Box::new(Dispatch), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1145,14 +1056,8 @@ mod tests {
             }),
             event_context: None,
         };
-        let (state, status) = (AllocateRegion::Prepare {})
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
-        assert!(status.need_persist());
-        assert!(receiver.try_recv().is_err());
-        let checkpoint = serde_json::to_vec(&state).unwrap();
-        let mut state: Box<dyn State> = serde_json::from_slice(&checkpoint).unwrap();
+        let mut state = ExecutePlan;
+
         state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let (_, request) = receiver.recv().await.unwrap();
@@ -1160,20 +1065,6 @@ mod tests {
             unreachable!()
         };
         assert!(create.requirements.unwrap().object_storage);
-
-        // Publication succeeded, but a crash restored the checkpoint preceding Dispatch.
-        let mut state: Box<dyn State> = serde_json::from_slice(&checkpoint).unwrap();
-        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
-        assert!(next.as_any().is::<Dispatch>());
-        assert!(receiver.try_recv().is_err());
-
-        // Older Execute checkpoints can also finish when all planned routes are visible.
-        let (next, _) = AllocateRegion::Execute(ExecutePlan)
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
-        assert!(next.as_any().is::<Dispatch>());
-        assert!(receiver.try_recv().is_err());
 
         let region_ids = current_parent_region_routes(&ctx)
             .await
@@ -1188,40 +1079,6 @@ mod tests {
                 RegionId::new(table_id, 3),
             ]
         );
-    }
-
-    #[tokio::test]
-    async fn test_legacy_execute_fences_unpublished_targets_without_creating_regions() {
-        let env = TestingEnv::new();
-        let table_id = 1024;
-        let routes = create_current_region_routes(table_id, &[1]);
-        env.create_physical_table_metadata_for_repartition(
-            table_id,
-            routes.clone(),
-            test_region_wal_options(&[1]),
-        )
-        .await;
-        let (sender, mut receiver) = mpsc::channel(1);
-        let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(sender)));
-        let mut ctx = new_parent_context(&env, node_manager, table_id);
-        ctx.persistent_ctx.plans = vec![RepartitionPlanEntry {
-            group_id: Uuid::nil(),
-            source_regions: vec![],
-            target_regions: vec![create_target_region_descriptor(table_id, 3, "x", 0, 100)],
-            allocated_region_ids: vec![RegionId::new(table_id, 3)],
-            pending_deallocate_region_ids: vec![],
-            transition_map: vec![],
-            original_target_routes: vec![],
-        }];
-        let err = AllocateRegion::Execute(ExecutePlan)
-            .next(&mut ctx, &TestingEnv::procedure_context())
-            .await
-            .unwrap_err();
-        assert!(!err.is_retryable());
-        let route = ctx.get_table_route_value().await.unwrap();
-        assert_eq!(route.max_region_number().unwrap(), 3);
-        assert_eq!(route.region_routes().unwrap(), &routes);
-        assert!(receiver.try_recv().is_err());
     }
 
     async fn check_execute_plan_skip_wal_provider(existing_wal_options: Option<WalOptions>) {
@@ -1259,11 +1116,7 @@ mod tests {
             transition_map: vec![],
             original_target_routes: vec![],
         }];
-        let (mut state, _) = (AllocateRegion::Prepare {})
-            .next(&mut ctx, &TestingEnv::procedure_context())
-            .await
-            .unwrap();
-
+        let mut state = ExecutePlan;
         state
             .next(&mut ctx, &TestingEnv::procedure_context())
             .await
@@ -1348,7 +1201,7 @@ mod tests {
             .expect("expected AllocateRegion state");
         match allocate_region {
             AllocateRegion::Build(build_plan) => assert!(build_plan.plan_entries.is_empty()),
-            _ => panic!("expected build plan"),
+            AllocateRegion::Execute(_) => panic!("expected build plan"),
         }
     }
 
@@ -1372,7 +1225,7 @@ mod tests {
             .expect("expected AllocateRegion state");
         match allocate_region {
             AllocateRegion::Build(build_plan) => assert!(build_plan.plan_entries.is_empty()),
-            _ => panic!("expected build plan"),
+            AllocateRegion::Execute(_) => panic!("expected build plan"),
         }
     }
 
@@ -1396,50 +1249,9 @@ mod tests {
             .expect("expected AllocateRegion state");
         match allocate_region {
             AllocateRegion::Execute(_) => {}
-            _ => panic!("expected execute plan"),
+            AllocateRegion::Build(_) => panic!("expected execute plan"),
         }
     }
-    #[test]
-    fn test_prepared_allocation_states_rejected_by_legacy_reader() {
-        // Both shapes that d21322e222f accepted after typetag removed the state name.
-        #[derive(Deserialize)]
-        enum LegacyVariant {
-            Build(BuildPlan),
-            Execute(ExecutePlan),
-        }
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum LegacyReader {
-            Variant(LegacyVariant),
-            Original {
-                plan_entries: Vec<AllocationPlanEntry>,
-            },
-        }
-        // Check both positive controls so a broken decoder cannot make the test pass.
-        let old = serde_json::from_str::<LegacyReader>(r#"{"Build":{"plan_entries":[]}}"#).unwrap();
-        assert!(
-            matches!(old, LegacyReader::Variant(LegacyVariant::Build(b)) if b.plan_entries.is_empty())
-        );
-        assert!(matches!(
-            serde_json::from_str::<LegacyReader>(r#"{"Execute":null}"#).unwrap(),
-            LegacyReader::Variant(LegacyVariant::Execute(_))
-        ));
-        assert!(
-            matches!(serde_json::from_str::<LegacyReader>(r#"{"plan_entries":[]}"#).unwrap(), LegacyReader::Original { plan_entries } if plan_entries.is_empty())
-        );
-
-        for state in [
-            AllocateRegion::Prepare {},
-            AllocateRegion::Create(PreparedAllocation {
-                region_routes: vec![],
-                wal_options: HashMap::new(),
-            }),
-        ] {
-            let payload = serde_json::to_vec(&state).unwrap();
-            assert!(serde_json::from_slice::<LegacyReader>(&payload).is_err());
-        }
-    }
-
     #[test]
     fn test_collect_allocation_sources_use_target_overlap() {
         let table_id = 1024;
@@ -1643,12 +1455,7 @@ mod tests {
             event_context: None,
         };
         for _ in 0..2 {
-            assert!(
-                (AllocateRegion::Prepare {})
-                    .next(&mut ctx, &procedure_ctx)
-                    .await
-                    .is_err()
-            );
+            assert!(ExecutePlan.next(&mut ctx, &procedure_ctx).await.is_err());
         }
         assert_eq!(resolver.calls.load(Ordering::Relaxed), 2);
         assert_eq!(
@@ -1667,12 +1474,7 @@ mod tests {
             .delete(TableRouteKey::new(table_id).to_string().as_bytes(), false)
             .await
             .unwrap();
-        assert!(
-            (AllocateRegion::Prepare {})
-                .next(&mut ctx, &procedure_ctx)
-                .await
-                .is_err()
-        );
+        assert!(ExecutePlan.next(&mut ctx, &procedure_ctx).await.is_err());
         assert_eq!(resolver.calls.load(Ordering::Relaxed), 2);
         let allocations = allocator.0.lock().unwrap();
         assert_eq!(allocations.len(), 3);
