@@ -503,12 +503,12 @@ impl RepartitionStart {
 mod tests {
     use std::sync::Arc;
 
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
     use common_meta::key::table_route::PhysicalTableRouteValue;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
-    use common_error::ext::ErrorExt;
-    use common_error::status_code::StatusCode;
     use common_meta::test_util::MockDatanodeManager;
     use datatypes::prelude::Value;
     use partition::expr::{Operand, RestrictedOp};
