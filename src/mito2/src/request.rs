@@ -800,6 +800,13 @@ pub(crate) enum WorkerRequest {
         sender: OptionOutputTx,
     },
 
+    /// Discards the region's pending WAL tails that node `node_id` wrote.
+    DiscardPendingTails {
+        region_id: RegionId,
+        node_id: u64,
+        sender: OptionOutputTx,
+    },
+
     /// Notify a worker to stop.
     Stop,
 
@@ -934,6 +941,11 @@ impl WorkerRequest {
             RegionRequest::CancelCompaction(v) => WorkerRequest::CancelCompaction {
                 region_id,
                 task_id: v.task_id,
+                sender: sender.into(),
+            },
+            RegionRequest::DiscardPendingTails(v) => WorkerRequest::DiscardPendingTails {
+                region_id,
+                node_id: v.node_id,
                 sender: sender.into(),
             },
             RegionRequest::BuildIndex(v) => WorkerRequest::Ddl(SenderDdlRequest {

@@ -17,9 +17,9 @@ use std::sync::Arc;
 use api::helper::to_pb_time_unit;
 use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{
-    BuildIndexRequest, CancelCompactionRequest, CompactRequest, CompactionTimeRange, FlushRequest,
-    PendingTails, RegionRequestHeader, TruncateRequest, Unflushed, build_index_request,
-    truncate_request,
+    BuildIndexRequest, CancelCompactionRequest, CompactRequest, CompactionTimeRange,
+    DiscardPendingTailsRequest, FlushRequest, RegionRequestHeader, TruncateRequest, Unflushed,
+    build_index_request, truncate_request,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
@@ -37,6 +37,7 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use store_api::metric_engine_consts;
 use store_api::storage::RegionId;
+use table::metadata::{TableId, TableInfoRef};
 use table::requests::{BuildIndexTableRequest, CompactTableRequest, FlushTableRequest};
 use table::table_name::TableName;
 
@@ -280,16 +281,27 @@ impl Requester {
         table_name: TableName,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
+        let table_info = self.table_info(&table_name).await?;
+        ensure_discard_supported(
+            &table_info.meta.engine,
+            table_info.is_physical_table(),
+            "discarding unflushed data from a Metric Engine logical table",
+        )?;
         let requests = self
-            .table_truncate_requests(&table_name, truncate_request::Kind::Unflushed(Unflushed {}))
-            .await?;
+            .physical_region_ids(&table_name, table_info.ident.table_id)
+            .await?
+            .into_iter()
+            .map(|region_id| {
+                RegionRequestBody::Truncate(TruncateRequest {
+                    region_id: region_id.into(),
+                    kind: Some(truncate_request::Kind::Unflushed(Unflushed {})),
+                })
+            })
+            .collect();
 
         info!("Handle table discard unflushed data request: {table_name}");
         self.do_request(
-            requests
-                .into_iter()
-                .map(RegionRequestBody::Truncate)
-                .collect(),
+            requests,
             Some(build_db_string(
                 &table_name.catalog_name,
                 &table_name.schema_name,
@@ -306,11 +318,9 @@ impl Requester {
         node_id: u64,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
-        let request = RegionRequestBody::Truncate(TruncateRequest {
+        let request = RegionRequestBody::DiscardPendingTails(DiscardPendingTailsRequest {
             region_id: region_id.into(),
-            kind: Some(truncate_request::Kind::PendingTails(PendingTails {
-                node_id,
-            })),
+            datanode_id: node_id,
         });
 
         info!(
@@ -333,16 +343,24 @@ impl Requester {
         node_id: u64,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
-        let requests = self
-            .table_truncate_requests(
-                &table_name,
-                truncate_request::Kind::PendingTails(PendingTails { node_id }),
-            )
+        let table_info = self.table_info(&table_name).await?;
+        ensure_discard_supported(
+            &table_info.meta.engine,
+            table_info.is_physical_table(),
+            "discarding pending WAL tails from a Metric Engine logical table",
+        )?;
+        let region_ids = self
+            .physical_region_ids(&table_name, table_info.ident.table_id)
             .await?;
-        let region_ids = requests
+        let requests = region_ids
             .iter()
-            .map(|request| RegionId::from_u64(request.region_id))
-            .collect::<Vec<_>>();
+            .map(|region_id| {
+                RegionRequestBody::DiscardPendingTails(DiscardPendingTailsRequest {
+                    region_id: (*region_id).into(),
+                    datanode_id: node_id,
+                })
+            })
+            .collect();
 
         info!(
             user = ctx.current_user().username(),
@@ -350,10 +368,7 @@ impl Requester {
         );
         let results = self
             .do_requests(
-                requests
-                    .into_iter()
-                    .map(RegionRequestBody::Truncate)
-                    .collect(),
+                requests,
                 Some(build_db_string(
                     &table_name.catalog_name,
                     &table_name.schema_name,
@@ -381,13 +396,8 @@ impl Requester {
         Ok(discarded)
     }
 
-    /// Returns a truncate request of `kind` for every region of the table. A Metric Engine
-    /// logical table is rejected as not supported.
-    async fn table_truncate_requests(
-        &self,
-        table_name: &TableName,
-        kind: truncate_request::Kind,
-    ) -> Result<Vec<TruncateRequest>> {
+    /// Returns the info of the table.
+    async fn table_info(&self, table_name: &TableName) -> Result<TableInfoRef> {
         let table = self
             .catalog_manager
             .table(
@@ -401,27 +411,25 @@ impl Requester {
         let table = table.with_context(|| TableNotFoundSnafu {
             table_name: table_name.to_string(),
         })?;
-        let table_info = table.table_info();
-        ensure_discard_supported(
-            &table_info.meta.engine,
-            table_info.is_physical_table(),
-            &kind,
-        )?;
+        Ok(table.table_info())
+    }
 
-        let partitions = &self
+    /// Returns the ids of the table's physical regions.
+    async fn physical_region_ids(
+        &self,
+        table_name: &TableName,
+        table_id: TableId,
+    ) -> Result<Vec<RegionId>> {
+        Ok(self
             .partition_manager
-            .find_physical_partition_info(table_info.ident.table_id)
+            .find_physical_partition_info(table_id)
             .await
             .with_context(|_| FindTablePartitionRuleSnafu {
                 table_name: table_name.to_string(),
             })?
-            .partitions;
-        Ok(partitions
+            .partitions
             .iter()
-            .map(|partition| TruncateRequest {
-                region_id: partition.id.into(),
-                kind: Some(kind.clone()),
-            })
+            .map(|partition| partition.id)
             .collect())
     }
 }
@@ -520,6 +528,7 @@ impl Requester {
             RegionRequestBody::Flush(req) => req.region_id,
             RegionRequestBody::Compact(req) => req.region_id,
             RegionRequestBody::CancelCompaction(req) => req.region_id,
+            RegionRequestBody::DiscardPendingTails(req) => req.region_id,
             RegionRequestBody::BuildIndex(req) => req.region_id,
             RegionRequestBody::Truncate(req) => req.region_id,
             _ => {
@@ -573,19 +582,8 @@ fn ensure_build_series_index_supported(engine: &str, is_physical_table: bool) ->
 fn ensure_discard_supported(
     engine: &str,
     is_physical_table: bool,
-    kind: &truncate_request::Kind,
+    feat: &'static str,
 ) -> Result<()> {
-    let feat = match kind {
-        truncate_request::Kind::Unflushed(_) => {
-            "discarding unflushed data from a Metric Engine logical table"
-        }
-        truncate_request::Kind::PendingTails(_) => {
-            "discarding pending WAL tails from a Metric Engine logical table"
-        }
-        truncate_request::Kind::All(_) | truncate_request::Kind::TimeRanges(_) => {
-            "truncating a Metric Engine logical table"
-        }
-    };
     ensure!(
         engine != METRIC_ENGINE || is_physical_table,
         NotSupportedSnafu { feat }
@@ -684,8 +682,8 @@ mod tests {
         let (sender, mut requests) = tokio::sync::mpsc::channel(8);
         // Region `n` discards `n` tails, except that region 3 fails for node 7.
         let watcher = DatanodeWatcher::new(sender).with_handler(|peer, request| {
-            let Some(RegionRequestBody::Truncate(TruncateRequest {
-                kind: Some(truncate_request::Kind::PendingTails(PendingTails { node_id })),
+            let Some(RegionRequestBody::DiscardPendingTails(DiscardPendingTailsRequest {
+                datanode_id: node_id,
                 ..
             })) = request.body
             else {
@@ -724,12 +722,12 @@ mod tests {
             DEFAULT_SCHEMA_NAME,
         ));
         let expected = |region_number, node_id| {
-            Some(RegionRequestBody::Truncate(TruncateRequest {
-                region_id: RegionId::new(1, region_number).as_u64(),
-                kind: Some(truncate_request::Kind::PendingTails(PendingTails {
-                    node_id,
-                })),
-            }))
+            Some(RegionRequestBody::DiscardPendingTails(
+                DiscardPendingTailsRequest {
+                    region_id: RegionId::new(1, region_number).as_u64(),
+                    datanode_id: node_id,
+                },
+            ))
         };
 
         let discarded = requester
@@ -791,16 +789,13 @@ mod tests {
 
     #[test]
     fn test_ensure_discard_supported() {
-        let kind = truncate_request::Kind::PendingTails(PendingTails { node_id: 7 });
-        let error = ensure_discard_supported(METRIC_ENGINE, false, &kind).unwrap_err();
+        let feat = "discarding pending WAL tails from a Metric Engine logical table";
+        let error = ensure_discard_supported(METRIC_ENGINE, false, feat).unwrap_err();
         assert!(matches!(error, crate::error::Error::NotSupported { .. }));
-        assert!(error.to_string().contains("pending WAL tails"), "{error}");
-        let kind = truncate_request::Kind::Unflushed(Unflushed {});
-        let error = ensure_discard_supported(METRIC_ENGINE, false, &kind).unwrap_err();
-        assert!(error.to_string().contains("unflushed data"), "{error}");
+        assert!(error.to_string().contains(feat), "{error}");
 
-        ensure_discard_supported(METRIC_ENGINE, true, &kind).unwrap();
-        ensure_discard_supported("mito", false, &kind).unwrap();
+        ensure_discard_supported(METRIC_ENGINE, true, feat).unwrap();
+        ensure_discard_supported("mito", false, feat).unwrap();
     }
 
     #[test]

@@ -272,25 +272,20 @@ impl RegionEngine for MetricEngine {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }
             }
-            // Only the data region's unflushed data or pending tails are discarded; the
-            // metadata region's pending tails are not discarded.
-            RegionRequest::Truncate(
-                request @ (RegionTruncateRequest::Unflushed
-                | RegionTruncateRequest::PendingTails { .. }),
-            ) => {
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed) => {
                 if self.inner.is_physical_region(region_id) {
                     self.inner
                         .mito
                         .handle_request(
                             utils::to_data_region_id(region_id),
-                            RegionRequest::Truncate(request),
+                            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
                         )
                         .await
                         .context(error::MitoTruncateOperationSnafu)
                         .map(|response| response.affected_rows)
                 } else {
                     UnsupportedRegionRequestSnafu {
-                        request: RegionRequest::Truncate(request),
+                        request: RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
                     }
                     .fail()
                 }
@@ -299,6 +294,19 @@ impl RegionEngine for MetricEngine {
                 request: RegionRequest::Truncate(request),
             }
             .fail(),
+            // Only the data region's pending tails are discarded; the metadata region's are not.
+            RegionRequest::DiscardPendingTails(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(utils::to_data_region_id(region_id), request)
+                        .await
+                        .context(error::MitoTruncateOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
             RegionRequest::Delete(delete) => self.inner.delete_region(region_id, delete).await,
             RegionRequest::Catchup(_) => {
                 let mut response = self
@@ -732,8 +740,8 @@ mod test {
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
         PathType, RegionCancelCompactionRequest, RegionCleanUpRequest, RegionCloseRequest,
-        RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
-        RegionTruncateRequest,
+        RegionDiscardPendingTailsRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest,
+        RegionPutRequest, RegionRequest, RegionTruncateRequest,
     };
 
     use super::*;
@@ -806,7 +814,7 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let request =
-            || RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 1 });
+            || RegionRequest::DiscardPendingTails(RegionDiscardPendingTailsRequest { node_id: 1 });
         let data_region_id = utils::to_data_region_id(env.default_physical_region_id());
         env.metric()
             .handle_request(

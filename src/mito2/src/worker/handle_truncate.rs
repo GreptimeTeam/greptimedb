@@ -19,7 +19,7 @@ use store_api::logstore::LogStore;
 use store_api::region_request::RegionTruncateRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{RegionNotFoundSnafu, UnexpectedSnafu};
+use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::{RegionTruncate, TruncateKind};
 use crate::region::RegionLeaderState;
 use crate::request::{DdlRequest, DiscardUnflushedResult, OptionOutputTx, TruncateResult};
@@ -32,12 +32,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         req: RegionTruncateRequest,
         sender: OptionOutputTx,
     ) {
-        // A discard of pending tails must not be rejected by the pending tails check below, and
-        // waits for no flush or compaction.
-        if let RegionTruncateRequest::PendingTails { node_id } = req {
-            self.handle_discard_pending_tails(region_id, node_id, sender);
-            return;
-        }
         let region = match self.regions.writable_non_staging_region(region_id) {
             Ok(region) => region,
             Err(e) => {
@@ -184,12 +178,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 };
                 self.handle_manifest_truncate_action(region, truncate, sender);
             }
-            RegionTruncateRequest::PendingTails { .. } => sender.send(
-                UnexpectedSnafu {
-                    reason: "pending tails are discarded before the truncate checks",
-                }
-                .fail(),
-            ),
         };
     }
 

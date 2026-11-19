@@ -44,8 +44,9 @@ use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    PathType, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest, RegionDropRequest,
-    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    PathType, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
+    RegionDiscardPendingTailsRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest,
+    RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -478,7 +479,8 @@ impl TestRegion {
     }
 
     async fn discard_pending_tails(&self, node_id: u64) -> Result<usize, BoxedError> {
-        let request = RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id });
+        let request =
+            RegionRequest::DiscardPendingTails(RegionDiscardPendingTailsRequest { node_id });
         let response = self.engine.handle_request(self.region_id, request).await?;
         Ok(response.affected_rows)
     }

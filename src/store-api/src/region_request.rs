@@ -25,9 +25,9 @@ use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
     AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CancelCompactionRequest,
     CleanUpRequest as PbCleanUpRequest, CloseRequest, CompactRequest, CreateRequest,
-    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
-    OpenRequest, TruncateRequest, alter_request, build_index_request, compact_request,
-    region_request, truncate_request,
+    CreateRequests, DeleteRequests, DiscardPendingTailsRequest, DropRequest, DropRequests,
+    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, build_index_request,
+    compact_request, region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -162,6 +162,7 @@ pub enum RegionRequest {
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
     CancelCompaction(RegionCancelCompactionRequest),
+    DiscardPendingTails(RegionDiscardPendingTailsRequest),
     BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
@@ -186,6 +187,9 @@ impl RegionRequest {
             region_request::Body::Flush(flush) => make_region_flush(flush),
             region_request::Body::Compact(compact) => make_region_compact(compact),
             region_request::Body::CancelCompaction(cancel) => make_region_cancel_compaction(cancel),
+            region_request::Body::DiscardPendingTails(discard) => {
+                make_region_discard_pending_tails(discard)
+            }
             region_request::Body::BuildIndex(index) => make_region_build_index(index),
             region_request::Body::Truncate(truncate) => make_region_truncate(truncate),
             region_request::Body::Creates(creates) => make_region_creates(creates),
@@ -469,6 +473,17 @@ fn make_region_cancel_compaction(
     )])
 }
 
+fn make_region_discard_pending_tails(
+    discard: DiscardPendingTailsRequest,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    Ok(vec![(
+        discard.region_id.into(),
+        RegionRequest::DiscardPendingTails(RegionDiscardPendingTailsRequest {
+            node_id: discard.datanode_id,
+        }),
+    )])
+}
+
 fn make_region_build_index(index: BuildIndexRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = index.region_id.into();
     Ok(vec![(
@@ -501,12 +516,6 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
         Some(truncate_request::Kind::Unflushed(_)) => Ok(vec![(
             region_id,
             RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
-        )]),
-        Some(truncate_request::Kind::PendingTails(pending_tails)) => Ok(vec![(
-            region_id,
-            RegionRequest::Truncate(RegionTruncateRequest::PendingTails {
-                node_id: pending_tails.node_id,
-            }),
         )]),
     }
 }
@@ -1955,6 +1964,15 @@ pub struct RegionCancelCompactionRequest {
     pub task_id: String,
 }
 
+/// Discards the region's pending WAL tails, the WAL ranges it still has to recover, that
+/// datanode `node_id` wrote, without replaying them. Returns the number of discarded tails; a
+/// region without such tails returns 0 and changes nothing.
+#[derive(Debug)]
+pub struct RegionDiscardPendingTailsRequest {
+    /// The datanode that wrote the tails.
+    pub node_id: u64,
+}
+
 #[derive(Debug)]
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
@@ -2004,13 +2022,6 @@ pub enum RegionTruncateRequest {
         /// only files that are fully contained in the time range will be truncated.
         /// so no guarantee that all data in the time range will be truncated.
         time_ranges: Vec<(Timestamp, Timestamp)>,
-    },
-    /// Discards the region's pending WAL tails, the WAL ranges it still has to recover, that
-    /// datanode `node_id` wrote, without replaying them. Returns the number of discarded
-    /// tails; a region without such tails returns 0 and changes nothing.
-    PendingTails {
-        /// The datanode that wrote the tails.
-        node_id: u64,
     },
 }
 
@@ -2129,6 +2140,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
             RegionRequest::CancelCompaction(_) => write!(f, "CancelCompaction"),
+            RegionRequest::DiscardPendingTails(_) => write!(f, "DiscardPendingTails"),
             RegionRequest::BuildIndex(_) => write!(f, "BuildIndex"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
@@ -2288,50 +2300,22 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_request_wire() {
+    fn test_discard_pending_tails_request_wire() {
+        use api::v1::region::RegionRequest as PbRegionRequest;
         use prost::Message;
 
-        // Decodes `bytes`, checks they encode back unchanged and returns the region request.
-        let decode = |bytes: &[u8]| {
-            let truncate = TruncateRequest::decode(bytes).unwrap();
-            assert_eq!(truncate.encode_to_vec(), bytes);
-            let mut requests =
-                RegionRequest::try_from_request_body(region_request::Body::Truncate(truncate))
-                    .unwrap();
-            let (region_id, request) = requests.remove(0);
-            assert_eq!(RegionId::new(1024, 1), region_id);
-            request
-        };
-
-        let legacy = decode(include_bytes!(
-            "../../../tests/compatibility/wire/truncate_pending_tails/legacy_truncate_unflushed.pb"
-        ));
-        assert!(matches!(
-            legacy,
-            RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
-        ));
-        let pending_tails = decode(include_bytes!(
-            "../../../tests/compatibility/wire/truncate_pending_tails/truncate_pending_tails.pb"
-        ));
-        assert!(matches!(
-            pending_tails,
-            RegionRequest::Truncate(RegionTruncateRequest::PendingTails { node_id: 7 })
-        ));
-    }
-
-    #[test]
-    fn test_make_region_truncate_rejects_unknown_kind_as_missing() {
-        use prost::Message;
-        // An empty message in field 99, a kind this version does not know, which decoding drops.
-        let truncate = TruncateRequest::decode([0x08, 0x01, 0x9a, 0x06, 0x00].as_slice()).unwrap();
-        assert_eq!(vec![0x08, 0x01], truncate.encode_to_vec());
-        let error = RegionRequest::try_from_request_body(region_request::Body::Truncate(truncate))
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("missing kind in TruncateRequest")
+        let bytes = include_bytes!(
+            "../../../tests/compatibility/wire/discard_pending_tails/discard_pending_tails.pb"
         );
+        let request = PbRegionRequest::decode(bytes.as_slice()).unwrap();
+        assert_eq!(request.encode_to_vec(), bytes);
+        let mut requests = RegionRequest::try_from_request_body(request.body.unwrap()).unwrap();
+        let (region_id, request) = requests.remove(0);
+        assert_eq!(RegionId::new(1024, 1), region_id);
+        let RegionRequest::DiscardPendingTails(request) = request else {
+            panic!("expected a pending tails discard, got {request:?}")
+        };
+        assert_eq!(7, request.node_id);
     }
 
     #[test]

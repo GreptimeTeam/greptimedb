@@ -1591,6 +1591,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     };
                     sender.send(result);
                 }
+                WorkerRequest::DiscardPendingTails {
+                    region_id,
+                    node_id,
+                    sender,
+                } => {
+                    self.handle_discard_pending_tails(region_id, node_id, sender);
+                }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
