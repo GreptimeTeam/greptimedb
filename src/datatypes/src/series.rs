@@ -347,15 +347,22 @@ impl SeriesLabels {
         if !labels.contains(&"__name__") {
             self.name = None;
         }
+        // Nothing to drop leaves the shared label array as the answer, so scan once and
+        // return instead of building a copy of it only to throw that copy away.
+        if !self
+            .tags()
+            .iter()
+            .any(|tag| !labels.contains(&tag.name.as_ref()))
+        {
+            return;
+        }
         let kept: Vec<_> = self
             .tags()
             .iter()
             .filter(|tag| labels.contains(&tag.name.as_ref()))
             .cloned()
             .collect();
-        if kept.len() != self.tags().len() {
-            self.tags = LabelStorage::Owned(kept.into());
-        }
+        self.tags = LabelStorage::Owned(kept.into());
     }
 
     /// Removes the selected labels and metric name.
@@ -363,15 +370,22 @@ impl SeriesLabels {
         if labels.contains(&"__name__") {
             self.name = None;
         }
+        // As in `keep_only`: with no selected label present the existing array is already
+        // the result, so keep sharing it rather than cloning it into a discarded vector.
+        if !self
+            .tags()
+            .iter()
+            .any(|tag| labels.contains(&tag.name.as_ref()))
+        {
+            return;
+        }
         let kept: Vec<_> = self
             .tags()
             .iter()
             .filter(|tag| !labels.contains(&tag.name.as_ref()))
             .cloned()
             .collect();
-        if kept.len() != self.tags().len() {
-            self.tags = LabelStorage::Owned(kept.into());
-        }
+        self.tags = LabelStorage::Owned(kept.into());
     }
 }
 
