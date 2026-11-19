@@ -17,7 +17,6 @@ mod gc;
 mod instance_kafka_wal_test;
 mod instance_noop_wal_test;
 mod instance_test;
-mod bench_volatile_dist_join;
 mod native_aggregate_test;
 mod nested_merge_scan_capability_test;
 mod postgres_copy_in_test;
