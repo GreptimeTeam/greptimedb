@@ -1,0 +1,20 @@
+src/mito-codec/src/key_values.rs
+  s_f1adaf4d85f1fe::t_0bee9e91e7ece1 301,453-457
+  s_f1adaf4d85f1fe::t_46dfd1cbd8349c 226-230,232,235,458-465
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "526c16b521ba9670255d6f71a3d9a5fbab694234",
+  "prompts": {},
+  "sessions": {
+    "s_f1adaf4d85f1fe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f1f0-c411-7560-b495-e444035db727",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
