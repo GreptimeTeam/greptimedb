@@ -34,6 +34,15 @@ pub enum TableRoute {
     Logical(Arc<LogicalTableRouteValue>),
 }
 
+impl From<TableRouteValue> for TableRoute {
+    fn from(value: TableRouteValue) -> Self {
+        match value {
+            TableRouteValue::Physical(route) => Self::Physical(Arc::new(route)),
+            TableRouteValue::Logical(route) => Self::Logical(Arc::new(route)),
+        }
+    }
+}
+
 impl TableRoute {
     /// Returns true if it's physical table.
     pub fn is_physical(&self) -> bool {
@@ -60,10 +69,23 @@ pub fn new_table_route_cache(
     cache: Cache<(usize, TableId), Arc<TableRoute>>,
     kv_backend: KvBackendRef,
 ) -> TableRouteCache {
-    let table_info_manager = Arc::new(TableRouteManager::new(kv_backend));
-    let init = init_factory(table_info_manager);
+    let table_route_manager = Arc::new(TableRouteManager::new(kv_backend));
+    let init = init_factory(table_route_manager.clone());
 
     CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_id_key)
+        .with_batch_initializer(Arc::new(move |ids| {
+            let manager = table_route_manager.clone();
+            Box::pin(async move {
+                let routes = manager.table_route_storage().batch_get(&ids).await?;
+                Ok(ids
+                    .into_iter()
+                    .zip(routes)
+                    .filter_map(|(id, route)| {
+                        route.map(|route| (id, Arc::new(TableRoute::from(route))))
+                    })
+                    .collect())
+            })
+        }))
 }
 
 fn init_factory(
@@ -78,12 +100,7 @@ fn init_factory(
                 .await?
                 .context(error::ValueNotExistSnafu {})?;
 
-            let table_route = match table_route_value {
-                TableRouteValue::Physical(physical) => TableRoute::Physical(Arc::new(physical)),
-                TableRouteValue::Logical(logical) => TableRoute::Logical(Arc::new(logical)),
-            };
-
-            Ok(Some(Arc::new(table_route)))
+            Ok(Some(Arc::new(TableRoute::from(table_route_value))))
         })
     })
 }

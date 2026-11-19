@@ -426,10 +426,21 @@ impl TableRouteManager {
         &self,
         logical_or_physical_table_ids: &[TableId],
     ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
-        let table_routes = self
-            .storage
-            .batch_get(logical_or_physical_table_ids)
-            .await?;
+        Self::resolve_physical_table_routes(logical_or_physical_table_ids, |ids| async move {
+            self.storage.batch_get(&ids).await
+        })
+        .await
+    }
+
+    /// Resolves logical references using the caller's ordered route loader.
+    pub async fn resolve_physical_table_routes<Fut>(
+        logical_or_physical_table_ids: &[TableId],
+        load: impl Fn(Vec<TableId>) -> Fut,
+    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>>
+    where
+        Fut: Future<Output = Result<Vec<Option<TableRouteValue>>>>,
+    {
+        let table_routes = load(logical_or_physical_table_ids.to_vec()).await?;
         // Returns a subset of `logical_or_physical_table_ids`.
         let table_routes = table_routes
             .into_iter()
@@ -462,10 +473,7 @@ impl TableRouteManager {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let table_routes = self
-            .table_route_storage()
-            .batch_get(&physical_table_ids)
-            .await?;
+        let table_routes = load(physical_table_ids.clone()).await?;
         let table_routes = table_routes
             .into_iter()
             .zip(physical_table_ids)
@@ -1086,6 +1094,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_batch_resolve_logical_routes() {
+        let routes = HashMap::from([
+            (1, TableRouteValue::logical(3)),
+            (2, TableRouteValue::logical(3)),
+            (3, TableRouteValue::physical(vec![])),
+            (4, TableRouteValue::logical(5)),
+        ]);
+        let load = |ids: Vec<TableId>| {
+            std::future::ready(Ok(ids.iter().map(|id| routes.get(id).cloned()).collect()))
+        };
+        let resolved = TableRouteManager::resolve_physical_table_routes(&[1, 2, 3, 9], load)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([1, 2, 3])
+        );
+        let missing = TableRouteManager::resolve_physical_table_routes(&[4], load)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            crate::error::Error::TableRouteNotFound { table_id: 5, .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn test_table_route_batch_get_remaps_addresses() {
         let kv = Arc::new(MemoryKvBackend::default());
         let table_route_storage = TableRouteStorage::new(kv.clone());
@@ -1111,6 +1146,23 @@ mod tests {
             .unwrap();
         let r = kv.txn(txn).await.unwrap();
         assert!(r.succeeded);
+
+        // Information schema can warm the route cache before a peer changes its address.
+        let cache = crate::cache::new_table_route_cache(
+            "routes".into(),
+            moka::future::Cache::new(8),
+            kv.clone(),
+        );
+        let cached = cache.get_many(&[1024]).await.unwrap();
+        let physical = cached[0]
+            .as_ref()
+            .unwrap()
+            .as_physical_table_route_ref()
+            .unwrap();
+        assert_eq!(
+            physical.region_routes[0].leader_peer.as_ref().unwrap().addr,
+            "old-leader"
+        );
 
         for (node_id, addr) in [(1, "new-leader"), (2, "new-follower")] {
             kv.put(PutRequest {

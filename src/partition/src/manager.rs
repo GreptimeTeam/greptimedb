@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use api::v1::Rows;
 use common_meta::cache::{TableRoute, TableRouteCacheRef};
-use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager};
+use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager, TableRouteValue};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
@@ -141,6 +141,37 @@ impl PartitionRuleManager {
         Ok(table_region_routes)
     }
 
+    /// Loads cached routing metadata for callers that only inspect region IDs or partitions.
+    /// Peer-address consumers use `batch_find_region_routes` to refresh node addresses.
+    pub async fn batch_cached_region_routes(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, Vec<RegionRoute>>> {
+        let routes =
+            TableRouteManager::resolve_physical_table_routes(table_ids, |ids| async move {
+                let routes = self.table_route_cache.get_many(&ids).await?;
+                Ok(routes
+                    .into_iter()
+                    .map(|route| {
+                        route.map(|route| match route.as_ref() {
+                            TableRoute::Physical(value) => {
+                                TableRouteValue::Physical(value.as_ref().clone())
+                            }
+                            TableRoute::Logical(value) => {
+                                TableRouteValue::Logical(value.as_ref().clone())
+                            }
+                        })
+                    })
+                    .collect())
+            })
+            .await
+            .context(error::TableRouteManagerSnafu)?;
+        Ok(routes
+            .into_iter()
+            .map(|(id, route)| (id, route.region_routes))
+            .collect())
+    }
+
     /// Returns the physical partition info with version.
     pub async fn find_physical_partition_info(
         &self,
@@ -178,7 +209,7 @@ impl PartitionRuleManager {
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, Vec<PartitionInfo>>> {
-        let batch_region_routes = self.batch_find_region_routes(table_ids).await?;
+        let batch_region_routes = self.batch_cached_region_routes(table_ids).await?;
 
         let mut results = HashMap::with_capacity(table_ids.len());
 
