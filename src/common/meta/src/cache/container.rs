@@ -17,11 +17,14 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
-use futures::FutureExt;
+use futures::StreamExt;
+use futures::channel::{mpsc, oneshot};
 use futures::future::{BoxFuture, try_join_all};
+use futures::stream::FuturesUnordered;
 use moka::future::Cache;
 use snafu::{OptionExt, ResultExt};
 use tokio::time::sleep;
@@ -370,64 +373,94 @@ where
     /// Returns values in input order, preserving duplicates and missing keys.
     ///
     /// Cache hits do not reach the batch loader. Misses use the same Moka
-    /// initialization entries as single-key reads. Invalidation during a batch
+    /// initialization entries as single-key reads. Only the keys whose loaders
+    /// this call owns are submitted to its batch loader. Invalidation during a batch
     /// load falls back to the normal initializer for affected pending reads.
     pub async fn get_many(&self, keys: &[K]) -> Result<Vec<Option<V>>> {
         let Some(batch_initializer) = &self.batch_initializer else {
             return try_join_all(keys.iter().map(|key| self.get_by_ref(key))).await;
         };
         let mut values = Vec::with_capacity(keys.len());
-        let mut misses = HashMap::new();
-        for key in keys {
+        let mut misses = Vec::new();
+        for (index, key) in keys.iter().enumerate() {
             let value = self.cache.get(key).await;
             if value.is_none() {
-                misses.entry(key.clone()).or_insert(());
+                misses.push((index, key));
             }
             values.push(value);
         }
+        metrics::CACHE_CONTAINER_CACHE_GET
+            .with_label_values(&[&self.name])
+            .inc_by((keys.len() - misses.len()) as u64);
         if misses.is_empty() {
-            metrics::CACHE_CONTAINER_CACHE_GET
-                .with_label_values(&[&self.name])
-                .inc_by(keys.len() as u64);
             return Ok(values);
         }
-        let batch_initializer = batch_initializer.clone();
-        let version = self.version.clone();
-        let batch = async move {
-            let generation = version.load(Ordering::Relaxed);
-            let values = batch_initializer(misses.into_keys().collect()).await;
-            (generation, values.map(Arc::new).map_err(Arc::new))
-        }
-        .boxed()
-        .shared();
+
+        let batch_size = misses.len();
+        let (requests, receiver) = mpsc::unbounded();
+        let generation = self.version.load(Ordering::Relaxed);
         let version = self.version.clone();
         let fallback = self.initializer.clone();
         let initializer: Initializer<K, V> = Arc::new(move |key| {
-            let batch = batch.clone();
             let version = version.clone();
             let fallback = fallback.clone();
+            let requests = requests.clone();
             Box::pin(async move {
-                let (generation, values) = batch.await;
+                if generation != version.load(Ordering::Relaxed) {
+                    return fallback(key).await;
+                }
+
+                let (reply, receive) = oneshot::channel();
+                requests.unbounded_send((key.clone(), reply)).ok().context(
+                    error::UnexpectedSnafu {
+                        err_msg: "Cache batch queue closed",
+                    },
+                )?;
+                let values: std::result::Result<Arc<HashMap<K, V>>, Arc<Error>> =
+                    receive.await.ok().context(error::UnexpectedSnafu {
+                        err_msg: "Cache batch reply dropped",
+                    })?;
                 if generation != version.load(Ordering::Relaxed) {
                     return fallback(key).await;
                 }
                 Ok(values.context(error::GetCacheSnafu)?.get(key).cloned())
             })
         });
-        try_join_all(keys.iter().zip(values).map(|(key, value)| {
-            let initializer = initializer.clone();
-            async move {
-                if value.is_some() {
-                    metrics::CACHE_CONTAINER_CACHE_GET
-                        .with_label_values(&[&self.name])
-                        .inc();
-                    Ok(value)
-                } else {
-                    self.get_by_ref_with(key, initializer).await
+
+        let reads = async move {
+            let mut pending = FuturesUnordered::new();
+            // Poll every key once before dispatch so stream fairness does not split
+            // immediately available misses into smaller backend batches.
+            for (index, key) in misses {
+                let read = self.get_by_ref_with(key, initializer.clone());
+                let mut read = Box::pin(async move { (index, read.await) });
+                match futures::poll!(&mut read) {
+                    Poll::Ready((_, value)) => values[index] = value?,
+                    Poll::Pending => pending.push(read),
                 }
             }
-        }))
-        .await
+            drop(initializer);
+            while let Some((index, value)) = pending.next().await {
+                values[index] = value?;
+            }
+            Ok(values)
+        };
+        let dispatch = async {
+            let mut batches = receiver.ready_chunks(batch_size);
+            while let Some(batch) = batches.next().await {
+                let (keys, replies): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+                let values = batch_initializer(keys)
+                    .await
+                    .map(Arc::new)
+                    .map_err(Arc::new);
+                for reply in replies {
+                    let _ = reply.send(values.clone());
+                }
+            }
+            Ok(())
+        };
+        let (values, ()) = futures::try_join!(reads, dispatch)?;
+        Ok(values)
     }
 }
 
@@ -504,13 +537,127 @@ mod tests {
         assert_eq!(batches.lock().unwrap().last().unwrap(), &vec![3]);
     }
 
+    type BatchGate = (Vec<u32>, tokio::sync::oneshot::Sender<Result<()>>);
+
+    fn gated_batch_cache() -> (
+        CacheContainer<u32, u32, CacheIdent>,
+        tokio::sync::mpsc::UnboundedReceiver<BatchGate>,
+    ) {
+        let (observed, batches) = tokio::sync::mpsc::unbounded_channel();
+        let cache = batch_test_cache(Arc::new(|_| {
+            Box::pin(async { panic!("unexpected single load") })
+        }))
+        .with_batch_initializer(Arc::new(move |mut keys| {
+            let (resume, gate) = tokio::sync::oneshot::channel();
+            keys.sort_unstable();
+            observed.send((keys.clone(), resume)).unwrap();
+            Box::pin(async move {
+                gate.await.unwrap()?;
+                Ok(keys.into_iter().map(|key| (key, key)).collect())
+            })
+        }));
+        (cache, batches)
+    }
+
+    #[tokio::test]
+    async fn test_overlapping_batches_load_each_key_once() {
+        let (cache, mut batches) = gated_batch_cache();
+        let mut first = Box::pin(cache.get_many(&[1, 2]));
+        assert!(futures::poll!(&mut first).is_pending());
+        let (keys, resume_first) = batches.try_recv().unwrap();
+        assert_eq!(keys, [1, 2]);
+
+        let mut second = Box::pin(cache.get_many(&[2, 3]));
+        assert!(futures::poll!(&mut second).is_pending());
+        let (keys, resume_second) = batches.try_recv().unwrap();
+        assert_eq!(keys, [3]);
+
+        resume_first.send(Ok(())).unwrap();
+        resume_second.send(Ok(())).unwrap();
+        let (first, second) = futures::try_join!(first, second).unwrap();
+        assert_eq!(first, [Some(1), Some(2)]);
+        assert_eq!(second, [Some(2), Some(3)]);
+    }
+
+    #[tokio::test]
+    async fn test_batch_waiter_promoted_after_cancellation() {
+        let (cache, mut batches) = gated_batch_cache();
+        let mut owner = Box::pin(cache.get_many(&[1]));
+        assert!(futures::poll!(&mut owner).is_pending());
+        let (keys, cancelled) = batches.try_recv().unwrap();
+        assert_eq!(keys, [1]);
+
+        let mut waiter = Box::pin(cache.get_many(&[1, 2]));
+        assert!(futures::poll!(&mut waiter).is_pending());
+        let (keys, resume) = batches.try_recv().unwrap();
+        assert_eq!(keys, [2]);
+        drop(owner);
+        assert!(cancelled.send(Ok(())).is_err());
+        resume.send(Ok(())).unwrap();
+
+        let promoted = async {
+            let (keys, resume) = batches.recv().await.unwrap();
+            assert_eq!(keys, [1]);
+            resume.send(Ok(())).unwrap();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(waiter, promoted)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap(), [Some(1), Some(2)]);
+    }
+
+    #[tokio::test]
+    async fn test_shared_error_cancels_unrelated_pending_load() {
+        let (cache, mut batches) = gated_batch_cache();
+        let mut owner = Box::pin(cache.get_many(&[1]));
+        assert!(futures::poll!(&mut owner).is_pending());
+        let (_, fail) = batches.try_recv().unwrap();
+
+        let mut waiter = Box::pin(cache.get_many(&[2, 1]));
+        assert!(futures::poll!(&mut waiter).is_pending());
+        let (keys, blocked) = batches.try_recv().unwrap();
+        assert_eq!(keys, [2]);
+
+        fail.send(error::GetLatestCacheRetryExceededSnafu { attempts: 1usize }.fail())
+            .unwrap();
+        assert!(owner.await.is_err());
+        let result = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .unwrap();
+        assert!(result.is_err());
+        assert!(blocked.send(Ok(())).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_large_cold_batch_loads_ready_keys_together() {
+        let (cache, mut batches) = gated_batch_cache();
+        let keys: Vec<_> = (0..128).collect();
+        let mut read = Box::pin(cache.get_many(&keys));
+        assert!(futures::poll!(&mut read).is_pending());
+        let (loaded, resume) = batches.try_recv().unwrap();
+        assert_eq!(loaded, keys);
+        resume.send(Ok(())).unwrap();
+        assert_eq!(
+            read.await.unwrap(),
+            keys.into_iter().map(Some).collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test]
     async fn test_get_many_invalidated_load_uses_current_value() {
+        for strategy in [InitStrategy::Unchecked, InitStrategy::VersionChecked] {
+            assert_invalidated_batch_uses_current_value(strategy).await;
+        }
+    }
+
+    async fn assert_invalidated_batch_uses_current_value(strategy: InitStrategy) {
         let started = Arc::new(tokio::sync::Notify::new());
         let resume = Arc::new(tokio::sync::Notify::new());
         let value = Arc::new(AtomicUsize::new(10));
         let current = value.clone();
-        let cache = batch_test_cache(Arc::new(move |_| {
+        let mut cache = batch_test_cache(Arc::new(move |_| {
             let current = current.clone();
             Box::pin(async move { Ok(Some(current.load(Ordering::SeqCst) as u32)) })
         }))
@@ -527,6 +674,7 @@ mod tests {
                 })
             }
         }));
+        cache.init_strategy = strategy;
         let read = cache.get_many(&[1]);
         let invalidate = async {
             started.notified().await;
@@ -557,8 +705,9 @@ mod tests {
                     })
                 }
             }))
-            .with_batch_initializer(Arc::new(|_| {
-                Box::pin(async { panic!("single-key load owns this miss") })
+            .with_batch_initializer(Arc::new(|keys| {
+                assert_eq!(keys, [2]);
+                Box::pin(async { Ok(HashMap::from([(2, 20)])) })
             })),
         );
         let single = tokio::spawn({
@@ -566,10 +715,10 @@ mod tests {
             async move { cache.get(1).await }
         });
         started.notified().await;
-        let mut batch = Box::pin(cache.get_many(&[1]));
+        let mut batch = Box::pin(cache.get_many(&[1, 2]));
         assert!(futures::poll!(&mut batch).is_pending());
         resume.notify_one();
-        assert_eq!(batch.await.unwrap(), vec![Some(10)]);
+        assert_eq!(batch.await.unwrap(), vec![Some(10), Some(20)]);
         assert_eq!(single.await.unwrap().unwrap(), Some(10));
     }
 
