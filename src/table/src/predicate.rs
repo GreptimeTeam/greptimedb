@@ -21,6 +21,7 @@ use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use datafusion::common::ScalarValue;
+use datafusion::functions::datetime::date_trunc::DateTruncFunc;
 use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
 use datafusion_common::ToDFSchema;
 use datafusion_common::pruning::PruningStatistics;
@@ -660,8 +661,10 @@ fn date_trunc_unit_of(expr: &Expr, ts_col_name: &str) -> Option<DateTruncUnit> {
     let Expr::ScalarFunction(scalar_function) = expr else {
         return None;
     };
-    let func_name = scalar_function.func.name();
-    if !func_name.eq_ignore_ascii_case("date_trunc") {
+    // The registered name is not enough: a same-name function with different
+    // semantics can be registered, and the range math below only holds for the
+    // built-in implementation.
+    if !scalar_function.func.inner().is::<DateTruncFunc>() {
         return None;
     }
     // DataFusion's `date_trunc` takes exactly `(unit, timestamp)`: there is no
@@ -699,8 +702,12 @@ fn date_trunc_unit_of(expr: &Expr, ts_col_name: &str) -> Option<DateTruncUnit> {
 /// - `f >= b` and `f > b` imply `ts >= b`, so `b` is used as an inclusive
 ///   lower bound (rounding up can only widen the range).
 /// - `f <= b` and `f < b` imply `ts < next_boundary_after(b)`, the first bucket
-///   boundary strictly after `b`. This is exact for `<=` and over-approximates
-///   `<` by at most one bucket, which only widens the extracted range.
+///   boundary strictly after `b`. That bound is exact for `f <= b` with calendar
+///   units; for fixed-width units it is computed as `b + one bucket`, so it is
+///   exact only when `b` is aligned to a bucket boundary and up to one bucket
+///   too wide otherwise. For `f < b` the exact bound would be `ts < b`, so it is
+///   over-approximated by at most one bucket. Every over-approximation only
+///   widens the extracted range, it never cuts off a matching row.
 /// - `f = b` implies the bucket `[b, next_boundary_after(b))`.
 ///
 /// Everything else (`!=`, non-literal bound, non-time-index column, unsupported
@@ -906,9 +913,12 @@ mod tests {
     use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use datafusion::parquet::arrow::ArrowWriter;
     use datafusion_common::{Column, ScalarValue};
-    use datafusion_expr::{BinaryExpr, Literal, Operator, col, lit};
+    use datafusion_expr::{
+        BinaryExpr, ColumnarValue, Literal, Operator, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
+        Signature, Volatility, col, lit,
+    };
     use datatypes::arrow::array::Int32Array;
-    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit as ArrowTimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::arrow_array::StringArray;
     use parquet::arrow::ParquetRecordBatchStreamBuilder;
@@ -1572,6 +1582,83 @@ mod tests {
         check_date_trunc_predicate(
             date_trunc_expr("day", "ts").between(col("t2"), col("t3")),
             TimestampRange::min_to_max(),
+        );
+    }
+
+    /// A `date_trunc` implementation carrying the built-in name but different
+    /// semantics, mimicking a same-name function registered by an extension.
+    #[derive(Debug, Hash, PartialEq, Eq)]
+    struct FakeDateTrunc {
+        signature: Signature,
+    }
+
+    impl FakeDateTrunc {
+        fn new() -> Self {
+            Self {
+                signature: Signature::exact(
+                    vec![
+                        DataType::Utf8,
+                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    ],
+                    Volatility::Immutable,
+                ),
+            }
+        }
+    }
+
+    impl ScalarUDFImpl for FakeDateTrunc {
+        fn name(&self) -> &str {
+            // Same name as the built-in `date_trunc`.
+            "date_trunc"
+        }
+
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+
+        fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+            Ok(DataType::Timestamp(ArrowTimeUnit::Millisecond, None))
+        }
+
+        fn invoke_with_args(
+            &self,
+            _args: ScalarFunctionArgs,
+        ) -> datafusion_common::Result<ColumnarValue> {
+            unimplemented!("the fake date_trunc is only built, never executed")
+        }
+    }
+
+    /// Builds `date_trunc(<unit>, <ts_col>)` from the fake implementation above.
+    fn fake_date_trunc_expr(unit: &str, ts_col: &str) -> Expr {
+        ScalarUDF::new_from_impl(FakeDateTrunc::new()).call(vec![
+            lit(ScalarValue::Utf8(Some(unit.to_string()))),
+            col(ts_col),
+        ])
+    }
+
+    #[test]
+    fn test_date_trunc_with_same_name_but_other_impl_returns_none() {
+        // The engine allows registering a function named `date_trunc` with
+        // different semantics. Matching on the name alone would derive a range
+        // that does not hold for that function, so only the built-in
+        // implementation may be used.
+        let b = utc_ms(2024, 5, 15, 0, 0, 0);
+        let expr = fake_date_trunc_expr("day", "ts").gt_eq(ts_ms(b));
+
+        // Sanity check: the expression is indistinguishable by name only.
+        let Expr::BinaryExpr(BinaryExpr { left, op, .. }) = &expr else {
+            panic!("expected a binary expression, got {expr}");
+        };
+        assert_eq!(&Operator::GtEq, op);
+        let Expr::ScalarFunction(func) = left.as_ref() else {
+            panic!("expected a scalar function on the left-hand side, got {left}");
+        };
+        assert_eq!("date_trunc", func.func.name());
+        assert!(date_trunc_unit_of(left, "ts").is_none());
+
+        assert_eq!(
+            TimestampRange::min_to_max(),
+            build_time_range_predicate("ts", TimeUnit::Millisecond, &[expr])
         );
     }
 
