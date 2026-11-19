@@ -108,6 +108,20 @@ pub fn is_windowable(expr: &PromExpr) -> bool {
     admit(expr).is_some()
 }
 
+/// The maximum input range of an admitted expression, in milliseconds.
+///
+/// Named selectors return zero; their caller must account for the evaluation
+/// lookback separately. A `rate` returns its matrix range, and parentheses and
+/// `sum` do not change it. Expressions outside the window allowlist, and ranges
+/// that narrow to zero or overflow, fail closed.
+pub fn max_input_range_ms(expr: &PromExpr) -> Result<i64, WindowError> {
+    let admitted = admit(expr).ok_or(WindowError::NotEligible)?;
+    match admitted.matrix {
+        Some(matrix) => range_millis(matrix.range),
+        None => Ok(0),
+    }
+}
+
 /// What the v1 allowlist admits, beyond the expression being windowable at all.
 struct Admitted<'a> {
     /// The range of an admitted `rate`'s matrix selector, which planning narrows
@@ -227,10 +241,7 @@ impl EvalGrid {
     /// the way planning validates it, exactly as [`windowed_eval_stmt`] does, so a
     /// statement planning would refuse never yields a grid.
     pub fn of(stmt: &EvalStmt) -> Result<Self, WindowError> {
-        let admitted = admit(&stmt.expr).ok_or(WindowError::NotEligible)?;
-        if let Some(matrix) = admitted.matrix {
-            range_millis(matrix.range)?;
-        }
+        max_input_range_ms(&stmt.expr)?;
         let step_ms = step_millis(stmt.interval)?;
         // A lookback is not narrowed further than planning narrows it: both routes
         // keep it in milliseconds, so a value that does not survive that conversion
@@ -655,6 +666,60 @@ mod tests {
         assert!(is_windowable(&stmt("x").expr));
         assert!(is_windowable(&stmt("rate(x[5m])").expr));
         assert!(is_windowable(&stmt("((x))").expr));
+    }
+
+    #[test]
+    fn input_range_follows_the_window_allowlist() {
+        for (query, expected) in [
+            ("x", 0),
+            ("((x))", 0),
+            ("sum((sum(x)))", 0),
+            ("rate(x[10m])", 600_000),
+            ("sum(rate(x[10m]))", 600_000),
+            ("((sum((sum(rate(((x[10m]))))))))", 600_000),
+            ("sum by (host) (rate(x[10m]))", 600_000),
+        ] {
+            assert_eq!(
+                max_input_range_ms(&stmt(query).expr),
+                Ok(expected),
+                "{query}"
+            );
+        }
+
+        for query in [
+            "avg(rate(x[10m]))",
+            "x offset 1m",
+            "rate(x[10m] @ end())",
+            "rate(x[10m]) + rate(y[20m])",
+            "sum(rate(x[10m]) + rate(y[20m]))",
+        ] {
+            assert_eq!(
+                max_input_range_ms(&stmt(query).expr),
+                Err(WindowError::NotEligible),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_range_rejects_zero_and_overflow_after_narrowing() {
+        for range in [Duration::ZERO, Duration::from_micros(999)] {
+            let original = stmt_with_range("rate(x[10m])", range);
+            assert_eq!(
+                max_input_range_ms(&original.expr),
+                Err(WindowError::InvalidSpan)
+            );
+        }
+        let overflow = stmt_with_range("rate(x[10m])", Duration::from_millis(i64::MAX as u64 + 1));
+        assert_eq!(
+            max_input_range_ms(&overflow.expr),
+            Err(WindowError::Overflow)
+        );
+
+        let largest = stmt_with_range("rate(x[10m])", Duration::from_millis(i64::MAX as u64));
+        assert_eq!(max_input_range_ms(&largest.expr), Ok(i64::MAX));
+        let fractional = stmt_with_range("rate(x[10m])", Duration::from_micros(1_500));
+        assert_eq!(max_input_range_ms(&fractional.expr), Ok(1));
     }
 
     /// Parentheses group, so they say nothing about the expression inside them:

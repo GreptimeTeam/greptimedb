@@ -61,7 +61,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::schema::{Schema, SchemaRef};
 use promql_parser::parser::EvalStmt;
-use query::promql::window::{EvalGrid, windowed_eval_stmt};
+use query::promql::window::{EvalGrid, max_input_range_ms, windowed_eval_stmt};
 use servers::error::{self as server_error, ExecuteQuerySnafu, UnexpectedResultSnafu};
 use snafu::ResultExt;
 
@@ -129,6 +129,15 @@ pub(crate) async fn execute_range<E>(
 where
     E: WindowExecutor + ?Sized,
 {
+    // The entire request must bypass if its input dependency cannot be bounded:
+    // deciding this before planning or executing any span avoids a partial fill.
+    let (Ok(input_range_ms), Ok(lookback_ms)) = (
+        max_input_range_ms(&stmt.expr),
+        i64::try_from(stmt.lookback_delta.as_millis()),
+    ) else {
+        return Ok(RangeOutcome::Bypassed);
+    };
+    let dependency_history_ms = input_range_ms.max(lookback_ms);
     let planned = match cache.plan(identity, stmt, now) {
         ChunkPlan::Bypass(_) => return Ok(RangeOutcome::Bypassed),
         ChunkPlan::Planned(planned) => planned,
@@ -149,7 +158,18 @@ where
     let mut infos = Vec::new();
     for span in ascending_spans(planned.chunks(), planned.direct()) {
         let window = match span {
-            Span::Chunk(key) => chunk_rows(executor, cache, key, stmt, &grid, now).await?,
+            Span::Chunk(key) => {
+                chunk_rows(
+                    executor,
+                    cache,
+                    key,
+                    stmt,
+                    &grid,
+                    now,
+                    dependency_history_ms,
+                )
+                .await?
+            }
             Span::Direct(direct) => execute_span(executor, stmt, &grid, direct.span()).await?,
         };
         warnings.extend(window.annotations.warnings().iter().cloned());
@@ -171,6 +191,7 @@ async fn chunk_rows<E>(
     stmt: &EvalStmt,
     grid: &EvalGrid,
     now: SystemTime,
+    dependency_history_ms: i64,
 ) -> server_error::Result<WindowOutput>
 where
     E: WindowExecutor + ?Sized,
@@ -201,11 +222,17 @@ where
     // the end, and a failure returned above without inserting anything. Its
     // annotations are stored beside them, and the same ones are returned, so the
     // request that filled the chunk reports them exactly as a later hit does.
-    cache.insert_annotated(
+    let chunk = key.chunk();
+    let dependency = TimeChunk::new(
+        chunk.start_ms().saturating_sub(dependency_history_ms),
+        chunk.end_ms(),
+    );
+    cache.insert_with_dependency(
         key.clone(),
         fill,
         Arc::new(clone_rows(&window.rows)?),
         Arc::new(window.annotations.clone()),
+        dependency,
     );
     Ok(window)
 }
@@ -361,12 +388,17 @@ mod tests {
     const NOW_MS: i64 = HEAD_MS + 24 * 3_600_000;
 
     fn at(ms: i64) -> SystemTime {
-        UNIX_EPOCH + Duration::from_millis(ms.unsigned_abs())
+        let duration = Duration::from_millis(ms.unsigned_abs());
+        if ms >= 0 {
+            UNIX_EPOCH + duration
+        } else {
+            UNIX_EPOCH - duration
+        }
     }
 
     /// The millisecond instant `time` names.
     fn millis(time: SystemTime) -> i64 {
-        i64::try_from(time.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()
+        query::promql::label_values::signed_millis_since_epoch(time).unwrap()
     }
 
     /// A statement from `start_ms` over `points` grid points, stepping `step_ms`.
@@ -572,6 +604,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filled_chunks_invalidate_on_their_full_input_history() {
+        for (query, lookback_ms, history_ms) in [
+            ("cpu", 300_000, 300_000),
+            ("rate(cpu[10m])", 300_000, 600_000),
+            ("sum(rate(cpu[10m]))", 300_000, 600_000),
+            ("rate(cpu[10m])", 900_000, 900_000),
+        ] {
+            let cache = test_cache();
+            let mut stmt = range_stmt(query, HEAD_MS, 5, STEP_MS);
+            stmt.lookback_delta = Duration::from_millis(lookback_ms as u64);
+            let mut identity = identity(query);
+            identity.lookback_ms = lookback_ms;
+            let key = TimeChunkKey::new(
+                identity.clone(),
+                TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS),
+            );
+
+            let rows = execute_range(
+                &RecordingExecutor::default(),
+                &cache,
+                identity.clone(),
+                &stmt,
+                at(NOW_MS),
+            )
+            .await
+            .unwrap();
+            assert_eq!(points(&merged(rows)).len(), 5, "{query}");
+            assert_eq!(cache.entry_count(), 1, "{query}");
+            assert!(matches!(cache.lookup(&key, at(NOW_MS)), Lookup::Hit { .. }));
+
+            // The dependency begins exactly `history_ms` before the output; a
+            // disjoint range ending there leaves the entry resident.
+            let start = HEAD_MS - history_ms;
+            assert_eq!(
+                cache.invalidate_range(&identity, TimeChunk::new(start - 1, start)),
+                0,
+                "{query}"
+            );
+            assert!(matches!(cache.lookup(&key, at(NOW_MS)), Lookup::Hit { .. }));
+            let end = HEAD_MS + CHUNK_MS;
+            assert_eq!(
+                cache.invalidate_range(&identity, TimeChunk::new(end, end + 1)),
+                0,
+                "{query}"
+            );
+            assert!(matches!(cache.lookup(&key, at(NOW_MS)), Lookup::Hit { .. }));
+            // A single dirty millisecond inside that history evicts the chunk,
+            // even though all its output points come later.
+            assert_eq!(
+                cache.invalidate_range(&identity, TimeChunk::new(start, start + 1)),
+                1,
+                "{query}"
+            );
+            assert!(matches!(cache.lookup(&key, at(NOW_MS)), Lookup::Miss(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn dependency_start_saturates_at_the_minimum_timestamp() {
+        let cache = test_cache();
+        let query = "cpu";
+        let mut stmt = range_stmt(query, -CHUNK_MS, 5, STEP_MS);
+        stmt.lookback_delta = Duration::from_millis(i64::MAX as u64);
+        let mut identity = identity(query);
+        identity.lookback_ms = i64::MAX;
+        let rows = execute_range(
+            &RecordingExecutor::default(),
+            &cache,
+            identity.clone(),
+            &stmt,
+            at(NOW_MS),
+        )
+        .await
+        .unwrap();
+        assert_eq!(points(&merged(rows)).len(), 5);
+        assert_eq!(cache.entry_count(), 1);
+        assert_eq!(
+            cache.invalidate_range(&identity, TimeChunk::new(i64::MIN, i64::MIN + 1)),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn a_hit_reuses_the_payload_of_the_chunk_it_serves() {
         let cache = test_cache();
         let stmt = range_stmt("cpu", HEAD_MS, 10, STEP_MS);
@@ -686,6 +801,48 @@ mod tests {
             RangeOutcome::Bypassed
         ));
         assert_eq!(0, cache.entry_count());
+    }
+
+    #[tokio::test]
+    async fn unknown_or_unrepresentable_input_history_bypasses_before_any_span() {
+        let cache = test_cache();
+        // The leading partial chunk would execute first if this were admitted.
+        let start = HEAD_MS + STEP_MS;
+        let unknown = range_stmt("rate(cpu[10m]) + rate(other[20m])", start, 10, STEP_MS);
+        assert!(matches!(
+            run(&ForbiddenExecutor, &cache, &unknown, "multi")
+                .await
+                .unwrap(),
+            RangeOutcome::Bypassed
+        ));
+
+        for range in [Duration::ZERO, Duration::from_millis(i64::MAX as u64 + 1)] {
+            let mut invalid = range_stmt("rate(cpu[10m])", start, 10, STEP_MS);
+            let promql_parser::parser::Expr::Call(call) = &mut invalid.expr else {
+                panic!("rate is a call");
+            };
+            let promql_parser::parser::Expr::MatrixSelector(matrix) = &mut *call.args.args[0]
+            else {
+                panic!("rate folds a matrix selector");
+            };
+            matrix.range = range;
+            assert!(matches!(
+                run(&ForbiddenExecutor, &cache, &invalid, "rate(cpu[10m])")
+                    .await
+                    .unwrap(),
+                RangeOutcome::Bypassed
+            ));
+        }
+
+        let mut overflow_lookback = range_stmt("cpu", start, 10, STEP_MS);
+        overflow_lookback.lookback_delta = Duration::from_millis(i64::MAX as u64 + 1);
+        assert!(matches!(
+            run(&ForbiddenExecutor, &cache, &overflow_lookback, "cpu")
+                .await
+                .unwrap(),
+            RangeOutcome::Bypassed
+        ));
+        assert_eq!(cache.entry_count(), 0);
     }
 
     #[tokio::test]
