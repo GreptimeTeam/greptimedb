@@ -37,6 +37,7 @@ pub(crate) mod series_candidate;
 pub(crate) mod series_reader;
 pub mod series_scan;
 pub mod stream;
+pub(crate) mod substituted_rows;
 pub(crate) mod unordered_scan;
 
 use std::collections::HashMap;

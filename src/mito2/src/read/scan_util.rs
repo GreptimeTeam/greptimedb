@@ -47,6 +47,7 @@ use crate::read::last_row::FlatLastTimestampSelector;
 use crate::read::pruner::PartitionPruner;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
+use crate::read::substituted_rows::filter_flat_batch_by_substituted_sequence;
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics};
 use crate::sst::file::{FileTimeRange, RegionFileId};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
@@ -1534,8 +1535,11 @@ pub(crate) async fn scan_flat_file_ranges(
 ///
 /// `file_sequence_trusted` is the per-file trust decision. Foreign reader
 /// batches have already been virtualized to the target-local file barrier, so
-/// they are filtered using the effective batch sequence. Local untrusted files
-/// pass through because exact capability excludes them before row filtering.
+/// they are filtered using the effective batch sequence. A local file whose marker is
+/// unset is left untouched only when it has no substituted cut: the exact-range
+/// capability excludes such a file from the region's range before row filtering. A
+/// local file that states a cut is filtered like a trusted one, because its cut already
+/// hid the rows a substitution produced.
 pub(crate) fn filter_flat_batch_by_sequence(
     record_batch: RecordBatch,
     sequence_range: Option<SequenceRange>,
@@ -1612,14 +1616,86 @@ pub fn build_flat_file_range_scan_stream(
             part_metrics.inc_build_reader_cost(build_cost);
 
             let may_compat = range.compat_batch();
-            let file_sequence_trusted = range
-                .file_handle()
-                .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
+            // The substituted cut of a physical-sequence read: rows at or below it carry a
+            // number a substitution produced, so they are hidden and their time range is
+            // reported.
+            let substituted_cut = stream_ctx.input.substituted_row_ranges().and_then(|windows| {
+                stream_ctx
+                    .input
+                    .substituted_sequence_cut(range.file_handle())
+                    .map(|cut| (cut, windows))
+            });
+            // Which rows of this file this round has already consumed, and which ones it
+            // may still report:
+            //
+            // * a local file's rows were admitted by this region, so the scan's own `(C, H]`
+            //   applies as it stands; the rows a substitution produced in it are taken out by
+            //   the cut above, which is why that cut is not "foreign files only";
+            // * a foreign file's rows were numbered in the creator's domain, which this
+            //   region's cursor does not bound. The creator's cursor slice the file belongs
+            //   to is the filter a physical-sequence read (`read_row_sequence`) asks for,
+            //   and it applies with or without a substituted cut: without it the file would
+            //   be read whole and every already consumed row delivered again. A foreign
+            //   file whose creator has no cursor slice fails closed.
+            let (file_sequence_range, file_sequence_trusted) =
+                match stream_ctx.input.foreign_row_sequence_filter(range.file_handle())? {
+                    Some(creator_range) => (Some(creator_range), true),
+                    None => (
+                        stream_ctx.input.sequence_range,
+                        // A local file whose marker is unset is attributable above its
+                        // substituted cut: the cut was applied just above (it is only
+                        // computed when a physical-sequence read hides those rows and
+                        // reports their windows), and what is left carries this region's
+                        // own numbering. Skipping the row filter here would deliver rows
+                        // the caller already consumed, which is exactly the row the
+                        // exact-range capability promises not to do.
+                        range
+                            .file_handle()
+                            .is_effective_target_sequence_trusted(
+                                stream_ctx.input.region_metadata().region_id,
+                            )
+                            || substituted_cut.is_some(),
+                    ),
+                };
+
+            // Which `(region, partition expression)` this read observed: the creator of
+            // the file and the expression the file states for its own rows. A cursor entry
+            // keyed by a region alone cannot say which part of that region's domain a
+            // round consumed, so the owner of the cursor learns the narrower key from the
+            // read itself. The expression travels as its own identity, never as an
+            // interval projected out of it: a projection would have to guess a comparison
+            // semantics for every operator it cannot express, and a file that states no
+            // expression at all is the only case that covers the complete domain.
+            //
+            // A local file is reported too: its numbers belong to this region's own
+            // domain, and a reader that reported only adopted files would leave a
+            // region's slices unobservable as soon as compaction rewrote them into local
+            // ones, which would stall the cursor instead of advancing it.
+            if let Some(observed) = stream_ctx.input.observed_slices() {
+                let meta = range.file_handle().meta_ref();
+                observed.record(meta.region_id.as_u64(), meta.partition_expr.as_deref())?;
+            }
 
             while let Some(record_batch) = reader.next_batch().await? {
+                // Hides the rows a substitution produced and reports the windows they
+                // occupy, so the caller recomputes exactly those windows.
+                let record_batch = match substituted_cut {
+                    Some((cut, windows)) => {
+                        let Some(record_batch) = filter_flat_batch_by_substituted_sequence(
+                            record_batch,
+                            Some(cut),
+                            windows,
+                        )?
+                        else {
+                            continue;
+                        };
+                        record_batch
+                    }
+                    None => record_batch,
+                };
                 let Some(record_batch) = filter_flat_batch_by_sequence(
                     record_batch,
-                    stream_ctx.input.sequence_range,
+                    file_sequence_range,
                     file_sequence_trusted,
                 )? else {
                     continue;

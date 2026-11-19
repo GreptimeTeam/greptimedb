@@ -338,8 +338,13 @@ pub enum Error {
         location: Location,
     },
 
+    /// The caller's incremental cursor cannot be trusted any more.
+    ///
+    /// The message keeps the stable `sequence range cursor invalid:` prefix the
+    /// enterprise incremental flow matches on to fall back to a full rebuild,
+    /// and the historical `STALE_CURSOR` token for existing log matchers.
     #[snafu(display(
-        "STALE_CURSOR: incremental query stale, region: {}, given_seq: {}, min_readable_seq: {}, retry_hint: FALLBACK_FULL_RECOMPUTE",
+        "sequence range cursor invalid: STALE_CURSOR: incremental query stale, region: {}, given_seq: {}, min_readable_seq: {}, retry_hint: FALLBACK_FULL_RECOMPUTE",
         region_id,
         given_seq,
         min_readable_seq
@@ -366,8 +371,15 @@ pub enum Error {
         location: Location,
     },
 
+    /// The region cannot prove that an exact `(min, max]` sequence read is
+    /// possible over its current files.
+    ///
+    /// Shares the stable `exact sequence range unavailable:` prefix with
+    /// [Self::RegionSequenceDomainBroken]; both mean "exactness is not
+    /// provable" to callers that must fall back, even though they keep
+    /// different status codes.
     #[snafu(display(
-        "SEQUENCE_RANGE_UNSUPPORTED: exact sequence-range read unsupported, region: {}, min_seq: {}, max_seq: {}, reason: {}, retry_hint: FALLBACK_MEMTABLE_ONLY_OR_FULL_RECOMPUTE",
+        "exact sequence range unavailable: SEQUENCE_RANGE_UNSUPPORTED: exact sequence-range read unsupported, region: {}, min_seq: {}, max_seq: {}, reason: {}, retry_hint: FALLBACK_MEMTABLE_ONLY_OR_FULL_RECOMPUTE",
         region_id,
         min_seq,
         max_seq,
@@ -382,8 +394,14 @@ pub enum Error {
         location: Location,
     },
 
+    /// A selected file carries rows from a foreign sequence domain and has no
+    /// admission barrier, so exactness cannot be proven at all.
+    ///
+    /// Shares the stable `exact sequence range unavailable:` prefix with
+    /// [Self::SequenceRangeUnsupported] so a caller can classify it without
+    /// depending on the (unchanged) status code.
     #[snafu(display(
-        "region {} is unusable for sequence reads: file {} declares region {}",
+        "exact sequence range unavailable: region {} cannot prove exact sequence-range reads: file {} declares region {} and carries no admission barrier, retry_hint: FALLBACK_FULL_RECOMPUTE",
         region_id,
         file_id,
         file_region_id

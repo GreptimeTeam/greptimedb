@@ -914,7 +914,9 @@ mod tests {
             {"region_id":4402341478400,"file_id":"34b6ebb9-b8a5-4a4b-b744-56f67defad02","time_range":[{"value":1451609210000,"unit":"Millisecond"},{"value":1451609520000,"unit":"Millisecond"}],"level":0,"file_size":100}
             ]
         }"#;
-        let _ = serde_json::from_str::<RegionEdit>(region_edit).unwrap();
+        // An edit written before this build must still deserialize.
+        let legacy_edit: RegionEdit = serde_json::from_str(region_edit).unwrap();
+        assert_eq!(None, legacy_edit.flushed_entry_id);
 
         let region_edit = r#"{
             "flushed_entry_id":10,

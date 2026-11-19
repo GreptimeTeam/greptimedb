@@ -16,6 +16,7 @@ use common_base::readable_size::ReadableSize;
 use partition::expr::PartitionExpr;
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::storage::SequenceNumber;
 use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
@@ -24,7 +25,7 @@ use crate::compaction::multi_region::{MultiRegionCompactionContext, MultiRegionT
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::read::FlatSource;
 use crate::sst::FormatType;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId, substituted_up_to_after_merge};
 use crate::sst::index::build::IndexBuildInputs;
 use crate::sst::index::registry::IndexBuildPlan;
 use crate::sst::parquet::metadata::extract_primary_key_range;
@@ -40,6 +41,7 @@ pub(crate) struct TargetWriter<'a> {
     max_file_size: usize,
     sequence: Option<NonZeroU64>,
     preserve_row_sequence: bool,
+    substituted_up_to: Option<SequenceNumber>,
 }
 
 impl<'a> TargetWriter<'a> {
@@ -48,14 +50,26 @@ impl<'a> TargetWriter<'a> {
         context: &'a MultiRegionCompactionContext,
         limits: &'a MemoryLimits,
         max_file_size: usize,
+        footer_all_zero: impl Fn(RegionFileId) -> bool,
         index_plan: Arc<IndexBuildPlan>,
     ) -> Self {
+        let region_id = target.metadata.region_id;
         let sequence = crate::sst::file::known_max_input_sequence(target.inputs.values());
         let preserve_row_sequence = target.options.preserve_row_sequence
             && target
                 .inputs
                 .values()
-                .all(|file| file.is_effective_target_sequence_trusted(target.metadata.region_id));
+                .all(|file| file.is_effective_target_sequence_trusted(region_id));
+        // The merge substitutes a file-level constant for the rows of a foreign input and of a
+        // local untrusted input whose footer proves an all-zero column, so the routed rows may
+        // carry numbers this region never allocated up to that constant.
+        let substituted_up_to = substituted_up_to_after_merge(
+            region_id,
+            target
+                .inputs
+                .values()
+                .map(|file| (file, footer_all_zero(file.file_id()))),
+        );
         Self {
             target,
             context,
@@ -64,6 +78,7 @@ impl<'a> TargetWriter<'a> {
             max_file_size,
             sequence,
             preserve_row_sequence,
+            substituted_up_to,
         }
     }
 
@@ -202,6 +217,7 @@ impl<'a> TargetWriter<'a> {
             primary_key_min: range.as_ref().map(|(min, _)| min.clone()),
             primary_key_max: range.map(|(_, max)| max),
             preserve_row_sequence: self.preserve_row_sequence,
+            substituted_up_to: self.substituted_up_to,
             format: info.format.clone(),
         })
     }

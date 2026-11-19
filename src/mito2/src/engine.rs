@@ -1482,6 +1482,35 @@ fn validate_sequence_fences(
     exact_sequence_range_available: bool,
     extension_provider_blocks_exact: bool,
 ) -> Result<()> {
+    // A read that may cross an invalid boundary prunes at file granularity and reads
+    // no row-level sequence range, so no sequence fence applies: the caller only needs
+    // the timestamps of the surviving rows, and rejecting the request would deadlock
+    // recovery.
+    if request.read_across_invalid_boundary || request.require_flushed_frontier {
+        // Such a read may read rows a stale cursor no longer explains; its result may
+        // only be committed when the layout it read is still the one `H` was taken from.
+        if let Some(high) = request.memtable_max_sequence {
+            // A read that requires the flushed frontier has no incremental lower bound
+            // and no exact sequence-range mode, so `H` bounds memtables only. When `H`
+            // is behind the flushed frontier an SST cannot be filtered by `H`, and a
+            // plain flush that landed after `H` was frozen would be aggregated into the
+            // recomputed window and then counted again by the next round. Keep the SST
+            // upper-bound fence so the caller rediscovers instead.
+            if request.require_flushed_frontier && !request.skip_sst_files {
+                let min_enforceable_seq = version.flushed_sequence;
+                ensure!(
+                    high >= min_enforceable_seq,
+                    SnapshotFenceStaleSnafu {
+                        region_id,
+                        given_seq: high,
+                        min_enforceable_seq,
+                    }
+                );
+            }
+        }
+        return Ok(());
+    }
+
     if request.exact_sequence_range {
         // Exact `sequence_range` mode: when the capability is available the
         // requested (C, H] delta is enforced row-level on memtables and every
@@ -1522,7 +1551,11 @@ fn validate_sequence_fences(
                 region_id,
                 min_seq: request.memtable_min_sequence.unwrap_or_default(),
                 max_seq: request.memtable_max_sequence.unwrap_or_default(),
-                reason: sequence_range_unsupported_reason(version, extension_provider_blocks_exact),
+                reason: sequence_range_unsupported_reason(
+                    request,
+                    version,
+                    extension_provider_blocks_exact,
+                ),
             }
             .fail();
         }
@@ -1567,15 +1600,22 @@ fn validate_sequence_fences(
 }
 
 fn sequence_range_unsupported_reason(
+    request: &ScanRequest,
     version: &crate::region::version::Version,
     extension_provider_blocks_exact: bool,
 ) -> String {
     if extension_provider_blocks_exact {
         "region is a follower with an extension range provider, whose streams cannot be filtered by sequence".to_string()
-    } else if version.options.preserve_row_sequence {
-        "region has files without preserved per-row sequences".to_string()
-    } else {
+    } else if !version.options.preserve_row_sequence {
         "region does not preserve per-row sequences (preserve_row_sequence is off)".to_string()
+    } else if request.read_row_sequence {
+        // A file that states a substituted cut is attributable (its substituted rows are
+        // hidden and reported, the rest keep this region's numbering), so the remaining
+        // case is a local file with neither the preserved-sequence marker nor a cut.
+        "region has files without preserved per-row sequences and without a substituted cut, so a physical-sequence read cannot attribute their rows"
+            .to_string()
+    } else {
+        "region has files without preserved per-row sequences".to_string()
     }
 }
 
