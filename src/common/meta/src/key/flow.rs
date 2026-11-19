@@ -568,6 +568,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_flow_info_cache_batches_backend_reads() {
+        use crate::cache::new_flow_info_cache;
+        use crate::cache::test_util::assert_batch_cache_reads;
+
+        assert_batch_cache_reads(new_flow_info_cache, |id| {
+            let info = test_flow_info_value(&format!("flow_{id}"), Default::default(), vec![]);
+            (
+                FlowInfoKey::new(id).to_bytes(),
+                info.try_as_raw_value().unwrap(),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_flow_info_manager_batch_get() {
+        let manager = FlowMetadataManager::new(Arc::new(MemoryKvBackend::default()));
+        let first = test_flow_info_value("first", Default::default(), vec![]);
+        let second = test_flow_info_value("second", Default::default(), vec![]);
+        for (id, info) in [(10, &first), (11, &second)] {
+            manager
+                .create_flow_metadata(id, info.clone(), vec![])
+                .await
+                .unwrap();
+        }
+        let infos = manager
+            .flow_info_manager()
+            .batch_get(&[11, 12, 10, 11])
+            .await
+            .unwrap();
+        assert_eq!(infos, [(10, first), (11, second)].into());
+    }
+
+    #[tokio::test]
     async fn test_batch_flow_info_invalidation() {
         use crate::cache::new_flow_info_cache;
         use crate::instruction::CacheIdent;

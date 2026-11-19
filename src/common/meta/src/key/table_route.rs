@@ -1161,6 +1161,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_table_route_cache_batches_backend_reads() {
+        use crate::cache::new_table_route_cache;
+        use crate::cache::test_util::assert_batch_cache_reads;
+
+        assert_batch_cache_reads(new_table_route_cache, |id| {
+            let value = TableRouteValue::logical(id + 100);
+            (
+                TableRouteKey::new(id).to_bytes(),
+                value.try_as_raw_value().unwrap(),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_table_route_batch_get_remaps_addresses() {
         let kv = Arc::new(MemoryKvBackend::default());
         let table_route_storage = TableRouteStorage::new(kv.clone());

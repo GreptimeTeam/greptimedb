@@ -885,6 +885,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_schema_options_preserve_user_options_and_system_schema() {
+        use std::time::Duration;
+
+        use common_meta::key::schema_name::SchemaNameValue;
+        use datatypes::arrow_array::string_array_value_at_index;
+
+        let backend = Arc::new(MemoryKvBackend::default());
+        let registry = cache::build_datanode_layered_cache_registry(backend.clone());
+        let manager = batch_lookup_manager(backend, Arc::new(registry));
+        let options = SchemaNameValue {
+            ttl: Some(Duration::from_secs(9).into()),
+            extra_options: [("region".into(), "east".into())].into(),
+            ..Default::default()
+        };
+        manager
+            .table_metadata_manager
+            .schema_manager()
+            .create(
+                SchemaNameKey::new(DEFAULT_CATALOG_NAME, "user_schema"),
+                Some(options),
+                true,
+            )
+            .await
+            .unwrap();
+        let schemata = manager
+            .table(
+                DEFAULT_CATALOG_NAME,
+                INFORMATION_SCHEMA_NAME,
+                "schemata",
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let batches: Vec<_> = schemata
+            .scan_to_stream(Default::default())
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let mut rows = Vec::new();
+        for batch in &batches {
+            let names = batch.column_by_name("schema_name").unwrap();
+            let options = batch.column_by_name("options").unwrap();
+            for row in 0..batch.num_rows() {
+                rows.push((
+                    string_array_value_at_index(names, row),
+                    string_array_value_at_index(options, row),
+                ));
+            }
+        }
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            [
+                (Some(INFORMATION_SCHEMA_NAME), Some("")),
+                (Some("user_schema"), Some("'ttl'='9s'\n'region'='east'\n")),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn test_tables_reuse_batch_loaded_metadata() {
         use std::collections::HashMap;
         use std::sync::Mutex;

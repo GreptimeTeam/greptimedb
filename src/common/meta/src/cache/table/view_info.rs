@@ -79,6 +79,28 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[tokio::test]
+    async fn test_view_info_cache_batches_backend_reads() {
+        use crate::cache::test_util::assert_batch_cache_reads;
+        use crate::key::view_info::{ViewInfoKey, ViewInfoValue};
+        use crate::key::{MetadataKey, MetadataValue};
+
+        assert_batch_cache_reads(new_view_info_cache, |id| {
+            let value = ViewInfoValue::new(
+                Default::default(),
+                HashSet::new(),
+                vec![],
+                vec![],
+                format!("SELECT {id}"),
+            );
+            (
+                ViewInfoKey::new(id).to_bytes(),
+                value.try_as_raw_value().unwrap(),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_view_info_cache() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
