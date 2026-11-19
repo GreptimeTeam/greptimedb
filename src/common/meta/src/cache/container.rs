@@ -134,7 +134,7 @@ where
         }
     }
 
-    /// Uses the supplied loader for explicit batch reads.
+    /// Uses the supplied loader for [`get_many`](Self::get_many).
     pub fn with_batch_initializer(mut self, initializer: BatchInitializer<K, V>) -> Self {
         self.batch_initializer = Some(initializer);
         self
@@ -369,6 +369,8 @@ where
 {
     /// Returns values in input order, preserving duplicates and missing keys.
     ///
+    /// A key omitted by the loader returns `None` and is not cached, so a
+    /// subsequent lookup loads it again. Backend errors are propagated.
     /// Cache hits do not reach the batch loader. Misses use the same Moka
     /// initialization entries as single-key reads. Only the keys whose loaders
     /// this call owns are submitted to its batch loader. Invalidation during a batch
@@ -461,6 +463,7 @@ mod tests {
     use super::*;
 
     fn batch_test_cache(
+        strategy: InitStrategy,
         initializer: Initializer<u32, u32>,
     ) -> CacheContainer<u32, u32, CacheIdent> {
         CacheContainer::with_strategy(
@@ -478,7 +481,7 @@ mod tests {
             }),
             initializer,
             |token| matches!(token, CacheIdent::TableId(_)),
-            InitStrategy::VersionChecked,
+            strategy,
         )
     }
 
@@ -486,9 +489,10 @@ mod tests {
     async fn test_get_many_hits_missing_duplicates_and_invalidation() {
         let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
         let observed = batches.clone();
-        let cache = batch_test_cache(Arc::new(|_| {
-            Box::pin(async { panic!("unexpected single load") })
-        }))
+        let cache = batch_test_cache(
+            InitStrategy::VersionChecked,
+            Arc::new(|_| Box::pin(async { panic!("unexpected single load") })),
+        )
         .with_batch_initializer(Arc::new(move |mut keys| {
             let observed = observed.clone();
             Box::pin(async move {
@@ -524,6 +528,19 @@ mod tests {
         assert_eq!(batches.lock().unwrap().last().unwrap(), &vec![3]);
     }
 
+    #[tokio::test]
+    async fn test_get_many_without_batch_initializer() {
+        let cache = batch_test_cache(
+            InitStrategy::Unchecked,
+            Arc::new(|&key| Box::pin(async move { Ok((key != 3).then_some(key * 10)) })),
+        );
+        cache.cache.insert(1, 11).await;
+        assert_eq!(
+            cache.get_many(&[2, 1, 3, 2]).await.unwrap(),
+            [Some(20), Some(11), None, Some(20)]
+        );
+    }
+
     type BatchGate = (Vec<u32>, tokio::sync::oneshot::Sender<Result<()>>);
 
     fn gated_batch_cache() -> (
@@ -531,9 +548,10 @@ mod tests {
         tokio::sync::mpsc::UnboundedReceiver<BatchGate>,
     ) {
         let (observed, batches) = tokio::sync::mpsc::unbounded_channel();
-        let cache = batch_test_cache(Arc::new(|_| {
-            Box::pin(async { panic!("unexpected single load") })
-        }))
+        let cache = batch_test_cache(
+            InitStrategy::VersionChecked,
+            Arc::new(|_| Box::pin(async { panic!("unexpected single load") })),
+        )
         .with_batch_initializer(Arc::new(move |mut keys| {
             let (resume, gate) = tokio::sync::oneshot::channel();
             keys.sort_unstable();
@@ -644,10 +662,13 @@ mod tests {
         let resume = Arc::new(tokio::sync::Notify::new());
         let value = Arc::new(AtomicUsize::new(10));
         let current = value.clone();
-        let mut cache = batch_test_cache(Arc::new(move |_| {
-            let current = current.clone();
-            Box::pin(async move { Ok(Some(current.load(Ordering::SeqCst) as u32)) })
-        }))
+        let cache = batch_test_cache(
+            strategy,
+            Arc::new(move |_| {
+                let current = current.clone();
+                Box::pin(async move { Ok(Some(current.load(Ordering::SeqCst) as u32)) })
+            }),
+        )
         .with_batch_initializer(Arc::new({
             let started = started.clone();
             let resume = resume.clone();
@@ -661,7 +682,6 @@ mod tests {
                 })
             }
         }));
-        cache.init_strategy = strategy;
         let read = cache.get_many(&[1]);
         let invalidate = async {
             started.notified().await;
@@ -679,19 +699,22 @@ mod tests {
         let started = Arc::new(tokio::sync::Notify::new());
         let resume = Arc::new(tokio::sync::Notify::new());
         let cache = Arc::new(
-            batch_test_cache(Arc::new({
-                let started = started.clone();
-                let resume = resume.clone();
-                move |_| {
+            batch_test_cache(
+                InitStrategy::VersionChecked,
+                Arc::new({
                     let started = started.clone();
                     let resume = resume.clone();
-                    Box::pin(async move {
-                        started.notify_one();
-                        resume.notified().await;
-                        Ok(Some(10))
-                    })
-                }
-            }))
+                    move |_| {
+                        let started = started.clone();
+                        let resume = resume.clone();
+                        Box::pin(async move {
+                            started.notify_one();
+                            resume.notified().await;
+                            Ok(Some(10))
+                        })
+                    }
+                }),
+            )
             .with_batch_initializer(Arc::new(|keys| {
                 assert_eq!(keys, [2]);
                 Box::pin(async { Ok(HashMap::from([(2, 20)])) })
@@ -710,12 +733,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_many_retries_after_backend_error() {
+    async fn test_get_many_reloads_after_backend_error() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let loads = attempts.clone();
-        let cache = batch_test_cache(Arc::new(|_| {
-            Box::pin(async { panic!("unexpected single load") })
-        }))
+        let cache = batch_test_cache(
+            InitStrategy::VersionChecked,
+            Arc::new(|_| Box::pin(async { panic!("unexpected single load") })),
+        )
         .with_batch_initializer(Arc::new(move |keys| {
             let loads = loads.clone();
             Box::pin(async move {
@@ -738,17 +762,20 @@ mod tests {
     async fn test_cancelled_batch_releases_single_key_waiter() {
         let started = Arc::new(tokio::sync::Notify::new());
         let cache = Arc::new(
-            batch_test_cache(Arc::new(|_| Box::pin(async { Ok(Some(20)) })))
-                .with_batch_initializer(Arc::new({
+            batch_test_cache(
+                InitStrategy::VersionChecked,
+                Arc::new(|_| Box::pin(async { Ok(Some(20)) })),
+            )
+            .with_batch_initializer(Arc::new({
+                let started = started.clone();
+                move |_| {
                     let started = started.clone();
-                    move |_| {
-                        let started = started.clone();
-                        Box::pin(async move {
-                            started.notify_one();
-                            std::future::pending().await
-                        })
-                    }
-                })),
+                    Box::pin(async move {
+                        started.notify_one();
+                        std::future::pending().await
+                    })
+                }
+            })),
         );
         let batch = tokio::spawn({
             let cache = cache.clone();
