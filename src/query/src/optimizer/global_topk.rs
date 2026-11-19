@@ -21,6 +21,7 @@ use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::{
     ChildrenPropertiesMode, ExecutionPlan, ExecutionPlanProperties, ReplaceChildrenOptions,
 };
@@ -52,30 +53,19 @@ impl PhysicalOptimizerRule for GlobalTopKOverFilteredScan {
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         plan.transform_up(|plan| {
-            let Some(sort) = plan.downcast_ref::<SortExec>() else {
+            let Some(merge_fetch) = plan
+                .downcast_ref::<SortPreservingMergeExec>()
+                .and_then(|merge| merge.fetch())
+            else {
                 return Ok(Transformed::no(plan));
             };
-            if !sort.preserve_partitioning()
-                || sort.input().output_partitioning().partition_count() <= 1
-                || filtered_scan_below_topk(sort)?.is_none()
-            {
-                return Ok(Transformed::no(plan));
+            match one_heap_below_merge(plan.children()[0], merge_fetch)? {
+                Some(input) => Ok(Transformed::yes(plan.clone().replace_children(
+                    vec![input],
+                    ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                )?)),
+                None => Ok(Transformed::no(plan)),
             }
-            let coalesced: Arc<dyn ExecutionPlan> =
-                Arc::new(CoalescePartitionsExec::new(sort.input().clone()));
-            // Both calls keep the dynamic filter expression already pushed into the scan.
-            // `with_preserve_partitioning` rebuilds its wrapper for one emitter, so the
-            // threshold is published as soon as the single heap fills.
-            let resorted = plan.clone().replace_children(
-                vec![coalesced],
-                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
-            )?;
-            let global = resorted
-                .downcast_ref::<SortExec>()
-                .expect("replace_children keeps the SortExec")
-                .clone()
-                .with_preserve_partitioning(false);
-            Ok(Transformed::yes(Arc::new(global) as Arc<dyn ExecutionPlan>))
         })
         .map(|t| t.data)
     }
@@ -87,6 +77,55 @@ impl PhysicalOptimizerRule for GlobalTopKOverFilteredScan {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// Rewrites the partitioned TopK that a `SortPreservingMergeExec` with `merge_fetch` reads
+/// through projections into one TopK over all partitions.
+///
+/// The partitioned TopK keeps up to `fetch` rows per partition, which equals the global
+/// result only because the merge above it takes the first `merge_fetch` rows of all
+/// partitions. One heap with `fetch >= merge_fetch` keeps every row the merge can return.
+fn one_heap_below_merge(
+    plan: &Arc<dyn ExecutionPlan>,
+    merge_fetch: usize,
+) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    if plan.is::<ProjectionExec>() {
+        let Some(input) = one_heap_below_merge(plan.children()[0], merge_fetch)? else {
+            return Ok(None);
+        };
+        return plan
+            .clone()
+            .replace_children(
+                vec![input],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .map(Some);
+    }
+    let Some(sort) = plan.downcast_ref::<SortExec>() else {
+        return Ok(None);
+    };
+    if !sort.preserve_partitioning()
+        || sort.fetch().is_none_or(|fetch| fetch < merge_fetch)
+        || sort.input().output_partitioning().partition_count() <= 1
+        || filtered_scan_below_topk(sort)?.is_none()
+    {
+        return Ok(None);
+    }
+    let coalesced: Arc<dyn ExecutionPlan> =
+        Arc::new(CoalescePartitionsExec::new(sort.input().clone()));
+    // Both calls keep the dynamic filter expression already pushed into the scan.
+    // `with_preserve_partitioning` rebuilds its wrapper for one emitter, so the
+    // threshold is published as soon as the single heap fills.
+    let resorted = plan.clone().replace_children(
+        vec![coalesced],
+        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+    )?;
+    let global = resorted
+        .downcast_ref::<SortExec>()
+        .expect("replace_children keeps the SortExec")
+        .clone()
+        .with_preserve_partitioning(false);
+    Ok(Some(Arc::new(global)))
 }
 
 /// Returns the region scan that `sort` reads if `sort` is a TopK on the time index with
@@ -150,10 +189,21 @@ mod tests {
         Column::new("ts", 1)
     }
 
+    fn merged(topk: Arc<dyn ExecutionPlan>, fetch: usize) -> Arc<dyn ExecutionPlan> {
+        let ordering = topk.output_ordering().unwrap().clone();
+        Arc::new(SortPreservingMergeExec::new(ordering, topk).with_fetch(Some(fetch)))
+    }
+
     fn optimize(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         GlobalTopKOverFilteredScan
             .optimize(plan, &ConfigOptions::default())
             .unwrap()
+    }
+
+    /// Optimizes `topk` under a merge with the same fetch and returns the merge's input.
+    fn optimize_merged(topk: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        let fetch = topk.fetch().unwrap();
+        optimize(merged(topk, fetch)).children()[0].clone()
     }
 
     fn is_partitioned_topk(plan: &Arc<dyn ExecutionPlan>) -> bool {
@@ -166,9 +216,14 @@ mod tests {
     fn test_filtered_scan_gets_one_heap() {
         let topk = partitioned_topk(filter(log_region_scan(4)), ts(), 100);
         let pushed_filter = topk.dynamic_expressions_produced()[0].clone();
-        let plan = optimize(topk);
+        let projection = Arc::new(
+            ProjectionExec::try_new(vec![(Arc::new(ts()) as _, "ts".to_string())], topk).unwrap(),
+        );
+        let plan = optimize(merged(projection, 100));
 
-        let sort = plan.downcast_ref::<SortExec>().unwrap();
+        let projection = plan.children()[0];
+        assert!(projection.is::<ProjectionExec>());
+        let sort = projection.children()[0].downcast_ref::<SortExec>().unwrap();
         assert!(!sort.preserve_partitioning());
         assert_eq!(Some(100), sort.fetch());
         // The scan holds the filter the old TopK produced; the new one must update it.
@@ -187,18 +242,28 @@ mod tests {
     }
 
     #[test]
+    fn test_topk_keeps_partitions_without_a_merge_bounding_it() {
+        // Without a merge each partition's rows are part of the result.
+        let plan = partitioned_topk(filter(log_region_scan(4)), ts(), 100);
+        assert!(is_partitioned_topk(&optimize(plan)));
+        // A merge returning more rows than one heap keeps needs every partition's rows.
+        let plan = merged(partitioned_topk(filter(log_region_scan(4)), ts(), 100), 200);
+        assert!(is_partitioned_topk(optimize(plan).children()[0]));
+    }
+
+    #[test]
     fn test_topk_keeps_partitions_when_one_heap_does_not_help() {
         // One thread would merge every filtered row of a weak filter.
         let plan = partitioned_topk(filter(log_region_scan(4)), ts(), MAX_GLOBAL_TOPK_FETCH + 1);
-        assert!(is_partitioned_topk(&optimize(plan)));
+        assert!(is_partitioned_topk(&optimize_merged(plan)));
         // Without a filter every scanned row reaches the heaps, so each fills at once.
         let plan = partitioned_topk(log_region_scan(4), ts(), 100);
-        assert!(is_partitioned_topk(&optimize(plan)));
+        assert!(is_partitioned_topk(&optimize_merged(plan)));
         // The scan cannot skip ranges on another sort key.
         let plan = partitioned_topk(filter(log_region_scan(4)), Column::new("body", 0), 100);
-        assert!(is_partitioned_topk(&optimize(plan)));
+        assert!(is_partitioned_topk(&optimize_merged(plan)));
         let limited = filter(log_region_scan(4)).with_fetch(Some(2)).unwrap();
         let plan = partitioned_topk(limited, ts(), 100);
-        assert!(is_partitioned_topk(&optimize(plan)));
+        assert!(is_partitioned_topk(&optimize_merged(plan)));
     }
 }
