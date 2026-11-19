@@ -64,7 +64,7 @@ use common_time::timestamp::TimeUnit;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnEncoding, CompressionOptions, SkippingIndexOptions,
 };
-use futures_util::future;
+use futures_util::{StreamExt, TryStreamExt, future, stream};
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
@@ -2827,62 +2827,28 @@ impl FlowMirrorTask {
         cache: &TableFlownodeSetCacheRef,
         requests: impl Iterator<Item = &RegionInsertRequest>,
     ) -> Result<Self> {
-        let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
-            HashMap::new();
+        // A cold table needs a prefix scan to discover its flow partitions.
+        const MAX_CONCURRENT_FLOW_LOOKUPS: usize = 8;
 
+        let mut by_table: HashMap<TableId, Vec<&RegionInsertRequest>> = HashMap::new();
         for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
-            match src_table_reqs.get_mut(&table_id) {
-                Some(Some((_peers, reqs))) => reqs.requests.push(req.clone()),
-                // already know this is not source table
-                Some(None) => continue,
-                _ => {
-                    // dedup peers
-                    let peers = cache
-                        .get(table_id)
-                        .await
-                        .context(RequestInsertsSnafu)?
-                        .unwrap_or_default()
-                        .values()
-                        .cloned()
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-
-                    if !peers.is_empty() {
-                        let mut reqs = RegionInsertRequests::default();
-                        reqs.requests.push(req.clone());
-                        src_table_reqs.insert(table_id, Some((peers, reqs)));
-                    } else {
-                        // insert a empty entry to avoid repeat query
-                        src_table_reqs.insert(table_id, None);
-                    }
-                }
-            }
+            by_table.entry(table_id).or_default().push(req);
         }
 
+        let table_ids: Vec<_> = by_table.keys().copied().collect();
+        let mut lookups = stream::iter(table_ids)
+            .map(|id| async move { cache.get(id).await.map(|flows| (id, flows)) })
+            .buffer_unordered(MAX_CONCURRENT_FLOW_LOOKUPS);
         let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
-
-        for (_table_id, (peers, reqs)) in src_table_reqs
-            .into_iter()
-            .filter_map(|(k, v)| v.map(|v| (k, v)))
-        {
-            if peers.len() == 1 {
-                // fast path, zero copy
-                inserts
-                    .entry(peers[0].clone())
-                    .or_default()
-                    .requests
-                    .extend(reqs.requests);
-                continue;
-            } else {
-                // TODO(discord9): need to split requests to multiple flownodes
-                for flownode in peers {
+        while let Some((id, flows)) = lookups.try_next().await.context(RequestInsertsSnafu)? {
+            if let Some(flows) = flows {
+                for peer in flows.values().collect::<HashSet<_>>() {
                     inserts
-                        .entry(flownode.clone())
+                        .entry(peer.clone())
                         .or_default()
                         .requests
-                        .extend(reqs.requests.clone());
+                        .extend(by_table[&id].iter().copied().cloned());
                 }
             }
         }
@@ -4944,6 +4910,52 @@ mod tests {
         let task = FlowMirrorTask::new(&cache, requests.iter()).await.unwrap();
         assert_eq!(12, task.pending_rows());
         assert_eq!(2, task.requests.len());
+        for mirrored in task.requests.values() {
+            assert_eq!(mirrored.requests.as_slice(), requests.as_slice());
+        }
+    }
+
+    #[tokio::test]
+    async fn flow_mirror_bounds_and_deduplicates_cold_lookups() {
+        let (started, mut loads) = tokio::sync::mpsc::unbounded_channel();
+        let cache = Arc::new(common_meta::cache::CacheContainer::new_coordinated(
+            "test".into(),
+            Cache::new(32),
+            Arc::new(move |&id| {
+                let (resume, gate) = tokio::sync::oneshot::channel();
+                started.send((id, resume)).unwrap();
+                Box::pin(async move {
+                    gate.await.unwrap();
+                    Ok(Some(Default::default()))
+                })
+            }),
+            common_meta::instruction::CacheIdent::table_id_key,
+        ));
+        let requests: Vec<_> = (1..=12)
+            .flat_map(|id| {
+                (0..2).map(move |region| RegionInsertRequest {
+                    region_id: RegionId::new(id, region).as_u64(),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let mut task = Box::pin(FlowMirrorTask::new(&cache, requests.iter()));
+        let mut seen = BTreeSet::new();
+        // Every table occurs twice. Only eight distinct misses may start before one completes.
+        for expected in [8, 4] {
+            assert!(futures_util::poll!(&mut task).is_pending());
+            let mut gates = Vec::new();
+            while let Ok((id, resume)) = loads.try_recv() {
+                assert!(seen.insert(id));
+                gates.push(resume);
+            }
+            assert_eq!(gates.len(), expected);
+            for gate in gates {
+                gate.send(()).unwrap();
+            }
+        }
+        assert!(task.await.unwrap().requests.is_empty());
+        assert_eq!(seen.len(), 12);
     }
 
     #[tokio::test]
