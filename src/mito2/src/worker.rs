@@ -1642,6 +1642,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     };
                     sender.send(result);
                 }
+                WorkerRequest::DiscardPendingTails {
+                    region_id,
+                    node_id,
+                    sender,
+                } => {
+                    self.handle_discard_pending_tails(region_id, node_id, sender);
+                }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
@@ -1857,10 +1864,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 edit,
                 tails,
             } => {
-                self.handle_tail_replay_committed(region_id, region, edit, tails)
+                self.apply_tails_edit(region_id, &region, edit, &tails)
                     .await
             }
             BackgroundNotify::TailReplayEnded => self.handle_tail_replay_ended(region_id),
+            BackgroundNotify::PendingTailsDiscarded {
+                region,
+                edit,
+                tails,
+                discarded,
+                sender,
+            } => {
+                self.handle_pending_tails_discarded(
+                    region_id, region, edit, tails, discarded, sender,
+                )
+                .await
+            }
         }
         // Completion handlers may return early after releasing their scheduler. Dispatch
         // here covers those paths as well as their normal completion.
@@ -2020,6 +2039,22 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_tail_commit_begin(_region_id).await;
+        }
+    }
+
+    /// A tail replay committed its result and has not told the worker yet.
+    pub(crate) async fn on_tail_commit_end(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_commit_end(_region_id).await;
+        }
+    }
+
+    /// A discard of pending tails released the region's WAL.
+    pub(crate) fn on_discarded_tails_wal_released(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_discarded_tails_wal_released(_region_id);
         }
     }
 

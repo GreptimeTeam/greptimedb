@@ -23,7 +23,7 @@ pub(crate) mod version;
 use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -1336,15 +1336,27 @@ pub(crate) enum IndexPublication {
     Stale(IndexPublicationStale),
 }
 
-/// Result of publishing the result of a pending tail replay to the manifest.
+/// Result of publishing an edit of the pending tails, a replay's result or a discard, to the
+/// manifest.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TailPublication {
-    /// The result was committed.
+    /// The edit was committed.
     Committed(ManifestVersion),
-    /// The region is altering or applying an edit, so the result waits.
+    /// The region is altering or applying an edit, or, without conditional publication, a
+    /// replay's earlier update may be saved without being applied.
     Busy,
-    /// The region is no longer a writable leader with the replayed tails.
+    /// The region is no longer a writable leader, or its manifest no longer records the
+    /// expected tails.
     Stale,
+}
+
+/// Who publishes an edit of the pending tails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TailsEditor {
+    /// A tail replay, which commits its own uncertain update again.
+    Replay,
+    /// A discard of one node's tails.
+    Discard,
 }
 
 /// Why an index publication became stale.
@@ -1393,6 +1405,12 @@ pub(crate) struct ManifestContext {
     /// lease of a heartbeat sent after it applies; 0 otherwise. While it is set, the region keeps
     /// the unread part of another node's listed tails.
     catchup_promoted_at: AtomicU64,
+    /// Whether a tail replay's manifest update has an uncertain result: it may be saved in
+    /// storage without being applied to this instance's manifest. Tracked only without
+    /// conditional publication, where a later update takes a new version instead of
+    /// conflicting with a saved one. A value left by an ended replay task keeps discards busy
+    /// until a replay of this instance publishes or the region is reopened.
+    replay_publication_uncertain: AtomicBool,
     /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv, which is how
     /// long the Leader role stays valid. The engine extends it from those leases, and writes check
     /// it.
@@ -1423,6 +1441,7 @@ impl ManifestContext {
                 reload_pending: false,
             }),
             catchup_promoted_at: AtomicU64::new(0),
+            replay_publication_uncertain: AtomicBool::new(false),
             leader_deadline: Deadline::default(),
             node_lease,
             staging_partition_info: Mutex::new(None),
@@ -1767,12 +1786,20 @@ impl ManifestContext {
         })
     }
 
-    /// Publishes the result of a replay of the pending tails `replayed`, if the region is
-    /// still a writable leader whose manifest records exactly those tails.
+    /// Publishes an edit of the pending tails `expected` by `editor`, if the region is still a
+    /// writable leader whose manifest records exactly those tails.
+    ///
+    /// Without conditional publication, a discard is busy while a replay's earlier update has an
+    /// uncertain result, since it may be in storage and the discard would record the replayed
+    /// tails again. A replay's update is uncertain from before its write until it commits; an
+    /// attempt that fails without saving anything keeps the uncertainty of the attempts before
+    /// it. With conditional publication the next update reuses the version of an uncertain
+    /// one, so a discard over a saved update conflicts and the region reloads instead.
     pub(crate) async fn update_manifest_for_tails(
         &self,
-        replayed: &[PendingTail],
+        expected: &[PendingTail],
         action_list: RegionMetaActionList,
+        editor: TailsEditor,
     ) -> Result<TailPublication> {
         let manager = self.manifest_manager.write().await;
         match self.state.load() {
@@ -1782,11 +1809,38 @@ impl ManifestContext {
             }
             _ => return Ok(TailPublication::Stale),
         }
-        if manager.manifest().pending_tails != replayed {
+        if manager.manifest().pending_tails != expected {
             return Ok(TailPublication::Stale);
         }
-        let manifest_version = self.update_and_fire(manager, action_list, false).await?;
-        Ok(TailPublication::Committed(manifest_version))
+        let tracks_uncertainty = !manager.is_conditional_publication();
+        let was_uncertain = match editor {
+            // Set under the lock before the write, so no discard commits between a saved write
+            // and its error.
+            TailsEditor::Replay if tracks_uncertainty => self
+                .replay_publication_uncertain
+                .swap(true, Ordering::Relaxed),
+            TailsEditor::Discard
+                if tracks_uncertainty
+                    && self.replay_publication_uncertain.load(Ordering::Relaxed) =>
+            {
+                return Ok(TailPublication::Busy);
+            }
+            _ => false,
+        };
+        let result = self.update_and_fire(manager, action_list, false).await;
+        if editor == TailsEditor::Replay && tracks_uncertainty {
+            match &result {
+                Ok(_) => self
+                    .replay_publication_uncertain
+                    .store(false, Ordering::Relaxed),
+                // This attempt saved nothing, but an earlier one may have.
+                Err(e) if !e.may_have_persisted_manifest_update() => self
+                    .replay_publication_uncertain
+                    .store(was_uncertain, Ordering::Relaxed),
+                Err(_) => {}
+            }
+        }
+        Ok(TailPublication::Committed(result?))
     }
 
     /// Performs a manifest write under a caller-held write lock and returns a

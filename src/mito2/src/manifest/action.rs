@@ -268,8 +268,8 @@ pub struct RegionManifest {
     /// `after < upto`: a new segment of a node takes as `after` the largest of the
     /// flushed entry id, the `upto`s of the node's existing segments and its handoff
     /// floor, and is added only if that is below its `upto`. So the entries of a node
-    /// between two of its segments are flushed or at or below a handoff floor of the
-    /// node, and need no replay.
+    /// between two of its segments are flushed, discarded or at or below a handoff floor
+    /// of the node, and need no replay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_tails: Vec<PendingTail>,
     /// The [HandoffFloor] of each node, removed once the flushed entry id reaches it.
@@ -283,12 +283,20 @@ impl RegionManifest {
     }
 
     /// Returns the entry id after which node `node_id` replays its WAL when it opens
-    /// the region. Entries up to it are flushed, left to the pending tails, or below
-    /// the handoff floor of the node.
+    /// the region. Entries up to it are flushed, discarded, left to the pending tails,
+    /// or below the handoff floor of the node.
     ///
     /// Entries of the node in `(after, upto]` of one of its tails belong to that tail.
     /// Whoever adds a tail ensures that every entry id the node allocates afterwards is
     /// above the tail's `upto`, so no later write of the node falls in a skipped range.
+    /// It also ensures that the node's WAL durably holds history through `upto`: a tail
+    /// commit or a discard can raise the flushed entry id to it, and an open of the region
+    /// checks that the WAL holds history through the flushed entry id where the log store
+    /// checks history (see [LogStore::check_region_history]). A discard raises the flushed
+    /// entry id on whichever node leads the region, so whoever adds a tail ensures both for
+    /// every node that may lead the region afterwards, not only for the tail's own node.
+    ///
+    /// [LogStore::check_region_history]: store_api::logstore::LogStore::check_region_history
     pub(crate) fn wal_replay_start(&self, node_id: Option<u64>) -> EntryId {
         let floor = node_id.and_then(|node_id| self.handoff_floors.get(&node_id).copied());
         self.pending_tails

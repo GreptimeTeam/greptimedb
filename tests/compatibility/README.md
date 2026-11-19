@@ -43,6 +43,13 @@ as before the field existed:
 cargo nextest run -p store-api -E 'test(test_legacy_granted_region_wire)'
 ```
 
+The [pending tails discard fixture](wire/discard_pending_tails/README.md) checks that
+a region request discarding pending WAL tails stays at body field 24:
+
+```shell
+cargo nextest run -p store-api -E 'test(test_discard_pending_tails_request_wire)'
+```
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of

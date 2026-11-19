@@ -1988,6 +1988,7 @@ impl RegionServerInner {
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
             | RegionRequest::CancelCompaction(_)
+            | RegionRequest::DiscardPendingTails(_)
             | RegionRequest::Truncate(_)
             | RegionRequest::BuildIndex(_)
             | RegionRequest::EnterStaging(_)

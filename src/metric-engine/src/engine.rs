@@ -294,6 +294,19 @@ impl RegionEngine for MetricEngine {
                 request: RegionRequest::Truncate(request),
             }
             .fail(),
+            // Only the data region's pending tails are discarded; the metadata region's are not.
+            RegionRequest::DiscardPendingTails(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(utils::to_data_region_id(region_id), request)
+                        .await
+                        .context(error::MitoDiscardPendingTailsOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
             RegionRequest::Delete(delete) => self.inner.delete_region(region_id, delete).await,
             RegionRequest::Catchup(_) => {
                 let mut response = self
@@ -727,8 +740,8 @@ mod test {
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
         PathType, RegionCancelCompactionRequest, RegionCleanUpRequest, RegionCloseRequest,
-        RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
-        RegionTruncateRequest,
+        RegionDiscardPendingTailsRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest,
+        RegionPutRequest, RegionRequest, RegionTruncateRequest,
     };
 
     use super::*;
@@ -784,6 +797,45 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.affected_rows, 0);
+
+        let error = env
+            .metric()
+            .handle_request(env.default_logical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discard_pending_tails_physical_and_logical_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let request =
+            || RegionRequest::DiscardPendingTails(RegionDiscardPendingTailsRequest { node_id: 1 });
+        let data_region_id = utils::to_data_region_id(env.default_physical_region_id());
+        // A physical region accepts the request; neither of its Mito regions has pending tails.
+        let response = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 0);
+        // The request reaches the data region, which refuses it as a follower.
+        env.mito()
+            .set_region_role(data_region_id, RegionRole::Follower)
+            .unwrap();
+        let error = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::RegionNotReady,
+            error.status_code()
+        );
 
         let error = env
             .metric()
