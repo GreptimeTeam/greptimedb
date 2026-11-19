@@ -1,0 +1,22 @@
+tests-integration/src/cluster.rs
+  s_b7d7dd5280bd00::t_59f33a65f5c27a 162-163,271,313,537-539,544-579,716-717,1187-1306
+  s_b7d7dd5280bd00::t_5fd1378565a1f0 1307
+src/meta-srv/src/metasrv/builder.rs
+  s_b7d7dd5280bd00::t_59f33a65f5c27a 821
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ce7d9720119903be80816e111286b30775617767",
+  "prompts": {},
+  "sessions": {
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
