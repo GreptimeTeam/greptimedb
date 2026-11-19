@@ -42,8 +42,10 @@ use crate::optimizer::windowed_sort::is_time_index_expr;
 pub struct GlobalTopKOverFilteredScan;
 
 /// Largest fetch that gets one heap. The heap runs on one thread: with a filter passing
-/// 90% of 24M rows, it took about 1.6x as long as per-partition heaps at fetch 100000
-/// and showed no loss at fetch 10000.
+/// 90% of 24M rows, it took about 1.6x as long as per-partition heaps at fetch 100000.
+/// Below that, fetch does not decide the outcome: with files split by time one heap wins
+/// or ties at fetch 1000 to 10000, and with files overlapping in time it loses up to 12%
+/// at each of them when the filter passes most rows.
 const MAX_GLOBAL_TOPK_FETCH: usize = 10_000;
 
 impl PhysicalOptimizerRule for GlobalTopKOverFilteredScan {
