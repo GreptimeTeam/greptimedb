@@ -37,6 +37,7 @@ pub use permission::{
     OTLP_WRITE, PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY, PROM_STORE_READ,
     PROM_STORE_WRITE, PROMQL_QUERY, PermissionAction, PermissionChecker, PermissionReq,
     PermissionResp, PermissionTableTarget, PermissionTableTargets, SEMANTIC_GRAPH_QUERY,
+    TableTargetPrecheck,
 };
 pub use user_info::UserInfo;
 pub use user_provider::static_user_provider::StaticUserProvider;

@@ -234,6 +234,22 @@ pub enum PermissionResp {
     Reject,
 }
 
+/// Result of prechecking table targets before resolving catalog
+/// `is_physical_metric_table` metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableTargetPrecheck {
+    /// Authorization is already granted without resolving catalog metadata.
+    Allow,
+    /// Authorization is already rejected without resolving catalog metadata.
+    Reject,
+    /// Catalog `is_physical_metric_table` metadata must be resolved for the
+    /// listed indices in [`PermissionTableTargets::Resolved`] (or an empty
+    /// vec when the checker defers [`PermissionTableTargets::Unresolved`]
+    /// to [`PermissionChecker::check_permission_with_table_targets`]),
+    /// followed by [`PermissionChecker::check_permission_with_table_targets`].
+    NeedsPhysicalResolution(Vec<usize>),
+}
+
 pub trait PermissionChecker: Send + Sync {
     fn check_permission(
         &self,
@@ -268,6 +284,45 @@ pub trait PermissionChecker: Send + Sync {
         _schema: &str,
     ) -> PermissionTableTargets {
         PermissionTableTargets::Unresolved
+    }
+
+    /// Classifies whether `targets` can already be decided before resolving
+    /// catalog `is_physical_metric_table` metadata, or returns the indices of
+    /// targets that still need catalog resolution.
+    ///
+    /// A `false` [`PermissionTableTarget::is_physical_metric_table`] flag may
+    /// mean the target has not been looked up yet. If its physical status could
+    /// change the decision, include its index in [`TableTargetPrecheck::NeedsPhysicalResolution`].
+    ///
+    /// The conservative default delegates the authorization decision to
+    /// [`Self::check_permission_with_table_targets`] with zero catalog lookups
+    /// when [`Self::uses_table_targets`] is `false`, and otherwise requests
+    /// physical resolution for every resolved target not already marked physical.
+    fn precheck_table_targets(
+        &self,
+        _user_info: UserInfoRef,
+        _req: PermissionReq,
+        targets: &PermissionTableTargets,
+    ) -> Result<TableTargetPrecheck> {
+        if !self.uses_table_targets() {
+            return Ok(TableTargetPrecheck::NeedsPhysicalResolution(Vec::new()));
+        }
+
+        match targets {
+            PermissionTableTargets::Resolved(targets) => {
+                let indices = targets
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, target)| {
+                        (!target.is_physical_metric_table).then_some(index)
+                    })
+                    .collect();
+                Ok(TableTargetPrecheck::NeedsPhysicalResolution(indices))
+            }
+            PermissionTableTargets::Unresolved => {
+                Ok(TableTargetPrecheck::NeedsPhysicalResolution(Vec::new()))
+            }
+        }
     }
 
     /// Checks the operation privilege and its resolved user-visible table targets.
@@ -334,6 +389,21 @@ impl PermissionChecker for Option<&PermissionCheckerRef> {
         match self {
             Some(checker) => checker.grpc_table_targets(request, catalog, schema),
             None => PermissionTableTargets::Unresolved,
+        }
+    }
+
+    fn precheck_table_targets(
+        &self,
+        user_info: UserInfoRef,
+        req: PermissionReq,
+        targets: &PermissionTableTargets,
+    ) -> Result<TableTargetPrecheck> {
+        match self {
+            Some(checker) => match checker.precheck_table_targets(user_info, req, targets)? {
+                TableTargetPrecheck::Reject => PermissionDeniedSnafu.fail(),
+                other => Ok(other),
+            },
+            None => Ok(TableTargetPrecheck::Allow),
         }
     }
 
@@ -776,5 +846,151 @@ mod tests {
                 matches!(targeted, PermissionResp::Allow)
             );
         }
+    }
+
+    #[test]
+    fn test_default_precheck_table_targets() {
+        let default_checker = DefaultPermissionChecker;
+        let ro_user = DefaultUserInfo::with_name_and_permission("ro", PermissionMode::ReadOnly);
+        let rw_user = DefaultUserInfo::with_name_and_permission("rw", PermissionMode::ReadWrite);
+        let targets = resolved_targets("metrics");
+
+        assert_eq!(
+            default_checker
+                .precheck_table_targets(
+                    ro_user.clone(),
+                    PermissionReq::Action(PROMQL_QUERY),
+                    &targets
+                )
+                .unwrap(),
+            TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
+        );
+        assert_eq!(
+            default_checker
+                .precheck_table_targets(ro_user, PermissionReq::Action(PROM_STORE_WRITE), &targets)
+                .unwrap(),
+            TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
+        );
+        assert_eq!(
+            default_checker
+                .precheck_table_targets(rw_user, PermissionReq::Action(PROM_STORE_WRITE), &targets)
+                .unwrap(),
+            TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
+        );
+
+        struct EndpointTargetIndependentChecker;
+        impl PermissionChecker for EndpointTargetIndependentChecker {
+            fn check_permission(&self, _: UserInfoRef, _: PermissionReq) -> Result<PermissionResp> {
+                panic!("precheck_table_targets must not bypass check_permission_with_table_targets")
+            }
+
+            fn uses_table_targets(&self) -> bool {
+                false
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                _: PermissionTableTargets,
+            ) -> Result<PermissionResp> {
+                Ok(PermissionResp::Reject)
+            }
+        }
+        assert_eq!(
+            EndpointTargetIndependentChecker
+                .precheck_table_targets(
+                    crate::userinfo_by_name(None),
+                    PermissionReq::Action(PROM_STORE_WRITE),
+                    &targets,
+                )
+                .unwrap(),
+            TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
+        );
+
+        let target_aware: PermissionCheckerRef = Arc::new(TargetAwarePermissionChecker);
+        let mixed_targets = PermissionTableTargets::resolved(vec![
+            PermissionTableTarget::new("greptime", "public", "allowed"),
+            PermissionTableTarget::new("greptime", "public", "physical")
+                .with_physical_metric_table(true),
+            PermissionTableTarget::new("greptime", "public", "other"),
+        ]);
+        assert_eq!(
+            target_aware
+                .precheck_table_targets(
+                    crate::userinfo_by_name(None),
+                    PermissionReq::Action(PROM_STORE_READ),
+                    &mixed_targets,
+                )
+                .unwrap(),
+            TableTargetPrecheck::NeedsPhysicalResolution(vec![0, 2])
+        );
+        assert_eq!(
+            target_aware
+                .precheck_table_targets(
+                    crate::userinfo_by_name(None),
+                    PermissionReq::Action(PROM_STORE_READ),
+                    &PermissionTableTargets::Unresolved,
+                )
+                .unwrap(),
+            TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
+        );
+
+        let some_target_aware = Some(&target_aware);
+        assert_eq!(
+            some_target_aware
+                .precheck_table_targets(
+                    crate::userinfo_by_name(None),
+                    PermissionReq::Action(PROM_STORE_READ),
+                    &mixed_targets,
+                )
+                .unwrap(),
+            TableTargetPrecheck::NeedsPhysicalResolution(vec![0, 2])
+        );
+
+        struct PrecheckRejectChecker;
+        impl PermissionChecker for PrecheckRejectChecker {
+            fn check_permission(&self, _: UserInfoRef, _: PermissionReq) -> Result<PermissionResp> {
+                Ok(PermissionResp::Reject)
+            }
+
+            fn precheck_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                _: &PermissionTableTargets,
+            ) -> Result<TableTargetPrecheck> {
+                Ok(TableTargetPrecheck::Reject)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                _: PermissionTableTargets,
+            ) -> Result<PermissionResp> {
+                Ok(PermissionResp::Reject)
+            }
+        }
+        let reject_ref: PermissionCheckerRef = Arc::new(PrecheckRejectChecker);
+        let some_reject = Some(&reject_ref);
+        let rejected = some_reject.precheck_table_targets(
+            crate::userinfo_by_name(None),
+            PermissionReq::Action(PROM_STORE_WRITE),
+            &targets,
+        );
+        assert!(matches!(rejected, Err(Error::PermissionDenied { .. })));
+
+        let no_checker: Option<&PermissionCheckerRef> = None;
+        assert_eq!(
+            no_checker
+                .precheck_table_targets(
+                    crate::userinfo_by_name(None),
+                    PermissionReq::Action(PROM_STORE_WRITE),
+                    &PermissionTableTargets::Unresolved,
+                )
+                .unwrap(),
+            TableTargetPrecheck::Allow
+        );
     }
 }
