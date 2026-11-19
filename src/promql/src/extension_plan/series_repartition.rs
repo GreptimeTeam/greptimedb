@@ -125,7 +125,8 @@ use std::task::{Context, Poll};
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
     PendingBatching, SendableEvaluatedSeriesStream, pack_evaluated_series, pack_raw_series_with,
-    raw_series_frame_schema_with_ordering, unpack_evaluated_series, unpack_raw_series,
+    raw_series_frame_schema_with_ordering, series_frame_ordering, unpack_evaluated_series,
+    unpack_raw_series,
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -154,10 +155,10 @@ use twox_hash::XxHash64;
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::series_execution::{
     HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk, SeriesExecutionPlan,
-    series_execution_plan,
+    checked_series_stream, series_execution_plan,
 };
 use crate::grid_series::{label_set, merge_same_labelset};
-use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
+use crate::native::execute::{field_segments, merge_workspace_bytes, operand_chunk_bytes};
 use crate::native::state::{StateChunk, state_bytes, state_row_of};
 use crate::source::merge_raw_identity_charging;
 use datatypes::series::samples::DenseSamplesRef;
@@ -212,23 +213,41 @@ enum InputRead {
     Chunks,
 }
 
+impl InputRead {
+    /// What this way of reading is, for a refusal that has to name both.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Frames => "frames",
+            Self::Chunks => "chunks",
+        }
+    }
+}
+
 /// One child partition, as this node reads it: its chunks when it hands them over, its frames when
 /// it does not.
 ///
 /// `hand_over` is the child as a native operator, decided once for the whole read: with it, the
 /// partition is read in process and wrapped in the form this node's chain assembly expects; without
 /// it, the partition is executed and its frames decoded here.
+#[allow(clippy::too_many_arguments)]
 fn routed_input(
     input: &Arc<dyn ExecutionPlan>,
     hand_over: Option<&dyn SeriesExecutionPlan>,
     content: FrameContent,
     series_schema: &Arc<SeriesSchema>,
     state: Option<&Arc<AggregateStateSchema>>,
+    declared_ordering: SeriesOrdering,
     partition: usize,
     context: &Arc<TaskContext>,
 ) -> DataFusionResult<RoutedInput> {
     if let Some(plan) = hand_over {
-        let chunks = plan.execute_series(partition, Arc::clone(context))?;
+        // A handed-over stream is checked against the order its own plan declares, exactly as a
+        // decoded frame is: this node narrows what it publishes, but the child's promise is what its
+        // chunks were produced under, and a chain that breaks it has to be refused here too.
+        let chunks = checked_series_stream(
+            plan.execute_series(partition, Arc::clone(context))?,
+            declared_ordering,
+        );
         return Ok(match content {
             FrameContent::Evaluated => {
                 RoutedInput::Evaluated(Box::pin(HeldSeriesCharges::evaluated(chunks)))
@@ -671,7 +690,19 @@ impl SeriesRepartitionExec {
                     read,
                 )?);
             }
-            Arc::clone(state.as_ref().expect("the execution was just started"))
+            let shared = Arc::clone(state.as_ref().expect("the execution was just started"));
+            // One read, one way of reading the child: an output that asks for the other form would
+            // be answered from a stream it did not ask for, so it is refused here rather than
+            // handed the wrong one.
+            if shared.read != read {
+                return Err(DataFusionError::Execution(format!(
+                    "SeriesRepartition was already read as {} for an earlier output, so output \
+                     partition {partition} cannot read it as {}",
+                    shared.read.as_str(),
+                    read.as_str()
+                )));
+            }
+            shared
         };
         SharedExecution::claim(&shared, partition).ok_or_else(|| {
             DataFusionError::Execution(format!(
@@ -1123,6 +1154,8 @@ struct SharedExecution {
     running: Mutex<Running>,
     /// How the read ended, and the failure it owes its outputs if it failed.
     ending: Arc<Mutex<Ending>>,
+    /// The way this read's child is being read, fixed by the first output that claimed it.
+    read: InputRead,
 }
 
 /// What one execution's state holds that has to be stopped together.
@@ -1182,6 +1215,9 @@ impl SharedExecution {
         let content = SeriesFrameDeclaration::parse(input.schema().as_ref())
             .map_err(|error| DataFusionError::Plan(error.to_string()))?
             .content();
+        // What the child promises about the order of what it publishes, which is what a chunk read
+        // of it has to be held to.
+        let declared_ordering = series_frame_ordering(input.schema().as_ref())?;
         let partitions = input.properties().partitioning.partition_count();
         // The child is asked for its chunks only when a reader of them claimed this read: the other
         // claim publishes frames, and a chunk read would have to be packed again.
@@ -1197,6 +1233,7 @@ impl SharedExecution {
                 content,
                 &series_schema,
                 state.as_ref(),
+                declared_ordering,
                 child_partition,
                 context,
             )?);
@@ -1210,6 +1247,7 @@ impl SharedExecution {
         }
         let ending = Arc::new(Mutex::new(Ending::default()));
         let shared = Arc::new_cyclic(|weak| SharedExecution {
+            read,
             running: Mutex::new(Running {
                 receivers,
                 inputs: Inputs::new(Arc::clone(&ending), partitions, weak.clone()),
@@ -2518,10 +2556,14 @@ fn raw_chunk_slice_bytes(chunk: &RawSeriesChunk) -> DataFusionResult<usize> {
                     .saturating_add(tag.value.len())
             }))
     });
-    // A histogram field is an index array naming rows of a shared table; both are held per sample.
+    // A field is one or more dense segments - a merged chunk carries one per source piece - so this
+    // walks them and measures each. Asking the field for a single dense view instead answered `None`
+    // for a multi-segment field, which charged nothing for bytes the router then queued. A segment is
+    // measured here by the buffers a slice of it keeps alive, where the evaluated figure
+    // ([`sample_slice_bytes`]) bills its rows.
     let mut fields_bytes = 0usize;
-    for samples in chunk.fields.iter() {
-        let field_bytes = match samples.dense() {
+    for segment in field_segments(&chunk.fields) {
+        let field_bytes = match segment.dense() {
             Some(DenseSamplesRef::Float(values)) => values.to_data().get_slice_memory_size()?,
             Some(DenseSamplesRef::Histogram(histograms)) => histograms
                 .indices()
@@ -2540,6 +2582,8 @@ fn raw_chunk_slice_bytes(chunk: &RawSeriesChunk) -> DataFusionResult<usize> {
                         .get_slice_memory_size()?,
                 )
                 .saturating_add(histogram_table_slice_bytes(mixed.histograms().batch())?),
+            // `segments` hands out dense segments only, so this is unreachable; a zero here is
+            // what the whole-field view used to answer for a merged field.
             None => 0,
         };
         fields_bytes = fields_bytes.saturating_add(field_bytes);

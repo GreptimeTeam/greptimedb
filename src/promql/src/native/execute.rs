@@ -199,14 +199,26 @@ pub(crate) fn operand_chunk_bytes(series: &Series) -> usize {
         .saturating_add(sample_slice_bytes(&series.fields))
 }
 
+/// The fields of one chunk, one dense segment at a time.
+///
+/// A field is one or more dense segments - a merged chunk carries one per source piece it was folded
+/// from - and asking such a field for a single dense view answers `None`. Every figure this crate
+/// bills for a chunk's samples walks the segments through here, so the two of them cannot drift on
+/// which parts of a field they count; only the yardstick differs, and each caller says why.
+pub(crate) fn field_segments(fields: &SeriesFields) -> impl Iterator<Item = &Samples> + '_ {
+    fields.iter().flat_map(|field| field.segments())
+}
+
 /// The bytes the samples of one series' fields take as the slices they are.
 ///
 /// A dense segment is counted by its rows and a native-histogram field by its index column; a nested
-/// segment is left to the chunks it is made of.
+/// segment is left to the chunks it is made of. The walk over segments is the same one
+/// [`raw_chunk_slice_bytes`](crate::extension_plan::series_repartition) makes for a raw chunk - a
+/// field is one or more of them, and both walk them with [`field_segments`] - but the yardstick
+/// differs on purpose: this figure bills rows and the allocations behind them are counted once by
+/// `chunk_bytes_beside_samples`, while a router bills the buffers a slice keeps alive.
 fn sample_slice_bytes(fields: &SeriesFields) -> usize {
-    fields
-        .iter()
-        .flat_map(|field| field.segments())
+    field_segments(fields)
         .map(|segment| match segment.dense() {
             Some(DenseSamplesRef::Float(values)) => {
                 values.len().saturating_mul(std::mem::size_of::<f64>())

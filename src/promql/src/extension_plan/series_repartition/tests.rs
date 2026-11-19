@@ -5833,6 +5833,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
         receivers.push(Some(receiver));
     }
     let shared = Arc::new(SharedExecution {
+        read: InputRead::Frames,
         running: Mutex::new(Running {
             receivers,
             inputs: Arc::clone(&inputs),
@@ -5946,6 +5947,7 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
             receivers.push(Some(receiver));
         }
         Arc::new(SharedExecution {
+            read: InputRead::Frames,
             running: Mutex::new(Running {
                 receivers,
                 inputs: Arc::clone(&inputs),
@@ -6110,6 +6112,7 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
     let inputs = Inputs::new(Arc::clone(&ending), 2, Weak::<SharedExecution>::new());
     let (sender, receiver) = mpsc::unbounded_channel();
     let shared = Arc::new(SharedExecution {
+        read: InputRead::Frames,
         running: Mutex::new(Running {
             receivers: vec![Some(receiver)],
             inputs: Arc::clone(&inputs),
@@ -8253,6 +8256,7 @@ async fn the_child_is_read_the_way_the_consumer_reads_this_node() {
         FrameContent::AggregateState,
         &series,
         Some(&wire),
+        SeriesOrdering::Contiguous,
         0,
         &context,
     )
@@ -8269,6 +8273,7 @@ async fn the_child_is_read_the_way_the_consumer_reads_this_node() {
         FrameContent::AggregateState,
         &series,
         Some(&wire),
+        SeriesOrdering::Contiguous,
         0,
         &context,
     )
@@ -8277,4 +8282,111 @@ async fn the_child_is_read_the_way_the_consumer_reads_this_node() {
         matches!(decoded, RoutedInput::State(_, _, _)),
         "a frame read executes the child and decodes it here"
     );
+}
+
+/// A merged field is charged for every segment it is made of, not for one view of all of them.
+///
+/// An inner router folds two pieces of one identity into a chunk whose field is two dense segments,
+/// and asking such a field for a single dense view answers `None`. Charging that answer billed the
+/// merged chunk as timestamps alone, so a router that queued it held live bytes nothing accounted
+/// for - and the charge it was merged under was released as soon as the read that produced it ended.
+///
+/// The figure is read at exactly that moment: the inner publication has been read to its end and
+/// dropped, the outer queue has not been consumed, so what the pool still counts is the bytes the
+/// queue is holding. Both are checked against the buffers themselves, so a field that costs
+/// nothing cannot pass on the strength of the timestamps beside it.
+#[tokio::test]
+async fn a_merged_field_is_charged_what_the_queue_holds_once_the_merge_charge_is_gone() {
+    const SEGMENT: usize = 4096;
+    let fragment = |first: i64| {
+        let times: Vec<i64> = (0..SEGMENT as i64).map(|row| first + row).collect();
+        raw_chunk(
+            "k",
+            Some(raw_metric("a")),
+            &times,
+            vec![Some(1.0); SEGMENT],
+            true,
+        )
+    };
+    // Two inputs, one closed piece of one identity each: what the inner router folds them into is one
+    // chunk whose field is the two segments it was merged from.
+    let inner = raw_node(
+        RawScripted::plan(vec![
+            RawPartition {
+                chunks: vec![fragment(0)],
+                gate: None,
+                gate_chunks: false,
+            },
+            RawPartition {
+                chunks: vec![fragment(SEGMENT as i64)],
+                gate: None,
+                gate_chunks: false,
+            },
+        ]),
+        1,
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let context = task_context(&pool);
+    // The inner publication, read the way the outer node reads a child that hands its chunks over.
+    let inner: Arc<dyn ExecutionPlan> = inner;
+    let hand_over =
+        series_execution_plan(inner.as_ref()).expect("a router hands its publication over");
+    let RoutedInput::Raw(mut stream) = routed_input(
+        &inner,
+        Some(hand_over),
+        FrameContent::Raw,
+        &raw_schema(),
+        None,
+        SeriesOrdering::Contiguous,
+        0,
+        &context,
+    )
+    .expect("the child is read as raw series") else {
+        panic!("a raw child is read as a raw series stream");
+    };
+    // The outer node's own queue: filled by its read, and read by nobody.
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let read_ahead = MemoryConsumer::new("OuterQueue").register(&context.runtime_env().memory_pool);
+    let stop = read_raw_chains(&mut stream, 0, &Routing::new(1), &[sender], &read_ahead).await;
+    if let Stop::Failed(error) = stop {
+        panic!("the inner publication could not be read: {error}");
+    }
+    // The read is the inner publication's end, so the charge it carried is gone with it; dropping the
+    // wrapper says so out loud rather than leaving it to when this function returns.
+    drop(stream);
+    let queued = pool.reserved();
+    // Both fragments, both segments: the merged chunk is two of each.
+    let payload = 2 * SEGMENT * std::mem::size_of::<f64>();
+    let timestamps = 2 * SEGMENT * std::mem::size_of::<i64>();
+    assert!(
+        queued >= payload + timestamps,
+        "the queue holds {queued} bytes charged for a chunk of at least {} bytes: the merged field \
+         is two segments of {payload} bytes and the timestamps beside them are {timestamps}",
+        payload + timestamps
+    );
+
+    // What was queued is the merged chunk this figure was about, and not one segment of it.
+    let Queued::Chain {
+        chain: RoutedChain::Raw(chain),
+        ..
+    } = receiver
+        .try_recv()
+        .expect("the queue holds the merged chain")
+    else {
+        panic!("a raw child's chain is queued as raw series");
+    };
+    assert_eq!(1, chain.len(), "one identity is one chain");
+    let (chunk, _charge) = &chain[0];
+    let field = chunk.fields.iter().next().expect("the chunk has its field");
+    assert_eq!(2, field.segments().len(), "the field is two segments");
+    assert!(
+        field.dense().is_none(),
+        "a field of two segments has no single dense view"
+    );
+
+    // And the figure is the queue's to hold: dropping what it queued gives all of it back.
+    drop(chain);
+    drop(receiver);
+    drop(inner);
+    assert_eq!(0, pool.reserved(), "the finished read holds nothing");
 }

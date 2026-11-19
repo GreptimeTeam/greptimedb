@@ -3005,17 +3005,11 @@ impl SeriesExecutionPlan for FusedSeriesExec {
         }
         let FusedExecution { stream, state } = self.output_stream(partition, context)?;
         match state {
-            Some(state) => {
-                let source: SendableStateSeriesStream = Box::pin(FusedStateStream {
-                    source: stream,
-                    pending: Vec::new().into_iter(),
-                    reservation: None,
-                });
-                Ok(Box::pin(FusedStateChunks {
-                    source,
-                    declared: state.binding,
-                }))
-            }
+            Some(state) => Ok(Box::pin(FusedStateChunks {
+                source: stream,
+                declared: state.binding,
+                pending: Vec::new().into_iter(),
+            })),
             None => {
                 let source: SendableEvaluatedSeriesStream =
                     Box::pin(FusedEvaluatedStream { source: stream });
@@ -3950,30 +3944,90 @@ impl Stream for FusedEvaluatedChunks {
 }
 
 /// Exported state, handed over one group at a time as the chunks a `Final` merges.
+///
+/// The charge the tree's own export carried rides on the groups it is cut into: a reader that takes
+/// one group and holds it is holding the bytes of the batch that group was folded in, so the
+/// reservation is shared by every group of that batch and released with the last of them.
 struct FusedStateChunks {
-    source: SendableStateSeriesStream,
+    source: FusedSeriesStream,
     /// The layout every group of this export was folded on.
     declared: Arc<AggregateStateSchema>,
+    /// The groups of the batch last taken off the tree, in the order it folded them, each with a
+    /// reference to the charge that batch carried.
+    ///
+    /// The reference is taken once per group rather than held by this stream, so the batch's charge
+    /// is released when the last group a consumer holds is dropped - not when this stream is polled
+    /// again, and not when it goes away either.
+    pending: std::vec::IntoIter<(
+        datatypes::series::aggregate_state::StateSeries,
+        Option<Arc<MemoryReservation>>,
+    )>,
 }
 
 impl Stream for FusedStateChunks {
     type Item = Result<HandedSeriesChunk, BoxedError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let declared = Arc::clone(&self.declared);
-        match Pin::new(&mut self.source).poll_next(cx) {
-            // A `Partial` closes every group it exports: the fold of one partition is whole, and the
-            // `Final` above merges the partitions' publications rather than continuing one chain.
-            Poll::Ready(Some(Ok((series, _closed)))) => Poll::Ready(Some(Ok(
-                HandedSeriesChunk::uncharged(SeriesChunk::State(StateChunk::Series {
+        let this = &mut *self;
+        loop {
+            if let Some((series, held)) = this.pending.next() {
+                // A `Partial` closes every group it exports: the fold of one partition is whole, and
+                // the `Final` above merges the partitions' publications rather than continuing one
+                // chain.
+                let chunk = SeriesChunk::State(StateChunk::Series {
                     series: vec![series],
-                    state_schema: declared,
+                    state_schema: Arc::clone(&this.declared),
                     reservation: None,
-                })),
-            ))),
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+                });
+                return Poll::Ready(Some(Ok(match held {
+                    Some(held) => {
+                        HandedSeriesChunk::charged(chunk, SeriesCharge::shared(vec![held]))
+                    }
+                    None => HandedSeriesChunk::uncharged(chunk),
+                })));
+            }
+            match Pin::new(&mut this.source).poll_output(cx) {
+                Poll::Ready(Some(Ok(FusedOutput::State(chunk)))) => {
+                    let StateChunk::Series {
+                        series,
+                        reservation,
+                        ..
+                    } = chunk
+                    else {
+                        Pin::new(&mut this.source).fail();
+                        return Poll::Ready(Some(Err(BoxedError::new(
+                            common_query::error::Error::from(DataFusionError::Internal(
+                                "row state reached the state chunk stream".into(),
+                            )),
+                        ))));
+                    };
+                    this.pending = {
+                        // One reference per group, so none of them is this stream's to hold.
+                        let held = reservation.map(Arc::new);
+                        series
+                            .into_iter()
+                            .map(|group| (group, held.clone()))
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                    };
+                }
+                Poll::Ready(Some(Ok(_))) => {
+                    Pin::new(&mut this.source).fail();
+                    return Poll::Ready(Some(Err(BoxedError::new(
+                        common_query::error::Error::from(DataFusionError::Internal(
+                            "non-state output reached the state chunk stream".into(),
+                        )),
+                    ))));
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    Pin::new(&mut this.source).fail();
+                    return Poll::Ready(Some(Err(BoxedError::new(
+                        common_query::error::Error::from(error),
+                    ))));
+                }
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
         }
     }
 }

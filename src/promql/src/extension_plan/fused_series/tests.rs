@@ -10898,3 +10898,157 @@ async fn a_fused_node_hands_over_what_the_frames_above_it_would_decode() {
     .await
     .expect("the composition finishes");
 }
+
+// ---------------------------------------------------------------------------
+// The handover's contract, held to the same standard as a frame
+// ---------------------------------------------------------------------------
+
+/// A child's chunks are checked at the order its own plan declares, exactly as its frames are.
+///
+/// The producer here names its keys by an `Interleaved` promise and then closes the same key twice.
+/// Its frames cannot carry that - it publishes them under the contiguous order it declares, and the
+/// packer refuses the recurrence - so a consumer reading its chunks has to refuse it too: the
+/// handover is a way to read a producer, not a way around what it promised.
+#[tokio::test]
+async fn a_router_refuses_the_chunk_sequence_the_frames_refuse() {
+    let closed = |time: i64, last: bool| {
+        chunk_of(
+            &raw_schema(),
+            "web-1",
+            metric(&[(HOST, "web-1")], Some(METRIC)),
+            &[time],
+            vec![vec![Some(1.0)]],
+            last,
+        )
+    };
+    // Two closed chunks of one key, which the contiguous order of the node above forbids.
+    let batches = || {
+        vec![frames_under(
+            &frame_schema_with_ordering(SeriesOrdering::Interleaved),
+            &[closed(60_000, true), closed(120_000, true)],
+        )]
+    };
+    let context = SessionContext::default().task_ctx();
+    let refused = |error: BoxedError| {
+        error
+            .to_string()
+            .contains("raw series key recurred after final chunk")
+    };
+
+    // The frame path: the producer cannot pack this under the order it publishes.
+    let source = raw_source(memory_exec_partitioned_with(
+        frame_schema_with_ordering(SeriesOrdering::Interleaved),
+        batches(),
+    ));
+    let mut frames = source
+        .execute(0, Arc::clone(&context))
+        .expect("the node executes");
+    let error = frames
+        .next()
+        .await
+        .expect("the producer answers instead of ending")
+        .expect_err("the frame path refuses a key that recurs after it closed");
+    assert!(
+        refused(BoxedError::new(common_query::error::Error::from(error))),
+        "the frame path refuses a key that recurs after it closed"
+    );
+
+    // The chunk path: read through a router, which asks the child for its chunks.
+    let router: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(
+            raw_source(memory_exec_partitioned_with(
+                frame_schema_with_ordering(SeriesOrdering::Interleaved),
+                batches(),
+            )),
+            1,
+        )
+        .expect("the child declares a raw frame"),
+    );
+    let chunks = series_execution_plan(router.as_ref())
+        .expect("the router hands its publication over")
+        .execute_series(0, context)
+        .expect("the output is claimed");
+    let error = chunks
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("the chunk path refuses what the frame path refuses");
+    let message = error.to_string();
+    assert!(refused(error), "{message}");
+}
+
+/// A state group is charged for as long as the reader holds it, with no router in between.
+///
+/// The tree's own export carries the fold's reservation; handing the groups of that export over has
+/// to carry it too, or a reader of a `Partial` holds uncharged bytes between the fold and its own
+/// accounting.
+#[tokio::test]
+async fn a_handed_state_group_keeps_the_export_charged() {
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let context = task_context(&pool);
+    let producer = state_producer();
+    let mut chunks = series_execution_plan(producer.as_ref())
+        .expect("a Partial hands its state over")
+        .execute_series(0, Arc::clone(&context))
+        .expect("the output is claimed");
+
+    let group = futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+        .await
+        .expect("the partial exports a group")
+        .expect("the group arrives");
+    assert!(
+        matches!(group.chunk(), SeriesChunk::State(StateChunk::Series { .. })),
+        "a partial hands its folded groups over"
+    );
+    let held = pool.reserved();
+    assert!(
+        held > 0,
+        "a held state group keeps the export it was folded in charged"
+    );
+
+    drop(group);
+    let after = pool.reserved();
+    assert!(
+        after < held,
+        "dropping the group gives its charge back: {held} held, {after} still reserved"
+    );
+
+    drop(futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx)).await);
+    drop(chunks);
+    drop(producer);
+    assert_eq!(0, pool.reserved(), "the finished export holds nothing");
+}
+
+/// The two entry points cannot be mixed on one execution, and the refusal names both.
+///
+/// The child is read once for every output of one execution, so the way it is read is fixed by the
+/// first output that claims it. A later output asking for the other form would be handed a stream it
+/// did not ask for; it is refused instead, naming what the read already is and what it was asked to
+/// become.
+#[tokio::test]
+async fn the_two_entry_points_cannot_be_mixed_on_one_execution() {
+    let context = SessionContext::default().task_ctx();
+    let router: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(
+            raw_source(memory_exec_partitioned(vec![frames(&[series_chunk(
+                "web-0",
+                &series_samples(1.0),
+                true,
+            )])])),
+            2,
+        )
+        .expect("the child declares a raw frame"),
+    );
+    router
+        .execute(0, Arc::clone(&context))
+        .expect("the first output reads frames");
+    let claimed = series_execution_plan(router.as_ref())
+        .expect("the router hands its publication over")
+        .execute_series(1, context);
+    // The refusal is an error, and naming it is what the two assertions below are about.
+    let Err(error) = claimed else {
+        panic!("a second output cannot read the same execution as chunks");
+    };
+    let message = error.to_string();
+    assert!(message.contains("already read as frames"), "{message}");
+    assert!(message.contains("cannot read it as chunks"), "{message}");
+}
