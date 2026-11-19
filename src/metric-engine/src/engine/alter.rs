@@ -33,7 +33,7 @@ use crate::error::{
     AddingFieldColumnSnafu, LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result,
     SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
-use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id};
+use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions};
 
 impl MetricEngineInner {
     pub async fn alter_regions(
@@ -146,7 +146,6 @@ impl MetricEngineInner {
 
             region_state.options().index
         };
-        let data_region_id = to_data_region_id(physical_region_id);
 
         // Acquire logical region locks in a deterministic order to avoid deadlocks when multiple
         // alter operations target overlapping regions concurrently.
@@ -167,7 +166,10 @@ impl MetricEngineInner {
         self.add_physical_columns(physical_region_id, new_columns_to_add, index_options)
             .await?;
 
-        let physical_metadata = self.data_region.physical_metadata(data_region_id).await?;
+        let physical_metadata = self
+            .data_region
+            .physical_metadata(physical_region_id)
+            .await?;
 
         // The physical region now has every requested column, either because this call
         // added it or because it was already there with the same definition.

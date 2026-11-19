@@ -293,7 +293,10 @@ impl MetricEngineInner {
         self.add_physical_columns(physical_region_id, new_columns, index_option)
             .await?;
 
-        let physical_metadata = self.data_region.physical_metadata(data_region_id).await?;
+        let physical_metadata = self
+            .data_region
+            .physical_metadata(physical_region_id)
+            .await?;
         let logical_regions = requests
             .iter()
             .map(|(region_id, _)| *region_id)

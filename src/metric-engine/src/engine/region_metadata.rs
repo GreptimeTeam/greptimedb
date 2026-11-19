@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Implementation of retrieving logical region's region metadata.
+//! Logical column snapshots and physical schema lookups for the metric engine.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -42,8 +42,6 @@ impl ColumnMetadataInterner {
         physical_table_id: TableId,
         metadata: ColumnMetadata,
     ) -> Result<InternedHash<ScopedColumnMetadata>> {
-        // Value equality can normalize timestamp units or signed zero. Readers
-        // also observe the stored default (e.g. through get_metadata).
         let literal_default = match metadata.column_schema.default_constraint() {
             Some(ColumnDefaultConstraint::Value(value)) if !value.is_null() => {
                 Some(serde_json::to_vec(value).context(SerializeColumnMetadataSnafu)?)
@@ -58,10 +56,12 @@ impl ColumnMetadataInterner {
     }
 }
 
+/// A column definition shared within one physical table.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ScopedColumnMetadata {
     physical_table_id: TableId,
     metadata: ColumnMetadata,
+    /// Preserves observable differences between equal literal values, such as signed zero.
     literal_default: Option<Vec<u8>>,
 }
 

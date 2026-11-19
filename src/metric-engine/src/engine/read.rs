@@ -223,12 +223,10 @@ impl MetricEngineInner {
 
         // generate physical projection
         let mut physical_projection = Vec::with_capacity(origin_projection.len());
-        let data_region_id = utils::to_data_region_id(physical_region_id);
         let physical_metadata = self
-            .mito
-            .get_metadata(data_region_id)
-            .await
-            .context(MitoReadOperationSnafu)?;
+            .data_region
+            .physical_metadata(physical_region_id)
+            .await?;
 
         for name in projected_logical_names {
             // Safety: logical columns is a strict subset of physical columns
@@ -248,12 +246,10 @@ impl MetricEngineInner {
             .load_logical_columns(physical_region_id, logical_region_id)
             .await?;
         let mut projection = Vec::with_capacity(logical_columns.len());
-        let data_region_id = utils::to_data_region_id(physical_region_id);
         let physical_metadata = self
-            .mito
-            .get_metadata(data_region_id)
-            .await
-            .context(MitoReadOperationSnafu)?;
+            .data_region
+            .physical_metadata(physical_region_id)
+            .await?;
         for col in logical_columns.iter() {
             // Safety: logical columns is a strict subset of physical columns
             projection.push(
