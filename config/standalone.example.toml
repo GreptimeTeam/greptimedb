@@ -1221,5 +1221,5 @@ tail = "10m"
 max_staleness = "30s"
 ## How old a cached chunk may be before it is evicted, independent of source changes.
 max_age = "1h"
-## Whether lookups probe the source table's sequence and invalidate affected spans before serving an entry. Required for correctness on writable tables.
+## Whether lookups probe the source table's sequence and invalidate affected spans before serving an entry. Required for correctness on writable tables; explicit DELETE mixed with distant PUTs, truncate, and TTL expiry remain documented scope limits.
 source_probe = true

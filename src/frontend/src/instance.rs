@@ -172,6 +172,11 @@ pub struct Instance {
     /// Per logical (queryable) table, the route version and region cursor last
     /// advanced after invalidating the rollup cache.
     source_probe_cursors: Arc<Mutex<HashMap<u32, SourceProbeState>>>,
+    /// The table ID last seen for each fully-qualified source name.
+    ///
+    /// A drop and recreate under the same name must not let entries keyed by the
+    /// name survive behind a fresh cursor.
+    source_probe_incarnations: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl Instance {
@@ -1634,6 +1639,20 @@ impl Instance {
         if eval_stmt.start == eval_stmt.end {
             return Ok(None);
         }
+        // A snapshot or Flow incremental bound changes which rows a read may see.
+        // The cache key does not encode either bound, so such a request must never
+        // hit or fill the ordinary entries.
+        if !query_ctx.snapshots().is_empty()
+            || query_ctx
+                .extensions()
+                .keys()
+                .any(|key| key.starts_with("flow."))
+        {
+            return Ok(None);
+        }
+        if Self::windowed_source_has_schema_override(&eval_stmt.expr) {
+            return Ok(None);
+        }
         let Some(identity) = Self::range_query_identity(
             query,
             eval_stmt,
@@ -1709,6 +1728,39 @@ impl Instance {
     /// [`None`] when the expression has no admitted source table or a dimension
     /// does not fit the identity's integer fields, because a narrowed value would
     /// key the same span under a different grid.
+    /// Whether an admitted selector names a schema through `__schema__` or
+    /// `__database__`. The planner resolves those to a schema different from the
+    /// request's current one, while the cache key and source probe would otherwise
+    /// use the current schema. Bypass rather than risk validating another table.
+    fn windowed_source_has_schema_override(expr: &promql_parser::parser::Expr) -> bool {
+        use promql_parser::parser::Expr;
+
+        fn selector_has_override(selector: &promql_parser::parser::VectorSelector) -> bool {
+            selector
+                .matchers
+                .matchers
+                .iter()
+                .any(|matcher| matcher.name == "__schema__" || matcher.name == "__database__")
+        }
+
+        match expr {
+            Expr::Paren(paren) => Self::windowed_source_has_schema_override(&paren.expr),
+            Expr::VectorSelector(selector) => selector_has_override(selector),
+            Expr::Call(call) if call.func.name == "rate" && call.args.args.len() == 1 => {
+                match call.args.args[0].as_ref() {
+                    Expr::MatrixSelector(matrix) => selector_has_override(&matrix.vs),
+                    _ => true,
+                }
+            }
+            Expr::Aggregate(aggregate) => {
+                Self::windowed_source_has_schema_override(&aggregate.expr)
+            }
+            // The caller only reaches this after admission; an unknown shape is
+            // not provably about the current schema.
+            _ => true,
+        }
+    }
+
     fn range_query_identity(
         query: &PromQuery,
         eval_stmt: &EvalStmt,
@@ -3656,6 +3708,31 @@ mod tests {
 
         assert_eq!(printed(&uncached), printed(&answer));
         assert_eq!(0, cache.entry_count(), "a failed probe fills nothing");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schema_override_and_snapshot_bounds_bypass_the_rollup_cache() -> TestResult<()> {
+        let cached = metric_instance(Some(test_rollup_cache())).await?;
+        let cache = cached.rollup_cache().unwrap().clone();
+        let plain = metric_instance(None).await?;
+
+        // `__schema__` makes the planner read another schema; the cache key and
+        // source probe only name the current one.
+        let overridden = metric_range_query(r#"cpu{__schema__="public"}"#);
+        let answer = promql_rows(&cached, &overridden, test_query_ctx(1)).await?;
+        let uncached = promql_rows(&plain, &overridden, test_query_ctx(2)).await?;
+        assert_eq!(printed(&uncached), printed(&answer));
+        assert_eq!(0, cache.entry_count(), "schema override fills nothing");
+
+        // A per-region snapshot changes which rows a request may see; it must not
+        // share the ordinary entries.
+        let snapshot = QueryContext::with_db_name(None);
+        snapshot.set_snapshot(1, 42);
+        let bounded = promql_rows(&cached, &metric_range_query("cpu"), Arc::new(snapshot)).await?;
+        let uncached = promql_rows(&plain, &metric_range_query("cpu"), test_query_ctx(3)).await?;
+        assert_eq!(printed(&uncached), printed(&bounded));
+        assert_eq!(0, cache.entry_count(), "snapshot request fills nothing");
         Ok(())
     }
 

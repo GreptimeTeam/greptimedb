@@ -487,6 +487,7 @@ impl FrontendBuilder {
             suspend: Arc::new(AtomicBool::new(false)),
             rollup_cache,
             source_probe_cursors: Arc::new(Mutex::new(HashMap::new())),
+            source_probe_incarnations: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }

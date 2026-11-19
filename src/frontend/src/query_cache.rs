@@ -117,6 +117,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
@@ -992,6 +993,14 @@ pub struct RollupCache {
     /// that can probe turns it on and invalidates the affected table before a
     /// lookup.
     source_probe: bool,
+    /// Serializes lookup, publication, and invalidation.
+    ///
+    /// The epoch alone cannot fence publication: a fill may pass its epoch check
+    /// and pause while an invalidation scans, then insert its pre-invalidation
+    /// payload. Holding this lock across the epoch check and the store means an
+    /// invalidation cannot complete between them, and a lookup cannot observe a
+    /// payload that an already-completed invalidation meant to remove.
+    invalidation_lock: Mutex<()>,
 }
 
 impl RollupCache {
@@ -1010,6 +1019,7 @@ impl RollupCache {
             entries,
             invalidation_epoch: AtomicU64::new(0),
             source_probe: false,
+            invalidation_lock: Mutex::new(()),
         }
     }
 
@@ -1090,6 +1100,7 @@ impl RollupCache {
         if key.chunk.is_empty() {
             return Lookup::Bypass(BypassReason::EmptyChunk);
         }
+        let _guard = self.invalidation_lock.lock().unwrap();
         let cursor = match self.authorized_cursor(now) {
             Ok(cursor) => cursor,
             Err(reason) => return Lookup::Miss(reason),
@@ -1193,6 +1204,7 @@ impl RollupCache {
         if key.chunk.is_empty() {
             return Insert::Bypassed;
         }
+        let _guard = self.invalidation_lock.lock().unwrap();
         // An invalidation ran after this fill captured its epoch, so the data the
         // fill read may be the data the invalidation removed. The fill loses.
         if self.invalidation_epoch() > fill.epoch() {
@@ -1274,6 +1286,7 @@ impl RollupCache {
     /// them is removed too, even though it read storage after this call. That costs
     /// a later miss, never a wrong answer, and is why no fill has to be waited for.
     pub fn invalidate_range(&self, identity: &QueryIdentity, input_span: TimeChunk) -> usize {
+        let _guard = self.invalidation_lock.lock().unwrap();
         // Advanced before the scan: a fill that captures the new epoch from now on
         // read storage after this point, and one that captured an older epoch is
         // refused by `insert_with_dependency`.
@@ -1302,6 +1315,7 @@ impl RollupCache {
     /// and a concurrent fill that started before invalidation cannot be stored.
     /// The scan and removals are not atomic, so a newer fill may also be removed.
     pub fn invalidate_table_range(&self, table: &str, input_span: TimeChunk) -> usize {
+        let _guard = self.invalidation_lock.lock().unwrap();
         self.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
 
         let mut dirty = Vec::new();
@@ -1325,6 +1339,7 @@ impl RollupCache {
     /// never worth serving a point whose input was erased, so the caller evicts the
     /// whole table instead of guessing a span.
     pub fn invalidate_table(&self, table: &str) -> usize {
+        let _guard = self.invalidation_lock.lock().unwrap();
         self.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
 
         let mut dirty = Vec::new();

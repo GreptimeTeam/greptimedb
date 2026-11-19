@@ -184,6 +184,18 @@ impl Instance {
             })?;
         let table_info = resolved.table_info();
         let table_id = table_info.table_id();
+        // A recreated table under the same name is a different incarnation. Its
+        // fresh cursor starts at zero, so old entries keyed by the name must go
+        // before the first probe of the new table.
+        {
+            let mut incarnations = self.source_probe_incarnations.lock().unwrap();
+            if incarnations
+                .insert(table.to_string(), table_id)
+                .is_some_and(|previous| previous != table_id)
+            {
+                cache.invalidate_table(source_table);
+            }
+        }
         let (_physical_table_id, route) = self
             .partition_manager()
             .find_physical_table_route_with_id(table_id)
@@ -258,9 +270,13 @@ impl Instance {
                 cache.invalidate_table_range(source_table, span);
             }
             // A sequence advance without a timestamp can mean erased rows. Do not
-            // guess a span: no entry of this table may survive.
-            (None, None) if changed => {
-                cache.invalidate_table(source_table);
+            // guess a span: no entry of this table may survive. An unchanged
+            // empty delta is a proven no-op and must keep the entries it did not
+            // touch, or a quiet table would evict every chunk on every request.
+            (None, None) => {
+                if changed {
+                    cache.invalidate_table(source_table);
+                }
             }
             // A half hull is not a proof.
             _ => {

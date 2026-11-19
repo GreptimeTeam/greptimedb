@@ -50,6 +50,11 @@ pub struct RollupCacheOptions {
     /// Whether lookups first probe the source table's sequence and invalidate the
     /// affected spans. This is required for correctness on writable tables; turning
     /// it off serves entries bounded only by `max_age`.
+    ///
+    /// The probe observes visible rows. A DELETE mixed with a distant PUT, a
+    /// truncate followed by new rows, and TTL/compaction removal can erase a
+    /// timestamp that no nonempty hull covers; those writes remain a documented
+    /// scope limit of the cached path.
     pub source_probe: bool,
 }
 
