@@ -314,6 +314,7 @@ fn file_meta_from_sst_info(
         primary_key_min: None,
         primary_key_max: None,
         preserve_row_sequence: false,
+        format: Default::default(),
     }
 }
 
@@ -513,6 +514,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         sst_format: format,
         append_mode: table.append_mode,
         pending_tails: Default::default(),
+        series_indexes: Default::default(),
         handoff_floors: Default::default(),
     };
     let checkpoint = RegionCheckpoint {

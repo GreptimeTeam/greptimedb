@@ -590,6 +590,7 @@ where
                 file_metadata: Some(Arc::new(parquet_metadata)),
                 index_metadata: index_output,
                 num_series,
+                format: Default::default(),
             });
             self.current_file = FileId::random();
             self.bytes_written.store(0, Ordering::Relaxed)

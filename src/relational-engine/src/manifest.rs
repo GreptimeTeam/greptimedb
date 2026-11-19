@@ -33,7 +33,7 @@ fn region_manifest_path(region_dir: &str) -> String {
     format!("{region_dir}manifest/_relational_manifest")
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RelationalRegionManifest {
     pub region_id: RegionId,
     pub column_metadatas: Vec<ColumnMetadata>,

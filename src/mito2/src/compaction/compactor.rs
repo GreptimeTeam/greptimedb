@@ -545,7 +545,7 @@ impl CompactionContext {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
@@ -589,6 +589,7 @@ fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
         num_rows: meta.num_rows as usize,
         num_row_groups: meta.num_row_groups,
         num_series: meta.num_series,
+        format: meta.format.clone(),
         ..Default::default()
     }
 }
@@ -909,6 +910,7 @@ impl DefaultSstMerger {
                     primary_key_min,
                     primary_key_max,
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
+                    format: sst_info.format.clone(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1735,7 +1737,7 @@ mod tests {
                         compaction_time_window: None,
                         flushed_entry_id: None,
                         flushed_sequence: None,
-                        wal_recovery: Default::default(),
+                        ..Default::default()
                     })),
                     false,
                 )

@@ -830,7 +830,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             }),
             &[],
             crate::test_util::new_noop_file_purger(),

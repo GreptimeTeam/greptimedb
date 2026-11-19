@@ -108,6 +108,7 @@ use crate::req_convert::insert::{
     fill_reqs_with_impure_default, rows_to_record_batch, value_matches_type,
 };
 use crate::statement::StatementExecutor;
+use crate::statement::ddl::is_retention_ttl;
 use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
 
 pub struct Inserter {
@@ -1902,6 +1903,7 @@ impl Inserter {
         create_table_expr
             .table_options
             .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+        apply_retention_ttl_hint(&mut create_table_expr.table_options, ctx);
 
         // create physical table
         let res = statement_executor
@@ -2574,6 +2576,19 @@ pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef)
         );
     }
     Ok(())
+}
+
+/// Copies a retention `ttl` hint onto a physical metric table being created.
+/// Only `ttl` is copied: other ingest hints must not land on the shared physical
+/// table, and `ttl=instant` stays on the logical table for flow forwarding.
+/// Once the physical table exists, the hint has no effect.
+pub fn apply_retention_ttl_hint(
+    table_options: &mut std::collections::HashMap<String, String>,
+    ctx: &QueryContextRef,
+) {
+    if let Some(ttl) = ctx.extension(TTL_KEY).filter(|ttl| is_retention_ttl(ttl)) {
+        table_options.insert(TTL_KEY.to_string(), ttl.to_string());
+    }
 }
 
 /// Fill table options for a new table by create type.
@@ -4181,6 +4196,29 @@ mod tests {
         );
         assert!(!table_options.contains_key(SEMANTIC_METRIC_TYPE));
         assert!(!table_options.contains_key(SEMANTIC_PER_TABLE_INDEX_KEY));
+    }
+
+    #[test]
+    fn test_apply_retention_ttl_hint_copies_only_retention_ttl() {
+        let mut instant_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        instant_ctx.set_extension(TTL_KEY, "instant");
+        instant_ctx.set_extension(APPEND_MODE_KEY, "true");
+        let instant_ctx = Arc::new(instant_ctx);
+        let mut instant_options = std::collections::HashMap::new();
+        apply_retention_ttl_hint(&mut instant_options, &instant_ctx);
+        assert!(instant_options.is_empty());
+
+        let mut retention_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        retention_ctx.set_extension(TTL_KEY, "7d");
+        retention_ctx.set_extension(APPEND_MODE_KEY, "true");
+        let retention_ctx = Arc::new(retention_ctx);
+        let mut retention_options = std::collections::HashMap::new();
+        apply_retention_ttl_hint(&mut retention_options, &retention_ctx);
+        assert_eq!(
+            retention_options.get(TTL_KEY).map(String::as_str),
+            Some("7d")
+        );
+        assert!(!retention_options.contains_key(APPEND_MODE_KEY));
     }
 
     #[test]
