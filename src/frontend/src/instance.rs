@@ -60,6 +60,7 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
+use common_query::promql_annotations::{PromqlAnnotationCollector, promql_annotation_collector};
 use common_query::{Output, OutputMeta};
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, RecordBatches};
@@ -97,7 +98,10 @@ use servers::prometheus_handler::{
 };
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::request_memory_limiter::ServerMemoryLimiter;
-use session::context::{Channel, MetricDiscoveryScope, QueryContextRef};
+use session::context::{
+    Channel, MetricDiscoveryScope, QueryContextRef, REMOTE_QUERY_ID_EXTENSION_KEY,
+    generate_remote_query_id,
+};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::ast::ObjectNamePartExt;
@@ -119,11 +123,11 @@ use crate::error::{
     InvalidSqlSnafu, ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result,
     SqlExecInterceptedSnafu, StatementTimeoutSnafu, TableOperationSnafu,
 };
-use crate::query_cache::{QueryIdentity, QueryRoute, RollupCache};
+use crate::query_cache::{CachedAnnotations, QueryIdentity, QueryRoute, RollupCache};
 use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
 
-use self::promql_cache::{RangeOutcome, WindowExecutor, execute_range, may_record_annotations};
+use self::promql_cache::{RangeOutcome, WindowExecutor, WindowOutput, execute_range};
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -1594,10 +1598,13 @@ impl Instance {
     ///
     /// - no cache installed (the default): the original path;
     /// - an instant query (`start == end`): the original path, since the cache
-    ///   holds chunks of an evaluation grid;
-    /// - a statement that can record a PromQL annotation: the original path, since
-    ///   a chunk served from memory is never re-evaluated and so cannot replay what
-    ///   its read recorded (see [`may_record_annotations`]).
+    ///   holds chunks of an evaluation grid.
+    ///
+    /// A statement that records PromQL warnings or infos does not bypass: the
+    /// messages of a chunk travel with its rows
+    /// ([`crate::query_cache::CachedAnnotations`]), so a hit reports what the read it
+    /// replaces reported, and every message of the merged answer is replayed into
+    /// the request's collector below.
     ///
     /// The statement itself then has to survive [`RollupCache::plan`], which refuses
     /// anything outside the window allowlist and any grid whose chunk bounds would
@@ -1620,9 +1627,6 @@ impl Instance {
         if eval_stmt.start == eval_stmt.end {
             return Ok(None);
         }
-        if may_record_annotations(&eval_stmt.expr) {
-            return Ok(None);
-        }
         let Some(identity) = Self::range_query_identity(
             query,
             eval_stmt,
@@ -1641,8 +1645,36 @@ impl Instance {
             cancellation_handle,
         };
         match execute_range(&executor, cache, identity, eval_stmt, SystemTime::now()).await? {
-            RangeOutcome::Merged(rows) => Ok(Some(rows)),
+            RangeOutcome::Merged { rows, annotations } => {
+                Self::record_annotations(query_ctx, &annotations);
+                Ok(Some(rows))
+            }
             RangeOutcome::Bypassed => Ok(None),
+        }
+    }
+
+    /// Reports the merged answer's warnings and infos the way the request's response
+    /// reads them.
+    ///
+    /// The HTTP and gRPC front-ends open a collector for the request before calling
+    /// in and report it afterwards, so replaying here is what makes a message of a
+    /// chunk served from memory (or of a window read under its own collector) show
+    /// up in the response. The collector deduplicates, so replaying the same message
+    /// twice reports it once. A request without a collector has nobody to report to
+    /// and is left alone.
+    fn record_annotations(query_ctx: &QueryContextRef, annotations: &CachedAnnotations) {
+        if annotations.is_empty() {
+            return;
+        }
+        let Some(query_id) = query_ctx.remote_query_id() else {
+            return;
+        };
+        let collector = promql_annotation_collector(query_id);
+        for warning in annotations.warnings() {
+            collector.record_warning(warning.clone());
+        }
+        for info in annotations.infos() {
+            collector.record_info(info.clone());
         }
     }
 
@@ -1712,14 +1744,35 @@ struct StatementWindowExecutor<'a> {
     cancellation_handle: Arc<CancellationHandle>,
 }
 
+impl StatementWindowExecutor<'_> {
+    /// The context the window is planned and executed under, and the collector its
+    /// annotations land in.
+    ///
+    /// The request's collector is shared by every span of the request, so a reading
+    /// of it cannot say which chunk recorded which message. A window therefore runs
+    /// under a remote query id of its own: the planner looks the collector up by that
+    /// id, so what the window records is attributable to it, and the caller replays
+    /// it into the request's collector afterwards. Every window gets one, whether or
+    /// not the request opened a collector, so a chunk filled by a request that
+    /// reports nothing still carries what its read recorded for the requests that do.
+    fn window_context(&self) -> (QueryContextRef, Option<PromqlAnnotationCollector>) {
+        let query_id = generate_remote_query_id();
+        let collector = promql_annotation_collector(&query_id);
+        let mut query_ctx = (*self.query_ctx).clone();
+        query_ctx.set_extension(REMOTE_QUERY_ID_EXTENSION_KEY, query_id);
+        (Arc::new(query_ctx), Some(collector))
+    }
+}
+
 #[async_trait]
 impl WindowExecutor for StatementWindowExecutor<'_> {
-    async fn execute_window(&self, eval_stmt: EvalStmt) -> server_error::Result<RecordBatches> {
+    async fn execute_window(&self, eval_stmt: EvalStmt) -> server_error::Result<WindowOutput> {
+        let (query_ctx, collector) = self.window_context();
         let statement = QueryStatement::Promql(eval_stmt, self.alias.clone());
         let plan = self
             .instance
             .statement_executor
-            .plan(&statement, self.query_ctx.clone())
+            .plan(&statement, query_ctx.clone())
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
@@ -1729,9 +1782,7 @@ impl WindowExecutor for StatementWindowExecutor<'_> {
             promql::remove_output_sort(plan)
         };
         let output = CancellableFuture::new(
-            self.instance
-                .statement_executor
-                .exec_plan(plan, self.query_ctx.clone()),
+            self.instance.statement_executor.exec_plan(plan, query_ctx),
             self.cancellation_handle.clone(),
         )
         .await
@@ -1741,17 +1792,38 @@ impl WindowExecutor for StatementWindowExecutor<'_> {
         let output = map_query_output(output)
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
-        match output.data {
-            OutputData::RecordBatches(batches) => Ok(batches),
-            OutputData::Stream(stream) => RecordBatches::try_collect(stream)
+        let rows = match output.data {
+            OutputData::RecordBatches(batches) => batches,
+            OutputData::Stream(stream) => {
+                // The plan future is cancellable, but consuming its stream is where
+                // most of a range query's work happens. Keep the collect future under
+                // the same handle, so cancellation drops the stream and stops the
+                // read rather than only its planning.
+                CancellableFuture::new(
+                    RecordBatches::try_collect(stream),
+                    self.cancellation_handle.clone(),
+                )
                 .await
+                .map_err(|_| server_error::CancelledSnafu.build())?
                 .map_err(BoxedError::new)
-                .context(ExecuteQuerySnafu),
-            OutputData::AffectedRows(_) => Err(UnexpectedResultSnafu {
-                reason: "a PromQL range query answered with affected rows".to_string(),
+                .context(ExecuteQuerySnafu)?
             }
-            .build()),
+            OutputData::AffectedRows(_) => {
+                return Err(UnexpectedResultSnafu {
+                    reason: "a PromQL range query answered with affected rows".to_string(),
+                }
+                .build());
+            }
+        };
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        if let Some(collector) = &collector {
+            collector.append_to(&mut warnings, &mut infos);
         }
+        Ok(WindowOutput {
+            rows,
+            annotations: CachedAnnotations::new(warnings, infos),
+        })
     }
 }
 
@@ -3494,25 +3566,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rate_range_query_keeps_the_original_path() -> TestResult<()> {
-        // A window folding float samples and native histograms records an
-        // annotation, which a chunk served from memory cannot replay; the range path
-        // therefore leaves such a statement to the original plan until annotations
-        // are stored with the payload.
+    async fn a_rate_range_query_is_cached_and_repeats() -> TestResult<()> {
+        // A range function is the shape that records annotations (a mixed float and
+        // native-histogram window), and it is cached like any other: the messages of
+        // a chunk travel with its rows (see `promql_cache`'s tests), so nothing is
+        // dropped by serving it.
         let cached = metric_instance(Some(test_rollup_cache())).await?;
         let cache = cached.rollup_cache().unwrap().clone();
         let plain = metric_instance(None).await?;
-        let query = metric_range_query("rate(cpu[1m])");
 
-        let first = promql_rows(&cached, &query, test_query_ctx(1)).await?;
-        let second = promql_rows(&cached, &query, test_query_ctx(2)).await?;
-        let uncached = promql_rows(&plain, &query, test_query_ctx(3)).await?;
+        for expr in ["rate(cpu[1m])", "sum(rate(cpu[1m]))"] {
+            let query = metric_range_query(expr);
+            let cold = promql_rows(&cached, &query, test_query_ctx(1)).await?;
+            let filled = cache.entry_count();
+            assert!(filled > 0, "{expr} filled its chunks");
 
-        assert_eq!(printed(&uncached), printed(&first));
-        assert_eq!(printed(&uncached), printed(&second));
-        assert_eq!(0, cache.entry_count(), "a rate query is not cached");
+            let warm = promql_rows(&cached, &query, test_query_ctx(2)).await?;
+            let uncached = promql_rows(&plain, &query, test_query_ctx(3)).await?;
+
+            assert_eq!(printed(&uncached), printed(&cold), "{expr}");
+            assert_eq!(printed(&uncached), printed(&warm), "{expr}");
+            assert_eq!(
+                filled,
+                cache.entry_count(),
+                "{expr}: a repeated request fills nothing new"
+            );
+        }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_annotations_of_a_merged_answer_are_replayed_once() {
+        // The response path reads the collector the request opened, so everything the
+        // chunked execution recorded has to be replayed into it — once, however many
+        // spans recorded the same message.
+        let query_ctx = Arc::new(QueryContext::with("greptime", "public"));
+        let annotations = crate::query_cache::CachedAnnotations::new(
+            vec![
+                "b-warning".to_string(),
+                "a-warning".to_string(),
+                "a-warning".to_string(),
+            ],
+            vec!["an-info".to_string()],
+        );
+
+        // The response path holds the collector across the call, which is what keeps
+        // the registry entry alive for the replay to write into.
+        let collector = common_query::promql_annotations::promql_annotation_collector(
+            query_ctx.remote_query_id().unwrap(),
+        );
+        Instance::record_annotations(&query_ctx, &annotations);
+        Instance::record_annotations(&query_ctx, &annotations);
+
+        let (mut warnings, mut infos) = (Vec::new(), Vec::new());
+        collector.append_to(&mut warnings, &mut infos);
+        assert_eq!(
+            vec!["a-warning".to_string(), "b-warning".to_string()],
+            warnings
+        );
+        assert_eq!(vec!["an-info".to_string()], infos);
+
+        // The replay is per request: another request's collector is untouched, and a
+        // request with nothing to report writes nothing.
+        let other = Arc::new(QueryContext::with("greptime", "public"));
+        let other_collector = common_query::promql_annotations::promql_annotation_collector(
+            other.remote_query_id().unwrap(),
+        );
+        Instance::record_annotations(&other, &crate::query_cache::CachedAnnotations::default());
+        let (mut other_warnings, mut other_infos) = (Vec::new(), Vec::new());
+        other_collector.append_to(&mut other_warnings, &mut other_infos);
+        assert!(other_warnings.is_empty() && other_infos.is_empty());
     }
 
     fn test_metric_names_table() -> TableRef {

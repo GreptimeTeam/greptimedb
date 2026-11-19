@@ -33,6 +33,16 @@
 //! duplicates nor loses a point. Every span of one statement shares its schema, so
 //! a merged result that disagrees is reported rather than returned.
 //!
+//! # Annotations
+//!
+//! A PromQL evaluation can record warnings and infos (a range function folding
+//! float samples together with native histograms is what records them). A chunk
+//! served from memory is not evaluated, so it cannot record anything; its messages
+//! are therefore stored beside its rows and served with them ([`CachedAnnotations`]).
+//! The caller replays every message of the merged answer into the request's
+//! collector, which deduplicates, so a request reports a message once whether the
+//! chunk that recorded it was read now or earlier.
+//!
 //! A statement the cache refuses, or one with nothing cacheable in its coverage,
 //! is returned as [`RangeOutcome::Bypassed`] before the first span is executed, so
 //! the caller can run its original plan unchanged.
@@ -50,13 +60,14 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::schema::{Schema, SchemaRef};
-use promql_parser::parser::{EvalStmt, Expr as PromExpr};
+use promql_parser::parser::EvalStmt;
 use query::promql::window::{EvalGrid, windowed_eval_stmt};
 use servers::error::{self as server_error, ExecuteQuerySnafu, UnexpectedResultSnafu};
 use snafu::ResultExt;
 
 use crate::query_cache::{
-    ChunkPlan, DirectSpan, FillCursor, Lookup, QueryIdentity, RollupCache, TimeChunk, TimeChunkKey,
+    CachedAnnotations, ChunkPlan, DirectSpan, FillCursor, Lookup, QueryIdentity, RollupCache,
+    TimeChunk, TimeChunkKey,
 };
 
 /// Executes one PromQL evaluation subwindow.
@@ -68,15 +79,34 @@ use crate::query_cache::{
 /// the end, which is why the trait cannot express one.
 #[async_trait]
 pub(crate) trait WindowExecutor: Send + Sync {
-    /// Plans and executes `stmt`, returning every row it produced.
-    async fn execute_window(&self, stmt: EvalStmt) -> server_error::Result<RecordBatches>;
+    /// Plans and executes `stmt`, returning every row it produced and what the read
+    /// recorded.
+    async fn execute_window(&self, stmt: EvalStmt) -> server_error::Result<WindowOutput>;
+}
+
+/// What one evaluation window produced.
+#[derive(Debug)]
+pub(crate) struct WindowOutput {
+    /// Every row the window read.
+    pub rows: RecordBatches,
+    /// The PromQL annotations the window's read recorded.
+    pub annotations: CachedAnnotations,
 }
 
 /// What a cache-aware range execution produced.
 #[derive(Debug)]
 pub(crate) enum RangeOutcome {
-    /// The rows of every span of the statement, merged in time order.
-    Merged(RecordBatches),
+    /// The merged answer of every span of the statement.
+    Merged {
+        /// The rows of every span, in time order.
+        rows: RecordBatches,
+        /// Everything the answering spans recorded, to report with the rows.
+        ///
+        /// The annotations of a served chunk come from the read that filled it, and
+        /// those of an executed span from that execution, so a request reports what
+        /// its answer was produced by whether the chunk was read now or earlier.
+        annotations: CachedAnnotations,
+    },
     /// The cache cannot serve this request; the caller must run its original plan.
     ///
     /// Nothing was executed: a bypass is decided by planning alone, before the
@@ -115,14 +145,18 @@ where
     })?;
 
     let mut merged = MergedRows::default();
+    let mut warnings = Vec::new();
+    let mut infos = Vec::new();
     for span in ascending_spans(planned.chunks(), planned.direct()) {
-        let rows = match span {
+        let window = match span {
             Span::Chunk(key) => chunk_rows(executor, cache, key, stmt, &grid, now).await?,
             Span::Direct(direct) => execute_span(executor, stmt, &grid, direct.span()).await?,
         };
-        merged.push(rows)?;
+        warnings.extend(window.annotations.warnings().iter().cloned());
+        infos.extend(window.annotations.infos().iter().cloned());
+        merged.push(window.rows)?;
     }
-    merged.finish()
+    merged.finish(CachedAnnotations::new(warnings, infos))
 }
 
 /// The rows of one cacheable `key`, served from memory when possible.
@@ -137,12 +171,23 @@ async fn chunk_rows<E>(
     stmt: &EvalStmt,
     grid: &EvalGrid,
     now: SystemTime,
-) -> server_error::Result<RecordBatches>
+) -> server_error::Result<WindowOutput>
 where
     E: WindowExecutor + ?Sized,
 {
     let fill: FillCursor = match cache.lookup(key, now) {
-        Lookup::Hit { payload, .. } => return clone_rows(&payload),
+        Lookup::Hit {
+            payload,
+            annotations,
+            ..
+        } => {
+            // The rows and the messages of one read are served together, so a hit
+            // reports what the read it replaces reported.
+            return Ok(WindowOutput {
+                rows: clone_rows(&payload)?,
+                annotations: (*annotations).clone(),
+            });
+        }
         Lookup::Bypass(_) | Lookup::Miss(_) => match cache.fill_cursor(now) {
             Ok(fill) => fill,
             // No fill may be validated right now (an unhealthy or stale authority):
@@ -151,11 +196,18 @@ where
             Err(_) => return execute_span(executor, stmt, grid, key.chunk()).await,
         },
     };
-    let rows = execute_span(executor, stmt, grid, key.chunk()).await?;
+    let window = execute_span(executor, stmt, grid, key.chunk()).await?;
     // Only a fully consumed chunk is inserted: `execute_span` returns rows it read to
-    // the end, and a failure returned above without inserting anything.
-    cache.insert(key.clone(), fill, Arc::new(clone_rows(&rows)?));
-    Ok(rows)
+    // the end, and a failure returned above without inserting anything. Its
+    // annotations are stored beside them, and the same ones are returned, so the
+    // request that filled the chunk reports them exactly as a later hit does.
+    cache.insert_annotated(
+        key.clone(),
+        fill,
+        Arc::new(clone_rows(&window.rows)?),
+        Arc::new(window.annotations.clone()),
+    );
+    Ok(window)
 }
 
 /// A copy of `rows`, which the cache hands out by shared reference.
@@ -175,7 +227,7 @@ async fn execute_span<E>(
     stmt: &EvalStmt,
     grid: &EvalGrid,
     span: TimeChunk,
-) -> server_error::Result<RecordBatches>
+) -> server_error::Result<WindowOutput>
 where
     E: WindowExecutor + ?Sized,
 {
@@ -209,33 +261,6 @@ fn grid_index(grid: &EvalGrid, ms: i64) -> server_error::Result<usize> {
         }
         .build()
     })
-}
-
-/// Whether evaluating `expr` can record a PromQL annotation (a warning or an info).
-///
-/// The window allowlist admits a named instant vector selector, `rate(<named range
-/// selector>)`, and `sum` over an admitted expression, however each is
-/// parenthesised. Only a range function folds a window, and a window folding float
-/// samples together with native histograms is what records a "mixed" annotation
-/// (`promql::range_eval::histogram`). A selector is evaluated sample by sample, and a
-/// fold over selectors only, records nothing.
-///
-/// A chunk served from memory is never re-evaluated, so it cannot replay what its
-/// original read recorded. Until annotations are stored beside the payload, a
-/// statement that can record one keeps the original path rather than risking a
-/// dropped warning.
-pub(crate) fn may_record_annotations(expr: &PromExpr) -> bool {
-    let mut expr = expr;
-    loop {
-        match expr {
-            PromExpr::Paren(paren) => expr = &paren.expr,
-            // A grouping modifier moves a value between groups; it does not change
-            // which samples the folded window of one point holds.
-            PromExpr::Aggregate(aggregate) if aggregate.param.is_none() => expr = &aggregate.expr,
-            _ => break,
-        }
-    }
-    !matches!(expr, PromExpr::VectorSelector(_))
 }
 
 /// One span of the statement, in the order the result must hold its rows.
@@ -300,13 +325,13 @@ impl MergedRows {
     }
 
     /// The merged result: the spans' rows in time order, or the schema alone when
-    /// every span was empty.
-    fn finish(self) -> server_error::Result<RangeOutcome> {
+    /// every span was empty, together with everything the spans recorded.
+    fn finish(self, annotations: CachedAnnotations) -> server_error::Result<RangeOutcome> {
         let schema = self.schema.unwrap_or_else(|| Arc::new(Schema::new(vec![])));
-        let merged = RecordBatches::try_new(schema, self.rows)
+        let rows = RecordBatches::try_new(schema, self.rows)
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
-        Ok(RangeOutcome::Merged(merged))
+        Ok(RangeOutcome::Merged { rows, annotations })
     }
 }
 
@@ -424,12 +449,23 @@ mod tests {
         windows: Mutex<Vec<(i64, i64)>>,
         /// The zero-based call at which the executor fails, when one is set.
         fail_at: Option<usize>,
+        /// The warning every window the executor runs records.
+        warns: Option<String>,
     }
 
     impl RecordingExecutor {
         fn failing_at(call: usize) -> Self {
             Self {
                 fail_at: Some(call),
+                ..Default::default()
+            }
+        }
+
+        /// An executor whose every window records `warning`, as a range function
+        /// over a mixed float/native-histogram window does.
+        fn warning(warning: &str) -> Self {
+            Self {
+                warns: Some(warning.to_string()),
                 ..Default::default()
             }
         }
@@ -442,7 +478,7 @@ mod tests {
 
     #[async_trait]
     impl WindowExecutor for RecordingExecutor {
-        async fn execute_window(&self, stmt: EvalStmt) -> server_error::Result<RecordBatches> {
+        async fn execute_window(&self, stmt: EvalStmt) -> server_error::Result<WindowOutput> {
             let call = {
                 let mut windows = self.windows.lock().unwrap();
                 windows.push((millis(stmt.start), millis(stmt.end)));
@@ -454,7 +490,14 @@ mod tests {
                 }
                 .build());
             }
-            Ok(rows_of(&stmt))
+            let annotations = match &self.warns {
+                Some(warning) => CachedAnnotations::new(vec![warning.clone()], vec![]),
+                None => CachedAnnotations::default(),
+            };
+            Ok(WindowOutput {
+                rows: rows_of(&stmt),
+                annotations,
+            })
         }
     }
 
@@ -464,7 +507,7 @@ mod tests {
 
     #[async_trait]
     impl WindowExecutor for ForbiddenExecutor {
-        async fn execute_window(&self, stmt: EvalStmt) -> server_error::Result<RecordBatches> {
+        async fn execute_window(&self, stmt: EvalStmt) -> server_error::Result<WindowOutput> {
             panic!(
                 "a warm chunk was planned and executed: [{}, {}]",
                 millis(stmt.start),
@@ -484,7 +527,14 @@ mod tests {
 
     fn merged(outcome: RangeOutcome) -> RecordBatches {
         match outcome {
-            RangeOutcome::Merged(rows) => rows,
+            RangeOutcome::Merged { rows, .. } => rows,
+            RangeOutcome::Bypassed => panic!("the statement was expected to be chunked"),
+        }
+    }
+
+    fn recorded(outcome: &RangeOutcome) -> CachedAnnotations {
+        match outcome {
+            RangeOutcome::Merged { annotations, .. } => annotations.clone(),
             RangeOutcome::Bypassed => panic!("the statement was expected to be chunked"),
         }
     }
@@ -664,22 +714,73 @@ mod tests {
         assert_eq!(0, cache.entry_count());
     }
 
-    #[test]
-    fn only_a_windowed_statement_can_record_annotations() {
-        let selector = parse("cpu").unwrap();
-        let parenthesised = parse("(cpu)").unwrap();
-        let summed = parse("sum(cpu)").unwrap();
-        let grouped = parse("sum by (host) (cpu)").unwrap();
-        let rate = parse("rate(cpu[5m])").unwrap();
-        let parenthesised_rate = parse("rate((cpu[5m]))").unwrap();
-        let summed_rate = parse("sum(rate(cpu[5m]))").unwrap();
+    #[tokio::test]
+    async fn a_hit_reports_the_annotations_of_the_read_it_serves() {
+        let cache = test_cache();
+        let stmt = range_stmt("cpu", HEAD_MS, 10, STEP_MS);
+        let cold =
+            RecordingExecutor::warning("encountered a mix of float and native histogram samples");
 
-        assert!(!may_record_annotations(&selector));
-        assert!(!may_record_annotations(&parenthesised));
-        assert!(!may_record_annotations(&summed));
-        assert!(!may_record_annotations(&grouped));
-        assert!(may_record_annotations(&rate));
-        assert!(may_record_annotations(&parenthesised_rate));
-        assert!(may_record_annotations(&summed_rate));
+        // The fill records the warning; the request that filled reports it once.
+        let filled = run(&cold, &cache, &stmt, "cpu").await.unwrap();
+        assert_eq!(
+            vec!["encountered a mix of float and native histogram samples".to_string()],
+            recorded(&filled).warnings()
+        );
+
+        // The warm request executes nothing and still reports the warning of the
+        // read it is served, exactly once.
+        let warm = run(&ForbiddenExecutor, &cache, &stmt, "cpu").await.unwrap();
+        assert_eq!(
+            vec!["encountered a mix of float and native histogram samples".to_string()],
+            recorded(&warm).warnings()
+        );
+        assert!(recorded(&warm).infos().is_empty());
+        assert_eq!(points(&merged(filled)), points(&merged(warm)));
+    }
+
+    #[tokio::test]
+    async fn a_direct_span_records_annotations_without_being_inserted() {
+        let cache = test_cache();
+        // Twelve points: two whole chunks and a two-point edge that may not be keyed
+        // as a chunk.
+        let stmt = range_stmt("cpu", HEAD_MS, 12, STEP_MS);
+        let executor = RecordingExecutor::warning("the edge span warned");
+
+        let cold = run(&executor, &cache, &stmt, "cpu").await.unwrap();
+        assert_eq!(2, cache.entry_count(), "the edge span is not an entry");
+        assert_eq!(
+            vec!["the edge span warned".to_string()],
+            recorded(&cold).warnings(),
+            "the three spans recorded one message between them"
+        );
+
+        // The warm request reads only the edge span again, and still reports the
+        // message once rather than once per span.
+        let warm = run(
+            &RecordingExecutor::warning("the edge span warned"),
+            &cache,
+            &stmt,
+            "cpu",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            vec!["the edge span warned".to_string()],
+            recorded(&warm).warnings()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunk_without_annotations_stays_empty_across_hits() {
+        let cache = test_cache();
+        let stmt = range_stmt("cpu", HEAD_MS, 10, STEP_MS);
+        let filled = run(&RecordingExecutor::default(), &cache, &stmt, "cpu")
+            .await
+            .unwrap();
+        assert!(recorded(&filled).is_empty());
+
+        let warm = run(&ForbiddenExecutor, &cache, &stmt, "cpu").await.unwrap();
+        assert!(recorded(&warm).is_empty());
     }
 }

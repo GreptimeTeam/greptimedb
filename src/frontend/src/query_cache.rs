@@ -606,6 +606,8 @@ pub enum Lookup {
     Hit {
         /// The complete result of the chunk.
         payload: Arc<RecordBatches>,
+        /// The warnings and infos the read behind `payload` recorded.
+        annotations: Arc<CachedAnnotations>,
         /// The cursor the payload was filled at.
         cursor: u64,
         /// When the payload was inserted.
@@ -834,10 +836,66 @@ pub enum ChunkPlan {
     Planned(PlannedChunks),
 }
 
+/// The PromQL annotations (warnings and infos) one chunk's read recorded.
+///
+/// A hit serves the rows of a read that already happened, so it cannot re-run the
+/// code that observed what the read saw. Recording those observations beside the
+/// rows lets a served chunk report the same warnings and infos a fresh read of it
+/// reported, instead of dropping them because the evaluation was skipped.
+///
+/// Both lists are sorted and deduplicated, exactly as the collector a request
+/// reports from keeps them, so replaying them cannot duplicate a message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CachedAnnotations {
+    warnings: Vec<String>,
+    infos: Vec<String>,
+}
+
+impl CachedAnnotations {
+    /// The annotations of one read, sorted and deduplicated.
+    pub fn new(mut warnings: Vec<String>, mut infos: Vec<String>) -> Self {
+        warnings.sort();
+        warnings.dedup();
+        infos.sort();
+        infos.dedup();
+        Self { warnings, infos }
+    }
+
+    /// The warnings the read recorded, in order.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// The infos the read recorded, in order.
+    pub fn infos(&self) -> &[String] {
+        &self.infos
+    }
+
+    /// Whether the read recorded nothing.
+    pub fn is_empty(&self) -> bool {
+        self.warnings.is_empty() && self.infos.is_empty()
+    }
+
+    /// The heap bytes these messages hold, which is what an entry is charged for
+    /// them.
+    ///
+    /// The text is the whole cost: the two lists and their pointers are covered by
+    /// the per-entry overhead every entry pays.
+    fn bytes(&self) -> u64 {
+        self.warnings
+            .iter()
+            .chain(self.infos.iter())
+            .map(|message| u64::try_from(message.len()).unwrap_or(u64::MAX))
+            .sum()
+    }
+}
+
 /// One cached chunk: the complete materialized result and how it was validated.
 #[derive(Debug, Clone)]
 struct Entry {
     payload: Arc<RecordBatches>,
+    /// What the read that produced `payload` recorded, served with it.
+    annotations: Arc<CachedAnnotations>,
     /// The cursor the payload was filled at, never the one seen at insertion.
     cursor: u64,
     /// The bytes this entry is charged: its payload plus a fixed overhead.
@@ -949,6 +1007,7 @@ impl RollupCache {
         }
         Lookup::Hit {
             payload: entry.payload,
+            annotations: entry.annotations,
             cursor: entry.cursor,
             inserted_at: entry.inserted_at,
         }
@@ -979,12 +1038,28 @@ impl RollupCache {
         fill: FillCursor,
         payload: Arc<RecordBatches>,
     ) -> Insert {
+        self.insert_annotated(key, fill, payload, Arc::default())
+    }
+
+    /// [`RollupCache::insert`] with the annotations the read recorded.
+    ///
+    /// The annotations are stored with the payload and served with it, so a hit
+    /// reports what the read it replaces would have reported. A chunk filled
+    /// without them is served without them.
+    pub fn insert_annotated(
+        &self,
+        key: TimeChunkKey,
+        fill: FillCursor,
+        payload: Arc<RecordBatches>,
+        annotations: Arc<CachedAnnotations>,
+    ) -> Insert {
         if key.chunk.is_empty() {
             return Insert::Bypassed;
         }
         let candidate = Entry {
-            weight: Entry::weigh(&payload),
+            weight: Entry::weigh(&payload, &annotations),
             payload,
+            annotations,
             cursor: fill.cursor(),
             validated_at: fill.captured_at(),
             inserted_at: SystemTime::now(),
@@ -1029,14 +1104,19 @@ impl RollupCache {
 }
 
 impl Entry {
-    /// The bytes `payload` is charged, clamped to what a cache weight can hold.
-    fn weigh(payload: &RecordBatches) -> u32 {
+    /// The bytes one entry is charged, clamped to what a cache weight can hold.
+    ///
+    /// The annotations count: a chunk whose read recorded a long message costs more
+    /// to keep than the same rows without it, so eviction stays within the budget
+    /// the configuration names.
+    fn weigh(payload: &RecordBatches, annotations: &CachedAnnotations) -> u32 {
         let data: usize = payload
             .iter()
             .map(|batch| batch.buffer_memory_size())
             .sum::<usize>();
         let bytes = u64::try_from(data)
             .unwrap_or(u64::MAX)
+            .saturating_add(annotations.bytes())
             .saturating_add(ENTRY_OVERHEAD_BYTES);
         u32::try_from(bytes).unwrap_or(u32::MAX)
     }
@@ -1803,6 +1883,72 @@ mod tests {
                 authority: 9
             })
         ));
+    }
+
+    #[test]
+    fn a_hit_reports_the_annotations_of_the_read_it_serves() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let key = chunk_key();
+        let fill = cache.fill_cursor(now).unwrap();
+
+        // A read that recorded nothing is served with nothing.
+        assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
+        let Lookup::Hit { annotations, .. } = cache.lookup(&key, now) else {
+            panic!("the chunk is resident");
+        };
+        assert!(annotations.is_empty());
+
+        // A read that recorded a warning and an info is served with them.
+        let recorded = CachedAnnotations::new(
+            vec!["b-warning".to_string(), "a-warning".to_string()],
+            vec!["an-info".to_string()],
+        );
+        assert_eq!(
+            cache.insert_annotated(key.clone(), fill, payload(), Arc::new(recorded.clone())),
+            Insert::Stored
+        );
+        let Lookup::Hit { annotations, .. } = cache.lookup(&key, now) else {
+            panic!("the chunk is resident");
+        };
+        assert_eq!(&recorded, annotations.as_ref());
+        assert_eq!(&recorded.warnings(), &annotations.warnings());
+        // The messages are ordered the way a request reports them.
+        assert_eq!(
+            vec!["a-warning".to_string(), "b-warning".to_string()],
+            annotations.warnings()
+        );
+    }
+
+    #[test]
+    fn the_byte_budget_charges_the_annotations() {
+        let now = at(LATER_MS);
+
+        // The rows alone are charged the fixed overhead and nothing more.
+        let plain = cache();
+        let fill = plain.fill_cursor(now).unwrap();
+        plain.insert(chunk_key(), fill, payload());
+        plain.entries.run_pending_tasks();
+        assert_eq!(ENTRY_OVERHEAD_BYTES, plain.entries.weighted_size());
+
+        // A chunk whose read recorded messages is charged their bytes as well.
+        let long = "w".repeat(4096);
+        let annotated = cache();
+        let fill = annotated.fill_cursor(now).unwrap();
+        annotated.insert_annotated(
+            chunk_key(),
+            fill,
+            payload(),
+            Arc::new(CachedAnnotations::new(
+                vec![long.clone()],
+                vec!["i".to_string()],
+            )),
+        );
+        annotated.entries.run_pending_tasks();
+        assert_eq!(
+            ENTRY_OVERHEAD_BYTES + long.len() as u64 + 1,
+            annotated.entries.weighted_size()
+        );
     }
 
     #[test]
