@@ -17,14 +17,11 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::Poll;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
-use futures::StreamExt;
-use futures::channel::{mpsc, oneshot};
+use common_cache::batch;
 use futures::future::{BoxFuture, try_join_all};
-use futures::stream::FuturesUnordered;
 use moka::future::Cache;
 use snafu::{OptionExt, ResultExt};
 use tokio::time::sleep;
@@ -385,7 +382,7 @@ where
         for (index, key) in keys.iter().enumerate() {
             let value = self.cache.get(key).await;
             if value.is_none() {
-                misses.push((index, key));
+                misses.push(index);
             }
             values.push(value);
         }
@@ -396,12 +393,38 @@ where
             return Ok(values);
         }
 
-        let batch_size = misses.len();
-        let (requests, receiver) = mpsc::unbounded();
+        let loads = |requests| {
+            let initializer = self.queued_initializer(requests);
+            misses.into_iter().map(move |index| {
+                let read = self.get_by_ref_with(&keys[index], initializer.clone());
+                async move { read.await.map(|value| (index, value)) }
+            })
+        };
+        batch::load(
+            loads,
+            |keys, replies| async move {
+                let values = batch_initializer(keys)
+                    .await
+                    .map(Arc::new)
+                    .map_err(Arc::new);
+                for reply in replies {
+                    let _ = reply.send(values.clone());
+                }
+            },
+            |(index, value)| values[index] = value,
+        )
+        .await?;
+        Ok(values)
+    }
+
+    fn queued_initializer(
+        &self,
+        requests: batch::BatchSender<K, BatchResult<K, V>>,
+    ) -> Initializer<K, V> {
         let generation = self.version.load(Ordering::Relaxed);
         let version = self.version.clone();
         let fallback = self.initializer.clone();
-        let initializer: Initializer<K, V> = Arc::new(move |key| {
+        Arc::new(move |key| {
             let version = version.clone();
             let fallback = fallback.clone();
             let requests = requests.clone();
@@ -410,59 +433,23 @@ where
                     return fallback(key).await;
                 }
 
-                let (reply, receive) = oneshot::channel();
-                requests.unbounded_send((key.clone(), reply)).ok().context(
-                    error::UnexpectedSnafu {
-                        err_msg: "Cache batch queue closed",
-                    },
-                )?;
-                let values: std::result::Result<Arc<HashMap<K, V>>, Arc<Error>> =
-                    receive.await.ok().context(error::UnexpectedSnafu {
-                        err_msg: "Cache batch reply dropped",
-                    })?;
+                let values =
+                    requests
+                        .request(key.clone())
+                        .await
+                        .context(error::UnexpectedSnafu {
+                            err_msg: "Cache batch reply dropped",
+                        })?;
                 if generation != version.load(Ordering::Relaxed) {
                     return fallback(key).await;
                 }
                 Ok(values.context(error::GetCacheSnafu)?.get(key).cloned())
             })
-        });
-
-        let reads = async move {
-            let mut pending = FuturesUnordered::new();
-            // Poll every key once before dispatch so stream fairness does not split
-            // immediately available misses into smaller backend batches.
-            for (index, key) in misses {
-                let read = self.get_by_ref_with(key, initializer.clone());
-                let mut read = Box::pin(async move { (index, read.await) });
-                match futures::poll!(&mut read) {
-                    Poll::Ready((_, value)) => values[index] = value?,
-                    Poll::Pending => pending.push(read),
-                }
-            }
-            drop(initializer);
-            while let Some((index, value)) = pending.next().await {
-                values[index] = value?;
-            }
-            Ok(values)
-        };
-        let dispatch = async {
-            let mut batches = receiver.ready_chunks(batch_size);
-            while let Some(batch) = batches.next().await {
-                let (keys, replies): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
-                let values = batch_initializer(keys)
-                    .await
-                    .map(Arc::new)
-                    .map_err(Arc::new);
-                for reply in replies {
-                    let _ = reply.send(values.clone());
-                }
-            }
-            Ok(())
-        };
-        let (values, ()) = futures::try_join!(reads, dispatch)?;
-        Ok(values)
+        })
     }
 }
+
+type BatchResult<K, V> = std::result::Result<Arc<HashMap<K, V>>, Arc<Error>>;
 
 #[cfg(test)]
 mod tests {
