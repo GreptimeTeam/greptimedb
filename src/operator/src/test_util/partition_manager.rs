@@ -277,8 +277,15 @@ async fn test_partition_expr_version_cache() {
     assert_ne!(None, *version_by_region.get(&3).unwrap());
 }
 
+#[cfg(test)]
+fn sorted_regions<T>(splits: &HashMap<RegionNumber, T>) -> Vec<RegionNumber> {
+    let mut regions = splits.keys().copied().collect::<Vec<_>>();
+    regions.sort_unstable();
+    regions
+}
+
 #[tokio::test]
-async fn test_logical_split_rows_rejects_physical_only_partition_column() {
+async fn test_logical_split_rows_covers_physical_only_partition_column() {
     let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
     let table_route_cache = test_new_table_route_cache(kv_backend.clone());
@@ -351,9 +358,14 @@ async fn test_logical_split_rows_rejects_physical_only_partition_column() {
         .find_table_partition_rule(&logical_table_info)
         .await
         .unwrap();
-    assert_eq!(&["a"], partition_rule.partition_columns());
+    // The logical table declares only `a`, but the physical rule references `b`, so
+    // the rule must cover `b` as well to stay evaluable.
+    assert_eq!(&["a", "b"], partition_rule.partition_columns());
 
-    let error = partition_manager
+    // A row carrying only `a` is routed instead of being rejected: `b` reads as
+    // NULL, and `Value` orders NULL below any other value, so `b < 50` holds and
+    // the row goes to the region of that expression.
+    let splits = partition_manager
         .split_rows(
             &logical_table_info,
             Rows {
@@ -364,11 +376,174 @@ async fn test_logical_split_rows_rejects_physical_only_partition_column() {
             },
         )
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        partition::error::Error::UndefinedColumn { ref column, .. } if column == "b"
-    ));
+        .unwrap();
+    assert_eq!(
+        vec![1],
+        sorted_regions(&splits),
+        "a physical-only partition column must not reject the row"
+    );
+    assert_eq!(1, splits[&1].0.rows.len());
+
+    // A row that also carries `b` is routed by the same expression.
+    let splits = partition_manager
+        .split_rows(
+            &logical_table_info,
+            Rows {
+                schema: vec![
+                    tag_column_schema("a", ColumnDataType::Int32),
+                    tag_column_schema("b", ColumnDataType::Int32),
+                ],
+                rows: vec![Row {
+                    values: vec![
+                        ValueData::I32Value(100).into(),
+                        ValueData::I32Value(10).into(),
+                    ],
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(vec![1], sorted_regions(&splits));
+}
+
+/// A logical table that doesn't carry the physical partition column must be routed by
+/// the physical expression: `Value` orders NULL below every value, so the row belongs
+/// to the region whose predicate accepts NULL, not to region 0.
+#[tokio::test]
+async fn test_logical_split_rows_routes_null_partition_column_by_expression() {
+    let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+    let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
+    let table_route_cache = test_new_table_route_cache(kv_backend.clone());
+    let partition_info_cache = test_new_partition_info_cache(table_route_cache.clone());
+    let partition_manager =
+        PartitionRuleManager::new(kv_backend, table_route_cache, partition_info_cache);
+
+    // Only the physical table is partitioned, and only on `b`; the logical table
+    // neither declares a partition column nor has a `b` column.
+    let physical_table_info =
+        new_test_table_info_with_columns(2048, "physical", test_column_schemas(true), vec![0, 2]);
+    let logical_table_info =
+        new_test_table_info_with_columns(2049, "logical", test_column_schemas(false), vec![]);
+    let partition_expr = |op: RestrictedOp| {
+        PartitionExpr::new(
+            Operand::Column("b".to_string()),
+            op,
+            Operand::Value(datatypes::value::Value::Int32(50)),
+        )
+        .as_json_str()
+        .unwrap()
+    };
+    table_metadata_manager
+        .create_table_metadata(
+            physical_table_info,
+            TableRouteValue::physical(vec![
+                RegionRoute {
+                    region: Region {
+                        id: 0.into(),
+                        name: "r0".to_string(),
+                        attrs: BTreeMap::new(),
+                        partition_expr: partition_expr(RestrictedOp::GtEq),
+                    },
+                    leader_peer: Some(Peer::new(0, "")),
+                    follower_peers: vec![],
+                    leader_state: None,
+                    leader_down_since: None,
+                    write_route_policy: None,
+                },
+                RegionRoute {
+                    region: Region {
+                        id: 1.into(),
+                        name: "r1".to_string(),
+                        attrs: BTreeMap::new(),
+                        partition_expr: partition_expr(RestrictedOp::Lt),
+                    },
+                    leader_peer: Some(Peer::new(1, "")),
+                    follower_peers: vec![],
+                    leader_state: None,
+                    leader_down_since: None,
+                    write_route_policy: None,
+                },
+            ]),
+            new_test_region_wal_options(vec![0, 1]),
+        )
+        .await
+        .unwrap();
+    table_metadata_manager
+        .create_table_metadata(
+            logical_table_info.clone(),
+            TableRouteValue::logical(2048),
+            new_test_region_wal_options(vec![]),
+        )
+        .await
+        .unwrap();
+
+    let (partition_rule, _) = partition_manager
+        .find_table_partition_rule(&logical_table_info)
+        .await
+        .unwrap();
+    assert_eq!(&["b"], partition_rule.partition_columns());
+
+    // The row doesn't carry `b`: `b >= 50` rejects NULL, `b < 50` accepts it.
+    let splits = partition_manager
+        .split_rows(
+            &logical_table_info,
+            Rows {
+                schema: vec![tag_column_schema("a", ColumnDataType::Int32)],
+                rows: vec![Row {
+                    values: vec![ValueData::I32Value(100).into()],
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![1],
+        sorted_regions(&splits),
+        "a NULL partition value belongs to the region whose predicate accepts it"
+    );
+    assert_eq!(1, splits[&1].0.rows.len());
+
+    // One multi-row statement: the row with a missing `b` and the row with `b = 60`
+    // must land in different regions, and the per-region counts must still cover
+    // every input row (routing is per row, so no row may be dropped).
+    let splits = partition_manager
+        .split_rows(
+            &logical_table_info,
+            Rows {
+                schema: vec![
+                    tag_column_schema("a", ColumnDataType::Int32),
+                    tag_column_schema("b", ColumnDataType::Int32),
+                ],
+                rows: vec![
+                    Row {
+                        values: vec![ValueData::I32Value(100).into(), api::v1::Value::default()],
+                    },
+                    Row {
+                        values: vec![
+                            ValueData::I32Value(100).into(),
+                            ValueData::I32Value(60).into(),
+                        ],
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![0, 1],
+        sorted_regions(&splits),
+        "a multi-row statement must keep both regions"
+    );
+    assert_eq!(1, splits[&0].0.rows.len(), "`b = 60` belongs to region 0");
+    assert_eq!(1, splits[&1].0.rows.len(), "`b = NULL` belongs to region 1");
+    assert_eq!(
+        2,
+        splits
+            .values()
+            .map(|(rows, _)| rows.rows.len())
+            .sum::<usize>(),
+        "every input row must reach exactly one region"
+    );
 }
 
 #[tokio::test]
