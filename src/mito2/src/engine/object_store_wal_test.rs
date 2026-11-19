@@ -1267,7 +1267,7 @@ async fn test_conflicting_backfill_asks_for_reload() {
     .await;
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
 
-    crate::worker::persist_backfilled_metadata(&sender, &region).await;
+    crate::worker::persist_backfilled_metadata_and_notify_if_fenced(&sender, &region).await;
 
     assert!(region.manifest_ctx.is_reload_pending());
     let request = receiver.try_recv().unwrap().request;

@@ -279,13 +279,13 @@ fn spawn_persist_backfilled_metadata(
     listener.on_persist_backfilled_metadata_begin(region.region_id);
     let sender = sender.clone();
     common_runtime::spawn_global(async move {
-        persist_backfilled_metadata(&sender, &region).await;
+        persist_backfilled_metadata_and_notify_if_fenced(&sender, &region).await;
     });
 }
 
 /// Persists the metadata the opener filled in for `region` and, if the commit fenced the region,
 /// asks its worker through `sender` for the reload.
-pub(crate) async fn persist_backfilled_metadata(
+pub(crate) async fn persist_backfilled_metadata_and_notify_if_fenced(
     sender: &Sender<WorkerRequestWithTime>,
     region: &MitoRegionRef,
 ) {

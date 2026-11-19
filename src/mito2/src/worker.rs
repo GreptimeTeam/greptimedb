@@ -37,7 +37,7 @@ mod handle_truncate;
 mod handle_write;
 
 #[cfg(test)]
-pub(crate) use handle_catchup::persist_backfilled_metadata;
+pub(crate) use handle_catchup::persist_backfilled_metadata_and_notify_if_fenced;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;

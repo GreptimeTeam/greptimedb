@@ -203,7 +203,7 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Staging regions, ending staging included, never flush: a flush would stage its SST and
   release the rows' WAL, losing them if staging does not end successfully. Every flush
   trigger in `worker/handle_flush.rs` must skip them: background triggers test `is_writable()`
-  and `is_staging()`, a flush request `is_flushable()` and `is_staging()` (`is_writable()` and
+  and `defers_background_flush()`, a flush request `is_flushable()` and `is_staging()` (`is_writable()` and
   `is_flushable()` are false while ending staging). `handle_close` leaves staging first.
   Tail replays never run for them: entering staging fails while tails are pending.
 - Direct SST imports without a staging binding cannot publish into staging.
@@ -212,9 +212,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - On a node whose writes need a lease, a region that a catchup made writable waits for a
   Leader or StagingLeader lease sent after the catchup (`awaits_leader_lease`). Until then
   `ManifestContext::update_locked` refuses its commits unless they are staged or the region is
-  downgrading (a close that must flush downgrades first); only replayed tails
-  (`update_manifest_for_tails`) skip the check, and ending staging checks it before
-  `commit_staged_locked`. No flush or compaction trigger starts work for a waiting region except
+  downgrading (a close that must flush downgrades first); only a replay of tails
+  (`TailsEditor::Replay`) skips the check, a discard does not, and ending staging checks it
+  before `commit_staged_locked`. No flush or compaction trigger starts work for a waiting region except
   a downgrade's flush. The lease that ends the wait wakes the worker
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
   region is then a writable leader, start a compaction, build missing indexes and persist

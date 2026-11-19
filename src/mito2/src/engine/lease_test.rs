@@ -914,7 +914,7 @@ impl EventListener for LeaseWaitEndedListener {
 }
 
 impl LeaseWaitEndedListener {
-    async fn wait_for_wait_end(&self) {
+    async fn wait_for_end(&self) {
         wait_until(|| self.wait_ends.load(Ordering::Acquire) != 0).await;
     }
 }
@@ -939,7 +939,7 @@ async fn test_leader_lease_after_demotion_ends_wait(#[case] role: RegionRole) {
 
     grant_at(&engine, RegionRole::Leader, Instant::now(), None);
     assert!(region.is_writable());
-    listener.wait_for_wait_end().await;
+    listener.wait_for_end().await;
     assert_eq!(listener.backfill_persists.load(Ordering::Relaxed), 1);
     assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
 }
@@ -955,7 +955,7 @@ async fn test_leader_lease_during_change_persists_no_backfill() {
     region.set_editing(RegionLeaderState::Writable).unwrap();
 
     grant_at(&engine, RegionRole::Leader, Instant::now(), None);
-    listener.wait_for_wait_end().await;
+    listener.wait_for_end().await;
 
     // The worker reports the persisting as it spawns it, and the end of the wait after.
     assert_eq!(listener.backfill_persists.load(Ordering::Relaxed), 0);
@@ -965,8 +965,8 @@ async fn test_leader_lease_during_change_persists_no_backfill() {
 
 /// The replayed and new rows of a region that awaits its Leader lease stay in its memtable until
 /// the lease ends the wait. A write the engine's full buffer stalls completes after the lease
-/// with no other write; a write over the region's buffer is rejected, as for a staging region,
-/// since only the lease could release it.
+/// with no other write; a write the region's own buffer would stall is rejected, since only the
+/// lease could release it.
 #[rstest]
 #[case::engine_full(FlushReason::EngineFull)]
 #[case::region_full(FlushReason::RegionFull)]
@@ -1049,7 +1049,7 @@ async fn test_full_write_buffer_waits_for_leader_lease_to_flush(#[case] reason: 
 }
 
 #[tokio::test]
-async fn test_compaction_refused_awaiting_leader_lease() {
+async fn test_compaction_skipped_awaiting_leader_lease() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("compaction-awaiting-lease").await;
     let (_listener, engine, schema) = create_region(&mut env, None).await;

@@ -1446,8 +1446,9 @@ pub(crate) struct LeaderLeasePromotion {
 pub(crate) struct ManifestContext {
     /// Manager to maintain manifest for this region. Logical writes go through
     /// [`update_locked`](Self::update_locked) (or an [`update_manifest`](Self::update_manifest)
-    /// variant; a replay of pending tails through the same write without its Leader lease
-    /// check) so they produce a [`PendingManifestHook`].
+    /// variant; a replay of pending tails makes the same write unchecked, and the end of staging
+    /// commits through [`commit_staged_locked`](Self::commit_staged_locked)) so they produce a
+    /// [`PendingManifestHook`].
     pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
     /// The state of the region. The region checks the state before updating
     /// manifest.
@@ -1886,7 +1887,7 @@ impl ManifestContext {
         let result = match editor {
             TailsEditor::Replay => {
                 match self.write_locked(&mut manager, action_list, false).await {
-                    Ok(pending) => Ok(self.fire_after_unlock(manager, pending).await),
+                    Ok(pending) => Ok(self.unlock_and_fire(manager, pending).await),
                     Err(e) => Err(e),
                 }
             }
@@ -1909,17 +1910,15 @@ impl ManifestContext {
 
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
-    /// dropping the lock. The write itself, `write_locked`, calls
-    /// [`RegionManifestManager::update_with_verification`] and is the funnel
-    /// through which logical manifest writes notify the hook; this function adds
-    /// the Leader lease check below, and only a replay of pending tails calls
-    /// `write_locked` without it.
+    /// dropping the lock. It is the checked entry of the shared write
+    /// `write_locked`, which a replay of pending tails calls without the check;
+    /// the end of staging commits through [`Self::commit_staged_locked`] instead.
     ///
     /// Fails an update that is not staged while the region [awaits its Leader
     /// lease](Self::awaits_leader_lease) and is not downgrading. Does not
     /// validate state or edit applicability — the caller must do so while still
     /// holding the lock (see `update_manifest_with_state_check` and
-    /// `MitoRegion::end_staging_locked`).
+    /// `MitoRegion::persist_backfilled_metadata_locked`).
     pub(crate) async fn update_locked(
         &self,
         manager: &mut RegionManifestManager,
@@ -1946,7 +1945,8 @@ impl ManifestContext {
         // A lease that ends the wait during the write does not lift the checks below.
         let awaited_leader_lease = self.awaits_leader_lease();
         // The final flush of a downgrading leader must not start cleanup after the downgrade
-        // checkpoint barrier, nor may a region that may not hold the region yet.
+        // checkpoint barrier, nor may a region that awaits its Leader lease and may not own the
+        // region yet.
         let allow_checkpoint = !is_staging
             && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading)
             && !awaited_leader_lease;
@@ -2071,11 +2071,11 @@ impl ManifestContext {
         let pending = self
             .update_locked(&mut manager, action_list, is_staging)
             .await?;
-        Ok(self.fire_after_unlock(manager, pending).await)
+        Ok(self.unlock_and_fire(manager, pending).await)
     }
 
     /// Releases the lock of the write that returned `pending`, then fires its hook.
-    async fn fire_after_unlock(
+    async fn unlock_and_fire(
         &self,
         manager: RwLockWriteGuard<'_, RegionManifestManager>,
         pending: PendingManifestHook,
@@ -2310,7 +2310,8 @@ impl ManifestContext {
     /// Fails a manifest commit of a region that [awaits its Leader lease](Self::awaits_leader_lease),
     /// unless the region is downgrading: a downgrade is asked only of the leader in the route.
     /// A commit calls it under the manifest lock before it sends anything; a request that would
-    /// flush first calls it before it schedules the flush. It reads atomics only.
+    /// flush first calls it before it schedules the flush, and an index build before it starts.
+    /// It reads atomics only.
     pub(crate) fn ensure_leader_lease_or_downgrading(&self, region_id: RegionId) -> Result<()> {
         ensure!(
             !self.refuses_commits_awaiting_leader_lease(),
@@ -3268,7 +3269,8 @@ mod tests {
     /// checkpoint without conditional publication too, where no verification of the commit
     /// turns it off.
     #[tokio::test]
-    async fn test_tail_commit_awaiting_leader_lease_starts_no_checkpoint_unconditionally() {
+    async fn test_tail_commit_awaiting_leader_lease_starts_no_checkpoint_without_conditional_publication()
+     {
         let env = SchedulerEnv::new().await;
         let region = build_test_region_with_checkpoint_distance(&env, 1).await;
         let manifest_ctx = &region.manifest_ctx;

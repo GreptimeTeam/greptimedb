@@ -54,8 +54,8 @@ pub(crate) struct IndexBuildSnapshot {
     index_options: IndexOptions,
 }
 
-/// Completed extensions prove the writer built this output's indexes together.
-/// A background replacement would otherwise erase those extension blobs.
+/// Returns whether a background build may replace the index of `file`: a file that already has
+/// an extension index was indexed whole by its writer, and a replacement would erase those blobs.
 pub(crate) fn needs_background_indexes(file: &FileMeta) -> bool {
     !ExtensionIndexKind::ALL.iter().any(|kind| {
         let index_type = IndexKind::Extension(*kind).index_type();
@@ -71,23 +71,22 @@ pub(crate) fn needs_background_indexes(file: &FileMeta) -> bool {
 /// region's files that its manifest records (`candidates`, each with the manifest's file meta).
 /// A flush build, which the end of a wait for the Leader lease asks for, builds no extension
 /// index, so it leaves the files that have one. Of the others it builds those whose index in the
-/// version (`version_meta`) is not current for the plan of `build_type`: a publication committed
-/// to the manifest but not yet applied is still invisible to queries, and its build still holds
-/// the file, so the manual task waits for it.
-fn select_whole_region_builds<F>(
-    candidates: Vec<(F, FileMetaRef)>,
-    version_meta: impl Fn(&F) -> &FileMeta,
+/// version is not current for the plan of `build_type`: a publication committed to the manifest
+/// but not yet applied is still invisible to queries, and its build still holds the file, so a
+/// manual build waits for it.
+fn select_whole_region_builds(
+    candidates: Vec<(FileHandle, FileMetaRef)>,
     registry: &IndexRegistry,
     snapshot: &IndexBuildSnapshot,
     build_type: &IndexBuildType,
-) -> Vec<(F, FileMetaRef)> {
+) -> Vec<(FileHandle, FileMetaRef)> {
     candidates
         .into_iter()
         .filter(|(_, file_meta)| {
             *build_type != IndexBuildType::Flush || needs_background_indexes(file_meta)
         })
         .filter(|(file, _)| {
-            index_needs_rebuild(registry, snapshot, version_meta(file), build_type.clone())
+            index_needs_rebuild(registry, snapshot, file.meta_ref(), build_type.clone())
         })
         .collect()
 }
@@ -344,13 +343,7 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         let build_tasks = if request.file_metas.is_empty() {
-            select_whole_region_builds(
-                candidates,
-                |file: &FileHandle| file.meta_ref(),
-                &registry,
-                &snapshot,
-                &request.build_type,
-            )
+            select_whole_region_builds(candidates, &registry, &snapshot, &request.build_type)
         } else {
             candidates
         };
@@ -618,6 +611,7 @@ mod tests {
 
     use super::*;
     use crate::sst::file::ColumnIndexMetadata;
+    use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::handler::{
         BuildContext, IndexCreator, IndexKindHandler, PlanEntry, PlannedIndex,
     };
@@ -653,11 +647,14 @@ mod tests {
         };
         let select = |build_type| {
             let candidates = [&sketched, &plain]
-                .map(|file| (file.clone(), FileMetaRef::from(file.clone())))
+                .map(|file| {
+                    let handle = FileHandle::new(file.clone(), Arc::new(NoopFilePurger));
+                    (handle, FileMetaRef::from(file.clone()))
+                })
                 .to_vec();
-            select_whole_region_builds(candidates, |file| file, &registry, &snapshot, &build_type)
+            select_whole_region_builds(candidates, &registry, &snapshot, &build_type)
                 .into_iter()
-                .map(|(file, _)| file.file_id)
+                .map(|(_, file)| file.file_id)
                 .collect::<Vec<_>>()
         };
 

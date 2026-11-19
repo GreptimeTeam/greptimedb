@@ -243,8 +243,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 continue;
             }
 
-            // A region that awaits its Leader lease cannot commit a flush yet, so, like a staging
-            // region, it rejects the writes it would stall: only the lease would release them.
+            // A region that awaits its Leader lease cannot commit a flush yet, so it rejects the
+            // writes it would stall, from its write buffer on: only the lease would release them.
             if region.manifest_ctx.awaits_leader_lease() {
                 if status.should_stall || status.should_reject {
                     pressure.rejected_region_ids.insert(region_id);

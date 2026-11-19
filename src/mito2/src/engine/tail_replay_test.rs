@@ -794,17 +794,7 @@ async fn test_catchup_replays_remote_reported_tail(#[case] leased: bool) {
     if leased {
         // The worker handled the replay's commit before the count above.
         assert_eq!(0, region.listener.compactions_scheduled());
-        let now = Instant::now();
-        region
-            .engine
-            .set_region_role_with_lease(
-                region.region_id,
-                RegionRole::Leader,
-                now,
-                now + Duration::from_secs(10),
-                None,
-            )
-            .unwrap();
+        region.promote_with_lease();
     }
     wait_until(|| region.listener.compactions_scheduled() == 1).await;
 }
@@ -2344,17 +2334,7 @@ async fn test_discard_awaiting_leader_lease_succeeds_after_it() {
     assert_eq!(tails, region.version().pending_tails);
     assert_eq!(flushed_entry_id, region.version().flushed_entry_id);
 
-    let now = Instant::now();
-    region
-        .engine
-        .set_region_role_with_lease(
-            region.region_id,
-            RegionRole::Leader,
-            now,
-            now + Duration::from_secs(10),
-            None,
-        )
-        .unwrap();
+    region.promote_with_lease();
     assert_eq!(2, region.discard_pending_tails(NODE_ID).await.unwrap());
     let version = region.version();
     assert!(version.pending_tails.is_empty());
