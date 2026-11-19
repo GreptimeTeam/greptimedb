@@ -2413,6 +2413,90 @@ async fn test_add_ddl_request_to_pending() {
     assert!(scheduler.has_pending_ddls(region_id));
 }
 
+#[rstest::rstest]
+#[case::picking(false)]
+#[case::uncancellable_remote(true)]
+#[tokio::test]
+async fn test_pause_compaction_drains_active_cycle_and_blocks_new_triggers(#[case] remote: bool) {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let id = version.region_id();
+    let manifest = env
+        .mock_manifest_context(version.current().version.metadata.clone())
+        .await;
+    let (schemas, _) = mock_schema_metadata_manager();
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
+
+    let schedule = |scheduler: &mut CompactionScheduler| {
+        scheduler
+            .schedule_automatic_compaction(
+                Options::Regular(Default::default()),
+                &version,
+                &env.access_layer,
+                &manifest,
+                schemas.clone(),
+            )
+            .unwrap()
+    };
+    assert!(schedule(&mut scheduler));
+    if remote {
+        scheduler
+            .region_status
+            .get_mut(&id)
+            .unwrap()
+            .start_remote_task();
+    }
+    let (manual, mut pending) = oneshot::channel();
+    scheduler
+        .schedule_manual_compaction(
+            Options::Regular(Default::default()),
+            &version,
+            &env.access_layer,
+            manual.into(),
+            &manifest,
+            schemas.clone(),
+            1,
+            None,
+        )
+        .unwrap();
+    let (tx, mut first) = oneshot::channel();
+    scheduler.pause_compaction(id, tx);
+    assert!(matches!(
+        first.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(!schedule(&mut scheduler));
+    assert_matches!(
+        pending.try_recv().unwrap(),
+        Err(Error::CompactionCancelled { .. })
+    );
+    if remote {
+        scheduler
+            .on_compaction_finished(id, &manifest, schemas.clone(), true)
+            .await;
+    } else {
+        assert_matches!(
+            scheduler.region_status[&id].active.phase,
+            CompactionPhase::Picking {
+                cancelled: true,
+                ..
+            }
+        );
+        scheduler.on_compaction_cancelled(id).await;
+    }
+    let first = first.try_recv().unwrap().unwrap();
+    let (tx, second) = oneshot::channel();
+    scheduler.pause_compaction(id, tx);
+    let second = second.await.unwrap().unwrap();
+    drop(first);
+    assert!(!schedule(&mut scheduler));
+    assert!(!scheduler.schedule_automatic_followup(id, &manifest, schemas.clone()));
+    drop(second);
+    assert!(schedule(&mut scheduler));
+}
+
 #[tokio::test]
 async fn test_pending_ddl_fences_later_compaction_triggers() {
     let env = SchedulerEnv::new().await;

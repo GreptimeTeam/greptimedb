@@ -36,6 +36,7 @@ pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
 #[cfg(test)]
 pub(crate) use planning::pick_automatic_for_test;
+pub use state::CompactionGuard;
 pub(crate) use state::{CompactionExecution, CompactionState, CompactionStateRef};
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
 #[cfg(test)]
@@ -226,6 +227,18 @@ impl CompactionScheduler {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
         status.shared_state = shared_state.clone();
         self.region_status.insert(region_id, status);
+    }
+
+    pub(crate) fn pause_compaction(
+        &mut self,
+        region_id: RegionId,
+        sender: tokio::sync::oneshot::Sender<Result<CompactionGuard>>,
+    ) {
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.pause(sender);
+        } else {
+            let _ = sender.send(crate::error::RegionNotFoundSnafu { region_id }.fail());
+        }
     }
 
     /// Cancels an exact live identity, checking the pending slot before the active cycle.
@@ -575,6 +588,10 @@ impl CompactionScheduler {
         let status = self.region_status.entry(region_id).or_insert_with(|| {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone())
         });
+        if status.is_paused() {
+            waiter.send(CompactionCancelledSnafu.fail());
+            return Ok(false);
+        }
         if status.has_ddl() {
             info!(
                 "Region {} has pending DDL requests, ignoring compaction: queued={}, executing={}",
@@ -768,7 +785,7 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
         };
-        if status.has_pending_tails() {
+        if status.is_paused() || status.has_pending_tails() {
             return false;
         }
         // An external automatic trigger requires one unrestricted follow-up pick.

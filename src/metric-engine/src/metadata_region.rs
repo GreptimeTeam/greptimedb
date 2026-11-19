@@ -484,6 +484,17 @@ impl MetadataRegion {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) async fn with_writes_paused(
+        &self,
+        metadata_region_id: RegionId,
+        f: impl Future<Output = ()>,
+    ) {
+        let lease = self.cache_access_lock(metadata_region_id);
+        let _guard = lease.read().await;
+        f.await;
+    }
+
     /// Acquires the cache access lock lease for `metadata_region_id`.
     ///
     /// The lease must be kept alive for as long as any guard taken from it.
