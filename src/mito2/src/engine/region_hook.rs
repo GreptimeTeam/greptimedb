@@ -121,8 +121,9 @@
 //! tail replay task), immediately after SST files are written but **before** the manifest
 //! is committed.
 //!
-//! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
-//! which calls the low-level [`RegionManifestManager::update_with_verification`]
+//! `on_manifest_updated` is funneled through the shared write that
+//! [`ManifestContext::update_locked`] makes after it checks the Leader lease; the
+//! write calls the low-level [`RegionManifestManager::update_with_verification`]
 //! and packages each successful write into a [`PendingManifestHook`]. The caller
 //! owns the write lock, drops it, and *then* fires the receipt — the hook must
 //! never run under the lock. [`ManifestContext::update_manifest`] is the common
