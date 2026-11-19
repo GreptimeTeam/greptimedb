@@ -1341,6 +1341,7 @@ impl EncodedBulkPart {
             file_metadata: Some(self.metadata.parquet_metadata.clone()),
             index_metadata: IndexOutput::default(),
             num_series: self.metadata.num_series,
+            format: Default::default(),
         }
     }
 

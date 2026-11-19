@@ -325,7 +325,7 @@ async fn test_gc_reclaims_obsolete_index_after_readers_and_linger_release(
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
-                    wal_recovery: Default::default(),
+                    ..Default::default()
                 })),
                 false,
             )
@@ -806,6 +806,7 @@ async fn test_gc_worker_compact_with_ref() {
                 .iter()
                 .flat_map(|removed| removed.files.iter())
                 .map(|removed_file| match removed_file {
+                    RemovedFile::Narthex(file_id) => FileRef::new(region_id, *file_id, None),
                     RemovedFile::File(file_id, v) => FileRef::new(region_id, *file_id, *v),
                     RemovedFile::Index(file_id, v) => FileRef::new(region_id, *file_id, Some(*v)),
                 })
@@ -1874,4 +1875,94 @@ async fn test_full_listing_gc_skips_region(#[case] cause: &str) {
     run_gc().await;
 
     assert_eq!(1, hook.gc_calls.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn test_narthex_artifact_gc_inventory_and_references() {
+    let env = IndexGcTestEnv::new(true).await;
+    let region_id = env.meta.region_id;
+    let layer = &env.region.access_layer;
+    let id = FileId::random();
+    let region_dir = layer.build_region_dir(region_id);
+    let prefix = location::narthex_file_dir(&region_dir, id);
+    let paths = [
+        format!("{prefix}manifest.json"),
+        format!("{prefix}part-0"),
+        format!("{prefix}part-1"),
+    ];
+    for path in &paths {
+        layer
+            .object_store()
+            .write(path, "narthex".as_bytes())
+            .await
+            .unwrap();
+    }
+    let entries = env
+        .worker
+        .list_from_object_store(region_id, 3)
+        .await
+        .unwrap();
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|entry| crate::sst::location::parse_narthex_file_id(entry.path()) == Some(id))
+        .collect();
+    assert_eq!(entries.len(), 3);
+    let removed = RemovedFile::Narthex(id);
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+    for (manifest, readers) in [
+        (HashMap::from([(id, None)]), HashSet::new()),
+        (HashMap::new(), HashSet::from([(id, None)])),
+    ] {
+        let (delete, _) = env.worker.filter_deletable_files(
+            entries.clone(),
+            &manifest,
+            &readers,
+            &HashSet::new(),
+            &HashSet::from([&removed]),
+            threshold,
+        );
+        assert!(delete.is_empty());
+    }
+    let (delete, _) = env.worker.filter_deletable_files(
+        entries,
+        &HashMap::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::from([&removed]),
+        threshold,
+    );
+    assert_eq!(delete, vec![removed]);
+    env.worker.delete_files(region_id, &delete).await.unwrap();
+    assert!(!layer.object_store().exists(&prefix).await.unwrap());
+    for path in paths {
+        assert!(!layer.object_store().exists(&path).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn test_narthex_artifact_gc_requires_age_for_every_object() {
+    let env = IndexGcTestEnv::new(true).await;
+    let layer = &env.region.access_layer;
+    let id = FileId::random();
+    let prefix =
+        crate::sst::location::narthex_file_dir(&layer.build_region_dir(env.meta.region_id), id);
+    let old = write_and_list_entry(layer.object_store(), &format!("{prefix}part-0")).await;
+    // A missing timestamp must withhold the entire artifact even if another
+    // part has a known, sufficiently old timestamp.
+    let memory = ObjectStore::new(services::Memory::default()).unwrap();
+    let unknown = write_and_list_entry(&memory, &format!("{prefix}manifest.json")).await;
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+    assert!(should_delete_file(
+        false, false, false, false, &old, threshold
+    ));
+    let (delete, deferred) = env.worker.filter_deletable_files(
+        vec![old, unknown],
+        &HashMap::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        threshold,
+    );
+    assert!(delete.is_empty());
+    assert!(deferred);
 }

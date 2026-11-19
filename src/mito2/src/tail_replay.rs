@@ -226,6 +226,7 @@ impl<S: LogStore> TailReplayTask<S> {
                     pending_tails: Some(remaining.clone()),
                     handoff_floor: None,
                 },
+                ..Default::default()
             };
             if !self.publish(&tails, edit, &uncommitted).await? {
                 return Ok(());

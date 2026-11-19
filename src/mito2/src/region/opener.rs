@@ -851,6 +851,10 @@ pub(crate) fn version_builder_from_manifest(
     region_options: RegionOptions,
 ) -> VersionBuilder {
     VersionBuilder::new(metadata, mutable)
+        .add_series_indexes(
+            file_purger.clone(),
+            manifest.series_indexes.values().cloned(),
+        )
         .add_files(file_purger, manifest.files.values().cloned())
         .flushed_entry_id(manifest.flushed_entry_id)
         .flushed_sequence(manifest.flushed_sequence)
@@ -1604,6 +1608,7 @@ mod tests {
             sst_format,
             append_mode: None,
             pending_tails: Default::default(),
+            series_indexes: Default::default(),
             handoff_floors: Default::default(),
         }
     }

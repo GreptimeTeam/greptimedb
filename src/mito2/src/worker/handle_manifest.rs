@@ -49,6 +49,7 @@ use crate::request::{
     RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
     SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
+use crate::sst::file::FileFormat;
 use crate::sst::index::IndexBuildType;
 use crate::sst::{file, location};
 use crate::wal::EntryId;
@@ -858,7 +859,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 flushed_entry_id: Some(discarded_entry_id),
                 flushed_sequence: Some(discarded_sequence),
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             };
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
             let result = match durability_barrier.wait(discarded_entry_id).await {
@@ -1064,6 +1065,9 @@ async fn edit_region(
         && preload_sst_cache
     {
         for file_meta in &edit.files_to_add {
+            if !matches!(file_meta.format, FileFormat::Parquet) {
+                continue;
+            }
             let write_cache = write_cache.clone();
             let layer = region.access_layer.clone();
             let listener = listener.clone();

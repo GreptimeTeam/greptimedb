@@ -215,6 +215,7 @@ async fn wal_recovery_records_survive_reopen(#[case] checkpoint_distance: u64) {
                 entry_id: 30,
             }),
         },
+        ..Default::default()
     };
     manager
         .update(
@@ -317,7 +318,7 @@ async fn checkpoint_with_different_compression_types() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         })]);
         actions.push(action);
     }
@@ -384,7 +385,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         })]);
         actions.push(action);
     }

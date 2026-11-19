@@ -157,7 +157,7 @@ pub type IndexTypes = SmallVec<[IndexType; 6]>;
 /// Cross-region file id.
 ///
 /// It contains a region id and a file id. The string representation is `{region_id}/{file_id}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RegionFileId {
     /// The region that creates the file.
     region_id: RegionId,
@@ -241,6 +241,56 @@ pub type FileMetaRef = MetadataRef<FileMeta>;
 
 /// Shared immutable partition expression.
 pub type PartitionExprRef = MetadataRef<PartitionExpr>;
+
+/// Physical encoding of an immutable SST. Legacy manifests contain Parquet files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FileFormat {
+    #[default]
+    Parquet,
+    NarthexSamples(Box<NarthexSamplesMeta>),
+    NarthexSeriesIndex(Box<NarthexSeriesIndexMeta>),
+}
+
+impl FileFormat {
+    fn is_parquet(&self) -> bool {
+        matches!(self, Self::Parquet)
+    }
+}
+
+/// Region-manifest metadata for one immutable Narthex part.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarthexPartMeta {
+    /// Encoded size of the part in bytes.
+    pub file_size: u64,
+}
+
+/// Narthex samples objects owned by one immutable file ID.
+/// Common bounds, statistics and sequence semantics remain in [`FileMeta`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarthexSamplesMeta {
+    /// Imported rows use the destination file admission sequence.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_file_sequence: bool,
+    /// Encoded size of manifest.json.
+    pub manifest_size: u64,
+    /// Parts in part-ID order, starting at zero.
+    pub parts: SmallVec<[NarthexPartMeta; 1]>,
+}
+
+/// Immutable narthex series index. Coverage identifies samples; it does not own them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarthexSeriesIndexMeta {
+    /// Encoded size of manifest.json.
+    pub manifest_size: u64,
+    /// Parts in part-ID order, starting at zero.
+    pub parts: SmallVec<[NarthexPartMeta; 1]>,
+    /// Sample files recorded by the experimental builder. The manifest neither
+    /// validates coverage nor retires indexes when samples are replaced. Both
+    /// policies depend on how production series files will be organized and
+    /// maintained across compaction.
+    pub sources: Vec<RegionFileId>,
+}
 
 /// Metadata of a SST file.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -338,6 +388,9 @@ pub struct FileMeta {
     /// restore this capability for untrusted inputs.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
+    /// Physical encoding, omitted for legacy Parquet files.
+    #[serde(default, skip_serializing_if = "FileFormat::is_parquet")]
+    pub format: FileFormat,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -366,6 +419,7 @@ impl Debug for FileMeta {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("FileMeta");
         debug_struct
+            .field("format", &self.format)
             .field("region_id", &self.region_id)
             .field("file_id", &DebugFmt(|f| write!(f, "{} ", self.file_id)))
             .field(
@@ -1043,6 +1097,12 @@ pub async fn delete_files(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum UncommittedFile {
+    Parquet { index_version: u64, has_index: bool },
+    Narthex,
+}
+
 /// Tracks SSTs from creation until their manifest edit is committed.
 ///
 /// Flush and local compaction jobs use this to remove files that were written successfully but
@@ -1050,7 +1110,7 @@ pub async fn delete_files(
 #[derive(Clone)]
 pub(crate) struct UncommittedSsts {
     region_id: RegionId,
-    files: Arc<Mutex<HashMap<FileId, (u64, bool)>>>,
+    files: Arc<Mutex<HashMap<FileId, UncommittedFile>>>,
     access_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
 }
@@ -1084,14 +1144,26 @@ impl UncommittedSsts {
         for sst in ssts {
             files.insert(
                 sst.file_id,
-                (sst.index_metadata.version, sst.index_metadata.file_size > 0),
+                match sst.format {
+                    FileFormat::Parquet => UncommittedFile::Parquet {
+                        index_version: sst.index_metadata.version,
+                        has_index: sst.index_metadata.file_size > 0,
+                    },
+                    _ => UncommittedFile::Narthex,
+                },
             );
         }
     }
 
     /// Tracks an SST before it is uploaded, so a cancelled upload is still removed.
     pub(crate) fn track_before_upload(&self, file_id: FileId, with_index: bool) {
-        self.files.lock().unwrap().insert(file_id, (0, with_index));
+        self.files.lock().unwrap().insert(
+            file_id,
+            UncommittedFile::Parquet {
+                index_version: 0,
+                has_index: with_index,
+            },
+        );
     }
 
     /// Disarms cleanup after the manifest edit has committed or may have committed.
@@ -1114,17 +1186,40 @@ impl UncommittedSsts {
         }
     }
 
+    /// Performs best-effort cleanup, draining tracked files without retaining failed deletions for retry.
     async fn try_cleanup(&self) -> crate::error::Result<()> {
         let files = std::mem::take(&mut *self.files.lock().unwrap());
         if files.is_empty() {
             return Ok(());
         }
 
-        let delete_index = files.values().any(|(_, exists_index)| *exists_index);
-        let file_ids = files
-            .into_iter()
-            .map(|(file_id, (index_version, _))| (file_id, index_version))
-            .collect::<Vec<_>>();
+        let mut delete_index = false;
+        let mut file_ids = Vec::new();
+        let mut failure = None;
+        for (id, file) in files {
+            match file {
+                UncommittedFile::Parquet {
+                    index_version,
+                    has_index,
+                } => {
+                    file_ids.push((id, index_version));
+                    delete_index |= has_index;
+                }
+                UncommittedFile::Narthex => {
+                    if let Err(error) = self
+                        .access_layer
+                        .delete_narthex_artifact(self.region_id, id)
+                        .await
+                    {
+                        debug!(
+                            "Failed to clean uncommitted Narthex artifact {id} for region {}: {error}",
+                            self.region_id
+                        );
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
         delete_files(
             self.region_id,
             &file_ids,
@@ -1132,7 +1227,8 @@ impl UncommittedSsts {
             &self.access_layer,
             &self.cache_manager,
         )
-        .await
+        .await?;
+        failure.map_or(Ok(()), Err)
     }
 
     #[cfg(test)]
@@ -1263,6 +1359,37 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
 
     use super::*;
+
+    #[test]
+    fn test_narthex_file_metadata_compatibility() {
+        let legacy = serde_json::to_value(FileMeta::default()).unwrap();
+        assert!(legacy.get("format").is_none());
+        assert_eq!(
+            serde_json::from_value::<FileMeta>(legacy).unwrap().format,
+            FileFormat::Parquet
+        );
+
+        let decode = |fixture: &str| {
+            let json: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            let edit = &json["actions"][0]["Edit"];
+            ["files_to_add", "series_indexes_to_add"]
+                .map(|field| serde_json::from_value::<Vec<FileMeta>>(edit[field].clone()).unwrap())
+        };
+        let canonical = decode(include_str!(
+            "../../../../tests/compatibility/manifest/narthex/delta.json"
+        ));
+        for (files, name) in canonical
+            .iter()
+            .zip(["narthex_samples", "narthex_series_index"])
+        {
+            assert!(!files.is_empty());
+            for file in files {
+                let json = serde_json::to_value(file).unwrap();
+                assert!(json["format"].get(name).is_some());
+                assert_eq!(&serde_json::from_value::<FileMeta>(json).unwrap(), file);
+            }
+        }
+    }
 
     #[test]
     fn test_shared_metadata_keeps_independent_lifetimes() {

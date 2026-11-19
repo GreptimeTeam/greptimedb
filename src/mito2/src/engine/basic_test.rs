@@ -2216,7 +2216,7 @@ async fn add_manifest_scan_region(
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
-        wal_recovery: Default::default(),
+        ..Default::default()
     };
     region
         .manifest_ctx

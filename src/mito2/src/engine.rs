@@ -531,7 +531,7 @@ impl MitoEngine {
     }
 
     /// Edit region's metadata by [RegionEdit] directly. Use with care.
-    /// Now we only allow adding files or removing files from region (the [RegionEdit] struct can only contain a non-empty "files_to_add" or "files_to_remove" field).
+    /// Allows adding or removing data files and series indexes from the region.
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
@@ -869,7 +869,10 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    (!edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty())
+    (!edit.files_to_add.is_empty()
+        || !edit.files_to_remove.is_empty()
+        || !edit.series_indexes_to_add.is_empty()
+        || !edit.series_indexes_to_remove.is_empty())
         && matches!(
             edit,
             RegionEdit {
@@ -1994,6 +1997,22 @@ mod tests {
 
     #[test]
     fn test_is_valid_region_edit() {
+        for edit in [
+            RegionEdit {
+                series_indexes_to_add: vec![FileMeta::default()],
+                ..Default::default()
+            },
+            RegionEdit {
+                series_indexes_to_remove: vec![FileMeta::default().file_id()],
+                ..Default::default()
+            },
+        ] {
+            assert!(is_valid_region_edit(&edit));
+            assert!(!is_valid_region_edit(&RegionEdit {
+                flushed_entry_id: Some(1),
+                ..edit
+            }));
+        }
         // Valid: has only "files_to_add"
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
@@ -2003,7 +2022,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -2016,7 +2035,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -2029,7 +2048,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -2042,7 +2061,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -2055,7 +2074,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -2066,7 +2085,7 @@ mod tests {
             flushed_entry_id: Some(1),
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -2077,7 +2096,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: Some(1),
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -2092,6 +2111,7 @@ mod tests {
                 pending_tails: Some(vec![]),
                 handoff_floor: None,
             },
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
     }

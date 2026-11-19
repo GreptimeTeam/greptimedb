@@ -195,7 +195,7 @@ async fn test_edit_region_schedule_compaction_with_format(
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
-        wal_recovery: Default::default(),
+        ..Default::default()
     };
     engine
         .edit_region(region.region_id, new_edit(&[0, 10, 50, 80]))
@@ -325,7 +325,7 @@ async fn test_edit_region_fill_cache(
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
-        wal_recovery: Default::default(),
+        ..Default::default()
     };
     engine.edit_region(region.region_id, edit).await.unwrap();
 
@@ -835,7 +835,7 @@ fn test_region_edit(region_id: RegionId, file_id: FileId) -> RegionEdit {
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
-        wal_recovery: Default::default(),
+        ..Default::default()
     }
 }
 
@@ -925,7 +925,7 @@ async fn test_edit_region_concurrently_with_format(flat_format: bool) {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
-                    wal_recovery: Default::default(),
+                    ..Default::default()
                 };
                 engine
                     .edit_region(self.region.region_id, edit)
@@ -1831,4 +1831,172 @@ async fn test_deferred_flush_queue_is_bounded_and_drains_after_role_change() {
     }
     assert_eq!(RegionRoleState::Follower, region.state());
     engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_edit_narthex_artifacts() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            enable_write_cache: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/compatibility/manifest/narthex/delta.json"
+    ))
+    .unwrap();
+    let mut edit: RegionEdit =
+        serde_json::from_value(fixture["actions"][0]["Edit"].clone()).unwrap();
+    for file in edit
+        .files_to_add
+        .iter_mut()
+        .chain(&mut edit.series_indexes_to_add)
+    {
+        file.region_id = region_id;
+    }
+    let mut samples = edit.files_to_add;
+    samples.push(FileMeta {
+        region_id,
+        file_id: FileId::random(),
+        ..Default::default()
+    });
+    let indexes = edit.series_indexes_to_add;
+    // Index-only edits are admitted independently of sample files.
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                series_indexes_to_add: indexes.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: samples.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(samples.len(), manifest.files.len());
+    assert_eq!(indexes.len(), manifest.series_indexes.len());
+    assert_eq!(indexes.len(), region.version().ssts.series_indexes().len());
+    crate::test_util::reopen_region(
+        &engine,
+        region_id,
+        region.table_dir().to_string(),
+        true,
+        Default::default(),
+    )
+    .await;
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(indexes.len(), region.version().ssts.series_indexes().len());
+    assert_eq!(
+        samples.len(),
+        region.manifest_ctx.manifest().await.files.len()
+    );
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                series_indexes_to_remove: indexes.iter().map(|file| file.file_id()).collect(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(region.version().ssts.series_indexes().is_empty());
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_remove: samples,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert!(manifest.files.is_empty());
+    assert!(manifest.series_indexes.is_empty());
+}
+
+#[tokio::test]
+async fn test_narthex_cleanup_failure_drains_tracking() {
+    use crate::sst::file::UncommittedSsts;
+    use crate::sst::parquet::SstInfo;
+    use object_store::layers::mock::{Error, ErrorKind, MockLayerBuilder, Result, oio};
+
+    struct FailingDeleter(Arc<std::sync::atomic::AtomicUsize>);
+    impl oio::Delete for FailingDeleter {
+        async fn delete(&mut self, _: &str, _: object_store::layers::mock::OpDelete) -> Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(Error::new(
+                ErrorKind::Unexpected,
+                "cleanup deletion failure",
+            ))
+        }
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fail_delete = fail.clone();
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let delete_attempts = attempts.clone();
+    let layer = MockLayerBuilder::default()
+        .deleter_factory(Arc::new(move |inner| {
+            if fail_delete.load(std::sync::atomic::Ordering::Relaxed) {
+                Box::new(FailingDeleter(delete_attempts.clone()))
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env.create_engine(Default::default()).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let tracker = UncommittedSsts::new(region_id, region.access_layer.clone(), None);
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/compatibility/manifest/narthex/delta.json"
+    ))
+    .unwrap();
+    let edit: RegionEdit = serde_json::from_value(fixture["actions"][0]["Edit"].clone()).unwrap();
+    for _ in 0..2 {
+        tracker.track(&[SstInfo {
+            file_id: FileId::random(),
+            format: edit.files_to_add[0].format.clone(),
+            ..Default::default()
+        }]);
+    }
+    fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(tracker.cleanup_for_test().await.is_err());
+    assert_eq!(0, tracker.num_tracked_files());
+    tracker.cleanup_for_test().await.unwrap();
+    assert_eq!(2, attempts.load(std::sync::atomic::Ordering::Relaxed));
 }

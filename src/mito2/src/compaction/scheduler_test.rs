@@ -1194,7 +1194,7 @@ async fn test_pick_result_refreshes_replaced_selected_file() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         }),
         &[],
         stale.file_purger(),
@@ -3366,7 +3366,7 @@ async fn test_compaction_tasks_partial_memory_admission() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         }),
         &[],
         builder.file_purger(),

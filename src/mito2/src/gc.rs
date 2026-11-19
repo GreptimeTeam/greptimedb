@@ -369,7 +369,7 @@ impl LocalGcWorker {
             let data_files = removed_files
                 .into_iter()
                 .filter_map(|f| match f {
-                    RemovedFile::File(file_id, _) => Some(file_id),
+                    RemovedFile::File(file_id, _) | RemovedFile::Narthex(file_id) => Some(file_id),
                     RemovedFile::Index(_, _) => None,
                 })
                 .collect();
@@ -544,16 +544,15 @@ impl LocalGcWorker {
             .map(|s| s.len())
             .sum::<usize>();
 
-        let current_files = manifest.as_ref().map(|m| &m.files);
-
-        let in_manifest = if let Some(current_files) = current_files {
-            current_files
-                .iter()
-                .map(|(file_id, meta)| (*file_id, meta.index_version()))
-                .collect::<HashMap<_, _>>()
-        } else {
-            Default::default()
-        };
+        let in_manifest = manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .all_files()
+                    .map(|file| (file.file_id, file.index_version()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
 
         let is_region_dropped = region.is_none();
 
@@ -593,7 +592,7 @@ impl LocalGcWorker {
             } else {
                 ""
             },
-            current_files.map(|c| c.len()).unwrap_or(0),
+            in_manifest.len(),
             tmp_ref_files.len(),
             removed_file_cnt,
             deletable_files.len(),
@@ -707,6 +706,7 @@ impl LocalGcWorker {
         let file_pairs = removed_files
             .iter()
             .filter_map(|f| match f {
+                RemovedFile::Narthex(_) => None,
                 RemovedFile::File(file_id, v) => Some((*file_id, v.unwrap_or(0))),
                 RemovedFile::Index(file_id, index_version) => {
                     let region_index_id =
@@ -724,6 +724,15 @@ impl LocalGcWorker {
             &self.cache_manager,
         )
         .await?;
+
+        for removed in removed_files {
+            if let RemovedFile::Narthex(id) = removed {
+                self.access_layer
+                    .delete_narthex_artifact(region_id, *id)
+                    .await?;
+                debug!("Deleted Narthex artifact {id} for region {region_id}");
+            }
+        }
 
         if !file_pairs.is_empty() {
             let deleted_count = file_pairs.len() as u64;
@@ -874,6 +883,42 @@ impl LocalGcWorker {
             })?;
         let index_cnt = index_entries.len();
         all_entries.extend(index_entries);
+        // Only descend into artifact directories, not index/blob/staging/cache directories.
+        let mut narthex_dirs = Vec::new();
+        all_entries.retain(|entry| {
+            if entry.metadata().is_dir() {
+                narthex_dirs.push(entry.path().to_string());
+                false
+            } else {
+                true
+            }
+        });
+        for dir in narthex_dirs {
+            let mut lister = self
+                .access_layer
+                .object_store()
+                .lister_with(&dir)
+                .recursive(true)
+                .await
+                .context(OpenDalSnafu)?;
+            let mut empty = true;
+            while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+                // Filesystem listings include the directory itself.
+                if entry.metadata().is_dir() && entry.path() == dir {
+                    continue;
+                }
+                empty = false;
+                if entry.metadata().is_file() {
+                    all_entries.push(entry);
+                }
+            }
+            if empty {
+                // Non-recursive deletion cannot remove objects from a concurrent writer.
+                if let Err(error) = self.access_layer.object_store().delete(&dir).await {
+                    debug!("Could not remove empty narthex directory {dir}: {error}");
+                }
+            }
+        }
         info!(
             "gc: full listing mode cost {} secs using {lister_cnt} lister for root={root_cnt} index={index_cnt} files in region {}.",
             start.elapsed().as_secs_f64(),
@@ -953,8 +998,8 @@ impl LocalGcWorker {
                     let stream = stream
                         .filter(|e| {
                             if let Ok(e) = &e {
-                                // notice that we only care about files, skip dirs
-                                e.metadata().is_file()
+                                // Artifact directories contain narthex objects; skip other directories.
+                                e.metadata().is_file() || location::is_narthex_file_dir(e.path())
                             } else {
                                 // error entry, take for further logging
                                 true
@@ -1020,7 +1065,34 @@ impl LocalGcWorker {
                 acc
             });
 
+        // Every listed object must be eligible before deleting an artifact. In
+        // particular, an old part cannot bypass a younger manifest's grace period.
+        let mut narthex_eligibility: HashMap<FileId, bool> = HashMap::new();
         for entry in entries {
+            if let Some(file_id) = crate::sst::location::parse_narthex_file_id(entry.path()) {
+                let in_manifest = in_manifest.contains_key(&file_id);
+                let in_tmp_ref = referenced_ssts.contains(&file_id);
+                let linger = may_linger_files.contains_key(&file_id);
+                let eligible = eligible_for_delete.contains_key(&file_id);
+                deferred_unknown |= is_deferred_unknown_file(
+                    in_manifest,
+                    in_tmp_ref,
+                    linger,
+                    eligible,
+                    &entry,
+                    unknown_file_may_linger_until,
+                );
+                let delete = should_delete_file(
+                    in_manifest,
+                    in_tmp_ref,
+                    linger,
+                    eligible,
+                    &entry,
+                    unknown_file_may_linger_until,
+                );
+                *narthex_eligibility.entry(file_id).or_insert(true) &= delete;
+                continue;
+            }
             if entry.name() == DROPPING_MARKER_FILE {
                 continue;
             }
@@ -1106,6 +1178,11 @@ impl LocalGcWorker {
                 ready_for_delete.push(removed_file);
             }
         }
+        ready_for_delete.extend(
+            narthex_eligibility
+                .into_iter()
+                .filter_map(|(id, eligible)| eligible.then_some(RemovedFile::Narthex(id))),
+        );
         (ready_for_delete, deferred_unknown)
     }
 
@@ -1180,7 +1257,7 @@ impl LocalGcWorker {
                 .iter()
                 .filter(|file| {
                     let in_use = match file {
-                        RemovedFile::File(file_id, _) => {
+                        RemovedFile::File(file_id, _) | RemovedFile::Narthex(file_id) => {
                             in_manifest.contains_key(file_id) || referenced_ssts.contains(file_id)
                         }
                         RemovedFile::Index(file_id, version) => {

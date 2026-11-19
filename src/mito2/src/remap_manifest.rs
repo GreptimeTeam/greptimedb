@@ -117,6 +117,7 @@ impl RemapManifest {
                 sst_format,
                 append_mode: None,
                 pending_tails: Default::default(),
+                series_indexes: Default::default(),
                 handoff_floors: Default::default(),
             };
 
@@ -470,6 +471,7 @@ mod tests {
             sst_format: FormatType::PrimaryKey,
             append_mode: None,
             pending_tails: Default::default(),
+            series_indexes: Default::default(),
             handoff_floors: Default::default(),
         }
     }

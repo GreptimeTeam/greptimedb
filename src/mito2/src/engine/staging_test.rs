@@ -881,7 +881,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                         flushed_entry_id: None,
                         flushed_sequence: None,
                         committed_sequence: None,
-                        wal_recovery: Default::default(),
+                        ..Default::default()
                     })]),
                     true,
                 )
@@ -1110,7 +1110,7 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
-                    wal_recovery: Default::default(),
+                    ..Default::default()
                 }),
             ]),
             true,
@@ -1548,7 +1548,7 @@ fn edit_adding(file: FileMeta) -> RegionEdit {
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
-        wal_recovery: Default::default(),
+        ..Default::default()
     }
 }
 
