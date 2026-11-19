@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use api::v1::Rows;
 use common_meta::cache::{TableRoute, TableRouteCacheRef};
-use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager, TableRouteValue};
+use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
@@ -143,30 +143,15 @@ impl PartitionRuleManager {
 
     /// Loads cached routing metadata for callers that only inspect region IDs or partitions.
     /// Peer-address consumers use `batch_find_region_routes` to refresh node addresses.
-    pub async fn batch_cached_region_routes(
+    pub async fn batch_cached_physical_table_routes(
         &self,
         table_ids: &[TableId],
-    ) -> Result<HashMap<TableId, Vec<RegionRoute>>> {
-        let routes = TableRouteManager::resolve_physical_table_routes(table_ids, |ids| {
-            self.load_cached_table_routes(ids)
+    ) -> Result<HashMap<TableId, Arc<PhysicalTableRouteValue>>> {
+        TableRouteManager::resolve_physical_table_routes(table_ids, |ids| async move {
+            self.table_route_cache.get_many(&ids).await
         })
         .await
-        .context(error::TableRouteManagerSnafu)?;
-        Ok(routes
-            .into_iter()
-            .map(|(id, route)| (id, route.region_routes))
-            .collect())
-    }
-
-    async fn load_cached_table_routes(
-        &self,
-        ids: Vec<TableId>,
-    ) -> common_meta::error::Result<Vec<Option<TableRouteValue>>> {
-        let routes = self.table_route_cache.get_many(&ids).await?;
-        Ok(routes
-            .into_iter()
-            .map(|route| route.as_deref().map(TableRouteValue::from))
-            .collect())
+        .context(error::TableRouteManagerSnafu)
     }
 
     /// Returns the physical partition info with version.
@@ -206,14 +191,14 @@ impl PartitionRuleManager {
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, Vec<PartitionInfo>>> {
-        let batch_region_routes = self.batch_cached_region_routes(table_ids).await?;
+        let routes = self.batch_cached_physical_table_routes(table_ids).await?;
 
         let mut results = HashMap::with_capacity(table_ids.len());
 
-        for (table_id, region_routes) in batch_region_routes {
+        for (table_id, route) in routes {
             results.insert(
                 table_id,
-                create_partitions_from_region_routes(table_id, &region_routes)?,
+                create_partitions_from_region_routes(table_id, &route.region_routes)?,
             );
         }
 

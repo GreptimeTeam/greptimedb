@@ -62,6 +62,43 @@ pub enum TableRouteValue {
     Logical(LogicalTableRouteValue),
 }
 
+/// A table route whose payload can be shared by multiple callers.
+#[derive(Clone)]
+pub enum TableRoute {
+    Physical(Arc<PhysicalTableRouteValue>),
+    Logical(Arc<LogicalTableRouteValue>),
+}
+
+impl From<TableRouteValue> for TableRoute {
+    fn from(value: TableRouteValue) -> Self {
+        match value {
+            TableRouteValue::Physical(route) => Self::Physical(Arc::new(route)),
+            TableRouteValue::Logical(route) => Self::Logical(Arc::new(route)),
+        }
+    }
+}
+
+impl From<Arc<TableRoute>> for TableRoute {
+    fn from(route: Arc<TableRoute>) -> Self {
+        Arc::unwrap_or_clone(route)
+    }
+}
+
+impl TableRoute {
+    /// Returns true if it's physical table.
+    pub fn is_physical(&self) -> bool {
+        matches!(self, TableRoute::Physical(_))
+    }
+
+    /// Returns [PhysicalTableRouteValue] reference if it's [TableRoute::Physical]; Otherwise it returns [None].
+    pub fn as_physical_table_route_ref(&self) -> Option<&Arc<PhysicalTableRouteValue>> {
+        match self {
+            TableRoute::Physical(table_route) => Some(table_route),
+            TableRoute::Logical(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize, Clone, Default)]
 pub struct PhysicalTableRouteValue {
     // The region routes of the table.
@@ -426,85 +463,81 @@ impl TableRouteManager {
         &self,
         logical_or_physical_table_ids: &[TableId],
     ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
-        Self::resolve_physical_table_routes(logical_or_physical_table_ids, |ids| async move {
-            self.storage.batch_get(&ids).await
-        })
-        .await
+        let routes =
+            Self::resolve_physical_table_routes(logical_or_physical_table_ids, |ids| async move {
+                self.storage.batch_get(&ids).await
+            })
+            .await?;
+        Ok(routes
+            .into_iter()
+            .map(|(id, route)| (id, Arc::unwrap_or_clone(route)))
+            .collect())
     }
 
     /// Resolves logical references using the caller's ordered route loader.
-    pub async fn resolve_physical_table_routes<Fut>(
-        logical_or_physical_table_ids: &[TableId],
+    /// Logical tables backed by the same physical table share its route.
+    pub async fn resolve_physical_table_routes<R, Fut>(
+        ids: &[TableId],
         load: impl Fn(Vec<TableId>) -> Fut,
-    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>>
+    ) -> Result<HashMap<TableId, Arc<PhysicalTableRouteValue>>>
     where
-        Fut: Future<Output = Result<Vec<Option<TableRouteValue>>>>,
+        R: Into<TableRoute>,
+        Fut: Future<Output = Result<Vec<Option<R>>>>,
     {
-        let table_routes = load(logical_or_physical_table_ids.to_vec()).await?;
-        // Returns a subset of `logical_or_physical_table_ids`.
-        let table_routes = table_routes
-            .into_iter()
-            .zip(logical_or_physical_table_ids)
-            .filter_map(|(route, id)| route.map(|route| (*id, route)))
-            .collect::<HashMap<_, _>>();
-
-        let mut physical_table_routes = HashMap::with_capacity(table_routes.len());
-        let mut logical_table_ids = HashMap::with_capacity(table_routes.len());
-
-        for (table_id, table_route) in table_routes {
-            match table_route {
-                TableRouteValue::Physical(x) => {
-                    physical_table_routes.insert(table_id, x);
-                }
-                TableRouteValue::Logical(x) => {
-                    logical_table_ids.insert(table_id, x.physical_table_id());
-                }
-            }
-        }
-
-        if logical_table_ids.is_empty() {
-            return Ok(physical_table_routes);
-        }
-
-        // Finds the logical tables corresponding to the physical tables.
-        let physical_table_ids = logical_table_ids
+        let requested = Self::index_routes(ids, load(ids.to_vec()).await?);
+        let missing_targets = requested
             .values()
-            .cloned()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let table_routes = load(physical_table_ids.clone()).await?;
-        let table_routes = table_routes
-            .into_iter()
-            .zip(physical_table_ids)
-            .filter_map(|(route, id)| route.map(|route| (id, route)))
-            .collect::<HashMap<_, _>>();
+            .filter_map(|route| match route {
+                TableRoute::Logical(logical)
+                    if !requested.contains_key(&logical.physical_table_id()) =>
+                {
+                    Some(logical.physical_table_id())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
 
-        for (logical_table_id, physical_table_id) in logical_table_ids {
-            let table_route =
-                table_routes
-                    .get(&physical_table_id)
-                    .context(TableRouteNotFoundSnafu {
-                        table_id: physical_table_id,
-                    })?;
-            match table_route {
-                TableRouteValue::Physical(x) => {
-                    physical_table_routes.insert(logical_table_id, x.clone());
+        let targets = if missing_targets.is_empty() {
+            HashMap::new()
+        } else {
+            let ids = missing_targets.into_iter().collect::<Vec<_>>();
+            let routes = load(ids.clone()).await?;
+            Self::index_routes(&ids, routes)
+        };
+
+        let mut resolved = HashMap::with_capacity(requested.len());
+        for (&id, route) in &requested {
+            let physical = match route {
+                TableRoute::Physical(physical) => physical,
+                TableRoute::Logical(logical) => {
+                    let table_id = logical.physical_table_id();
+                    let target = requested
+                        .get(&table_id)
+                        .or_else(|| targets.get(&table_id))
+                        .context(TableRouteNotFoundSnafu { table_id })?;
+                    target.as_physical_table_route_ref().with_context(|| {
+                        MetadataCorruptionSnafu {
+                            err_msg: format!(
+                                "logical table {id} points to a logical route {table_id}."
+                            ),
+                        }
+                    })?
                 }
-                TableRouteValue::Logical(x) => {
-                    // Never get here, because we use a physical table id cannot obtain a logical table.
-                    MetadataCorruptionSnafu {
-                        err_msg: format!(
-                            "logical table {} {:?} cannot be resolved to a physical table.",
-                            logical_table_id, x
-                        ),
-                    }
-                    .fail()?;
-                }
-            }
+            };
+            resolved.insert(id, physical.clone());
         }
+        Ok(resolved)
+    }
 
-        Ok(physical_table_routes)
+    fn index_routes<R: Into<TableRoute>>(
+        ids: &[TableId],
+        routes: Vec<Option<R>>,
+    ) -> HashMap<TableId, TableRoute> {
+        ids.iter()
+            .copied()
+            .zip(routes)
+            .filter_map(|(id, route)| route.map(|route| (id, route.into())))
+            .collect()
     }
 
     /// Returns [`RegionDistribution`] of the table(`table_id`).
@@ -1111,6 +1144,13 @@ mod tests {
             resolved.keys().copied().collect::<HashSet<_>>(),
             HashSet::from([1, 2, 3])
         );
+        assert!(Arc::ptr_eq(&resolved[&1], &resolved[&3]));
+        assert!(Arc::ptr_eq(&resolved[&2], &resolved[&3]));
+        let logical_only = TableRouteManager::resolve_physical_table_routes(&[1, 2], load)
+            .await
+            .unwrap();
+        assert_eq!(logical_only.len(), 2);
+        assert!(Arc::ptr_eq(&logical_only[&1], &logical_only[&2]));
         let missing = TableRouteManager::resolve_physical_table_routes(&[4], load)
             .await
             .unwrap_err();

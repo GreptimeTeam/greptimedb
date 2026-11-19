@@ -20,6 +20,7 @@ use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::{INFORMATION_SCHEMA_TABLES_TABLE_ID, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_meta::datanode::RegionStat;
+use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::rpc::router::RegionRoute;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
@@ -330,7 +331,7 @@ impl InformationSchemaTablesBuilder {
             let info = table.table_info();
             let routes = routes
                 .get(&info.table_id())
-                .map(Vec::as_slice)
+                .map(|route| route.region_routes.as_slice())
                 .unwrap_or_default();
             let stats = Self::stats_for_routes(routes, sorted_stats);
             self.add_table(catalog_name, schema_name, info, table.table_type(), &stats);
@@ -341,7 +342,7 @@ impl InformationSchemaTablesBuilder {
     async fn load_table_routes(
         manager: Option<&PartitionRuleManager>,
         tables: &[TableRef],
-    ) -> Result<HashMap<TableId, Vec<RegionRoute>>> {
+    ) -> Result<HashMap<TableId, Arc<PhysicalTableRouteValue>>> {
         let Some(manager) = manager else {
             return Ok(HashMap::new());
         };
@@ -352,7 +353,7 @@ impl InformationSchemaTablesBuilder {
             .map(|info| info.table_id())
             .collect::<Vec<_>>();
         manager
-            .batch_cached_region_routes(&ids)
+            .batch_cached_physical_table_routes(&ids)
             .await
             .context(FindRegionRoutesSnafu)
     }

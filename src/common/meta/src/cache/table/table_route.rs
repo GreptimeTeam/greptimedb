@@ -21,51 +21,9 @@ use store_api::storage::TableId;
 use crate::cache::{CacheContainer, Initializer};
 use crate::error;
 use crate::instruction::CacheIdent;
-use crate::key::table_route::{
-    LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteManager, TableRouteManagerRef,
-    TableRouteValue,
-};
+pub use crate::key::table_route::TableRoute;
+use crate::key::table_route::{TableRouteManager, TableRouteManagerRef};
 use crate::kv_backend::KvBackendRef;
-
-/// [TableRoute] stores `Arc` wrapped table route.
-#[derive(Clone)]
-pub enum TableRoute {
-    Physical(Arc<PhysicalTableRouteValue>),
-    Logical(Arc<LogicalTableRouteValue>),
-}
-
-impl From<TableRouteValue> for TableRoute {
-    fn from(value: TableRouteValue) -> Self {
-        match value {
-            TableRouteValue::Physical(route) => Self::Physical(Arc::new(route)),
-            TableRouteValue::Logical(route) => Self::Logical(Arc::new(route)),
-        }
-    }
-}
-
-impl From<&TableRoute> for TableRouteValue {
-    fn from(route: &TableRoute) -> Self {
-        match route {
-            TableRoute::Physical(value) => Self::Physical(value.as_ref().clone()),
-            TableRoute::Logical(value) => Self::Logical(value.as_ref().clone()),
-        }
-    }
-}
-
-impl TableRoute {
-    /// Returns true if it's physical table.
-    pub fn is_physical(&self) -> bool {
-        matches!(self, TableRoute::Physical(_))
-    }
-
-    /// Returns [PhysicalTableRouteValue] reference if it's [TableRoute::Physical]; Otherwise it returns [None].
-    pub fn as_physical_table_route_ref(&self) -> Option<&Arc<PhysicalTableRouteValue>> {
-        match self {
-            TableRoute::Physical(table_route) => Some(table_route),
-            TableRoute::Logical(_) => None,
-        }
-    }
-}
 
 /// [TableRouteCache] caches the [TableId] to [TableRoute] mapping.
 pub type TableRouteCache = CacheContainer<TableId, Arc<TableRoute>, CacheIdent>;
