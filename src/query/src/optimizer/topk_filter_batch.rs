@@ -16,13 +16,13 @@ use std::sync::Arc;
 
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions};
 use datafusion_common::Result;
 
 use crate::optimizer::windowed_sort::is_time_index_expr;
@@ -37,6 +37,11 @@ use crate::optimizer::windowed_sort::is_time_index_expr;
 /// filtered input batch on whole: the coalescer never splits a batch into pieces of the
 /// target size or holds rows back. Other sort keys are left alone, since file and row
 /// group ranges rarely let the scan skip anything by them.
+///
+/// Batch size 1 passes batches through only because `LimitedBatchCoalescer` caps the
+/// biggest batch it coalesces at half the target, so every non-empty batch takes arrow's
+/// large-batch bypass. `test_filter_with_batch_size_one_keeps_batches_whole` fails if a
+/// DataFusion or arrow upgrade changes that.
 #[derive(Debug)]
 pub struct TopKFilterBatchSize;
 
@@ -66,7 +71,10 @@ fn rewrite(plan: Arc<dyn ExecutionPlan>, under_topk: bool) -> Result<Arc<dyn Exe
             sort.fetch().is_some() && is_time_index_expr(sort.input(), &sort.expr().first().expr)?;
         (plan, is_time_topk)
     } else if let Some(filter) = plan.downcast_ref::<FilterExec>() {
-        if under_topk && filter.batch_size() > 1 {
+        if filter.fetch().is_some() {
+            // It keeps the first rows that pass, so when the threshold arrives decides which.
+            (plan, false)
+        } else if under_topk && filter.batch_size() > 1 {
             (
                 Arc::new(filter.with_batch_size(1)?) as Arc<dyn ExecutionPlan>,
                 true,
@@ -100,8 +108,10 @@ fn rewrite(plan: Arc<dyn ExecutionPlan>, under_topk: bool) -> Result<Arc<dyn Exe
     if !changed {
         return Ok(plan);
     }
-    #[allow(deprecated)]
-    plan.with_new_children(new_children)
+    plan.replace_children(
+        new_children,
+        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+    )
 }
 
 #[cfg(test)]
@@ -188,6 +198,10 @@ mod tests {
             .unwrap(),
         );
         let plan = optimize(sort(aggregate, Column::new("ts", 0), Some(100)));
+        assert_eq!(default_size, filter_batch_size(&plan));
+
+        let limited = filter.with_fetch(Some(2)).unwrap();
+        let plan = optimize(sort(limited, Column::new("ts", 1), Some(1)));
         assert_eq!(default_size, filter_batch_size(&plan));
     }
 

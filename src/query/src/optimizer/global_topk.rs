@@ -21,7 +21,9 @@ use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
-use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+use datafusion::physical_plan::{
+    ChildrenPropertiesMode, ExecutionPlan, ExecutionPlanProperties, ReplaceChildrenOptions,
+};
 use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use table::table::scan::RegionScanExec;
@@ -62,11 +64,15 @@ impl PhysicalOptimizerRule for GlobalTopKOverFilteredScan {
             let coalesced: Arc<dyn ExecutionPlan> =
                 Arc::new(CoalescePartitionsExec::new(sort.input().clone()));
             // Both calls keep the dynamic filter expression already pushed into the scan.
-            #[allow(deprecated)]
-            let resorted = plan.clone().with_new_children(vec![coalesced])?;
+            // `with_preserve_partitioning` rebuilds its wrapper for one emitter, so the
+            // threshold is published as soon as the single heap fills.
+            let resorted = plan.clone().replace_children(
+                vec![coalesced],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )?;
             let global = resorted
                 .downcast_ref::<SortExec>()
-                .expect("with_new_children keeps the SortExec")
+                .expect("replace_children keeps the SortExec")
                 .clone()
                 .with_preserve_partitioning(false);
             Ok(Transformed::yes(Arc::new(global) as Arc<dyn ExecutionPlan>))
@@ -88,7 +94,9 @@ impl PhysicalOptimizerRule for GlobalTopKOverFilteredScan {
 /// that include at least one filter.
 ///
 /// Without a filter every scanned row reaches the heaps, so each fills at once. On another
-/// sort key the scan cannot skip ranges by time, so one heap only serializes the work.
+/// sort key the scan cannot skip ranges by time, so one heap only serializes the work. A
+/// filter with a fetch keeps the first rows that pass, so reading ranges in another order
+/// would change which rows it keeps.
 pub(crate) fn filtered_scan_below_topk(sort: &SortExec) -> Result<Option<&RegionScanExec>> {
     if !sort
         .fetch()
@@ -103,9 +111,13 @@ pub(crate) fn filtered_scan_below_topk(sort: &SortExec) -> Result<Option<&Region
         if let Some(scan) = node.downcast_ref::<RegionScanExec>() {
             return Ok(seen_filter.then_some(scan));
         }
-        seen_filter |= node.is::<FilterExec>();
-        if !(node.is::<FilterExec>() || node.is::<ProjectionExec>() || node.is::<CooperativeExec>())
-        {
+        let is_filter = match node.downcast_ref::<FilterExec>() {
+            Some(filter) if filter.fetch().is_some() => return Ok(None),
+            Some(_) => true,
+            None => false,
+        };
+        seen_filter |= is_filter;
+        if !(is_filter || node.is::<ProjectionExec>() || node.is::<CooperativeExec>()) {
             return Ok(None);
         }
         let Some(child) = node.children().into_iter().next() else {
@@ -184,6 +196,9 @@ mod tests {
         assert!(is_partitioned_topk(&optimize(plan)));
         // The scan cannot skip ranges on another sort key.
         let plan = partitioned_topk(filter(log_region_scan(4)), Column::new("body", 0), 100);
+        assert!(is_partitioned_topk(&optimize(plan)));
+        let limited = filter(log_region_scan(4)).with_fetch(Some(2)).unwrap();
+        let plan = partitioned_topk(limited, ts(), 100);
         assert!(is_partitioned_topk(&optimize(plan)));
     }
 }
