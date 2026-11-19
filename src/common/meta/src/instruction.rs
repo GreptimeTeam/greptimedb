@@ -426,6 +426,24 @@ pub enum CacheIdent {
     User(UserCacheIdent),
 }
 
+impl CacheIdent {
+    pub fn table_id_key(&self) -> Option<&TableId> {
+        if let Self::TableId(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    pub fn table_name_key(&self) -> Option<&TableName> {
+        if let Self::TableName(name) = self {
+            Some(name)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserCacheIdent {
     pub catalog: String,

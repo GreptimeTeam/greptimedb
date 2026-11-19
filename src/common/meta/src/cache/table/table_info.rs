@@ -14,15 +14,13 @@
 
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use store_api::storage::TableId;
 use table::metadata::TableInfo;
 
-use crate::cache::{CacheContainer, InitStrategy, Initializer};
+use crate::cache::{CacheContainer, Initializer};
 use crate::error;
-use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::table_info::{TableInfoManager, TableInfoManagerRef};
 use crate::kv_backend::KvBackendRef;
@@ -35,20 +33,24 @@ pub type TableInfoCacheRef = Arc<TableInfoCache>;
 /// Constructs a [TableInfoCache].
 pub fn new_table_info_cache(
     name: String,
-    cache: Cache<TableId, Arc<TableInfo>>,
+    cache: Cache<(usize, TableId), Arc<TableInfo>>,
     kv_backend: KvBackendRef,
 ) -> TableInfoCache {
     let table_info_manager = Arc::new(TableInfoManager::new(kv_backend));
-    let init = init_factory(table_info_manager);
+    let init = init_factory(table_info_manager.clone());
 
-    CacheContainer::with_strategy(
-        name,
-        cache,
-        Box::new(invalidator),
-        init,
-        filter,
-        InitStrategy::VersionChecked,
-    )
+    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_id_key)
+        .with_batch_initializer(Arc::new(move |ids| {
+            let manager = table_info_manager.clone();
+            Box::pin(async move {
+                Ok(manager
+                    .batch_get(&ids)
+                    .await?
+                    .into_iter()
+                    .map(|(id, value)| (id, Arc::new(value.table_info)))
+                    .collect())
+            })
+        }))
 }
 
 fn init_factory(table_info_manager: TableInfoManagerRef) -> Initializer<TableId, Arc<TableInfo>> {
@@ -66,30 +68,13 @@ fn init_factory(table_info_manager: TableInfoManagerRef) -> Initializer<TableId,
     })
 }
 
-fn invalidator<'a>(
-    cache: &'a Cache<TableId, Arc<TableInfo>>,
-    idents: &'a [&CacheIdent],
-) -> BoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        for ident in idents {
-            if let CacheIdent::TableId(table_id) = ident {
-                cache.invalidate(table_id).await
-            }
-        }
-        Ok(())
-    })
-}
-
-fn filter(ident: &CacheIdent) -> bool {
-    matches!(ident, CacheIdent::TableId(_))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
     use moka::future::CacheBuilder;
+    use table::requests::AlterKind;
 
     use super::*;
     use crate::ddl::test_util::create_table::test_create_table_task;
@@ -98,7 +83,7 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[tokio::test]
-    async fn test_cache() {
+    async fn test_schema_after_alter() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
         let cache = CacheBuilder::new(128).build();
@@ -118,11 +103,43 @@ mod tests {
         let table_info = cache.get(1024).await.unwrap().unwrap();
         assert_eq!(*table_info, task.table_info);
 
-        assert!(cache.contains_key(&1024));
+        let current = table_metadata_manager
+            .table_info_manager()
+            .get(1024)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut altered = task.table_info;
+        altered.meta = altered
+            .meta
+            .builder_with_alter_kind(
+                &altered.name,
+                &AlterKind::DropColumns {
+                    names: vec!["cpu".into()],
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        altered.ident.version += 1;
+        table_metadata_manager
+            .update_table_info(&current, None, altered)
+            .await
+            .unwrap();
+        assert!(
+            table_info
+                .meta
+                .schema
+                .column_schema_by_name("cpu")
+                .is_some()
+        );
         cache
             .invalidate(&[CacheIdent::TableId(1024)])
             .await
             .unwrap();
-        assert!(!cache.contains_key(&1024));
+        let result = cache.get_many(&[1024]).await.unwrap();
+        let fresh = result[0].as_ref().unwrap();
+        assert_eq!(fresh.ident.version, table_info.ident.version + 1);
+        assert!(fresh.meta.schema.column_schema_by_name("cpu").is_none());
     }
 }

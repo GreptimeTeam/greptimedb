@@ -14,15 +14,12 @@
 
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use store_api::storage::TableId;
 
-use crate::cache::container::InitStrategy;
 use crate::cache::{CacheContainer, Initializer};
 use crate::error;
-use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::table_route::{
     LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteManager, TableRouteManagerRef,
@@ -60,20 +57,13 @@ pub type TableRouteCacheRef = Arc<TableRouteCache>;
 /// Constructs a [TableRouteCache].
 pub fn new_table_route_cache(
     name: String,
-    cache: Cache<TableId, Arc<TableRoute>>,
+    cache: Cache<(usize, TableId), Arc<TableRoute>>,
     kv_backend: KvBackendRef,
 ) -> TableRouteCache {
     let table_info_manager = Arc::new(TableRouteManager::new(kv_backend));
     let init = init_factory(table_info_manager);
 
-    CacheContainer::with_strategy(
-        name,
-        cache,
-        Box::new(invalidator),
-        init,
-        filter,
-        InitStrategy::VersionChecked,
-    )
+    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_id_key)
 }
 
 fn init_factory(
@@ -96,24 +86,6 @@ fn init_factory(
             Ok(Some(Arc::new(table_route)))
         })
     })
-}
-
-fn invalidator<'a>(
-    cache: &'a Cache<TableId, Arc<TableRoute>>,
-    idents: &'a [&CacheIdent],
-) -> BoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        for ident in idents {
-            if let CacheIdent::TableId(table_id) = ident {
-                cache.invalidate(table_id).await
-            }
-        }
-        Ok(())
-    })
-}
-
-fn filter(ident: &CacheIdent) -> bool {
-    matches!(ident, CacheIdent::TableId(_))
 }
 
 #[cfg(test)]
