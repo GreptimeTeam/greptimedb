@@ -71,13 +71,6 @@ fn target_column_id(target: &IndexTarget) -> store_api::storage::ColumnId {
     }
 }
 
-fn column_target_id(target: &IndexTarget) -> Option<store_api::storage::ColumnId> {
-    match target {
-        IndexTarget::ColumnId(id) => Some(*id),
-        IndexTarget::JsonPath(_) => None,
-    }
-}
-
 fn normalize_entries(entries: &mut Vec<PlanEntry>) {
     entries.sort_by_key(|entry| (entry.column_id, entry.format_version));
     entries.dedup_by(|a, b| {
@@ -90,9 +83,42 @@ fn normalize_entries(entries: &mut Vec<PlanEntry>) {
     });
 }
 
-fn builtin_is_current(file: &FileMeta, context: &PlanContext<'_>) -> bool {
-    // Preserve the established schema/version policy, including its JSON rebuild scope.
-    file.is_index_consistent_with_region(&context.metadata.column_metadatas, context.index_options)
+fn builtin_is_current<'a>(
+    file: &FileMeta,
+    context: &PlanContext<'_>,
+    kind: IndexKind,
+    targets: impl Iterator<Item = (&'a IndexTarget, u8)>,
+) -> bool {
+    if !file
+        .is_index_consistent_with_region(&context.metadata.column_metadatas, context.index_options)
+    {
+        return false;
+    }
+    if context.build_type != crate::sst::index::IndexBuildType::Manual {
+        return true;
+    }
+    let mut paths = targets
+        .filter_map(|(target, version)| match target {
+            IndexTarget::JsonPath(path) => Some((path, version)),
+            IndexTarget::ColumnId(_) => None,
+        })
+        .peekable();
+    if paths.peek().is_none() {
+        return true;
+    }
+    let recorded: std::collections::HashMap<_, _> = file
+        .indexes
+        .iter()
+        .filter_map(|index| Some(((index.column_id, index.json_path.as_deref()?), index)))
+        .collect();
+    paths.all(|(path, version)| {
+        recorded
+            .get(&(path.column_id(), path.path()))
+            .is_some_and(|index| {
+                index.created_indexes.contains(&kind.index_type())
+                    && index.fulltext_bloom_version >= version
+            })
+    })
 }
 
 #[cfg(test)]
@@ -101,6 +127,49 @@ mod tests {
     use crate::region::options::IndexOptions;
     use crate::sst::index::IndexBuildType;
     use crate::test_util::sst_util;
+
+    #[test]
+    fn test_invalid_json_hints_preserve_other_column_indexes() {
+        use arrow_schema::extension::{
+            EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+        };
+        use datatypes::data_type::ConcreteDataType;
+        use datatypes::extension::json::Json2ExtensionType;
+        use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+
+        let mut metadata = sst_util::sst_region_metadata();
+        let field = &mut metadata.column_metadatas[2].column_schema;
+        field.data_type = ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
+        field.mut_metadata().insert(
+            EXTENSION_TYPE_NAME_KEY.into(),
+            Json2ExtensionType::NAME.into(),
+        );
+        field
+            .mut_metadata()
+            .insert(EXTENSION_TYPE_METADATA_KEY.into(), "invalid json".into());
+        let metadata = Arc::new(metadata);
+        let options = IndexOptions::default();
+        for build_type in [IndexBuildType::Flush, IndexBuildType::Compact] {
+            let context = PlanContext {
+                metadata: &metadata,
+                index_options: &options,
+                build_type,
+                rebuild_source: None,
+                existing_indexes: &[],
+            };
+            for (handler, column_id) in [
+                (
+                    BuiltinIndexHandler::Inverted(InvertedIndexConfig::default()),
+                    0,
+                ),
+                (BuiltinIndexHandler::Bloom(BloomFilterConfig::default()), 1),
+            ] {
+                let plan = handler.plan(&context).unwrap().unwrap();
+                assert_eq!(plan.entries().len(), 1);
+                assert_eq!(plan.entries()[0].column_id, column_id);
+            }
+        }
+    }
 
     #[test]
     fn test_builtin_validation_preserves_build_time_option_errors() {
@@ -134,6 +203,7 @@ mod tests {
                 metadata: &metadata,
                 index_options: &options,
                 build_type: IndexBuildType::Flush,
+                rebuild_source: None,
                 existing_indexes: &[],
             };
             assert!(handler.validate(&context).is_ok());
@@ -173,6 +243,7 @@ mod tests {
                 metadata: &metadata,
                 index_options: &options,
                 build_type: IndexBuildType::Flush,
+                rebuild_source: None,
                 existing_indexes: &[],
             };
             assert!(handler.plan(&context).is_err());

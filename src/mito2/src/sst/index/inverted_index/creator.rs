@@ -773,9 +773,12 @@ mod tests {
             );
             let index_id = RegionIndexId::new(RegionFileId::new(metadata.region_id, file_id), 0);
             let mut writer = manager.writer(&index_id).await.unwrap();
-            let (rows, bytes) = creator.finish(&mut writer).await.unwrap();
-            assert_eq!(rows, 4);
-            assert!(bytes > 0);
+            let entries =
+                crate::sst::index::handler::IndexCreator::finish(&mut creator, &mut writer)
+                    .await
+                    .unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].target, target);
             writer.finish().await.unwrap();
             let reader = manager.reader(&index_id).await.unwrap();
             let blob = reader

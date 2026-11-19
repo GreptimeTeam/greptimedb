@@ -495,6 +495,7 @@ pub struct SstInfo {
 
 #[cfg(test)]
 mod tests {
+    use index::target::IndexTarget;
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -1969,11 +1970,17 @@ mod tests {
                 .entries
                 .iter()
                 .filter(|entry| entry.kind.index_type() == kind)
-                .filter_map(|entry| entry.column_id)
+                .map(|entry| entry.target.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(columns(IndexType::InvertedIndex), vec![0]);
-        assert_eq!(columns(IndexType::BloomFilterIndex), vec![1]);
+        assert_eq!(
+            columns(IndexType::InvertedIndex),
+            vec![IndexTarget::ColumnId(0)]
+        );
+        assert_eq!(
+            columns(IndexType::BloomFilterIndex),
+            vec![IndexTarget::ColumnId(1)]
+        );
         let reader = manager
             .reader(&RegionIndexId::new(
                 RegionFileId::new(region_id, info.file_id),
@@ -3667,10 +3674,13 @@ mod tests {
             .entries
             .iter()
             .filter(|entry| entry.kind == IndexKind::Fulltext)
-            .filter_map(|entry| entry.column_id)
+            .map(|entry| entry.target.clone())
             .collect::<Vec<_>>();
         columns.sort_unstable();
-        assert_eq!(columns, vec![1, 2]);
+        assert_eq!(
+            columns,
+            vec![IndexTarget::ColumnId(1), IndexTarget::ColumnId(2)]
+        );
         let manager = env
             .get_puffin_manager()
             .build(object_store.clone(), file_path.clone());

@@ -1298,7 +1298,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to retrieve index options from column metadata"))]
+    #[snafu(display("Failed to retrieve index options from metadata for column '{column_name}'"))]
     IndexOptions {
         #[snafu(implicit)]
         location: Location,

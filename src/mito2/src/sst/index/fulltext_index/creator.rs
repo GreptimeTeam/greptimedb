@@ -17,12 +17,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use api::v1::SemanticType;
-use arrow_schema::extension::ExtensionType;
 use common_telemetry::warn;
 use datatypes::arrow::array::{Array, LargeStringArray, StringArray};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::extension::json::Json2ExtensionType;
 use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
 use datatypes::vectors::VectorRef;
 use index::fulltext_index::create::{
@@ -42,11 +40,13 @@ use crate::error::{
     OperateAbortedIndexSnafu, Result,
 };
 use crate::read::Batch;
-use crate::sst::index::column::extract_json_type_hint_values;
+use crate::sst::index::column::{extract_json_type_hint_values, json_index_hints};
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
+use crate::sst::index::handler::JsonIndexRebuildSource;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
+use crate::sst::index::kind::IndexKind;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
 use crate::sst::index::{IndexBuildType, TYPE_FULLTEXT_INDEX};
@@ -83,7 +83,7 @@ impl FulltextIndexer {
     ) -> Result<Option<Self>> {
         let mut targets = Vec::new();
         for column in &metadata.column_metadatas {
-            for (target, options) in Self::targets(column, &build_type)? {
+            for (target, options) in Self::targets(column, &build_type, None)? {
                 targets.push((
                     column.column_id,
                     column.column_schema.name.clone(),
@@ -175,6 +175,7 @@ impl FulltextIndexer {
     pub(crate) fn targets(
         column: &store_api::metadata::ColumnMetadata,
         build_type: &IndexBuildType,
+        source: Option<JsonIndexRebuildSource<'_>>,
     ) -> Result<Vec<(IndexTarget, datatypes::schema::FulltextOptions)>> {
         // Tag columns don't support fulltext index now.
         // If we need to support fulltext index for tag columns, we also need to parse
@@ -198,32 +199,19 @@ impl FulltextIndexer {
         if let Some(options) = options.filter(|options| options.enable) {
             targets.push((IndexTarget::ColumnId(column.column_id), options));
         }
-        // Only flush and compaction builds collect JSON targets; manual and schema-change
-        // rebuilds skip them because existing SSTs may not materialize the current hints.
-        // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
-        if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
-            && column.column_schema.data_type.is_json2()
-            && let Some(extension) = column
-                .column_schema
-                .extension_type::<Json2ExtensionType>()
-                .context(IndexOptionsSnafu {
-                    column_name: &column.column_schema.name,
-                })?
-        {
-            for hint in extension.metadata().json_settings().type_hints() {
-                let Some(options) = hint.fulltext_index.as_ref().filter(|o| o.enable) else {
-                    continue;
-                };
-                match IndexTarget::new_json_path(column.column_id, hint.path.clone()) {
-                    Ok(target) => targets.push((target, options.clone())),
-                    Err(err) => {
-                        warn!(
-                            err;
-                            "Skip invalid JSON fulltext index target, column_id: {}, path: {:?}",
-                            column.column_id,
-                            hint.path
-                        );
-                    }
+        for hint in json_index_hints(column, build_type, source, IndexKind::Fulltext)? {
+            let Some(options) = hint.fulltext_index.filter(|o| o.enable) else {
+                continue;
+            };
+            match IndexTarget::new_json_path(column.column_id, hint.path.clone()) {
+                Ok(target) => targets.push((target, options)),
+                Err(err) => {
+                    warn!(
+                        err;
+                        "Skip invalid JSON fulltext index target, column_id: {}, path: {:?}",
+                        column.column_id,
+                        hint.path
+                    );
                 }
             }
         }
@@ -760,9 +748,21 @@ mod tests {
                 let index_id =
                     RegionIndexId::new(RegionFileId::new(metadata.region_id, file_id), 0);
                 let mut writer = puffin.writer(&index_id).await.unwrap();
-                let (rows, bytes) = creator.finish(&mut writer).await.unwrap();
-                assert_eq!(rows, 4);
-                assert!(bytes > 0);
+                let entries =
+                    crate::sst::index::handler::IndexCreator::finish(&mut creator, &mut writer)
+                        .await
+                        .unwrap();
+                assert_eq!(entries.len(), hints.len());
+                for hint in &hints {
+                    let target = IndexTarget::new_json_path(1, hint.path.clone()).unwrap();
+                    let entry = entries.iter().find(|entry| entry.target == target).unwrap();
+                    let expected_version = if backend == FulltextBackend::Bloom {
+                        u32::from(crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION)
+                    } else {
+                        0
+                    };
+                    assert_eq!(entry.format_version, expected_version);
+                }
                 writer.finish().await.unwrap();
                 let cache = Arc::new(
                     crate::cache::index::bloom_filter_index::BloomFilterIndexCache::new(

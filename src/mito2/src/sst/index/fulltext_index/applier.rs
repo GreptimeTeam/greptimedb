@@ -21,7 +21,9 @@ use std::time::Instant;
 use common_base::range_read::RangeReader;
 use common_base::term_token::{extract_like_probes, extract_term_probes};
 use common_telemetry::{tracing, warn};
-use datatypes::schema::{FulltextBackend, FulltextOptions};
+#[cfg(test)]
+use datatypes::schema::FulltextBackend;
+use datatypes::schema::FulltextOptions;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReaderImpl};
 use index::fulltext_index::Config;
@@ -46,7 +48,7 @@ use crate::error::{
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionIndexId;
-use crate::sst::index::column::fulltext_target_options;
+use crate::sst::index::column::{compatible_fulltext_options, fulltext_target_options};
 use crate::sst::index::fulltext_index::applier::builder::FulltextRequest;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::puffin_manager::{
@@ -262,9 +264,7 @@ impl FulltextIndexApplier {
             return false;
         };
         // JSON path hints can change backend, case sensitivity, and analyzer.
-        expected.backend == actual.backend
-            && expected.case_sensitive == actual.case_sensitive
-            && (expected.backend == FulltextBackend::Bloom || expected.analyzer == actual.analyzer)
+        compatible_fulltext_options(expected, &actual)
     }
 }
 

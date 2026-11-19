@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::SemanticType;
 use arrow_schema::extension::ExtensionType;
 use common_function::scalars::json::json_get::{JsonGetWithType, json_object_path};
@@ -21,15 +23,153 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::extension::json::Json2ExtensionType;
 use datatypes::json::JsonTypeHint;
-use datatypes::schema::FulltextOptions;
+use datatypes::schema::{FulltextBackend, FulltextOptions};
 use datatypes::vectors::{Helper, VectorRef};
 use index::target::IndexTarget;
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 use crate::error::{ConvertVectorSnafu, IndexOptionsSnafu, InvalidRecordBatchSnafu, Result};
+use crate::sst::index::IndexBuildType;
+use crate::sst::index::handler::JsonIndexRebuildSource;
+use crate::sst::index::kind::IndexKind;
 use crate::sst::parquet::format::PrimaryKeyArray;
+
+/// Whether a rebuild needs the physical schema before it can plan path indexes.
+pub(crate) fn has_json_path_indexes(metadata: &RegionMetadata) -> Result<bool> {
+    for column in &metadata.column_metadatas {
+        if !column.column_schema.data_type.is_json2() {
+            continue;
+        }
+        if json_extension(column)?.is_some_and(|ext| {
+            ext.metadata()
+                .json_settings()
+                .type_hints()
+                .iter()
+                .any(|hint| {
+                    hint.inverted_index
+                        || hint.skipping_index.is_some()
+                        || hint
+                            .fulltext_index
+                            .as_ref()
+                            .is_some_and(|options| options.enable)
+                })
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Selects JSON hints whose values and index semantics are available in the build input.
+pub(crate) fn json_index_hints(
+    column: &ColumnMetadata,
+    build_type: &IndexBuildType,
+    source: Option<JsonIndexRebuildSource<'_>>,
+    kind: IndexKind,
+) -> Result<Vec<JsonTypeHint>> {
+    let rebuilding = matches!(
+        build_type,
+        IndexBuildType::Manual | IndexBuildType::SchemaChange
+    );
+    // Manual candidate selection sees current hints; per-file planning narrows them to
+    // the paths materialized in the source SST before creating any indexes.
+    if !column.column_schema.data_type.is_json2() || (rebuilding && source.is_none()) {
+        return Ok(Vec::new());
+    }
+    let current = match json_extension(column) {
+        Ok(Some(extension)) => extension,
+        Ok(None) => return Ok(Vec::new()),
+        // Flush and compaction skip unreadable JSON hints for inverted and bloom indexes.
+        Err(_) if !rebuilding && matches!(kind, IndexKind::Inverted | IndexKind::Bloom) => {
+            return Ok(Vec::new());
+        }
+        Err(err) => return Err(err),
+    };
+    let hints = current.metadata().json_settings().type_hints();
+    let Some(JsonIndexRebuildSource::Sst(metadata, schema)) = source else {
+        return Ok(hints.to_vec());
+    };
+    let Some(original) = metadata.column_by_id(column.column_id) else {
+        return Ok(Vec::new());
+    };
+    if original.column_schema.name != column.column_schema.name
+        || !original.column_schema.data_type.is_json2()
+    {
+        return Ok(Vec::new());
+    }
+    let Some(original) = json_extension(original)? else {
+        return Ok(Vec::new());
+    };
+    let Ok(root) = schema.field_with_name(&column.column_schema.name) else {
+        return Ok(Vec::new());
+    };
+    let originals: HashMap<_, _> = original
+        .metadata()
+        .json_settings()
+        .type_hints()
+        .iter()
+        .map(|hint| (hint.path.as_slice(), hint))
+        .collect();
+    Ok(hints
+        .iter()
+        .filter(|hint| {
+            let Some(previous) = originals.get(hint.path.as_slice()) else {
+                return false;
+            };
+            if previous.data_type != hint.data_type {
+                return false;
+            }
+            if !materialized_leaf_matches(root.data_type(), hint) {
+                return false;
+            }
+            match kind {
+                IndexKind::Inverted => previous.inverted_index,
+                IndexKind::Bloom => previous.skipping_index.is_some(),
+                IndexKind::Fulltext => hint
+                    .fulltext_index
+                    .as_ref()
+                    .zip(previous.fulltext_index.as_ref())
+                    .is_some_and(|(expected, actual)| {
+                        actual.enable && compatible_fulltext_options(expected, actual)
+                    }),
+                IndexKind::Extension(_) => false,
+            }
+        })
+        .cloned()
+        .collect())
+}
+
+fn materialized_leaf_matches(root: &arrow_schema::DataType, hint: &JsonTypeHint) -> bool {
+    let leaf = hint.path.iter().try_fold(root, |ty, key| {
+        let arrow_schema::DataType::Struct(fields) = ty else {
+            return None;
+        };
+        fields.find(key).map(|(_, field)| field.data_type())
+    });
+    leaf.is_some_and(|ty| {
+        *ty == hint.data_type.as_arrow_type() || (ty.is_string() && hint.data_type.is_string())
+    })
+}
+
+fn json_extension(column: &ColumnMetadata) -> Result<Option<Json2ExtensionType>> {
+    column
+        .column_schema
+        .extension_type::<Json2ExtensionType>()
+        .with_context(|_| IndexOptionsSnafu {
+            column_name: column.column_schema.name.clone(),
+        })
+}
+
+pub(super) fn compatible_fulltext_options(
+    expected: &FulltextOptions,
+    actual: &FulltextOptions,
+) -> bool {
+    expected.backend == actual.backend
+        && expected.case_sensitive == actual.case_sensitive
+        && (expected.backend == FulltextBackend::Bloom || expected.analyzer == actual.analyzer)
+}
 
 /// Extracts leaf values for a JSON type hint at the given path.
 ///
@@ -256,6 +396,50 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+
+    #[test]
+    fn test_rebuild_hints_require_a_matching_physical_leaf() {
+        use arrow_schema::{DataType as ArrowType, Schema};
+        use datatypes::extension::json::JsonMetadata;
+        use datatypes::json::JsonSettings;
+        use datatypes::types::json_type::JsonNativeType;
+
+        let path_hint = |parent: &str| JsonTypeHint {
+            path: vec![parent.into(), "leaf".into()],
+            data_type: ConcreteDataType::int64_datatype(),
+            inverted_index: true,
+            skipping_index: None,
+            fulltext_index: None,
+        };
+        let hints = ["valid", "missing", "wrong_type", "scalar_parent"].map(path_hint);
+        let mut metadata = crate::test_util::sst_util::sst_region_metadata();
+        let column = &mut metadata.column_metadatas[2];
+        column.column_schema.data_type = ConcreteDataType::json2(JsonNativeType::object());
+        column
+            .column_schema
+            .with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+                JsonSettings::try_new(hints.to_vec(), Some(0)).unwrap(),
+            ))));
+        let nested = |key: &str, ty| ArrowType::Struct(vec![Field::new(key, ty, true)].into());
+        let root = ArrowType::Struct(
+            vec![
+                Field::new("valid", nested("leaf", ArrowType::Int64), true),
+                Field::new("missing", nested("other", ArrowType::Int64), true),
+                Field::new("wrong_type", nested("leaf", ArrowType::Boolean), true),
+                Field::new("scalar_parent", ArrowType::Int64, true),
+            ]
+            .into(),
+        );
+        let schema = Schema::new(vec![Field::new(&column.column_schema.name, root, true)]);
+        let selected = json_index_hints(
+            &metadata.column_metadatas[2],
+            &IndexBuildType::Manual,
+            Some(JsonIndexRebuildSource::Sst(&metadata, &schema)),
+            IndexKind::Inverted,
+        )
+        .unwrap();
+        assert_eq!(selected, [path_hint("valid")]);
+    }
 
     #[test]
     fn test_fulltext_target_options_requires_string_column() {

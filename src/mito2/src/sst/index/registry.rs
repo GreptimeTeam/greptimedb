@@ -585,6 +585,7 @@ mod tests {
             metadata: &metadata,
             index_options: &options,
             build_type: crate::sst::index::IndexBuildType::Compact,
+            rebuild_source: None,
             existing_indexes: &[],
         };
         for (kinds, entry_kind, invalid) in [

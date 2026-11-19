@@ -47,6 +47,18 @@ pub struct PlanEntry {
     pub format_version: u32,
 }
 
+/// Source of JSON path hints when planning an index rebuild.
+#[derive(Clone, Copy)]
+pub enum JsonIndexRebuildSource<'a> {
+    /// Region hints used to select candidate SSTs before reading their physical schema.
+    RegionHints,
+    /// Materialized input used to decide which paths a single SST can rebuild.
+    Sst(
+        &'a store_api::metadata::RegionMetadata,
+        &'a arrow_schema::Schema,
+    ),
+}
+
 /// Schema and options used to prepare work without reading input files.
 pub struct PlanContext<'a> {
     /// Shared region schema.
@@ -55,6 +67,8 @@ pub struct PlanContext<'a> {
     pub index_options: &'a IndexOptions,
     /// Lifecycle event requesting the build.
     pub build_type: IndexBuildType,
+    /// Available JSON path information for this stage of rebuild planning.
+    pub rebuild_source: Option<JsonIndexRebuildSource<'a>>,
     /// Existing column descriptors of the target SST during rebuild.
     /// Empty for new outputs, including compaction; input descriptors are available
     /// through [`BuildContext::inputs`] when constructing a creator.

@@ -522,7 +522,10 @@ pub enum IndexType {
 pub struct ColumnIndexMetadata {
     /// The column ID this index metadata applies to.
     pub column_id: ColumnId,
-    /// List of index types that have been successfully created for this column.
+    /// Path segments within the root JSON column. Absent for a whole-column index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_path: Option<Vec<String>>,
+    /// Index types successfully created for this column or path.
     pub created_indexes: IndexTypes,
     /// Version of the column's fulltext bloom index. `0` means not recorded: the column
     /// has no bloom index, or its index is the legacy format, which `ssts_index_meta`
@@ -613,6 +616,7 @@ impl FileMeta {
         let id_to_indexes = self
             .indexes
             .iter()
+            .filter(|index| index.json_path.is_none())
             .map(|index| (index.column_id, index))
             .collect::<std::collections::HashMap<_, _>>();
         let inverted_options = &index_options.inverted_index;
@@ -1852,6 +1856,10 @@ mod tests {
         let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
         assert!(file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
 
+        // An index on a path cannot satisfy the parent column's index requirement.
+        file_meta.indexes[0].json_path = Some(vec!["a".into()]);
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
+
         // Case 2: Superset match. File has more indexes than required.
         file_meta.indexes = vec![ColumnIndexMetadata {
             column_id: 1,
@@ -1950,6 +1958,7 @@ mod tests {
                 column_id: 1,
                 created_indexes: SmallVec::from_iter([IndexType::FulltextIndex]),
                 fulltext_bloom_version,
+                json_path: None,
             }],
             ..Default::default()
         };

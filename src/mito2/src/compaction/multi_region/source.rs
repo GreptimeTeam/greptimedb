@@ -236,6 +236,7 @@ impl SharedSource {
                     metadata: &target.metadata,
                     index_options: &target.options.index_options,
                     build_type: IndexBuildType::Compact,
+                    rebuild_source: None,
                     existing_indexes: &[],
                 });
                 (*id, Arc::new(work))
