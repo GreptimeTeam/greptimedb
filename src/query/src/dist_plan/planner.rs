@@ -1091,7 +1091,11 @@ mod tests {
             .expect("projection-wrapped join should retain its large-side routing input");
         assert_eq!(
             vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
-            planner.get_regions(&table_name, large_input).await.unwrap().0
+            planner
+                .get_regions(&table_name, large_input)
+                .await
+                .unwrap()
+                .0
         );
     }
 

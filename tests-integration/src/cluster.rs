@@ -425,7 +425,6 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
-<<<<<<< HEAD
     /// Routes frontend-to-datanode RPCs through real TCP clients instead of duplex clients.
     /// This only has an effect when `with_real_datanode_grpc_addr(true)` is also set.
     #[must_use]
@@ -438,13 +437,14 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_query_options(mut self, options: query::options::QueryOptions) -> Self {
         self.query_options = options;
-=======
+        self
+    }
+
     /// Enables the datanode concurrent read limiter with `max_concurrent_queries`
     /// permits per admission lane (ordinary and nested reads each get their own lane).
     #[must_use]
     pub fn with_datanode_max_concurrent_queries(mut self, max_concurrent_queries: usize) -> Self {
         self.datanode_max_concurrent_queries = Some(max_concurrent_queries);
->>>>>>> 1f7343cbf5f (fix(datanode): give nested MergeScan reads a bounded admission lane)
         self
     }
 

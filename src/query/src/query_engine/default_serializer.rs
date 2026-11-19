@@ -367,7 +367,13 @@ mod tests {
         register_greptime_functions(&mut state, &QueryContext::arc()).unwrap();
 
         for name in [
-            "prom_eq", "prom_ne", "prom_lt", "prom_le", "prom_gt", "prom_ge", "prom_sqrt",
+            "prom_eq",
+            "prom_ne",
+            "prom_lt",
+            "prom_le",
+            "prom_gt",
+            "prom_ge",
+            "prom_sqrt",
         ] {
             assert!(
                 state.scalar_functions().contains_key(name),
@@ -379,10 +385,6 @@ mod tests {
     use catalog::error::{QueryAccessDeniedSnafu, Result as CatalogResult};
     use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
-    use promql::functions::{
-        MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramCount,
-        NativeHistogramDrop, PromqlFloatToString,
-    };
     use common_function::aggrs::aggr_wrapper::StateWrapper;
     use common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
     use common_query::logical_plan::SubstraitPlanDecoderRef;
@@ -402,6 +404,10 @@ mod tests {
     use datatypes::data_type::DataType;
     use futures::stream::BoxStream;
     use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
+    use promql::functions::{
+        MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramCount,
+        NativeHistogramDrop, PromqlFloatToString,
+    };
     use session::context::QueryContext;
     use table::TableRef;
     use table::metadata::{TableId, TableInfoRef};

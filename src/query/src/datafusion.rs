@@ -921,8 +921,7 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
         PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionRole,
-        RegionScanner,
-        ScannerProperties,
+        RegionScanner, ScannerProperties,
     };
     use store_api::storage::{RegionId, ScanRequest};
     use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder};
