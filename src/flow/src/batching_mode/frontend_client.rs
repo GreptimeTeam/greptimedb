@@ -969,6 +969,7 @@ mod tests {
                 metrics: RecordBatchMetrics {
                     region_watermarks: vec![common_recordbatch::adapter::RegionWatermarkEntry {
                         region_id: 42,
+                        partition_expr: None,
                         watermark: Some(99),
                     }],
                     ..Default::default()

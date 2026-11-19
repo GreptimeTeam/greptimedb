@@ -23,6 +23,7 @@ use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::storage::CursorShard;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -56,6 +57,16 @@ pub struct TaskState {
     /// Region id -> last consumed watermark sequence. Incremental scans use
     /// this as the next lower sequence bound for each source region.
     checkpoints: BTreeMap<u64, u64>,
+    /// Region id -> the cursor of each of its partition-expression slices, when the
+    /// owner of this cursor knows them (Enterprise keeps a `(region, slice) -> seq`
+    /// cursor and writes it here).
+    ///
+    /// `checkpoints` stays the region projection every decision of this task reads: the
+    /// least advanced slice, because a region-level bound may not claim a sequence that
+    /// some slice has not consumed. The slices are only the *wire* form, so that a reader
+    /// holding a file adopted from the region can filter its rows by the cursor of the
+    /// slice the file belongs to. Empty means "only the region projection is known".
+    checkpoint_shards: BTreeMap<u64, Vec<CursorShard>>,
     /// Once set, the task will never attempt incremental mode again.
     /// Set when the flow's query shape is deterministically incompatible
     /// with incremental execution (e.g. unsupported aggregate expressions).
@@ -86,6 +97,7 @@ impl TaskState {
             checkpoint_mode: CheckpointMode::FullSnapshot,
             pending_fenced_repair: None,
             checkpoints: Default::default(),
+            checkpoint_shards: Default::default(),
             incremental_disabled: false,
             exec_state: ExecState::Idle,
             shutdown_rx,
@@ -131,6 +143,38 @@ impl TaskState {
         &self.checkpoints
     }
 
+    /// The expression slices of every region's cursor, when the owner knows them.
+    ///
+    /// Empty means the cursor is only known as the region projection
+    /// [`Self::checkpoints`] holds.
+    pub fn checkpoint_shards(&self) -> &BTreeMap<u64, Vec<CursorShard>> {
+        &self.checkpoint_shards
+    }
+
+    /// Advance the cursor of every `(region, expression slice)` the owner proved, and
+    /// keep [`Self::checkpoints`] the region projection of it.
+    ///
+    /// A region-level entry is the *least* advanced slice of that region: a reader of the
+    /// region's own rows cannot tell which slice a row belongs to, so it may not be told
+    /// to start after a sequence some other slice has not consumed.
+    pub fn advance_checkpoint_shards(&mut self, shards: BTreeMap<u64, Vec<CursorShard>>) {
+        self.checkpoints = shards
+            .iter()
+            .filter_map(|(region_id, shards)| {
+                shards
+                    .iter()
+                    .map(|shard| shard.seq)
+                    .min()
+                    .map(|seq| (*region_id, seq))
+            })
+            .collect();
+        self.checkpoint_shards = shards;
+        self.pending_fenced_repair = None;
+        if !self.incremental_disabled {
+            self.checkpoint_mode = CheckpointMode::Incremental;
+        }
+    }
+
     /// Read the live dirty-window queue without exposing TaskState internals to execution owners.
     pub fn dirty_time_windows(&self) -> &DirtyTimeWindows {
         &self.dirty_time_windows
@@ -160,10 +204,31 @@ impl TaskState {
         self.abandon_fenced_repair();
     }
 
+    /// Drop every stored cursor and re-enter FullSnapshot mode from scratch.
+    ///
+    /// Unlike [`Self::mark_full_snapshot`], which keeps the checkpoint map and
+    /// only abandons a fenced repair, and [`Self::advance_checkpoints`], which
+    /// replaces the map but promotes the task back to `Incremental`, this drops
+    /// the cursors themselves: they belong to a data layout that no longer
+    /// exists (for example after a region edit reassigned which rows a region
+    /// owns). A fresh full-snapshot watermark proof is required before
+    /// incremental mode may resume.
+    ///
+    /// `incremental_disabled` is left untouched: a permanently disabled task
+    /// stays disabled.
+    pub fn reset_to_full_snapshot(&mut self) {
+        self.checkpoints.clear();
+        self.checkpoint_shards.clear();
+        self.abandon_fenced_repair();
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+    }
+
     /// Replace full-snapshot checkpoints with a complete watermark proof.
     /// Clears fenced repair state and enters Incremental unless disabled.
     pub fn advance_checkpoints(&mut self, watermark_map: HashMap<u64, u64>) {
         self.checkpoints = watermark_map.into_iter().collect();
+        // A region-keyed proof says nothing about the slices of a region.
+        self.checkpoint_shards.clear();
         self.pending_fenced_repair = None;
         if !self.incremental_disabled {
             self.checkpoint_mode = CheckpointMode::Incremental;
@@ -182,6 +247,8 @@ impl TaskState {
                 self.checkpoints.insert(*region_id, *seq);
             }
         }
+        // A region-keyed proof says nothing about the slices of a region.
+        self.checkpoint_shards.clear();
         if !self.incremental_disabled {
             self.checkpoint_mode = CheckpointMode::Incremental;
         }
@@ -232,6 +299,8 @@ impl TaskState {
     pub fn finish_fenced_repair(&mut self) -> Option<BTreeMap<u64, u64>> {
         let repair = self.pending_fenced_repair.take()?;
         self.checkpoints = repair.high;
+        // A repair proves region watermarks, not the slices of a region.
+        self.checkpoint_shards.clear();
         if !self.incremental_disabled {
             self.checkpoint_mode = CheckpointMode::Incremental;
         }
@@ -1406,6 +1475,56 @@ mod test {
         assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
         assert!(state.pending_fenced_repair().is_none());
         assert_eq!(state.dirty_time_windows.len(), 2);
+    }
+
+    #[test]
+    fn test_reset_to_full_snapshot_drops_cursors_and_fenced_state() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert!(!state.is_incremental_disabled());
+
+        for second in [30, 40] {
+            state.dirty_time_windows.add_window(
+                Timestamp::new_second(second),
+                Some(Timestamp::new_second(second + 5)),
+            );
+        }
+        state
+            .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
+            .unwrap();
+        assert!(state.pending_fenced_repair().is_some());
+
+        state.reset_to_full_snapshot();
+
+        // The cursors themselves are gone: they belonged to a data layout that
+        // no longer exists.
+        assert!(state.checkpoints().is_empty());
+        // The fenced repair is abandoned and its pending windows return to the
+        // live dirty queue, so a later full snapshot still covers the backlog.
+        assert!(state.pending_fenced_repair().is_none());
+        assert_eq!(state.dirty_time_windows.len(), 2);
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        // Resetting the cursors never re-enables a disabled task.
+        assert!(!state.is_incremental_disabled());
+    }
+
+    #[test]
+    fn test_reset_to_full_snapshot_keeps_incremental_disabled() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state.disable_incremental();
+        assert!(state.is_incremental_disabled());
+
+        state.reset_to_full_snapshot();
+
+        assert!(state.checkpoints().is_empty());
+        assert!(state.is_incremental_disabled());
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
     }
 
     #[test]
