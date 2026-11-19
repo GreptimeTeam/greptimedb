@@ -76,7 +76,9 @@ use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
-use crate::options::{FlowQueryExtensions, remote_dyn_filter_pushdown_enabled_from_extensions};
+use crate::options::{
+    FlowQueryExtensions, FlowTableScanKind, remote_dyn_filter_pushdown_enabled_from_extensions,
+};
 use crate::query_engine::QueryEngineState;
 use crate::region_query::{RegionQueryHandlerRef, RegionReadLimiter};
 
@@ -991,6 +993,19 @@ impl MergeScanExec {
         self.captured_remote_dyn_filters.lock().unwrap().concat()
     }
 
+    /// Test-only hook to inject sub-stage metrics without executing the scan.
+    #[cfg(test)]
+    pub(crate) fn insert_sub_stage_metrics(
+        &self,
+        region_id: RegionId,
+        metrics: RecordBatchMetrics,
+    ) {
+        self.sub_stage_metrics
+            .lock()
+            .unwrap()
+            .insert(region_id, metrics);
+    }
+
     pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
         let sub_stage_metrics = self.sub_stage_metrics.lock().unwrap();
         let mut metrics: Vec<_> = sub_stage_metrics.iter().collect();
@@ -1005,21 +1020,27 @@ impl MergeScanExec {
         &self.regions
     }
 
-    pub fn is_flow_sink_scan(&self) -> bool {
-        let Some(sink_table_id) =
+    /// Returns the regions of this merge scan that participate in terminal region
+    /// watermark collection.
+    ///
+    /// Snapshot-read and incrementally replayed tables bind a per-region snapshot
+    /// on scan open, so their watermark is provable. Plain reads (including the
+    /// legacy sink-table scan and tables outside the table-scoped sets) are
+    /// skipped: merging their absent or unrelated bounds could fabricate a proof.
+    pub fn flow_watermark_regions(&self) -> Vec<RegionId> {
+        let Ok(Some(extensions)) =
             FlowQueryExtensions::parse_flow_extensions(&self.query_ctx.extensions())
-                .ok()
-                .flatten()
-                .and_then(|extensions| extensions.sink_table_id)
         else {
-            return false;
+            return Vec::new();
         };
 
-        !self.regions.is_empty()
-            && self
-                .regions
-                .iter()
-                .all(|region_id| region_id.table_id() == sink_table_id)
+        self.regions
+            .iter()
+            .copied()
+            .filter(|region_id| {
+                extensions.classify_table(region_id.table_id()) != FlowTableScanKind::Plain
+            })
+            .collect()
     }
 
     pub fn partition_count(&self) -> usize {

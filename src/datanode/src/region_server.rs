@@ -61,7 +61,7 @@ use query::QueryEngineRef;
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
-use query::options::should_collect_region_watermark_from_extensions;
+use query::options::should_collect_region_watermark_for_region_from_extensions;
 use serde_json;
 use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
@@ -1001,8 +1001,10 @@ fn wrap_flow_region_watermark_stream(
     region_id: RegionId,
     query_ctx: &QueryContextRef,
 ) -> SendableRecordBatchStream {
-    if should_collect_region_watermark_from_extensions(&query_ctx.extensions())
-        && let Some(seq) = query_ctx.get_snapshot(region_id.as_u64())
+    if should_collect_region_watermark_for_region_from_extensions(
+        &query_ctx.extensions(),
+        region_id,
+    ) && let Some(seq) = query_ctx.get_snapshot(region_id.as_u64())
     {
         Box::pin(RegionWatermarkStream::new(stream, region_id, seq)) as SendableRecordBatchStream
     } else {
