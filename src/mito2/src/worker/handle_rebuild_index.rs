@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::region::build_index_request;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, info, warn};
 use snafu::{IntoError, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionBuildIndexRequest;
@@ -213,6 +213,17 @@ impl<S> RegionWorkerLoop<S> {
                 }
                 .fail(),
             );
+            return;
+        }
+        // A region that awaits its Leader lease could not publish the index. In async build
+        // mode the end of the wait builds the missing indexes if the region is then a writable
+        // leader.
+        if let Err(e) = region
+            .manifest_ctx
+            .ensure_leader_lease_or_downgrading(region_id)
+        {
+            info!("Region {region_id} awaits its Leader lease, building no index");
+            sender.send(Err(e));
             return;
         }
 

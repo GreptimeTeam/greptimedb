@@ -55,6 +55,7 @@ use tokio::sync::{Notify, oneshot};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::engine::listener::{EventListener, FlushCancellationListener};
 use crate::engine::region_hook::{RegionHook, RegionHookRef};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -536,20 +537,36 @@ pub(crate) async fn count_ssts(store: &ObjectStore, region_dir: &str) -> usize {
         .count()
 }
 
+/// A commit is stale because the Leader deadline of its writer passes while it is written, or,
+/// with `awaiting_leader_lease`, because a catchup made its writer writable and no Leader lease
+/// confirmed it; the cases cover the commits such a writer still makes: the flushes of its
+/// downgrade and of its close.
 #[rstest]
-#[case::flush(RegionRequest::Flush(RegionFlushRequest::default()), 1)]
+#[case::flush(RegionRequest::Flush(RegionFlushRequest::default()), 1, false)]
 #[case::compaction(
     RegionRequest::Compact(RegionCompactRequest {
         options: compact_request::Options::StrictWindow(StrictWindow { window_seconds: 3600 }),
         ..Default::default()
     }),
-    1
+    1,
+    false
 )]
-#[case::truncate(RegionRequest::Truncate(RegionTruncateRequest::All), 0)]
+#[case::truncate(RegionRequest::Truncate(RegionTruncateRequest::All), 0, false)]
+#[case::downgrade_flush_awaiting_leader_lease(
+    RegionRequest::Flush(RegionFlushRequest::default()),
+    1,
+    true
+)]
+#[case::close_flush_awaiting_leader_lease(
+    RegionRequest::Close(RegionCloseRequest { flush_on_close: true }),
+    1,
+    true
+)]
 #[tokio::test]
 async fn test_stale_commit_on_deleted_delta_name_conflicts(
     #[case] commit: RegionRequest,
     #[case] new_ssts: usize,
+    #[case] awaiting_leader_lease: bool,
 ) {
     common_telemetry::init_default_ut_logging();
     // The creation is version 0 and the flushes below are versions 1 and 2.
@@ -569,7 +586,17 @@ async fn test_stale_commit_on_deleted_delta_name_conflicts(
         put_rows(&old_leader, region_id, rows(start)).await;
         flush_region(&old_leader, region_id, None).await;
     }
+    if awaiting_leader_lease {
+        promote_to_await_leader_lease(&old_leader, region_id).await;
+    }
     put_rows(&old_leader, region_id, rows(6)).await;
+    // A close turns the region downgrading itself.
+    if awaiting_leader_lease && !matches!(commit, RegionRequest::Close(_)) {
+        old_leader
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+            .await
+            .unwrap();
+    }
 
     let region = old_leader.get_region(region_id).unwrap();
     let (manifest, checkpoint) = {
@@ -614,7 +641,22 @@ async fn test_stale_commit_on_deleted_delta_name_conflicts(
         }
     }
 
-    old_leader.freeze_lease_clock(deadline);
+    if awaiting_leader_lease {
+        assert!(region.manifest_ctx.awaits_leader_lease());
+        // A lease that ends the wait during the write does not lift the check.
+        old_leader
+            .set_region_role_with_lease(
+                region_id,
+                RegionRole::StagingLeader,
+                Instant::now(),
+                deadline,
+                None,
+            )
+            .unwrap();
+        assert!(!region.manifest_ctx.awaits_leader_lease());
+    } else {
+        old_leader.freeze_lease_clock(deadline);
+    }
     blocker.release();
     let error = commit.await.unwrap().unwrap_err();
     assert!(error.retry_hint().is_retryable(), "{error:?}");

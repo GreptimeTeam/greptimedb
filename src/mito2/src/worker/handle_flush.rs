@@ -135,9 +135,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         for region in &regions {
             if self.flush_scheduler.is_flush_requested(region.region_id)
                 || !region.is_writable()
-                || region.is_staging()
+                || region.defers_background_flush()
             {
-                // Already flushing, not writable, or in staging, whose rows must stay in the WAL.
+                // Already flushing, not writable, staging, whose rows must stay in the WAL, or
+                // awaiting its Leader lease, which it needs to commit a flush.
                 continue;
             }
 
@@ -237,6 +238,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 if status.should_reject
                     || staging_usage >= self.write_buffer_manager.flush_limit() / 2
                 {
+                    pressure.rejected_region_ids.insert(region_id);
+                }
+                continue;
+            }
+
+            // A region that awaits its Leader lease cannot commit a flush yet, so, like a staging
+            // region, it rejects the writes it would stall: only the lease would release them.
+            if region.manifest_ctx.awaits_leader_lease() {
+                if status.should_stall || status.should_reject {
                     pressure.rejected_region_ids.insert(region_id);
                 }
                 continue;
@@ -381,8 +391,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
         self.update_topic_latest_entry_id(&region);
 
-        // A staging region must keep its WAL until staging ends, so it flushes nothing.
-        if region.is_staging() && !region.version().memtables.is_empty() {
+        // A staging region must keep its WAL until staging ends, and a region that awaits its
+        // Leader lease cannot commit a flush before it is downgraded, so they flush nothing.
+        if (region.is_staging() || region.manifest_ctx.refuses_commits_awaiting_leader_lease())
+            && !region.version().memtables.is_empty()
+        {
             sender.send(match request.reason {
                 // These only ask to advance the flushed position, which can wait.
                 Some(RegionFlushReason::RegionMigration | RegionFlushReason::RemoteWalPrune) => {
@@ -418,7 +431,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 Some(tail.node_id) == node_id && tail.after <= version.flushed_entry_id
             });
             if !region.is_writable()
-                || region.is_staging()
+                || region.defers_background_flush()
                 || self.flush_scheduler.is_flush_requested(region_id)
                 || region_memtable_usage(&version) == 0
                 || release_capped
@@ -444,10 +457,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 continue;
             }
             self.update_topic_latest_entry_id(region);
-            // The rows of a staging region must stay in the WAL until staging ends, so a staging
-            // region with rows pins its topic's prune point: the update above only keeps the id
-            // fresh while the memtable is empty.
-            if region.is_staging() {
+            // A staging region, whose rows must stay in the WAL until staging ends, or a region
+            // that awaits its Leader lease, which it needs to commit a flush, pins its topic's
+            // prune point while it has rows: the update above only keeps the id fresh while the
+            // memtable is empty.
+            if region.defers_background_flush() {
                 continue;
             }
 

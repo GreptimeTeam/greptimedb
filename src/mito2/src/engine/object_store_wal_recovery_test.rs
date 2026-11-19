@@ -2306,12 +2306,17 @@ async fn wait_for_pressure_admission(
 
 /// Exercises the production threshold, worker timers, flush and WAL release.
 /// Both regions pin the oldest object and belong to different workers.
+/// With `awaiting_leader_lease`, region A is a writable leader that awaits its Leader lease.
 #[rstest]
-#[case::writable(RegionRoleState::Leader(RegionLeaderState::Writable))]
-#[case::follower(RegionRoleState::Follower)]
-#[case::staging(RegionRoleState::Leader(RegionLeaderState::Staging))]
+#[case::writable(RegionRoleState::Leader(RegionLeaderState::Writable), false)]
+#[case::follower(RegionRoleState::Follower, false)]
+#[case::staging(RegionRoleState::Leader(RegionLeaderState::Staging), false)]
+#[case::awaiting_leader_lease(RegionRoleState::Leader(RegionLeaderState::Writable), true)]
 #[tokio::test]
-async fn test_wal_pressure_flushes_blockers_across_workers(#[case] state: RegionRoleState) {
+async fn test_wal_pressure_flushes_blockers_across_workers(
+    #[case] state: RegionRoleState,
+    #[case] awaiting_leader_lease: bool,
+) {
     use crate::time_provider::mock::MockTimeProvider;
 
     let mut env = TestEnv::new().await;
@@ -2423,8 +2428,18 @@ async fn test_wal_pressure_flushes_blockers_across_workers(#[case] state: Region
         RegionRoleState::Leader(RegionLeaderState::Writable) => {}
         _ => unreachable!(),
     }
+    let lease_deadline = std::time::Instant::now() + Duration::from_secs(600);
+    if awaiting_leader_lease {
+        region(&engine, REGION_B)
+            .manifest_ctx
+            .leader_deadline
+            .extend(lease_deadline);
+        region_a
+            .manifest_ctx
+            .start_leader_lease_wait_for_test(REGION_A);
+    }
     clock.set_now(now + 240_000);
-    if state != RegionRoleState::Leader(RegionLeaderState::Writable) {
+    if state != RegionRoleState::Leader(RegionLeaderState::Writable) || awaiting_leader_lease {
         // Observe admission itself: a failed manifest commit would also leave
         // the watermark unchanged, but must not make this assertion pass.
         assert!(!wait_for_pressure_admission(&mut observations, REGION_A).await);
@@ -2445,6 +2460,17 @@ async fn test_wal_pressure_flushes_blockers_across_workers(#[case] state: Region
         assert_eq!(vec![REGION_A], store.flush_candidates());
         if region_a.is_staging() {
             region_a.exit_staging().unwrap();
+        } else if awaiting_leader_lease {
+            let sent_at = std::time::Instant::now();
+            engine
+                .set_region_role_with_lease(
+                    REGION_A,
+                    RegionRole::Leader,
+                    sent_at,
+                    lease_deadline,
+                    None,
+                )
+                .unwrap();
         } else {
             engine
                 .set_region_role(REGION_A, RegionRole::Leader)

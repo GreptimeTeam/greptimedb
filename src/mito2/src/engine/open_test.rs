@@ -35,8 +35,9 @@ use tokio::sync::{Notify, oneshot};
 
 use crate::compaction::compactor::{CompactionRegionOpener, OpenCompactionRegionRequest};
 use crate::config::MitoConfig;
+use crate::engine::MitoEngine;
 use crate::engine::flush_test::MockRegionHook;
-use crate::engine::listener::EventListener;
+use crate::engine::listener::{EventListener, EventListenerRef};
 use crate::engine::region_hook::RegionHookRef;
 use crate::error;
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
@@ -1198,22 +1199,19 @@ fn new_dummy_fetcher(region_id: RegionId, expr_json: String) -> PartitionExprFet
     })
 }
 
-#[rstest::rstest]
-#[case::from_writable(false)]
-#[case::after_empty_staging(true)]
-#[tokio::test]
-async fn test_open_backfills_partition_expr_with_fetcher(#[case] staging: bool) {
-    let mut env = TestEnv::with_prefix("open-backfill-fetcher").await;
-
-    // prepare plugins with dummy fetcher
-    let region_id = RegionId::new(100, 1);
+/// Creates `region_id` without a partition expression, as a table created before the manifest
+/// stored it, and reopens it on an engine whose fetcher fills the expression in and that reports
+/// to `listener`. Returns the engine, the expression and the table directory.
+pub(crate) async fn open_region_with_backfilled_partition_expr(
+    env: &mut TestEnv,
+    region_id: RegionId,
+    listener: Option<EventListenerRef>,
+) -> (MitoEngine, String, String) {
     let expr_json = r#"{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"UInt32\":10}}}}"#.to_string();
     let fetcher = new_dummy_fetcher(region_id, expr_json.clone());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, None, Some(fetcher))
+        .create_engine_with(MitoConfig::default(), None, listener, Some(fetcher))
         .await;
-
-    // create region with partition_expr=None (legacy style)
     let request = CreateRequestBuilder::new()
         .table_dir("t")
         .partition_expr_json(None)
@@ -1222,11 +1220,9 @@ async fn test_open_backfills_partition_expr_with_fetcher(#[case] staging: bool) 
         .handle_request(region_id, RegionRequest::Create(request.clone()))
         .await
         .unwrap();
-
     let meta = engine.get_region(region_id).unwrap().metadata();
     assert!(meta.partition_expr.is_none());
 
-    // close and reopen to trigger backfill in opener
     engine
         .handle_request(
             region_id,
@@ -1249,10 +1245,20 @@ async fn test_open_backfills_partition_expr_with_fetcher(#[case] staging: bool) 
         )
         .await
         .unwrap();
-
-    // verify partition_expr is backfilled and persisted
     let meta = engine.get_region(region_id).unwrap().metadata();
     assert_eq!(meta.partition_expr.as_deref(), Some(expr_json.as_str()));
+    (engine, expr_json, request.table_dir)
+}
+
+#[rstest::rstest]
+#[case::from_writable(false)]
+#[case::after_empty_staging(true)]
+#[tokio::test]
+async fn test_open_backfills_partition_expr_with_fetcher(#[case] staging: bool) {
+    let mut env = TestEnv::with_prefix("open-backfill-fetcher").await;
+    let region_id = RegionId::new(100, 1);
+    let (engine, expr_json, table_dir) =
+        open_region_with_backfilled_partition_expr(&mut env, region_id, None).await;
 
     // Set leader and trigger backfill
     engine
@@ -1294,7 +1300,7 @@ async fn test_open_backfills_partition_expr_with_fetcher(#[case] staging: bool) 
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                table_dir: request.table_dir.clone(),
+                table_dir,
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,

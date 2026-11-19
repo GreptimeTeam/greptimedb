@@ -440,6 +440,15 @@ impl WorkerGroup {
         &self.granted_leases
     }
 
+    /// Tells the worker of `region` that a lease ended its wait for its Leader lease, without
+    /// waiting.
+    pub(crate) fn notify_leader_lease_wait_ended(&self, region: &MitoRegionRef) {
+        handle_catchup::notify_leader_lease_wait_ended(
+            &self.worker(region.region_id).sender,
+            region,
+        );
+    }
+
     /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
     pub(crate) fn notify_writable(&self, region: &MitoRegionRef) {
         handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
@@ -1856,6 +1865,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_region_reloaded(region_id, old, result).await
             }
             BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::LeaderLeaseWaitEnded => {
+                self.handle_leader_lease_wait_ended(region_id).await
+            }
             BackgroundNotify::RegionCannotReplay { region } => {
                 self.handle_region_cannot_replay(region_id, region)
             }
@@ -2055,6 +2067,22 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_discarded_tails_wal_released(_region_id);
+        }
+    }
+
+    /// The worker handled the end of the region's wait for its Leader lease.
+    pub(crate) fn on_leader_lease_wait_ended(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_leader_lease_wait_ended(_region_id);
+        }
+    }
+
+    /// The worker spawns the persisting of the region's backfilled metadata.
+    pub(crate) fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_persist_backfilled_metadata_begin(_region_id);
         }
     }
 

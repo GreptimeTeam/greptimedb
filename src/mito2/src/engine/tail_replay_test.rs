@@ -44,9 +44,9 @@ use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    PathType, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionDiscardPendingTailsRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest,
-    RegionRequest, RegionTruncateRequest,
+    PathType, RegionAlterRequest, RegionBuildIndexRequest, RegionCatchupRequest,
+    RegionCloseRequest, RegionDiscardPendingTailsRequest, RegionDropRequest, RegionFlushRequest,
+    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -102,6 +102,7 @@ struct TailReplayListener {
     fence_begins: AtomicUsize,
     /// Index builds the worker learned stopped.
     index_builds_stopped: AtomicUsize,
+    compactions_scheduled: AtomicUsize,
 }
 
 #[async_trait]
@@ -143,6 +144,10 @@ impl EventListener for TailReplayListener {
 
     async fn on_index_build_stopped(&self, _region_file_id: RegionFileId) {
         self.index_builds_stopped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_compaction_scheduled(&self, _region_id: RegionId) {
+        self.compactions_scheduled.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -196,6 +201,10 @@ impl TailReplayListener {
 
     fn fence_begins(&self) -> usize {
         self.fence_begins.load(Ordering::Relaxed)
+    }
+
+    fn compactions_scheduled(&self) -> usize {
+        self.compactions_scheduled.load(Ordering::Relaxed)
     }
 }
 
@@ -756,19 +765,83 @@ async fn test_tail_read_stops_at_its_upto(#[case] upto_kind: UptoKind) {
     assert_eq!(region.entries[0], region.version().flushed_entry_id);
 }
 
+/// With write leases the replayed tail is published while the region awaits its Leader lease,
+/// and the compaction its commit could not start starts when the lease ends the wait.
+#[rstest]
+#[case::without_write_lease(false)]
+#[case::awaiting_leader_lease(true)]
 #[tokio::test]
-async fn test_catchup_replays_remote_reported_tail() {
-    let region = TestRegion::new("tail-replay-remote-reported", false, None).await;
+async fn test_catchup_replays_remote_reported_tail(#[case] leased: bool) {
+    let region = TestRegion::new("tail-replay-remote-reported", leased, None).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;
     region
         .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
         .await;
+    // The catchup lets the region write until the node's deadline.
+    if leased {
+        region
+            .engine
+            .renew_node_lease(Instant::now() + Duration::from_secs(10));
+    }
 
     region.catchup().await;
     region.wait_until_replayed().await;
 
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    assert_eq!(leased, mito_region.manifest_ctx.awaits_leader_lease());
     assert_eq!(last, region.version().flushed_entry_id);
     assert_eq!(9, count_rows(&region.engine, region.region_id).await);
+    if leased {
+        // The worker handled the replay's commit before the count above.
+        assert_eq!(0, region.listener.compactions_scheduled());
+        let now = Instant::now();
+        region
+            .engine
+            .set_region_role_with_lease(
+                region.region_id,
+                RegionRole::Leader,
+                now,
+                now + Duration::from_secs(10),
+                None,
+            )
+            .unwrap();
+    }
+    wait_until(|| region.listener.compactions_scheduled() == 1).await;
+}
+
+/// A tail replay that commits while the region awaits its Leader lease starts no checkpoint,
+/// which could clean up versions the previous leader may still need.
+#[tokio::test]
+async fn test_tail_commit_awaiting_leader_lease_starts_no_checkpoint() {
+    let config = MitoConfig {
+        manifest_checkpoint_distance: 1,
+        ..Default::default()
+    };
+    let region = TestRegion::build("tail-replay-no-checkpoint", true, None, None, config).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    region
+        .engine
+        .renew_node_lease(Instant::now() + Duration::from_secs(10));
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let manager = mito_region.manifest_ctx.manifest_manager.read().await;
+    let (version, checkpoint) = (
+        manager.last_version(),
+        manager.checkpointer().last_checkpoint_version(),
+    );
+    drop(manager);
+
+    region.catchup().await;
+    region.wait_until_replayed().await;
+
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    assert!(mito_region.manifest_ctx.awaits_leader_lease());
+    let manager = mito_region.manifest_ctx.manifest_manager.read().await;
+    assert!(manager.last_version() > version);
+    assert_eq!(checkpoint, manager.checkpointer().last_checkpoint_version());
+    assert!(!manager.checkpointer().is_doing_checkpoint());
 }
 
 #[tokio::test]
@@ -875,6 +948,22 @@ async fn test_unread_remote_listed_tail_waits_for_leader_lease() {
     assert_eq!(version, next_manifest_version(&mito_region).await);
     // The replay waits for the lease instead of ending and starting again.
     assert_eq!(0, region.listener.ended());
+    // Without write leases a StagingLeader lease is not the Leader lease the replay waits for.
+    let now = Instant::now();
+    region
+        .engine
+        .set_region_role_with_lease(
+            region.region_id,
+            RegionRole::StagingLeader,
+            now,
+            now + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+    let checks = region.listener.lease_checks();
+    wait_until(|| region.listener.lease_checks() >= checks + 2).await;
+    assert!(region.has_pending_tails());
+    assert_eq!(version, next_manifest_version(&mito_region).await);
     region.promote_with_lease();
     region.wait_until_replayed().await;
 
@@ -1728,17 +1817,30 @@ async fn test_failed_replay_reloads_region_from_newer_manifest() {
     assert_eq!(6, count_rows(&region.engine, region.region_id).await);
 }
 
+/// With write leases the replay commits while the region awaits its Leader lease, and the lease
+/// that ends the wait builds the index the replay could not publish.
 #[rstest]
-#[case::create_on_flush(true)]
-#[case::no_create_on_flush(false)]
+#[case::create_on_flush(true, false)]
+#[case::no_create_on_flush(false, false)]
+#[case::awaiting_leader_lease(true, true)]
 #[tokio::test]
-async fn test_replayed_ssts_build_index_as_flushed(#[case] create_on_flush: bool) {
-    let region = TestRegion::with_config(
+async fn test_replayed_ssts_build_index_as_flushed(
+    #[case] create_on_flush: bool,
+    #[case] leased: bool,
+) {
+    let region = TestRegion::build(
         "tail-replay-index",
+        leased,
+        None,
         None,
         async_build_mode_config(create_on_flush),
     )
     .await;
+    if leased {
+        region
+            .engine
+            .renew_node_lease(Instant::now() + Duration::from_secs(10));
+    }
     let region_id = RegionId::new(1, 2);
     let request = CreateRequestBuilder::new()
         .insert_option(WAL_OPTIONS_KEY, &wal_options()[WAL_OPTIONS_KEY])
@@ -1765,6 +1867,37 @@ async fn test_replayed_ssts_build_index_as_flushed(#[case] create_on_flush: bool
         .unwrap();
     let replayed = region.engine.get_region(region_id).unwrap();
     wait_until(|| !replayed.version().has_pending_tails()).await;
+    if leased {
+        assert!(replayed.manifest_ctx.awaits_leader_lease());
+        // The worker handled the replay's commit before this request, and refused its build.
+        let err = region
+            .engine
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.as_any().downcast_ref::<Error>(),
+                Some(Error::RegionLeaseNotReceived { .. })
+            ),
+            "{err:?}"
+        );
+        assert_eq!(region.listener.index_builds_stopped(), 0);
+        let now = Instant::now();
+        region
+            .engine
+            .set_region_role_with_lease(
+                region_id,
+                RegionRole::Leader,
+                now,
+                now + Duration::from_secs(10),
+                None,
+            )
+            .unwrap();
+    }
 
     wait_until(|| region.listener.index_builds_stopped() == 1).await;
     let version = replayed.version();

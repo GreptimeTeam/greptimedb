@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Handling catchup request.
+//! Handling catchup request and the end of a region's wait for its Leader lease.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_telemetry::tracing::warn;
@@ -23,16 +24,22 @@ use store_api::logstore::LogStore;
 use store_api::region_engine::SettableRegionRoleState;
 use store_api::region_request::RegionCatchupRequest;
 use store_api::storage::RegionId;
+use tokio::sync::mpsc::Sender;
 
+use crate::config::IndexBuildMode;
 use crate::error::{self, Result};
-use crate::region::MitoRegion;
 use crate::region::catchup::RegionCatchupTask;
 use crate::region::opener::RegionOpener;
-use crate::request::OptionOutputTx;
+use crate::region::{MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
+use crate::sst::index::IndexBuildType;
+use crate::tail_replay::notify_worker;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
-use crate::worker::{RegionWorkerLoop, drain_ended_staging, handle_tail_replay};
+use crate::worker::{
+    RegionWorkerLoop, WorkerListener, drain_ended_staging, handle_reload, handle_tail_replay,
+};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_catchup_request(
@@ -222,4 +229,70 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         Ok(region)
     }
+
+    /// Starts the work that a region deferred while it awaited its Leader lease.
+    pub(crate) async fn handle_leader_lease_wait_ended(&mut self, region_id: RegionId) {
+        let Some(region) = self.regions.get_region(region_id) else {
+            return;
+        };
+        // As for any flush, the completion of these handles the stalled writes.
+        self.maybe_flush_worker();
+        self.maybe_flush_write_regions(HashSet::from([region_id]));
+        let state = region.state();
+        if state == RegionRoleState::Leader(RegionLeaderState::Writable) {
+            self.schedule_compaction(&region).await;
+            self.build_missing_indexes(&region).await;
+            spawn_persist_backfilled_metadata(&self.listener, &self.sender, region);
+        } else {
+            info!(
+                "Region {region_id} is {state:?} when its Leader lease wait ends, starting no compaction, building no missing index and persisting no backfilled metadata"
+            );
+        }
+        self.listener.on_leader_lease_wait_ended(region_id);
+    }
+
+    /// Builds the indexes of the region's files that lack them, which a region that waits does
+    /// not build.
+    async fn build_missing_indexes(&mut self, region: &MitoRegionRef) {
+        if self.config.index.build_mode != IndexBuildMode::Async {
+            return;
+        }
+        let request = BuildIndexRequest {
+            region_id: region.region_id,
+            build_type: IndexBuildType::Flush,
+            file_metas: Vec::new(),
+            result_senders: Vec::new(),
+        };
+        self.handle_rebuild_index(request, OptionOutputTx::new(None))
+            .await;
+    }
+}
+
+/// Persists the metadata the opener filled in, which the catchup of a region that waits does
+/// not, without blocking the worker. The commit runs outside the worker, so it asks for the
+/// reload of a region it fences.
+fn spawn_persist_backfilled_metadata(
+    listener: &WorkerListener,
+    sender: &Sender<WorkerRequestWithTime>,
+    region: MitoRegionRef,
+) {
+    listener.on_persist_backfilled_metadata_begin(region.region_id);
+    let sender = sender.clone();
+    common_runtime::spawn_global(async move {
+        region.persist_backfilled_metadata().await;
+        handle_reload::notify_if_fenced(&sender, &region).await;
+    });
+}
+
+/// Tells the worker that a lease ended the wait of `region` for its Leader lease, without
+/// waiting.
+pub(crate) fn notify_leader_lease_wait_ended(
+    sender: &Sender<WorkerRequestWithTime>,
+    region: &MitoRegionRef,
+) {
+    let sender = sender.clone();
+    let region_id = region.region_id;
+    common_runtime::spawn_global(async move {
+        notify_worker(&sender, region_id, BackgroundNotify::LeaderLeaseWaitEnded).await;
+    });
 }

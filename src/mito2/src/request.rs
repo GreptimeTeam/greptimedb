@@ -1171,6 +1171,9 @@ pub(crate) enum BackgroundNotify {
     },
     /// The region became writable and may have pending tails to replay.
     RegionBecameWritable,
+    /// A lease ended the region's wait for its Leader lease, so the work the wait deferred may
+    /// start.
+    LeaderLeaseWaitEnded,
     /// A role change left the region unable to replay its tails (see
     /// [MitoRegion::can_replay_tails](crate::region::MitoRegion::can_replay_tails)); a running
     /// replay is cancelled.
@@ -1236,6 +1239,7 @@ impl BackgroundNotify {
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
             | Self::RegionBecameWritable
+            | Self::LeaderLeaseWaitEnded
             | Self::RegionCannotReplay { .. }
             | Self::TailReplayCommitted { .. }
             | Self::TailReplayEnded

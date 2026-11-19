@@ -208,6 +208,16 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Direct SST imports without a staging binding cannot publish into staging.
   `worker/handle_manifest.rs` seals edit admission while EnterStaging drains accepted
   edits. Scheduler-owned DDLs resume through execution, bypassing initial admission.
+- On a node whose writes need a lease, a region that a catchup made writable waits for a
+  Leader or StagingLeader lease sent after the catchup (`awaits_leader_lease`). Until then
+  `ManifestContext::update_locked` refuses its commits unless they are staged or the region is
+  downgrading (a close that must flush downgrades first); only replayed tails
+  (`update_manifest_for_tails`) skip the check, and ending staging checks it before
+  `commit_staged_locked`. No flush or compaction trigger starts work for a waiting region except
+  a downgrade's flush. The lease that ends the wait wakes the worker
+  (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
+  region is then a writable leader, start a compaction, build missing indexes and persist
+  backfilled metadata.
 - The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
   region instance, so a reopen during catchup keeps it. Every path that removes a region from
   a worker's region map must also remove its record: `RegionWorkerLoop::remove_region`
