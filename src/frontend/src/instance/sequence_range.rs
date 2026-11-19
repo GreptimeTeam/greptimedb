@@ -266,6 +266,20 @@ impl Instance {
                     (lower, generation, cache.source_epoch())
                 }
                 None => {
+                    // Install the name before scanning. Without this provisional
+                    // state, a rename racing the very first probe would not be
+                    // observable, and that probe could publish an untracked fill
+                    // under the old name after the rename eviction.
+                    state.insert(
+                        table_id,
+                        SourceProbeState {
+                            route_version: version,
+                            table_name: qualified_name.clone(),
+                            source_name: source_table.to_string(),
+                            generation: 0,
+                            cursors: BTreeMap::new(),
+                        },
+                    );
                     let lower = regions.iter().map(|region| (*region, 0)).collect();
                     (lower, 0, cache.source_epoch())
                 }
