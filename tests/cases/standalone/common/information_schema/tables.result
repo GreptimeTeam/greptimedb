@@ -22,7 +22,8 @@ create table t (ts timestamp time index);
 
 Affected Rows: 0
 
-select table_catalog, table_schema, table_name from information_schema.tables where table_schema not in ('information_schema', 'greptime_private');
+select table_catalog, table_schema, table_name from information_schema.tables where table_schema not in ('information_schema', 'greptime_private')
+order by table_catalog, table_schema, table_name;
 
 +---------------+--------------+------------+
 | table_catalog | table_schema | table_name |

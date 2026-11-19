@@ -10,7 +10,8 @@ use abcde;
 
 create table t (ts timestamp time index);
 
-select table_catalog, table_schema, table_name from information_schema.tables where table_schema not in ('information_schema', 'greptime_private');
+select table_catalog, table_schema, table_name from information_schema.tables where table_schema not in ('information_schema', 'greptime_private')
+order by table_catalog, table_schema, table_name;
 
 use public;
 
