@@ -37,6 +37,7 @@ use crate::sst::file::{FileFormat, FileTimeRange};
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 
+pub(crate) mod blob;
 pub mod file_range;
 pub mod flat_format;
 pub mod format;
@@ -192,6 +193,8 @@ pub struct WriteOptions {
     pub max_file_size: Option<usize>,
     /// Encoding policy for direct floating-point field columns.
     pub float_field_encoding: FloatFieldEncoding,
+    /// Value size that moves a string or binary field column into a blob sidecar.
+    pub blob_threshold: Option<usize>,
     /// Maximum number of blocking tasks that encode the columns of a row group.
     /// Values below 2 encode on the writing task.
     pub encode_parallelism: usize,
@@ -206,6 +209,7 @@ impl Default for WriteOptions {
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
             max_file_size: None,
             float_field_encoding: FloatFieldEncoding::default(),
+            blob_threshold: None,
             encode_parallelism: 1,
             encode_runtime: EncodeRuntime::default(),
         }

@@ -1011,6 +1011,10 @@ impl<M: SstMerger> DefaultCompactor<M> {
                         max_file_size: unit.max_file_size,
                         row_group_size: context.region_options.row_group_size(),
                         float_field_encoding: context.region_options.float_field_encoding,
+                        blob_threshold: context
+                            .region_options
+                            .sst_blob_threshold
+                            .map(|size| size.as_bytes() as usize),
                         encode_parallelism: context
                             .region_options
                             .compaction_output_parallelism_or(
@@ -1091,6 +1095,10 @@ where
                 max_file_size: picker_output.max_file_size,
                 row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
+                blob_threshold: compaction_region
+                    .region_options
+                    .sst_blob_threshold
+                    .map(|size| size.as_bytes() as usize),
                 encode_parallelism: compaction_region
                     .region_options
                     .compaction_output_parallelism_or(

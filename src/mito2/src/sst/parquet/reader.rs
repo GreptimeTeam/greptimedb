@@ -76,6 +76,7 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
+use crate::sst::parquet::blob::{BlobResolver, PendingBatch, blob_columns};
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
@@ -1809,6 +1810,10 @@ pub(crate) struct RowGroupBuildContext<'a> {
 
 impl RowGroupReaderBuilder {
     /// Path of the file to read.
+    pub(crate) fn object_store(&self) -> &ObjectStore {
+        &self.object_store
+    }
+
     pub(crate) fn file_path(&self) -> &str {
         &self.file_path
     }
@@ -2593,6 +2598,10 @@ pub(crate) struct FlatRowGroupReader {
     stream: ProjectedRecordBatchStream,
     /// Cached sequence array to override sequences.
     override_sequence: Option<ArrayRef>,
+    /// Resolves out-of-line values when the file stores some columns in a blob sidecar.
+    blob_resolver: Option<BlobResolver>,
+    /// Decoded batch whose remaining rows still hold references.
+    pending: Option<PendingBatch>,
 }
 
 impl FlatRowGroupReader {
@@ -2602,16 +2611,33 @@ impl FlatRowGroupReader {
         let override_sequence = context
             .read_format()
             .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
+        let builder = context.reader_builder();
+        let blob_columns = blob_columns(builder.parquet_metadata());
+        let blob_resolver = (!blob_columns.is_empty()).then(|| {
+            BlobResolver::new(
+                builder.object_store().clone(),
+                builder.file_path(),
+                blob_columns,
+            )
+        });
 
         Self {
             context,
             stream,
             override_sequence,
+            blob_resolver,
+            pending: None,
         }
     }
 
     /// Returns the next RecordBatch.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        if let (Some(resolver), Some(pending)) = (&self.blob_resolver, &mut self.pending) {
+            if let Some(batch) = resolver.next_chunk(pending).await? {
+                return Ok(Some(batch));
+            }
+            self.pending = None;
+        }
         match self.stream.next().await {
             Some(batch_result) => {
                 let record_batch = batch_result?;
@@ -2620,7 +2646,18 @@ impl FlatRowGroupReader {
                     .context
                     .read_format()
                     .convert_batch(record_batch, self.override_sequence.as_ref())?;
-                Ok(Some(record_batch))
+                let Some(resolver) = &self.blob_resolver else {
+                    return Ok(Some(record_batch));
+                };
+                if record_batch.num_rows() == 0 {
+                    return Ok(Some(record_batch));
+                }
+                let Some(mut pending) = resolver.prepare(record_batch.clone())? else {
+                    return Ok(Some(record_batch));
+                };
+                let first = resolver.next_chunk(&mut pending).await?;
+                self.pending = Some(pending);
+                Ok(first)
             }
             None => Ok(None),
         }

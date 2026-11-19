@@ -141,6 +141,10 @@ pub struct RegionOptions {
     /// Encoding for direct floating-point field columns in Parquet SSTs.
     #[serde(default)]
     pub float_field_encoding: FloatFieldEncoding,
+    /// String and binary field columns whose first written value of this size or larger is
+    /// found move out of each SST into a blob sidecar. `None` keeps all values in SSTs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sst_blob_threshold: Option<ReadableSize>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -172,6 +176,14 @@ impl RegionOptions {
                 parallelism > 0,
                 InvalidRegionOptionsSnafu {
                     reason: "compaction.experimental_output_parallelism must be greater than 0",
+                }
+            );
+        }
+        if let Some(threshold) = self.sst_blob_threshold {
+            ensure!(
+                threshold.as_bytes() > 0,
+                InvalidRegionOptionsSnafu {
+                    reason: "experimental_sst_blob_threshold must be greater than 0",
                 }
             );
         }
@@ -387,6 +399,7 @@ impl RegionOptions {
             write_buffer_size: options.write_buffer_size,
             preserve_row_sequence: options.preserve_row_sequence,
             float_field_encoding,
+            sst_blob_threshold: options.sst_blob_threshold,
         };
         opts.validate()?;
 
@@ -542,6 +555,9 @@ struct RegionOptionsWithoutEnum {
     #[serde(rename = "experimental_sst_float_field_encoding")]
     #[serde_as(as = "NoneAsEmptyString")]
     float_field_encoding: Option<FloatFieldEncoding>,
+    #[serde(rename = "experimental_sst_blob_threshold")]
+    #[serde_as(as = "NoneAsEmptyString")]
+    sst_blob_threshold: Option<ReadableSize>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -560,6 +576,7 @@ impl Default for RegionOptionsWithoutEnum {
             max_row_group_row_count: options.max_row_group_row_count,
             preserve_row_sequence: options.preserve_row_sequence,
             float_field_encoding: Some(options.float_field_encoding),
+            sst_blob_threshold: options.sst_blob_threshold,
         }
     }
 }
@@ -736,6 +753,18 @@ mod tests {
         assert!(object_store_wal.requires_conditional_manifest_publication(true));
         assert!(!object_store_wal.requires_conditional_manifest_publication(false));
         assert!(!options(WalOptions::RaftEngine).requires_conditional_manifest_publication(true));
+    }
+
+    #[test]
+    fn test_sst_blob_threshold_parses() {
+        assert_eq!(None, RegionOptions::default().sst_blob_threshold);
+        let map = make_map(&[("experimental_sst_blob_threshold", "64KiB")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert_eq!(Some(ReadableSize::kb(64)), options.sst_blob_threshold);
+
+        let map = make_map(&[("experimental_sst_blob_threshold", "0")]);
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
+        assert!(err.to_string().contains("experimental_sst_blob_threshold"));
     }
 
     #[test]
@@ -1230,6 +1259,7 @@ mod tests {
             write_buffer_size: None,
             preserve_row_sequence: false,
             float_field_encoding: FloatFieldEncoding::default(),
+            sst_blob_threshold: None,
         };
         assert_eq!(expect, options);
     }
@@ -1290,6 +1320,7 @@ mod tests {
             compaction_output_parallelism: Some(4),
             preserve_row_sequence: true,
             float_field_encoding: FloatFieldEncoding::default(),
+            sst_blob_threshold: None,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         assert!(region_options_json_str.contains("preserve_row_sequence"));
@@ -1372,6 +1403,7 @@ mod tests {
             compaction_output_parallelism: None,
             preserve_row_sequence: false,
             float_field_encoding: FloatFieldEncoding::default(),
+            sst_blob_threshold: None,
         };
         assert_eq!(options, got);
     }

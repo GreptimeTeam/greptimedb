@@ -40,6 +40,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::stream::spawn_compact_stream;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
+use crate::sst::parquet::blob::row_group_sizes;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
 
@@ -84,15 +85,7 @@ impl CompactionSstReaderBuilder<'_> {
         let batch_size = crate::batch_size::estimate_batch_size(
             parquet_metadata
                 .iter()
-                .flat_map(|metadata| metadata.row_groups())
-                .map(|row_group| {
-                    let uncompressed_bytes = row_group
-                        .columns()
-                        .iter()
-                        .map(|column| column.uncompressed_size() as u64)
-                        .sum();
-                    (row_group.num_rows() as u64, uncompressed_bytes)
-                }),
+                .flat_map(|metadata| row_group_sizes(metadata)),
         );
 
         let projection = (0..self.metadata.column_metadatas.len()).collect();

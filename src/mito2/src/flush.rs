@@ -679,6 +679,10 @@ impl MemtableSstWriter {
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
             float_field_encoding: version.options.float_field_encoding,
+            blob_threshold: version
+                .options
+                .sst_blob_threshold
+                .map(|size| size.as_bytes() as usize),
             ..Default::default()
         };
         if let Some(row_group_size) = self.row_group_size {
@@ -1110,9 +1114,14 @@ fn memtable_flat_sources(
         sources: SmallVec::new(),
         encoded: SmallVec::new(),
     };
+    // Encoded parts are uploaded as they are, which would keep large values inside the SST.
+    let upload_encoded = options.sst_blob_threshold.is_none();
+    let is_uploaded_as_is = |component: &Vec<MemtableRange>| {
+        upload_encoded && component.len() == 1 && component[0].encoded().is_some()
+    };
     let mut rows_remaining = components
         .iter()
-        .filter(|component| component.len() != 1 || component[0].encoded().is_none())
+        .filter(|component| !is_uploaded_as_is(component))
         .flatten()
         .map(MemtableRange::num_rows)
         .sum::<usize>();
@@ -1121,7 +1130,7 @@ fn memtable_flat_sources(
     for component in components {
         // A standalone encoded component is an ordering barrier. Do not merge
         // raw ranges on either side while uploading the intervening rows as-is.
-        if component.len() == 1
+        if is_uploaded_as_is(&component)
             && let Some(encoded) = component[0].encoded()
         {
             if !pending.is_empty() {

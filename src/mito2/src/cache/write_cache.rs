@@ -332,7 +332,12 @@ impl WriteCache {
         .await
         .with_file_cleaner(cleaner)
         .with_write_guard(context.guard)
-        .with_cancellation(context.cancellation.clone());
+        .with_cancellation(context.cancellation.clone())
+        // Out-of-line values skip the local cache and go straight to the remote store.
+        .with_blob_target(
+            upload_request.remote_store.clone(),
+            upload_request.dest_path_provider.clone(),
+        );
 
         let sst_info = match write_request.sst_write_format {
             crate::sst::FormatType::PrimaryKey => {
