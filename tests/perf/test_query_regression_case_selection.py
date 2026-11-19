@@ -117,6 +117,90 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
         # The latency gate still exists, so the case keeps its non-regression role.
         self.assertIn("max_candidate_latency_regression_pct", thresholds)
 
+    def test_dynamic_membership_plan_checks_are_probe_scan_scoped(self) -> None:
+        cases = [
+            {
+                "name": "dyn_filter_join",
+                # The synthetic case anchors on the logs scan projection prefix:
+                # the JOIN key first, then the projected f1..f6 fields.
+                "anchor": r'"projection": \["trace_id", "f1"',
+                "probe_prefix": (
+                    'RegionScanExec: {"region_id": 1}, '
+                    '"projection": ["trace_id", "f1", "f2", "f3", "f4", "f5", "f6"]'
+                ),
+            },
+            {
+                "name": "dyn_filter_join_target",
+                "anchor": (
+                    r'"projection": \["trace_id", "severity_text", "body", "timestamp"\]'
+                ),
+                "probe_prefix": (
+                    'RegionScanExec: {"region_id": 1}, '
+                    '"projection": ["trace_id", "severity_text", "body", "timestamp"]'
+                ),
+            },
+        ]
+        build_placeholder = (
+            'RegionScanExec: {"region_id": 2}, '
+            '"projection": ["trace_id", "timestamp"], '
+            '"dyn_filters": ["DynamicFilter [ true ]"]'
+        )
+        membership_elsewhere = (
+            'RegionScanExec: {"region_id": 2}, '
+            '"projection": ["trace_id", "timestamp"], '
+            '"dyn_filters": ["DynamicFilter [ trace_id@0 IN (SET) ([trace0]) ]"]'
+        )
+        for spec in cases:
+            with self.subTest(case=spec["name"]):
+                case = tomllib.loads(
+                    (Path(__file__).parent / "query_cases" / spec["name"] / "case.toml").read_text()
+                )
+                checks = case["scenario"]["queries"][0]["plan_checks"]
+                self.assertTrue(checks["require"])
+                self.assertTrue(checks["forbid"])
+
+                # Every probe-specific pattern is bound to the probe scan line;
+                # a global pattern would pass or fail on the wrong scan.
+                for pattern in checks["require"] + checks["forbid"]:
+                    self.assertIn(spec["anchor"], pattern)
+
+                probe = (
+                    spec["probe_prefix"]
+                    + ', "dyn_filters": ["DynamicFilter [ CASE hash_repartition % 3 '
+                    "WHEN 0 THEN trace_id@0 >= trace101 AND trace_id@0 <= trace98 "
+                    'AND trace_id@0 IN (SET) ([trace6, trace7]) ]"]'
+                )
+                # A good probe plan passes even with the build-side unsolved
+                # `DynamicFilter [ true ]` placeholder, and the require has no
+                # exact partition-count rule.
+                for partitions in (1, 3):
+                    plan = "\n".join([probe] * partitions + [build_placeholder])
+                    for pattern in checks["require"]:
+                        self.assertRegex(plan, pattern, plan)
+                    for pattern in checks["forbid"]:
+                        self.assertNotRegex(plan, pattern, plan)
+
+                # A degraded probe fails even when membership appears on another
+                # scan line and the build placeholder is present.
+                for degraded in (
+                    'DynamicFilter [ empty ]',
+                    'DynamicFilter [ true ]',
+                    'DynamicFilter [ trace_id@0 >= trace101 AND trace_id@0 <= trace98 AND true ]',
+                ):
+                    plan = "\n".join(
+                        [
+                            membership_elsewhere,
+                            spec["probe_prefix"] + f', "dyn_filters": ["{degraded}"]',
+                            build_placeholder,
+                        ]
+                    )
+                    self.assertFalse(
+                        any(re.search(pattern, plan) for pattern in checks["require"]), plan
+                    )
+                    self.assertTrue(
+                        any(re.search(pattern, plan) for pattern in checks["forbid"]), plan
+                    )
+
     def test_sst_float_bss_omits_base_encoding_for_older_binaries(self) -> None:
         case_path = Path(__file__).parent / "query_cases/sst_float_bss/case.toml"
         setup_sql = dict(re.findall(

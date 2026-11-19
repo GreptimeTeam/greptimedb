@@ -181,6 +181,97 @@ class DirectQueryParallelismTest(unittest.TestCase):
                 self.assertNotIn("--config-file", frontends[name])
 
 
+class DirectMeasureRetryTest(unittest.TestCase):
+    """A completed measure report is the verdict; only a crash is retried."""
+
+    def setUp(self) -> None:
+        self.args = SimpleNamespace(http_timeout="1", allow_large_fixture="false")
+        self.ports = list(range(10000, 10016))
+        self.plan = {"scenario": {"kind": "direct_readable_sst"}}
+
+    def run_direct(
+        self, tmpdir: str, measure_results: list[tuple[int, dict | None]]
+    ) -> tuple[int, list[str], Path]:
+        events: list[str] = []
+        measure_calls = 0
+
+        def run(command, **_kwargs):
+            nonlocal measure_calls
+            phase = command[1]
+            events.append(phase)
+            if phase == "prepare-direct":
+                output = Path(command[command.index("--output") + 1])
+                output.write_text(json.dumps({"fixtures": [{"fixture_dir": "fixture/0"}]}))
+                return SimpleNamespace(returncode=0)
+            if phase == "measure":
+                returncode, payload = measure_results[measure_calls]
+                measure_calls += 1
+                if payload is not None:
+                    output = Path(command[command.index("--output") + 1])
+                    output.write_text(json.dumps(payload))
+                return SimpleNamespace(returncode=returncode)
+            return SimpleNamespace(returncode=0)
+
+        def restart(target, component, _procs):
+            events.append(f"restart:{target.name}:{component}")
+
+        with (
+            patch.object(runner, "allocate_ports", return_value=self.ports),
+            patch.object(runner, "start_component"),
+            patch.object(runner, "stop_component"),
+            patch.object(runner, "restart_component", side_effect=restart),
+            patch.object(runner.subprocess, "run", side_effect=run),
+        ):
+            status = runner.run_direct_case(
+                self.args, Path("case.toml"), Path(tmpdir), Path("base"),
+                Path("candidate"), Path("fixture"), Path("runner"), self.plan,
+            )
+        return status, events, Path(tmpdir) / "query-regression-report.json"
+
+    def test_completed_failed_report_is_kept_without_a_warm_retry(self) -> None:
+        failed = {
+            "status": "failed",
+            "targets": [{"name": "candidate", "status": "failed"}],
+            "thresholds": [
+                {
+                    "query": "dyn_membership_join_target",
+                    "threshold": "max_candidate_page_size_to_fetch_store_bytes",
+                    "status": "failed",
+                    "reason": "scan metric not found in plan text",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status, events, report = self.run_direct(tmpdir, [(1, failed)])
+            self.assertEqual(status, 1)
+            self.assertEqual(events.count("measure"), 1)
+            self.assertFalse(any(event.startswith("restart:") for event in events), events)
+            self.assertEqual(json.loads(report.read_text()), failed)
+
+    def test_missing_report_retries_cold_and_keeps_the_real_failure(self) -> None:
+        failed = {
+            "status": "failed",
+            "targets": [{"name": "candidate", "measurements": []}],
+            "thresholds": [{"threshold": "max_candidate_num_sst_rows", "status": "failed"}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status, events, report = self.run_direct(tmpdir, [(1, None), (1, failed)])
+            self.assertEqual(status, 1)
+            self.assertEqual(events.count("measure"), 2)
+            first = events.index("measure")
+            second = events.index("measure", first + 1)
+            self.assertEqual(
+                events[first + 1:second],
+                [
+                    "restart:base:datanode",
+                    "restart:base:frontend",
+                    "restart:candidate:datanode",
+                    "restart:candidate:frontend",
+                ],
+            )
+            self.assertEqual(json.loads(report.read_text()), failed)
+
+
 class DockerTargetTest(unittest.TestCase):
     image_id = "sha256:" + "a" * 64
 

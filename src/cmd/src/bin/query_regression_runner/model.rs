@@ -238,8 +238,11 @@ pub(super) struct Query {
 /// Declarative plan-text assertions for one query.
 ///
 /// `require` patterns must match at least once and `forbid` patterns must not
-/// match at all. Both are unanchored regular expressions, so a plain substring
-/// works when the surrounding formatting is stable.
+/// match at all. Both are unanchored regular expressions over the concatenated
+/// plan rows, so a plain substring works when the surrounding formatting is
+/// stable. Scope a scan-specific pattern to that scan's line (for example on its
+/// `"projection"` entry): a global pattern sees every scan in the plan, and a
+/// join's build-side scan also carries the producer side of its dynamic filter.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PlanChecks {

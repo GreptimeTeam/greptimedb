@@ -10,7 +10,10 @@
 #    from SST must stay far below a full 1M-row scan. A candidate that lost the
 #    dynamic-membership prefilter (for example a build without #10340/#10341)
 #    still returns the same 1,926 rows after reading a full row group or the
-#    whole SST, so a latency threshold alone would let it pass.
+#    whole SST, so a latency threshold alone would let it pass. All plan
+#    patterns are scan-scoped to the probe (logs) line, so the build scan's
+#    expected producer-side `DynamicFilter [ true ]` placeholder is exempt and
+#    degraded probe shapes still fail.
 #
 #    Assertions gate the candidate only: the base target is the control and may
 #    be a build without the optimization. Base values are still reported as
@@ -173,12 +176,40 @@ iterations = 7
 
 # The probe scan must show the join dynamic filter with the pushed-down
 # membership list, and must not show a shape that disables membership: an
-# unresolved `DynamicFilter [ empty ]`, a fully degraded `DynamicFilter [ true ]`
-# (oversized payload or hash-lookup fallback), or bounds that lost the list
-# (`... AND true ]`).
+# unresolved `DynamicFilter [ empty ]`, a degraded `DynamicFilter [ true ]` on
+# the probe scan (oversized payload or hash-lookup fallback), or bounds that lost
+# the list (`... AND true ]`).
+#
+# Every pattern is anchored on the probe (logs) scan line: its `"projection"`
+# list identifies the table, and `[^\n]*` carries the match to that line's
+# `"dyn_filters"` entry. Scan scoping is load-bearing because the build (traces)
+# scan legitimately carries the *producer* side of the same dynamic filter in its
+# unsolved state, `"dyn_filters": ["DynamicFilter [ true ]"]`. That build-side
+# placeholder is expected and exempt; a global `DynamicFilter \[ true \]` forbid
+# would fail on the correct plan. The `require` is scoped for the same reason: a
+# global `trace_id@N IN (` pattern would also pass when membership appears on
+# some other scan while the probe scan degraded. `require` only needs one
+# match - it deliberately has no exact-match rule - so neither one `CASE`
+# expression over several hash partitions nor multiple probe partition lines is
+# required.
+#
+# The probe projection is pinned by this case's query and column list; if either
+# changes, the patterns must be updated with it. It starts with the JOIN key and
+# then the projected `f1`..`f6` fields; the trailing time index (if projected) is
+# not part of the anchor. Measured on the #10340+#10341 stack, the probe scan
+# reports the membership list inside its `DynamicFilter` expression (for example
+# `DynamicFilter [ CASE hash_repartition % 3 WHEN 0 THEN ... trace_id@0 IN (SET)
+# ([trace6, trace7, ...]) AND ... ]`) while the build scan reports the bare
+# placeholder.
 [scenario.queries.plan_checks]
-require = ["DynamicFilter", 'trace_id@\d+\s+IN\s+\(']
-forbid = ['DynamicFilter \[ empty \]', 'DynamicFilter \[ true \]', 'DynamicFilter \[[^\n]*\bAND true\b']
+require = [
+  '"projection": \["trace_id", "f1", "f2", "f3", "f4", "f5", "f6"[^\n]*"dyn_filters": \["DynamicFilter \[[^\n]*\bIN \(SET\)',
+]
+forbid = [
+  '"projection": \["trace_id", "f1", "f2", "f3", "f4", "f5", "f6"[^\n]*"dyn_filters": \["DynamicFilter \[ empty \]',
+  '"projection": \["trace_id", "f1", "f2", "f3", "f4", "f5", "f6"[^\n]*"dyn_filters": \["DynamicFilter \[ true \]"\]',
+  '"projection": \["trace_id", "f1", "f2", "f3", "f4", "f5", "f6"[^\n]*"dyn_filters": \["DynamicFilter \[[^\n]*\bAND true\b',
+]
 
 [scenario.queries.thresholds]
 # Candidate-only latency non-regression against the base.

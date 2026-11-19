@@ -431,11 +431,13 @@ Semantics:
   so warm iterations report little or no `page_size_to_fetch_store`. Metric
   assertions therefore take the maximum value seen in the cold pre-warmup
   execution and in every measured iteration. Without the cold sample a case
-  would pass even when the candidate read the whole SST on the first run. Note
-  that the outer driver retries `measure` once when it fails; the retried report
-  has a warm page cache, so a store-byte gate fails with a missing metric
-  instead of a byte count. That is a failure either way, but rerun the case when
-  the first attempt failed for an unrelated reason.
+  would pass even when the candidate read the whole SST on the first run. The
+  outer driver keeps the first completed `measure` report, failed or not, so a
+  real plan or row failure is never overwritten by a warm retry (a warm retry
+  drops store-byte counters and would turn the real failure into a missing-metric
+  failure). Only a `measure` run that exits without writing a report is retried,
+  and that retry restarts the datanodes so the retried scan is still cold;
+  missing metrics continue to fail closed.
 - **Failure propagation.** Entries live in the report `thresholds` array with
   `query`, `target`, `threshold`, `actual`, `limit`, and `status`, so any
   `failed` entry fails the case exactly like a latency regression. The PR
@@ -460,8 +462,9 @@ The Rust runner consumes the normalized plan and endpoint ports. For
 `direct_readable_sst`, the driver starts both clusters, runs `prepare-direct`,
 stops only both datanodes, writes File-object-store destination TOMLs, invokes
 `materialize` for every fixture and target, restarts datanodes, then runs
-`measure` (with one frontend restart retry). `materialize` uses OpenDAL and only
-replaces the fixture's exact region prefix in each target data home.
+`measure` (with one cold retry only when it exits without writing a report).
+`materialize` uses OpenDAL and only replaces the fixture's exact region prefix
+in each target data home.
 
 For `prom_remote_write_then_query`, it renders a target frontend configuration
 with `render-remote-config`, starts both clusters, runs `prepare-remote` and

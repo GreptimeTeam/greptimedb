@@ -138,9 +138,15 @@ Scan-scoped patterns work the same way. A join's dynamic filter also appears on
 the *build*-side scan, in its unsolved `DynamicFilter [ true ]` form, because
 that is the side that fills it in; a global forbid of `DynamicFilter \[ true \]`
 therefore fails on a correct plan whenever the build side is in the same
-fragment. Anchor the pattern on the scan being gated instead - its
-`"projection"` or `"filters"` entry identifies the table - as
-`tests/perf/query_cases/dyn_filter_join_target` does.
+fragment. The same applies to the positive patterns: a global `IN (SET)` require
+would pass when membership appears only on a scan other than the one being
+gated. Scope every probe-specific `require` and `forbid` pattern to the scan
+line being checked - its `"projection"` or `"filters"` entry identifies the
+table - as `tests/perf/query_cases/dyn_filter_join` and
+`tests/perf/query_cases/dyn_filter_join_target` do. The build-side placeholder
+is exempt because the anchored patterns never match the build scan line. A
+`require` pattern only needs one match; do not encode an exact partition count,
+because the number of scan lines follows query parallelism.
 
 All plan and scan-metric assertions gate the candidate only. The base target is
 the control and may lack the optimization; its values are reported as

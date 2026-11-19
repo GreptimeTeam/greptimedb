@@ -440,17 +440,31 @@ def run_direct_case(
         for target in targets:
             start_component(target, "datanode", procs)
 
+        report = work_dir / "query-regression-report.json"
         measure = [
             str(runner), "measure", "--case", str(case_path),
             "--fixture-generator", str(fixture_generator),
             "--base-http-port", str(targets[0].http_port),
             "--candidate-http-port", str(targets[1].http_port),
-            "--output", str(work_dir / "query-regression-report.json"),
+            "--output", str(report),
             "--http-timeout", str(args.http_timeout),
         ]
+        # `measure` writes the report before exiting nonzero on a failed case, so
+        # a completed report carries the real plan/row verdict. Keep it: a warm
+        # retry would overwrite it and drop cold-only scan counters such as
+        # `page_size_to_fetch_store`, turning a real failure into "metric not
+        # found" instead.
+        report.unlink(missing_ok=True)
         status = subprocess.run(measure, check=False).returncode
+        if report.exists():
+            return status
         if status != 0:
+            # No report means the runner died before it could measure the case.
+            # Restart the datanodes as well as the frontends: a retry after data
+            # has been touched must start from a cold page cache so scan
+            # counters stay meaningful and missing metrics fail closed.
             for target in targets:
+                restart_component(target, "datanode", procs)
                 restart_component(target, "frontend", procs)
             status = subprocess.run(measure, check=False).returncode
         return status

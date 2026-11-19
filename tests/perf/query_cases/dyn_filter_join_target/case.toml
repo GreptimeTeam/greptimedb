@@ -39,7 +39,9 @@
 #    patterns also forbid the degraded probe shapes (unresolved
 #    `DynamicFilter [ empty ]`, a probe scan left with the `DynamicFilter [ true
 #    ]` placeholder, and bounds that lost the list, `... AND true ]`), which
-#    return identical 20 rows after reading much more.
+#    return identical 20 rows after reading much more. Every probe-specific
+#    pattern is scan-scoped to the probe projection; the build scan's expected
+#    producer-side `DynamicFilter [ true ]` placeholder is exempt.
 # 2. Latency non-regression versus the base (+30%).
 #
 # Shape (one region, one SST per table, timestamp-major: one row per second):
@@ -211,12 +213,20 @@ iterations = 7
 # the probe scan (oversized payload or hash-lookup fallback), or bounds that lost
 # the list (`... AND true ]`).
 #
-# The two scan-scoped patterns are anchored on the probe scan's projection. The
-# build (traces) scan legitimately carries the *producer* side of the same
-# dynamic filter in its unsolved state (`"dyn_filters": ["DynamicFilter [ true
-# ]"]`, because it is the side that fills it in), so a global
-# `DynamicFilter \[ true \]` forbid would fail on the correct plan. Measured on
-# this fixture with the merged stack: the probe scan reports
+# Every probe-specific pattern is anchored on the probe scan's projection: the
+# projection identifies the scan line and `[^\n]*` carries the match to that
+# line's `"dyn_filters"` entry. The build (traces) scan legitimately carries the
+# *producer* side of the same dynamic filter in its unsolved state
+# (`"dyn_filters": ["DynamicFilter [ true ]"]`, because it is the side that fills
+# it in). That build-side placeholder is expected and exempt, so a global
+# `DynamicFilter \[ true \]` forbid would fail on the correct plan. For the same
+# reason the `require` and the `DynamicFilter [ empty ]` / `AND true` forbids are
+# scan-scoped instead of global: global patterns would pass - or fail - on the
+# wrong scan. `require` only needs one matching probe partition line; it
+# deliberately has no exact-match rule, so a plan with one line per hash
+# partition passes.
+#
+# Measured on this fixture with the merged stack: the probe scan reports
 # `"dyn_filters": ["DynamicFilter [ CASE hash_repartition % 3 WHEN 0 THEN
 # trace_id@0 >= trace101 AND trace_id@0 <= trace98 AND trace_id@0 IN (SET)
 # ([trace6, trace7, ...]) AND ... ]"]` (3 hash partitions) while the build scan
@@ -225,14 +235,12 @@ iterations = 7
 # it.
 [scenario.queries.plan_checks]
 require = [
-  "DynamicFilter",
-  'trace_id@\d+\s+IN\s+\(',
   '"projection": \["trace_id", "severity_text", "body", "timestamp"\][^\n]*"dyn_filters": \["DynamicFilter \[[^\n]*\bIN \(SET\)',
 ]
 forbid = [
-  'DynamicFilter \[ empty \]',
+  '"projection": \["trace_id", "severity_text", "body", "timestamp"\][^\n]*"dyn_filters": \["DynamicFilter \[ empty \]',
   '"projection": \["trace_id", "severity_text", "body", "timestamp"\][^\n]*"dyn_filters": \["DynamicFilter \[ true \]"\]',
-  'DynamicFilter \[[^\n]*\bAND true\b',
+  '"projection": \["trace_id", "severity_text", "body", "timestamp"\][^\n]*"dyn_filters": \["DynamicFilter \[[^\n]*\bAND true\b',
 ]
 
 [scenario.queries.thresholds]
@@ -260,14 +268,16 @@ max_candidate_num_sst_rows = 8192
 # scan that read the whole SST would fetch its full 9,672,060 B file. 1 MiB sits
 # ~2x above that upper bound and ~9x below a full probe scan.
 #
-# Caveat: this counter only shows real store reads on the *first* `measure` pass
-# against a fresh datanode. `.github/scripts/query-regression-run.py` retries
-# `measure` (restarting the frontend but not the datanode) when a pass fails, and
-# the retried pass is served from the Mito page cache, so the metric disappears
-# and this assertion reports "scan metric not found" instead of a number. The
-# same happens to `tests/perf/query_cases/dyn_filter_join`. Values above come
-# from a first pass, in which the synthetic case's documented 192 KiB
-# (131,072 B probe + 65,536 B build) reproduces exactly.
+# This counter only shows real store reads on a cold datanode; warm scans are
+# served from the Mito page cache. `.github/scripts/query-regression-run.py`
+# keeps the first completed `measure` report, failed or not, so a plan/row
+# failure is reported as-is instead of being retried against a warm page cache
+# (where this metric would disappear and turn the real failure into "scan metric
+# not found"). Only a run that crashes before writing a report is retried, and
+# that retry restarts the datanodes as well as the frontends so the retried scan
+# is still cold and the metric stays meaningful. Values above come from a cold
+# pass, in which the synthetic case's documented 192 KiB (131,072 B probe +
+# 65,536 B build) reproduces exactly.
 max_candidate_page_size_to_fetch_store_bytes = 1048576
 
 # Second execution of the same SQL without EXPLAIN ANALYZE. The harness has no

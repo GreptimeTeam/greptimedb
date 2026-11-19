@@ -34,6 +34,12 @@
 //! served from the page cache once a scan has run, so an assertion that only
 //! looked at warm iterations (`page_size_to_fetch_store` would then be absent)
 //! would pass no matter which plan shape the candidate used.
+//!
+//! Patterns run over the concatenated plan rows, so a pattern that describes
+//! one scan must be anchored on that scan's line (typically its `"projection"`
+//! entry). A join's dynamic filter also appears on the build-side scan as the
+//! producer-side `DynamicFilter [ true ]` placeholder, which a global pattern
+//! would wrongly gate.
 
 use std::collections::HashMap;
 
@@ -415,6 +421,66 @@ mod tests {
         )
     }
 
+    /// Probe-scan anchor of the target-shaped case: the projection pins the
+    /// probe (logs) scan line and `[^\n]*` carries the match to that line's
+    /// `dyn_filters`. `dyn_filter_join` uses the same approach with its own
+    /// (f1..f6) probe projection.
+    const PROBE_SCAN_ANCHOR: &str =
+        r#""projection": \["trace_id", "severity_text", "body", "timestamp"\][^\n]*"#;
+
+    /// The build (traces) scan of a correct plan: it owns the producer side of
+    /// the dynamic filter, so its placeholder is legitimately `true`.
+    const BUILD_PLACEHOLDER_LINE: &str = r#"UnorderedScan: region=2, {"projection": ["trace_id"], "dyn_filters": ["DynamicFilter [ true ]"]}"#;
+
+    /// A build-side scan that (wrongly or coincidentally) carries the
+    /// membership list. Membership appearing here must not satisfy the
+    /// probe-scoped require.
+    const BUILD_MEMBERSHIP_LINE: &str = r#"UnorderedScan: region=2, {"projection": ["trace_id"], "dyn_filters": ["DynamicFilter [ trace_id@0 IN (SET) ([trace0, trace1]) ]"]}"#;
+
+    /// The probe (logs) scan of a correct plan. The real plan reports one
+    /// dynamic-filter expression with a `CASE` over the hash partitions.
+    const PROBE_MEMBERSHIP_LINE: &str = r#"UnorderedScan: region=1, {"projection": ["trace_id", "severity_text", "body", "timestamp"], "filters": ["timestamp >= 2024-01-01T00:00:00Z"], "dyn_filters": ["DynamicFilter [ CASE hash_repartition % 3 WHEN 0 THEN trace_id@0 >= trace101 AND trace_id@0 <= trace98 AND trace_id@0 IN (SET) ([trace6, trace7]) WHEN 1 THEN trace_id@0 IN (SET) ([trace0, trace1]) ELSE false END ]"]}"#;
+
+    const PROBE_EMPTY_LINE: &str = r#"UnorderedScan: region=1, {"projection": ["trace_id", "severity_text", "body", "timestamp"], "dyn_filters": ["DynamicFilter [ empty ]"]}"#;
+
+    const PROBE_TRUE_LINE: &str = r#"UnorderedScan: region=1, {"projection": ["trace_id", "severity_text", "body", "timestamp"], "dyn_filters": ["DynamicFilter [ true ]"]}"#;
+
+    const PROBE_BOUNDS_ONLY_LINE: &str = r#"UnorderedScan: region=1, {"projection": ["trace_id", "severity_text", "body", "timestamp"], "dyn_filters": ["DynamicFilter [ trace_id@0 >= trace101 AND trace_id@0 <= trace98 AND true ]"]}"#;
+
+    /// The scan-scoped plan checks used by both dynamic-membership cases. A
+    /// correct plan may carry `DynamicFilter [ true ]` on the build scan, so
+    /// every pattern is anchored on the probe projection instead of matching
+    /// the whole plan text.
+    fn probe_scoped_membership_checks() -> Query {
+        let require = [format!(
+            "{PROBE_SCAN_ANCHOR}{}",
+            r#""dyn_filters": \["DynamicFilter \[[^\n]*\bIN \(SET\)"#
+        )];
+        let forbid = [
+            format!(
+                "{PROBE_SCAN_ANCHOR}{}",
+                r#""dyn_filters": \["DynamicFilter \[ empty \]"#
+            ),
+            format!(
+                "{PROBE_SCAN_ANCHOR}{}",
+                r#""dyn_filters": \["DynamicFilter \[ true \]"\]"#
+            ),
+            format!(
+                "{PROBE_SCAN_ANCHOR}{}",
+                r#""dyn_filters": \["DynamicFilter \[[^\n]*\bAND true\b"#
+            ),
+        ];
+        let require: Vec<&str> = require.iter().map(String::as_str).collect();
+        let forbid: Vec<&str> = forbid.iter().map(String::as_str).collect();
+        query("join", &require, &forbid, json!({}))
+    }
+
+    fn probe_scoped_results(plan: &str) -> Vec<Value> {
+        let candidate = result(vec![measurement("join", vec![analyze_row(plan)])], None);
+        enforce_plan_assertions(&[probe_scoped_membership_checks()], &candidate, &candidate)
+            .unwrap()
+    }
+
     fn find<'a>(results: &'a [Value], threshold: &str, subject: &str) -> &'a Value {
         results
             .iter()
@@ -521,6 +587,58 @@ mod tests {
             0
         );
         assert_eq!(page_bytes["base_actual"], 125829120);
+    }
+
+    #[test]
+    fn probe_scoped_checks_pass_with_a_build_side_true_placeholder() {
+        // The require has no exact-count rule: one probe line (the real shape)
+        // and three probe lines both pass while the build scan keeps its
+        // producer-side placeholder.
+        for probe_partitions in [1_u64, 3] {
+            let plan = std::iter::repeat_n(PROBE_MEMBERSHIP_LINE, probe_partitions as usize)
+                .chain(std::iter::once(BUILD_PLACEHOLDER_LINE))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let results = probe_scoped_results(&plan);
+            let require = results
+                .iter()
+                .find(|entry| entry["threshold"] == "plan_require")
+                .expect("require entry");
+            assert_eq!(require["status"], "passed", "{plan}: {results:#?}");
+            assert_eq!(require["actual"], probe_partitions, "{plan}");
+            for entry in results
+                .iter()
+                .filter(|entry| entry["threshold"] == "plan_forbid")
+            {
+                assert_eq!(entry["status"], "passed", "{plan}: {entry}");
+                assert_eq!(entry["actual"], 0, "{plan}: {entry}");
+            }
+        }
+    }
+
+    #[test]
+    fn probe_scoped_checks_fail_even_when_membership_appears_elsewhere() {
+        for degraded_probe in [PROBE_EMPTY_LINE, PROBE_TRUE_LINE, PROBE_BOUNDS_ONLY_LINE] {
+            // Membership is present on the plan, but only on another scan.
+            let plan = format!("{BUILD_MEMBERSHIP_LINE}\n{degraded_probe}");
+            let results = probe_scoped_results(&plan);
+            let require = results
+                .iter()
+                .find(|entry| entry["threshold"] == "plan_require")
+                .expect("require entry");
+            assert_eq!(require["status"], "failed", "{plan}: {results:#?}");
+            assert_eq!(require["actual"], 0, "{plan}");
+            let failed_forbid: Vec<_> = results
+                .iter()
+                .filter(|entry| entry["threshold"] == "plan_forbid" && entry["status"] == "failed")
+                .collect();
+            assert_eq!(failed_forbid.len(), 1, "{plan}: {results:#?}");
+            assert_eq!(failed_forbid[0]["actual"], 1, "{plan}");
+            assert_eq!(
+                failed_forbid[0]["reason"], "forbidden plan pattern matched",
+                "{plan}"
+            );
+        }
     }
 
     #[test]
