@@ -1104,7 +1104,8 @@ mod tests {
         );
 
         // The whole payload clears the large-side predicate at the join and reads all regions.
-        assert_all_logical_regions(planner.get_regions(&table_name, &join_plan).await.unwrap());
+        let (all_regions, _) = planner.get_regions(&table_name, &join_plan).await.unwrap();
+        assert_all_logical_regions(all_regions);
 
         // The local large input keeps its predicate pruning: one of three regions.
         let routing_plan = nested_broadcast_join_probe_input(&join_plan)
@@ -1116,6 +1117,7 @@ mod tests {
                 .get_regions(&table_name, routing_plan)
                 .await
                 .unwrap()
+                .0
         );
 
         let mut full_payload = join_plan.clone();
@@ -1137,7 +1139,7 @@ mod tests {
             .expect("projection-wrapped join should retain its large-side routing input");
         assert_eq!(
             vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
-            planner.get_regions(&table_name, large_input).await.unwrap()
+            planner.get_regions(&table_name, large_input).await.unwrap().0
         );
     }
 

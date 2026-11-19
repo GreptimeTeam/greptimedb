@@ -272,12 +272,9 @@ pub struct GreptimeDbClusterBuilder {
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
     real_datanode_grpc_addr: bool,
-<<<<<<< HEAD
     frontend_real_datanode_grpc: bool,
     query_options: query::options::QueryOptions,
-=======
     datanode_max_concurrent_queries: Option<usize>,
->>>>>>> 06d15dbcf78 (fix(datanode): give nested MergeScan reads a bounded admission lane)
 }
 
 impl GreptimeDbClusterBuilder {
@@ -318,12 +315,9 @@ impl GreptimeDbClusterBuilder {
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
             real_datanode_grpc_addr: false,
-<<<<<<< HEAD
             frontend_real_datanode_grpc: false,
             query_options: query::options::QueryOptions::default(),
-=======
             datanode_max_concurrent_queries: None,
->>>>>>> 06d15dbcf78 (fix(datanode): give nested MergeScan reads a bounded admission lane)
         }
     }
 
@@ -431,7 +425,6 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
-<<<<<<< HEAD
     /// Routes frontend-to-datanode RPCs through real TCP clients instead of duplex clients.
     /// This only has an effect when `with_real_datanode_grpc_addr(true)` is also set.
     #[must_use]
@@ -444,13 +437,14 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_query_options(mut self, options: query::options::QueryOptions) -> Self {
         self.query_options = options;
-=======
+        self
+    }
+
     /// Enables the datanode concurrent read limiter with `max_concurrent_queries`
     /// permits per admission lane (ordinary and nested reads each get their own lane).
     #[must_use]
     pub fn with_datanode_max_concurrent_queries(mut self, max_concurrent_queries: usize) -> Self {
         self.datanode_max_concurrent_queries = Some(max_concurrent_queries);
->>>>>>> 06d15dbcf78 (fix(datanode): give nested MergeScan reads a bounded admission lane)
         self
     }
 
