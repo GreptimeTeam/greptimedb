@@ -67,6 +67,13 @@ pub(crate) fn needs_background_indexes(file: &FileMeta) -> bool {
     })
 }
 
+/// Returns whether a build of `build_type` for every file of a region may replace the index of
+/// `file`. A flush build, which the end of a wait for the Leader lease asks for, builds no
+/// extension index, so it leaves the files that have one.
+fn is_whole_region_candidate(build_type: &IndexBuildType, file: &FileMeta) -> bool {
+    *build_type != IndexBuildType::Flush || needs_background_indexes(file)
+}
+
 impl<S> RegionWorkerLoop<S> {
     pub(crate) fn new_index_build_task(
         &self,
@@ -286,12 +293,7 @@ impl<S> RegionWorkerLoop<S> {
                     let file_meta = current_file_meta(file.meta_ref().file_id)?;
                     Some((file.clone(), file_meta))
                 })
-                // A flush build of every file, which the end of a wait for the Leader lease
-                // asks for, builds no extension index, so it leaves the files that have one.
-                .filter(|(_, file_meta)| {
-                    request.build_type != IndexBuildType::Flush
-                        || needs_background_indexes(file_meta)
-                })
+                .filter(|(_, file_meta)| is_whole_region_candidate(&request.build_type, file_meta))
                 .collect::<Vec<_>>()
         } else {
             request
@@ -611,6 +613,27 @@ mod tests {
     };
     use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
     use crate::test_util::CreateRequestBuilder;
+
+    #[test]
+    fn test_whole_region_flush_build_leaves_files_with_extension_indexes() {
+        let sketched = FileMeta {
+            available_indexes: [crate::sst::file::IndexType::HllIndex]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let plain = FileMeta::default();
+
+        assert!(!is_whole_region_candidate(
+            &IndexBuildType::Flush,
+            &sketched
+        ));
+        assert!(is_whole_region_candidate(&IndexBuildType::Flush, &plain));
+        assert!(is_whole_region_candidate(
+            &IndexBuildType::Manual,
+            &sketched
+        ));
+    }
 
     #[derive(Debug)]
     struct MaintenanceHandler;
