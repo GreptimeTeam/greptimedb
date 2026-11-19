@@ -1845,6 +1845,112 @@ fn output_with_region_watermarks(
 }
 
 #[tokio::test]
+async fn test_capture_sequence_range_timestamps_returns_raw_values_and_proven_high() {
+    let query_engine = create_test_query_engine();
+    let timestamp_plan = sql_to_df_plan(
+        QueryContext::arc(),
+        query_engine.clone(),
+        "SELECT ts FROM numbers_with_ts WHERE number = 42",
+        false,
+    )
+    .await
+    .unwrap();
+    let lower = BTreeMap::from([(1, 10), (2, 20)]);
+    let handler = Arc::new(RecoveryCaptureHandler {
+        output: std::sync::Mutex::new(Some(recovery_stream_output(
+            vec![
+                recovery_timestamp_batch(vec![Some(10_000), Some(-1), Some(1_000)]),
+                recovery_timestamp_batch(vec![Some(11_000), Some(1_000), Some(-5_000)]),
+            ],
+            Some(vec![(1, Some(12)), (2, Some(20))]),
+            false,
+        ))),
+        lower: serde_json::to_string(&lower).unwrap(),
+        expire_after: None,
+        expiry_lower: std::sync::Mutex::new(None),
+    });
+    let handler_dyn: Arc<
+        dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+    > = handler.clone();
+    let frontend =
+        FrontendClient::from_grpc_handler(Arc::downgrade(&handler_dyn), QueryOptions::default());
+
+    let (high, timestamps) = capture_sequence_range_timestamps(
+        &query_engine,
+        &frontend,
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        &timestamp_plan,
+        &lower,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(high, BTreeMap::from([(1, 12), (2, 20)]));
+    // RecoveryMetricsStream pops batches, so the second batch is returned first.
+    assert_eq!(
+        timestamps,
+        vec![11_000, 1_000, -5_000, 10_000, -1, 1_000]
+            .into_iter()
+            .map(Timestamp::new_millisecond)
+            .collect::<Vec<_>>()
+    );
+
+    // Even when rows are present, they must not escape without a complete,
+    // non-regressing proof for both lower-bound regions.
+    for watermarks in [
+        None,
+        Some(vec![(1, Some(12))]),
+        Some(vec![(1, Some(12)), (2, None)]),
+        Some(vec![(1, Some(9)), (2, Some(20))]),
+        Some(vec![(1, Some(12)), (2, Some(20)), (3, Some(1))]),
+    ] {
+        *handler.output.lock().unwrap() = Some(recovery_stream_output(
+            vec![recovery_timestamp_batch(vec![Some(1_000)])],
+            watermarks,
+            false,
+        ));
+        assert!(
+            capture_sequence_range_timestamps(
+                &query_engine,
+                &frontend,
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                &timestamp_plan,
+                &lower,
+            )
+            .await
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_capture_sequence_range_timestamps_rejects_empty_lower_before_dispatch() {
+    let query_engine = create_test_query_engine();
+    let timestamp_plan = sql_to_df_plan(
+        QueryContext::arc(),
+        query_engine.clone(),
+        "SELECT ts FROM numbers_with_ts WHERE number = 42",
+        false,
+    )
+    .await
+    .unwrap();
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let err = capture_sequence_range_timestamps(
+        &query_engine,
+        &frontend,
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        &timestamp_plan,
+        &BTreeMap::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("nonempty lower sequence bounds"));
+}
+
+#[tokio::test]
 async fn test_capture_recovery_windows_decodes_raw_timestamp_projection_with_where_and_expiry() {
     let TestTaskParts {
         mut task,
