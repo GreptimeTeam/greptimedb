@@ -106,10 +106,11 @@ fn one_heap_below_merge(
     let Some(sort) = plan.downcast_ref::<SortExec>() else {
         return Ok(None);
     };
+    let partitions = sort.input().output_partitioning().partition_count();
     if !sort.preserve_partitioning()
         || sort.fetch().is_none_or(|fetch| fetch < merge_fetch)
-        || sort.input().output_partitioning().partition_count() <= 1
-        || filtered_scan_below_topk(sort)?.is_none()
+        || partitions <= 1
+        || filtered_scan_below_topk(sort, partitions)?.is_none()
     {
         return Ok(None);
     }
@@ -132,13 +133,17 @@ fn one_heap_below_merge(
 
 /// Returns the region scan that `sort` reads if `sort` is a TopK on the time index with
 /// a fetch up to [`MAX_GLOBAL_TOPK_FETCH`], reading the scan through row-wise operators
-/// that include at least one filter.
+/// that include at least one filter, and if the scan has more ranges than `partitions`.
 ///
 /// Without a filter every scanned row reaches the heaps, so each fills at once. On another
 /// sort key the scan cannot skip ranges by time, so one heap only serializes the work. A
 /// filter with a fetch keeps the first rows that pass, so reading ranges in another order
-/// would change which rows it keeps.
-pub(crate) fn filtered_scan_below_topk(sort: &SortExec) -> Result<Option<&RegionScanExec>> {
+/// would change which rows it keeps. With at most one range per partition the threshold
+/// leaves no later range to skip, so one heap only adds a single consumer.
+pub(crate) fn filtered_scan_below_topk(
+    sort: &SortExec,
+    partitions: usize,
+) -> Result<Option<&RegionScanExec>> {
     if !sort
         .fetch()
         .is_some_and(|fetch| fetch <= MAX_GLOBAL_TOPK_FETCH)
@@ -150,7 +155,8 @@ pub(crate) fn filtered_scan_below_topk(sort: &SortExec) -> Result<Option<&Region
     let mut seen_filter = false;
     loop {
         if let Some(scan) = node.downcast_ref::<RegionScanExec>() {
-            return Ok(seen_filter.then_some(scan));
+            let has_ranges_to_skip = scan.get_partition_ranges().len() > partitions;
+            return Ok((seen_filter && has_ranges_to_skip).then_some(scan));
         }
         let is_filter = match node.downcast_ref::<FilterExec>() {
             Some(filter) if filter.fetch().is_some() => return Ok(None),
@@ -216,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_filtered_scan_gets_one_heap() {
-        let topk = partitioned_topk(filter(log_region_scan(4)), ts(), 100);
+        let topk = partitioned_topk(filter(log_region_scan(4, 2)), ts(), 100);
         let pushed_filter = topk.dynamic_expressions_produced()[0].clone();
         let projection = Arc::new(
             ProjectionExec::try_new(vec![(Arc::new(ts()) as _, "ts".to_string())], topk).unwrap(),
@@ -246,25 +252,35 @@ mod tests {
     #[test]
     fn test_topk_keeps_partitions_without_a_merge_bounding_it() {
         // Without a merge each partition's rows are part of the result.
-        let plan = partitioned_topk(filter(log_region_scan(4)), ts(), 100);
+        let plan = partitioned_topk(filter(log_region_scan(4, 2)), ts(), 100);
         assert!(is_partitioned_topk(&optimize(plan)));
         // A merge returning more rows than one heap keeps needs every partition's rows.
-        let plan = merged(partitioned_topk(filter(log_region_scan(4)), ts(), 100), 200);
+        let plan = merged(
+            partitioned_topk(filter(log_region_scan(4, 2)), ts(), 100),
+            200,
+        );
         assert!(is_partitioned_topk(optimize(plan).children()[0]));
     }
 
     #[test]
     fn test_topk_keeps_partitions_when_one_heap_does_not_help() {
         // One thread would merge every filtered row of a weak filter.
-        let plan = partitioned_topk(filter(log_region_scan(4)), ts(), MAX_GLOBAL_TOPK_FETCH + 1);
+        let plan = partitioned_topk(
+            filter(log_region_scan(4, 2)),
+            ts(),
+            MAX_GLOBAL_TOPK_FETCH + 1,
+        );
         assert!(is_partitioned_topk(&optimize_merged(plan)));
         // Without a filter every scanned row reaches the heaps, so each fills at once.
-        let plan = partitioned_topk(log_region_scan(4), ts(), 100);
+        let plan = partitioned_topk(log_region_scan(4, 2), ts(), 100);
         assert!(is_partitioned_topk(&optimize_merged(plan)));
         // The scan cannot skip ranges on another sort key.
-        let plan = partitioned_topk(filter(log_region_scan(4)), Column::new("body", 0), 100);
+        let plan = partitioned_topk(filter(log_region_scan(4, 2)), Column::new("body", 0), 100);
         assert!(is_partitioned_topk(&optimize_merged(plan)));
-        let limited = filter(log_region_scan(4)).with_fetch(Some(2)).unwrap();
+        // Each partition reads one range, so there is no later range to skip.
+        let plan = partitioned_topk(filter(log_region_scan(4, 1)), ts(), 100);
+        assert!(is_partitioned_topk(&optimize_merged(plan)));
+        let limited = filter(log_region_scan(4, 2)).with_fetch(Some(2)).unwrap();
         let plan = partitioned_topk(limited, ts(), 100);
         assert!(is_partitioned_topk(&optimize_merged(plan)));
     }

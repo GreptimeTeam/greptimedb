@@ -129,7 +129,7 @@ mod tests {
     use crate::optimizer::test_util::{body_is_not_null, log_region_scan, sort_by};
 
     fn filter_over_scan() -> Arc<dyn ExecutionPlan> {
-        body_is_not_null(log_region_scan(1))
+        body_is_not_null(log_region_scan(1, 1))
     }
 
     fn sort(

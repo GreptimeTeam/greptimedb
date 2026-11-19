@@ -139,8 +139,7 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=4 REDACTED
-|_|_|_SortExec: TopK(fetch=4), expr=[t@1 ASC NULLS LAST], preserve_partitioning=[false], filter=[t@1 < 10] REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_SortExec: TopK(fetch=4), expr=[t@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["i", "t"], "filters": ["i > Int32(2)"], "dyn_filters":REDACTED
 |_|_|_|
@@ -175,8 +174,7 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
-|_|_|_SortExec: TopK(fetch=4), expr=[t@1 DESC], preserve_partitioning=[false], filter=[t@1 IS NULL OR t@1 > 9] REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_SortExec: TopK(fetch=4), expr=[t@1 DESC], preserve_partitioning=[true] REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["i", "t"], "filters": ["i > Int32(2)"], "dyn_filters":REDACTED
 |_|_|_|
@@ -416,6 +414,122 @@ EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 +-+-+-+
 
 DROP TABLE test_pk;
+
+Affected Rows: 0
+
+-- More ranges than partitions: the TopK on the time index reads all partitions
+-- through one heap, and its threshold reaches the scan.
+CREATE TABLE test_one_heap(i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='16');
+
+Affected Rows: 0
+
+INSERT INTO test_one_heap VALUES (1, 1), (2, 2);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
++------------------------------------+
+| ADMIN FLUSH_TABLE('test_one_heap') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+INSERT INTO test_one_heap VALUES (3, 3), (4, 4);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
++------------------------------------+
+| ADMIN FLUSH_TABLE('test_one_heap') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+INSERT INTO test_one_heap VALUES (5, 5), (6, 6);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
++------------------------------------+
+| ADMIN FLUSH_TABLE('test_one_heap') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+INSERT INTO test_one_heap VALUES (7, 7), (8, 8);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
++------------------------------------+
+| ADMIN FLUSH_TABLE('test_one_heap') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+INSERT INTO test_one_heap VALUES (9, 9), (10, 10);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
++------------------------------------+
+| ADMIN FLUSH_TABLE('test_one_heap') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+INSERT INTO test_one_heap VALUES (11, 11), (12, 12);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
++------------------------------------+
+| ADMIN FLUSH_TABLE('test_one_heap') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+SELECT * FROM test_one_heap WHERE i > 2 ORDER BY t DESC LIMIT 3;
+
++----+-------------------------+
+| i  | t                       |
++----+-------------------------+
+| 12 | 1970-01-01T00:00:00.012 |
+| 11 | 1970-01-01T00:00:00.011 |
+| 10 | 1970-01-01T00:00:00.010 |
++----+-------------------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE SELECT * FROM test_one_heap WHERE i > 2 ORDER BY t DESC LIMIT 3;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=3 REDACTED
+|_|_|_SortExec: TopK(fetch=3), expr=[t@1 DESC], preserve_partitioning=[false], filter=[t@1 IS NULL OR t@1 > 10] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_FilterExec: i@0 > 2 REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":6, "mem_ranges":0, "files":6, "file_ranges":6}, "projection": ["i", "t"], "filters": ["i > Int32(2)"], "dyn_filters":REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+DROP TABLE test_one_heap;
 
 Affected Rows: 0
 

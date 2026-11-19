@@ -58,7 +58,8 @@ impl ParallelizeScan {
         let mut global_topk_scans = Vec::new();
         plan.apply(|node| {
             if let Some(sort) = node.downcast_ref::<SortExec>()
-                && let Some(scan) = filtered_scan_below_topk(sort)?
+                && let Some(scan) =
+                    filtered_scan_below_topk(sort, config.execution.target_partitions)?
             {
                 global_topk_scans.push((
                     scan as *const RegionScanExec,

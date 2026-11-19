@@ -147,3 +147,44 @@ EXPLAIN ANALYZE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 
 DROP TABLE test_pk;
+
+-- More ranges than partitions: the TopK on the time index reads all partitions
+-- through one heap, and its threshold reaches the scan.
+CREATE TABLE test_one_heap(i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='16');
+
+INSERT INTO test_one_heap VALUES (1, 1), (2, 2);
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
+INSERT INTO test_one_heap VALUES (3, 3), (4, 4);
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
+INSERT INTO test_one_heap VALUES (5, 5), (6, 6);
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
+INSERT INTO test_one_heap VALUES (7, 7), (8, 8);
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
+INSERT INTO test_one_heap VALUES (9, 9), (10, 10);
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
+INSERT INTO test_one_heap VALUES (11, 11), (12, 12);
+
+ADMIN FLUSH_TABLE('test_one_heap');
+
+SELECT * FROM test_one_heap WHERE i > 2 ORDER BY t DESC LIMIT 3;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE SELECT * FROM test_one_heap WHERE i > 2 ORDER BY t DESC LIMIT 3;
+
+DROP TABLE test_one_heap;

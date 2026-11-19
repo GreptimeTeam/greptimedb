@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use common_time::Timestamp;
 use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -259,18 +260,34 @@ fn log_region_metadata() -> RegionMetadataRef {
 }
 
 /// A region scan over an empty `(body STRING, ts TIMESTAMP TIME INDEX)` table split
-/// into `partitions` partitions.
-pub(crate) fn log_region_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
+/// into `partitions` partitions of `ranges_per_partition` ranges, each range reporting
+/// one row.
+pub(crate) fn log_region_scan(
+    partitions: usize,
+    ranges_per_partition: usize,
+) -> Arc<dyn ExecutionPlan> {
     let metadata = log_region_metadata();
     let stream = RecordBatches::try_new(metadata.schema.clone(), vec![])
         .unwrap()
         .as_stream();
     let scanner = Box::new(SinglePartitionScanner::new(stream, false, metadata, None));
     let scan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
-    Arc::new(
-        scan.with_new_partitions(vec![vec![]; partitions], partitions)
-            .unwrap(),
-    )
+    let ranges = (0..partitions)
+        .map(|partition| {
+            (0..ranges_per_partition)
+                .map(|i| {
+                    let id = partition * ranges_per_partition + i;
+                    PartitionRange {
+                        start: Timestamp::new_millisecond(id as i64 * 10),
+                        end: Timestamp::new_millisecond(id as i64 * 10 + 10),
+                        num_rows: 1,
+                        identifier: id,
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    Arc::new(scan.with_new_partitions(ranges, partitions).unwrap())
 }
 
 /// Filters the output of a [`log_region_scan`] by `body IS NOT NULL`.
