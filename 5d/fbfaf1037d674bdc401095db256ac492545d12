@@ -1,0 +1,24 @@
+src/catalog/src/lib.rs
+  s_c311425adc0214::t_9813809502eb80 104-106,123-124
+src/catalog/src/kvbackend/manager.rs
+  s_c311425adc0214::t_566ef10f19a79d 437-442,453-455,757,883
+  s_c311425adc0214::t_801cc0e3c01f66 752-756,758,760,762,766-807,814-834,844-846,848,850-851,853-876
+  s_c311425adc0214::t_91b371c875dc4a 808-813,835-843,847,849,852
+  s_c311425adc0214::t_3388fd60395b05 877
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5dfbfaf1037d674bdc401095db256ac492545d12",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
