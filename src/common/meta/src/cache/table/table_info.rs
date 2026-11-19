@@ -39,7 +39,7 @@ pub fn new_table_info_cache(
     kv_backend: KvBackendRef,
 ) -> TableInfoCache {
     let table_info_manager = Arc::new(TableInfoManager::new(kv_backend));
-    let init = init_factory(table_info_manager);
+    let init = init_factory(table_info_manager.clone());
 
     CacheContainer::with_strategy(
         name,
@@ -49,6 +49,17 @@ pub fn new_table_info_cache(
         filter,
         InitStrategy::VersionChecked,
     )
+    .with_batch_initializer(Arc::new(move |ids| {
+        let manager = table_info_manager.clone();
+        Box::pin(async move {
+            Ok(manager
+                .batch_get(&ids)
+                .await?
+                .into_iter()
+                .map(|(id, value)| (id, Arc::new(value.table_info)))
+                .collect())
+        })
+    }))
 }
 
 fn init_factory(table_info_manager: TableInfoManagerRef) -> Initializer<TableId, Arc<TableInfo>> {

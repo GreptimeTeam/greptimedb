@@ -23,6 +23,7 @@ use futures_util::stream::BoxStream;
 use session::context::QueryContext;
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
+use table::table_name::TableName;
 
 use crate::error::Result;
 
@@ -98,6 +99,32 @@ pub trait CatalogManager: Send + Sync {
             .table(catalog, schema, table_name, query_ctx)
             .await?
             .map(|t| t.table_info().ident.table_id))
+    }
+
+    /// Returns table IDs in input order, including missing names.
+    async fn table_ids(&self, names: &[TableName]) -> Result<Vec<Option<TableId>>> {
+        let mut result = Vec::with_capacity(names.len());
+        for name in names {
+            result.push(
+                self.table_id(
+                    &name.catalog_name,
+                    &name.schema_name,
+                    &name.table_name,
+                    None,
+                )
+                .await?,
+            );
+        }
+        Ok(result)
+    }
+
+    /// Returns table metadata in input order, including missing tables.
+    async fn table_infos_by_ids(&self, ids: &[TableId]) -> Result<Vec<Option<TableInfoRef>>> {
+        let mut result = Vec::with_capacity(ids.len());
+        for &id in ids {
+            result.push(self.table_info_by_id(id).await?);
+        }
+        Ok(result)
     }
 
     /// Returns the table of provided id.
