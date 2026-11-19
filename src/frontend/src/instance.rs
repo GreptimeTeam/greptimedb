@@ -1664,7 +1664,7 @@ impl Instance {
         ) else {
             return Ok(None);
         };
-        let source_epoch = if cache.source_probe_enabled() {
+        let (source_epoch, probe_table, probe_table_id) = if cache.source_probe_enabled() {
             // A sequence-validated cache may not answer until this table's changes
             // have been invalidated and its cursor advanced. A probe that cannot
             // prove the whole table bypasses the cache instead of serving stale
@@ -1674,16 +1674,16 @@ impl Instance {
                 query_ctx.current_schema(),
                 identity.source_table.clone(),
             );
-            let Some(source_epoch) = self
+            let Some((source_epoch, table_id)) = self
                 .refresh_cache_source(&table, &identity.source_table, query_ctx)
                 .await
                 .unwrap_or(None)
             else {
                 return Ok(None);
             };
-            source_epoch
+            (source_epoch, Some(table), Some(table_id))
         } else {
-            cache.source_epoch()
+            (cache.source_epoch(), None, None)
         };
         let executor = StatementWindowExecutor {
             instance: self,
@@ -1691,6 +1691,8 @@ impl Instance {
             alias,
             ordered: requires_output_ordering,
             cancellation_handle,
+            probe_table,
+            probe_table_id,
         };
         match execute_range(
             &executor,
@@ -1699,6 +1701,7 @@ impl Instance {
             eval_stmt,
             SystemTime::now(),
             source_epoch,
+            probe_table_id,
         )
         .await?
         {
@@ -1834,6 +1837,10 @@ struct StatementWindowExecutor<'a> {
     alias: Option<String>,
     ordered: bool,
     cancellation_handle: Arc<CancellationHandle>,
+    /// The table name the source probe validated, when this request uses one.
+    probe_table: Option<TableName>,
+    /// The incarnation the probe validated against that name.
+    probe_table_id: Option<u32>,
 }
 
 impl StatementWindowExecutor<'_> {
@@ -1858,6 +1865,23 @@ impl StatementWindowExecutor<'_> {
 
 #[async_trait]
 impl WindowExecutor for StatementWindowExecutor<'_> {
+    async fn source_table_id(&self) -> Option<u32> {
+        let table = self.probe_table.as_ref()?;
+        self.probe_table_id?;
+        self.instance
+            .catalog_manager
+            .table(
+                &table.catalog_name,
+                &table.schema_name,
+                &table.table_name,
+                Some(&self.query_ctx),
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|table| table.table_info().table_id())
+    }
+
     async fn execute_window(&self, eval_stmt: EvalStmt) -> server_error::Result<WindowOutput> {
         let (query_ctx, collector) = self.window_context();
         let statement = QueryStatement::Promql(eval_stmt, self.alias.clone());

@@ -82,6 +82,13 @@ pub(crate) trait WindowExecutor: Send + Sync {
     /// Plans and executes `stmt`, returning every row it produced and what the read
     /// recorded.
     async fn execute_window(&self, stmt: EvalStmt) -> server_error::Result<WindowOutput>;
+
+    /// The table ID the source name currently resolves to, when this executor can
+    /// ask the catalog. A fill whose plan may have bound a different incarnation
+    /// must not publish.
+    async fn source_table_id(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// What one evaluation window produced.
@@ -126,6 +133,7 @@ pub(crate) async fn execute_range<E>(
     stmt: &EvalStmt,
     now: SystemTime,
     source_epoch: u64,
+    source_table_id: Option<u32>,
 ) -> server_error::Result<RangeOutcome>
 where
     E: WindowExecutor + ?Sized,
@@ -169,6 +177,7 @@ where
                     now,
                     dependency_history_ms,
                     source_epoch,
+                    source_table_id,
                 )
                 .await?
             }
@@ -196,6 +205,7 @@ async fn chunk_rows<E>(
     now: SystemTime,
     dependency_history_ms: i64,
     source_epoch: u64,
+    source_table_id: Option<u32>,
 ) -> server_error::Result<WindowOutput>
 where
     E: WindowExecutor + ?Sized,
@@ -206,7 +216,12 @@ where
     if cache.source_epoch() != source_epoch {
         return execute_span(executor, stmt, grid, key.chunk()).await;
     }
-    let fill: FillCursor = match cache.lookup(key, now) {
+    if let Some(expected) = source_table_id
+        && executor.source_table_id().await != Some(expected)
+    {
+        return execute_span(executor, stmt, grid, key.chunk()).await;
+    }
+    let fill: FillCursor = match cache.lookup_fenced(key, now, source_epoch) {
         Lookup::Hit {
             payload,
             annotations,
@@ -228,6 +243,13 @@ where
         },
     };
     let window = execute_span(executor, stmt, grid, key.chunk()).await?;
+    if let Some(expected) = source_table_id
+        && executor.source_table_id().await != Some(expected)
+    {
+        // The name resolved to a different incarnation while the window ran. The
+        // rows answer the current query but must not be published under the name.
+        return Ok(window);
+    }
     // Only a fully consumed chunk is inserted: `execute_span` returns rows it read to
     // the end, and a failure returned above without inserting anything. Its
     // annotations are stored beside them, and the same ones are returned, so the
@@ -573,6 +595,7 @@ mod tests {
             stmt,
             at(NOW_MS),
             cache.source_epoch(),
+            None,
         )
         .await
     }
@@ -648,6 +671,7 @@ mod tests {
                 &stmt,
                 at(NOW_MS),
                 cache.source_epoch(),
+                None,
             )
             .await
             .unwrap();
@@ -703,6 +727,7 @@ mod tests {
             &stmt,
             at(NOW_MS),
             cache.source_epoch(),
+            None,
         )
         .await
         .unwrap();

@@ -643,6 +643,8 @@ pub enum MissReason {
         /// How long ago the fill captured its read.
         age: Duration,
     },
+    /// A source rename, repartition, or incarnation changed after validation.
+    SourceChanged,
 }
 
 /// The outcome of one [`RollupCache::lookup`].
@@ -1076,6 +1078,7 @@ impl RollupCache {
     /// an older generation is dropped because its source identity or route may no
     /// longer be the one it read.
     pub fn advance_source_epoch(&self) -> u64 {
+        let _guard = self.invalidation_lock.lock().unwrap();
         self.source_epoch.fetch_add(1, Ordering::SeqCst) + 1
     }
 
@@ -1124,10 +1127,22 @@ impl RollupCache {
     /// entry, never storage, and never waits for an in-flight fill or for cache
     /// maintenance.
     pub fn lookup(&self, key: &TimeChunkKey, now: SystemTime) -> Lookup {
+        self.lookup_fenced(key, now, self.source_epoch())
+    }
+
+    /// [`Self::lookup`] with the source generation the caller validated.
+    ///
+    /// The check runs under the same lock as the hit decision: a rename that
+    /// advanced the source epoch after the caller's pre-check cannot be followed by
+    /// serving an entry keyed to the old identity.
+    pub fn lookup_fenced(&self, key: &TimeChunkKey, now: SystemTime, source_epoch: u64) -> Lookup {
         if key.chunk.is_empty() {
             return Lookup::Bypass(BypassReason::EmptyChunk);
         }
         let _guard = self.invalidation_lock.lock().unwrap();
+        if self.source_epoch() != source_epoch {
+            return Lookup::Miss(MissReason::SourceChanged);
+        }
         let cursor = match self.authorized_cursor(now) {
             Ok(cursor) => cursor,
             Err(reason) => return Lookup::Miss(reason),

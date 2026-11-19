@@ -173,7 +173,7 @@ impl Instance {
         table: &TableName,
         source_table: &str,
         query_ctx: &QueryContextRef,
-    ) -> Result<Option<u64>> {
+    ) -> Result<Option<(u64, u32)>> {
         let Some(cache) = self.rollup_cache.as_ref() else {
             return Ok(None);
         };
@@ -368,7 +368,7 @@ impl Instance {
                 );
             }
         }
-        Ok(Some(source_epoch))
+        Ok(Some((source_epoch, table_id)))
     }
 }
 
