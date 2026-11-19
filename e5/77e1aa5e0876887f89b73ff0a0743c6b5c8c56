@@ -1,0 +1,37 @@
+src/metric-engine/src/data_region.rs
+  s_e01d8d83ef4b5f::t_0b4962e09b6407 72,82,93,109,113-114
+src/metric-engine/AGENTS.md
+  s_a318bba3e07aba::t_881d02e00b7906 30,78-79
+src/metric-engine/src/engine/alter.rs
+  s_e01d8d83ef4b5f::t_6ebc1e5516f07d 36,169-172
+src/metric-engine/src/engine/create.rs
+  s_e01d8d83ef4b5f::t_5da37bc43bcb2d 296-299
+src/metric-engine/src/engine/read.rs
+  s_e01d8d83ef4b5f::t_37b639988c0ac8 227-229,250-252
+src/metric-engine/src/engine/region_metadata.rs
+  s_a318bba3e07aba::t_4a5b93bdd38e08 15,59,64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e577e1aa5e0876887f89b73ff0a0743c6b5c8c56",
+  "prompts": {},
+  "sessions": {
+    "s_a318bba3e07aba": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f31d-fe33-7173-883b-abb50fea746e",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_e01d8d83ef4b5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f31d-fdd6-7a43-8e0a-128aa635c7c9",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
