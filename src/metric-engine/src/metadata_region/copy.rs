@@ -24,9 +24,9 @@ use crate::error::Result;
 use crate::metadata_region::MetadataRegion;
 use crate::utils;
 
-// Bound both the protobuf row overhead and the variable-length key/value payload.
-const COPY_BATCH_ROWS: usize = 4096;
-const COPY_BATCH_BYTES: usize = 1024 * 1024;
+// The row limit bounds per-row protobuf overhead. The byte limit counts key/value payload.
+const COPY_BATCH_ROWS: usize = 8 * 1024;
+const COPY_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 impl MetadataRegion {
     /// Updates logical region metadata so that any entries previously referencing
@@ -134,7 +134,7 @@ fn remap_column_key(
         return Ok(None);
     };
     *decoded_name =
-        MetadataRegion::decode_column_name(target, encoded, std::mem::take(decoded_name))?
+        MetadataRegion::decode_column_name(source, encoded, std::mem::take(decoded_name))?
             .into_bytes();
     Ok(Some(MetadataRegion::encoded_column_key(target, encoded)))
 }
@@ -186,6 +186,49 @@ mod tests {
         assert_eq!(
             metadata.get(region, "tail").await.unwrap().as_deref(),
             Some("value")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_source_column_leaves_target_marker_unpublished() {
+        let env = TestEnv::new().await;
+        let target = env.default_physical_region_id();
+        env.create_physical_region(target, "/copy", vec![]).await;
+        let metadata = env.metadata_region();
+        let region = to_metadata_region_id(target);
+        let source = RegionId::new(target.table_id(), 0);
+        let logical = RegionId::new(10, source.region_number());
+        let target_logical = RegionId::new(logical.table_id(), target.region_number());
+
+        // /w decodes to 0xff, which is not a UTF-8 column name.
+        metadata
+            .put_entries(
+                region,
+                vec![
+                    (MetadataRegion::concat_region_key(logical), String::new()),
+                    (
+                        MetadataRegion::encoded_column_key(logical, "/w"),
+                        "value".to_string(),
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let err = metadata
+            .transform_logical_region_metadata(target, source)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            metadata
+                .get(region, &MetadataRegion::concat_region_key(target_logical))
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            matches!(err, crate::error::Error::InvalidRequest { region_id, .. } if region_id == logical),
+            "{err}"
         );
     }
 

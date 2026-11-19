@@ -82,6 +82,8 @@ cargo nextest run -p metric-engine
 - Metadata reads use an LRU cache. Metadata writes take the per-region cache
   write lock and invalidate the cache after the Mito2 write succeeds; preserve
   that ordering when adding a metadata mutation path.
+- Repartition writes all remapped columns before publishing target region markers.
+  A retry can replay completed column batches.
 - Always convert ids via `utils::to_data_region_id` / `to_metadata_region_id`.
 - `MetricEngine::loaded_logical_regions` exposes physical regions' loaded logical
   children. RegionServer captures them before drop/close and unregisters them

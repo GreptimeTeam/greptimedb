@@ -352,26 +352,26 @@ impl MetadataRegion {
             raw.parse::<u64>()
                 .with_context(|_| ParseRegionIdSnafu { raw })?,
         );
-        let name = Self::decode_column_name(region_id, encoded, Vec::new())?;
+        let name = Self::decode_column_name(raw, encoded, Vec::new())?;
         Ok(Some((region_id, name)))
     }
 
-    fn decode_column_name(
-        region_id: RegionId,
-        encoded: &str,
-        mut buffer: Vec<u8>,
-    ) -> Result<String> {
+    fn decode_column_name(raw: &str, encoded: &str, mut buffer: Vec<u8>) -> Result<String> {
         buffer.clear();
         STANDARD_NO_PAD
             .decode_vec(encoded, &mut buffer)
             .context(DecodeColumnValueSnafu)?;
-        String::from_utf8(buffer).map_err(|err| {
-            crate::error::InvalidRequestSnafu {
-                region_id,
+        match String::from_utf8(buffer) {
+            Ok(name) => Ok(name),
+            Err(err) => crate::error::InvalidRequestSnafu {
+                region_id: RegionId::from(
+                    raw.parse::<u64>()
+                        .with_context(|_| ParseRegionIdSnafu { raw })?,
+                ),
                 reason: format!("Invalid UTF-8 column name: {err}"),
             }
-            .build()
-        })
+            .fail(),
+        }
     }
 
     pub fn serialize_column_metadata(column_metadata: &ColumnMetadata) -> String {
