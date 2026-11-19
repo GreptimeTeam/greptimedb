@@ -2206,7 +2206,12 @@ mod tests {
             assert_eq!(current.version().unwrap(), reserved.version().unwrap());
             RegionId::from_u64(create.region_id).region_number()
         };
-        let (result, first_number) = tokio::join!(first.execute(&ctx), observe_create);
+        let create_timeout = Duration::from_secs(5);
+        let (result, first_number) = tokio::time::timeout(create_timeout, async {
+            tokio::join!(first.execute(&ctx), observe_create)
+        })
+        .await
+        .expect("first split timed out waiting for a create request");
         assert!(!result.unwrap_err().is_retry_later());
         let (_, request) = requests.try_recv().unwrap();
         let Some(Body::Create(create)) = request.body else {
@@ -2237,7 +2242,11 @@ mod tests {
         let mut second = new_split();
         second.execute(&ctx).await.unwrap();
         second.execute(&ctx).await.unwrap();
-        let (result, _) = tokio::join!(second.execute(&ctx), requests.recv());
+        let (result, _) = tokio::time::timeout(create_timeout, async {
+            tokio::join!(second.execute(&ctx), requests.recv())
+        })
+        .await
+        .expect("second split timed out waiting for a create request");
         result.unwrap();
         assert_parent_state::<Dispatch>(&second);
         let numbers: Vec<_> = current_parent_region_routes(&second.context)
