@@ -223,21 +223,16 @@ impl SparseReadRowHelper {
         primary_key_encoding: PrimaryKeyEncoding,
     ) -> SparseReadRowHelper {
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
-            // Optimized case: when schema has exactly 3 columns (primary key, timestamp, and one field),
-            // we can directly use their indices in order without building an explicit mapping.
-            // The column order is: encoded primary key, timestamp, and field.
-            if rows.schema.len() == 3 {
-                let indices = rows
-                    .schema
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| Some(index))
-                    .collect();
+            // A sparse row contains the encoded key, timestamp, and any supplied fields.
+            // Use positional indices only when the region also has a single field.
+            if rows.schema.len() == 3
+                && metadata.column_metadatas.len() == metadata.primary_key.len() + 2
+            {
                 return SparseReadRowHelper {
-                    indices,
+                    indices: vec![Some(0), Some(1), Some(2)],
                     num_primary_key_column: 1,
                 };
-            };
+            }
 
             let mut indices = Vec::with_capacity(rows.schema.len());
             let name_to_index: HashMap<_, _> = rows
@@ -303,6 +298,7 @@ impl SparseReadRowHelper {
 #[cfg(test)]
 mod tests {
     use api::v1::{self, ColumnDataType, SemanticType};
+    use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
     use super::*;
     use crate::test_util::{TestRegionMetadataBuilder, i64_value};
@@ -452,6 +448,19 @@ mod tests {
         // ts: 2,
         // fields: [v0=1, v1=4]
         check_key_values(&kvs, 3, &[Some(0), Some(3)], 2, &[Some(1), Some(4)]);
+    }
+
+    #[test]
+    fn test_sparse_encoded_row_with_one_of_two_fields() {
+        let meta = new_region_metadata(2, 2);
+        for (field, expected) in [("v0", [Some(2), None]), ("v1", [None, Some(2)])] {
+            let mut mutation = new_mutation(&[PRIMARY_KEY_COLUMN_NAME, TS_NAME, field], 1);
+            mutation.write_hint = Some(v1::WriteHint {
+                primary_key_encoding: v1::PrimaryKeyEncoding::Sparse.into(),
+            });
+            let kvs = KeyValues::new(&meta, mutation).unwrap();
+            check_key_values(&kvs, 1, &[Some(0)], 1, &expected);
+        }
     }
 
     #[test]
