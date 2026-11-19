@@ -2183,8 +2183,10 @@ impl ManifestContext {
     }
 
     /// Promotes the region to a writable leader unless a downgrade started after `issued_at` or
-    /// the region waits for a reload. Returns false if the promotion is ignored for one of these
-    /// reasons; otherwise the role changes as [`Self::set_role`] allows.
+    /// the region waits for a reload. `promoted` is false if the promotion is ignored for one of
+    /// these reasons; otherwise the role changes as [`Self::set_role`] allows. `ended_wait` tells
+    /// whether this lease ended the region's wait for its Leader lease, whether or not it promoted
+    /// the region.
     pub(crate) fn promote_unless_downgrade_started_after(
         &self,
         issued_at: Instant,

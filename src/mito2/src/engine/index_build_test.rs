@@ -36,7 +36,9 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType};
 use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter};
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::{RegionEngine, SetRegionRoleStateResponse, SettableRegionRoleState};
+use store_api::region_engine::{
+    RegionEngine, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
+};
 use store_api::region_request::{
     AddColumn, AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCloseRequest,
     RegionCompactRequest, RegionFlushRequest, RegionRequest, RegionTruncateRequest, SetIndexOption,
@@ -49,6 +51,7 @@ use crate::cache::{CacheManager, CacheStrategy};
 use crate::config::{IndexBuildMode, MitoConfig, Mode};
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::put_and_flush;
+use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::engine::listener::{EventListener, GateIndexBuildListener, IndexBuildListener};
 use crate::manifest::action::RegionEdit;
 use crate::read::Batch;
@@ -3121,6 +3124,109 @@ async fn test_async_compaction_builds_and_manual_rebuild_maintains_sketch() {
             .contains(&crate::sst::file::IndexType::HllIndex)
     }));
     assert_tag_inverted_index(&region.access_layer, files[0].index_id()).await;
+    assert_sketch_rows(&region.access_layer, files[0].index_id(), 4).await;
+    engine.stop().await.unwrap();
+}
+
+/// The index pass at the end of a wait for the Leader lease, a flush build of every file, leaves
+/// a compacted file whose sketch the compaction built with it, since a flush build would replace
+/// its index without the sketch.
+#[tokio::test]
+async fn test_leader_lease_wait_end_keeps_compacted_sketch() {
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    let provider = Arc::new(RebuildSketchProvider::default());
+    plugins.insert::<IndexKindProviderRef>(provider.clone());
+    let mut config = async_build_mode_config(true);
+    config.inverted_index.create_on_compaction = Mode::Disable;
+    let engine = env.create_engine_with_plugins(config, plugins).await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new()
+        .insert_option("sst_format", "flat")
+        .build();
+    request.column_metadatas[0]
+        .column_schema
+        .set_inverted_index(true);
+    request
+        .column_metadatas
+        .iter_mut()
+        .find(|column| column.column_id == 0)
+        .unwrap()
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for start in [0, 2] {
+        let rows = Rows {
+            schema: schema.clone(),
+            rows: build_rows(start, start + 2),
+        };
+        put_rows(&engine, region_id, rows).await;
+        flush_region(&engine, region_id, None).await;
+    }
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let has_sketch = |file: &FileMeta| {
+        file.indexes.iter().any(|column| {
+            column
+                .created_indexes
+                .contains(&crate::sst::file::IndexType::HllIndex)
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let files = region.all_manifest_files().await.0;
+            if files.len() == 1 && has_sketch(&files[0]) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let compacted = region.all_manifest_files().await.0[0].clone();
+    engine.require_write_lease();
+    promote_to_await_leader_lease(&engine, region_id).await;
+
+    let now = std::time::Instant::now();
+    engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            now,
+            now + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+
+    // A replacement of the index would finish well within this time.
+    let region = engine.get_region(region_id).unwrap();
+    assert!(!region.manifest_ctx.awaits_leader_lease());
+    let changed = tokio::time::timeout(Duration::from_secs(2), async {
+        while region.all_manifest_files().await.0 == vec![compacted.clone()] {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        changed.is_err(),
+        "the lease replaced the compacted file's index"
+    );
+    let files = region.all_manifest_files().await.0;
+    assert!(has_sketch(&files[0]));
     assert_sketch_rows(&region.access_layer, files[0].index_id(), 4).await;
     engine.stop().await.unwrap();
 }

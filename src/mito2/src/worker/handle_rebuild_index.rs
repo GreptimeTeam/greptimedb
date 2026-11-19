@@ -37,6 +37,7 @@ use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRo
 use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
 use crate::sst::file::{self, FileHandle, FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::index::handler::{IndexKindProviderRef, PlanContext};
+use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
 use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
@@ -51,6 +52,19 @@ use crate::worker::{RegionWorkerLoop, index_registry};
 pub(crate) struct IndexBuildSnapshot {
     metadata: RegionMetadataRef,
     index_options: IndexOptions,
+}
+
+/// Completed extensions prove the writer built this output's indexes together.
+/// A background replacement would otherwise erase those extension blobs.
+pub(crate) fn needs_background_indexes(file: &FileMeta) -> bool {
+    !ExtensionIndexKind::ALL.iter().any(|kind| {
+        let index_type = IndexKind::Extension(*kind).index_type();
+        file.available_indexes.contains(&index_type)
+            || file
+                .indexes
+                .iter()
+                .any(|column| column.created_indexes.contains(&index_type))
+    })
 }
 
 impl<S> RegionWorkerLoop<S> {
@@ -271,6 +285,12 @@ impl<S> RegionWorkerLoop<S> {
                 .filter_map(|file| {
                     let file_meta = current_file_meta(file.meta_ref().file_id)?;
                     Some((file.clone(), file_meta))
+                })
+                // A flush build of every file, which the end of a wait for the Leader lease
+                // asks for, builds no extension index, so it leaves the files that have one.
+                .filter(|(_, file_meta)| {
+                    request.build_type != IndexBuildType::Flush
+                        || needs_background_indexes(file_meta)
                 })
                 .collect::<Vec<_>>()
         } else {
