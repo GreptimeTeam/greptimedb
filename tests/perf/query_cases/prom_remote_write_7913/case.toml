@@ -2,6 +2,12 @@
 # through the normal metric write path. This case is intentionally not part of the
 # default query-regression set; run it explicitly when validating PromQL pipeline
 # placement on realistic metric-engine data.
+#
+# It is also the only ingested case the native fused-series route can serve: the
+# metric engine writes a millisecond time index and the table is copy-on-write.
+# The queries below the three bare selectors cover the shapes that route splits
+# or composes over ingested data (grouped aggregate, global topk, ignored-label
+# binary match, subquery, offset selector, metric-name rewrite).
 
 [case]
 name = "prom_remote_write_7913"
@@ -56,6 +62,90 @@ kind = "tql"
 query = "TQL ANALYZE VERBOSE (1704067200, 1705276800, '1h') prom_remote_write_7913{host=~'host.*'}"
 warmup = 1
 iterations = 2
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+# ---------------------------------------------------------------------------
+# Plan-shape coverage on top of the three bare selectors.
+#
+# This table is the one ingested case the native fused-series route can serve:
+# the metric engine writes a millisecond time index and the table is not
+# `append_mode`. The queries below therefore cover the shapes that route splits
+# or composes over real ingested data: a grouped aggregate, a global topk, a
+# binary match, a subquery, an offset selector, and a metric-name rewrite (which
+# makes eight series share one name and so goes through the canonical
+# merge/collect path).
+#
+# Every one is measured with `TQL ANALYZE VERBOSE` (the framework reads
+# `execution_time_ms` from the ANALYZE output) over the two hours starting one
+# hour after ingestion starts, so `offset 1h` still reads stored samples. The
+# subquery query uses a coarser 15-minute outer step because a one-minute inner
+# step over a one-hour range is 61 inner evaluations per outer one.
+#
+# `... / ignoring(host) ...` is a valid one-to-one match here: `instance` is
+# unique per series in this fixture, so ignoring `host` still leaves a distinct
+# key per series.
+# ---------------------------------------------------------------------------
+
+[[scenario.queries]]
+name = "sum_by_host_rate_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '5m') sum by (host) (rate(prom_remote_write_7913{host=~'host.*'}[5m]))"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+[[scenario.queries]]
+name = "topk_10_selector"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '5m') topk(10, prom_remote_write_7913{host=~'host.*'})"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+[[scenario.queries]]
+name = "selector_ratio_ignoring_host"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '5m') prom_remote_write_7913{host=~'host.*'} / ignoring(host) prom_remote_write_7913{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+[[scenario.queries]]
+name = "max_over_time_rate_1h_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15m') max_over_time(rate(prom_remote_write_7913{host=~'host.*'}[5m])[1h:5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+[[scenario.queries]]
+name = "selector_offset_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '5m') prom_remote_write_7913{host=~'host.*'} offset 1h"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+# Renaming the metric leaves 1024 distinct names over 8192 series, so eight
+# series share each name: the canonical merge/collect path.
+[[scenario.queries]]
+name = "label_replace_metric_name"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '5m') label_replace(rate(prom_remote_write_7913{host=~'host.*'}[5m]), '__name__', 'rewritten_$1', 'host', '(.*)')"
+warmup = 3
+iterations = 9
 
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 100
