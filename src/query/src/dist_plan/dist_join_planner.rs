@@ -357,6 +357,13 @@ impl NestedBroadcastJoinRewriter<'_> {
             return None;
         }
 
+        // A volatile expression confined to a build-side join key is not part of
+        // `small_plan`, so the input guard below cannot see it. Re-executing the key per
+        // probe region would match the same build row differently in each region.
+        if join.on.iter().any(|(_, small_key)| small_key.is_volatile()) {
+            return None;
+        }
+
         // The pinned DataFusion Substrait producer rejects `JoinConstraint::Using`, so a
         // rewritten payload would fail to encode on the frontend and make a previously
         // executable query fail. Keep `USING` joins local.
@@ -815,6 +822,33 @@ mod tests {
                 &ConfigOptions::default(),
             )
             .unwrap();
+
+        let result = rewrite(plan.clone());
+        assert_eq!(plan.to_string(), result.to_string());
+        assert!(matches!(result, LogicalPlan::Join(_)));
+    }
+
+    #[test]
+    fn nested_broadcast_join_rewrite_rejects_volatile_join_key() {
+        let plan = distributed_join_plan();
+        let LogicalPlan::Join(join) = &plan else {
+            panic!("expected a join on top, got: {plan}");
+        };
+        let volatile = Expr::ScalarFunction(datafusion_expr::expr::ScalarFunction::new_udf(
+            Arc::new(ScalarUDF::new_from_impl(VolatileTestUdf)),
+            vec![col("t2.number")],
+        ));
+        // The small-side input itself is not volatile: the volatile expression only
+        // appears in the build-side join key.
+        let plan = LogicalPlan::Join(Join {
+            on: vec![(join.on[0].0.clone(), volatile)],
+            ..join.clone()
+        });
+        if let LogicalPlan::Join(join) = &plan {
+            let (small_plan, _) = strip_merge_scan(&join.right).unwrap();
+            assert!(!contains_volatile_expr(&small_plan));
+            assert!(join.on.iter().any(|(_, key)| key.is_volatile()));
+        }
 
         let result = rewrite(plan.clone());
         assert_eq!(plan.to_string(), result.to_string());
