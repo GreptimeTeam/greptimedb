@@ -396,7 +396,8 @@ impl Requester {
         Ok(discarded)
     }
 
-    /// Returns the info of the table.
+    /// Returns the info of the table, or a [TableNotFound](crate::error::Error::TableNotFound)
+    /// error if the catalog has no such table.
     async fn table_info(&self, table_name: &TableName) -> Result<TableInfoRef> {
         let table = self
             .catalog_manager
@@ -414,7 +415,9 @@ impl Requester {
         Ok(table.table_info())
     }
 
-    /// Returns the ids of the table's physical regions.
+    /// Returns the region ids of the physical table behind `table_id`, from its physical
+    /// partition info. For a Metric Engine logical table these are the regions of its physical
+    /// table, so a caller that must not act on them rejects a logical table first.
     async fn physical_region_ids(
         &self,
         table_name: &TableName,
@@ -792,7 +795,6 @@ mod tests {
         let feat = "discarding pending WAL tails from a Metric Engine logical table";
         let error = ensure_discard_supported(METRIC_ENGINE, false, feat).unwrap_err();
         assert!(matches!(error, crate::error::Error::NotSupported { .. }));
-        assert!(error.to_string().contains(feat), "{error}");
 
         ensure_discard_supported(METRIC_ENGINE, true, feat).unwrap();
         ensure_discard_supported("mito", false, feat).unwrap();

@@ -2196,6 +2196,25 @@ mod tests {
     }
 
     #[test]
+    fn test_discard_pending_tails_request_wire() {
+        use api::v1::region::RegionRequest as PbRegionRequest;
+        use prost::Message;
+
+        let bytes = include_bytes!(
+            "../../../tests/compatibility/wire/discard_pending_tails/discard_pending_tails.pb"
+        );
+        let request = PbRegionRequest::decode(bytes.as_slice()).unwrap();
+        assert_eq!(request.encode_to_vec(), bytes);
+        let mut requests = RegionRequest::try_from_request_body(request.body.unwrap()).unwrap();
+        let (region_id, request) = requests.remove(0);
+        assert_eq!(RegionId::new(1024, 1), region_id);
+        let RegionRequest::DiscardPendingTails(request) = request else {
+            panic!("expected a pending tails discard, got {request:?}")
+        };
+        assert_eq!(7, request.node_id);
+    }
+
+    #[test]
     fn test_build_index_options_round_trip() {
         use prost::Message;
 
@@ -2297,25 +2316,6 @@ mod tests {
             requests[0].1,
             RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
         ));
-    }
-
-    #[test]
-    fn test_discard_pending_tails_request_wire() {
-        use api::v1::region::RegionRequest as PbRegionRequest;
-        use prost::Message;
-
-        let bytes = include_bytes!(
-            "../../../tests/compatibility/wire/discard_pending_tails/discard_pending_tails.pb"
-        );
-        let request = PbRegionRequest::decode(bytes.as_slice()).unwrap();
-        assert_eq!(request.encode_to_vec(), bytes);
-        let mut requests = RegionRequest::try_from_request_body(request.body.unwrap()).unwrap();
-        let (region_id, request) = requests.remove(0);
-        assert_eq!(RegionId::new(1024, 1), region_id);
-        let RegionRequest::DiscardPendingTails(request) = request else {
-            panic!("expected a pending tails discard, got {request:?}")
-        };
-        assert_eq!(7, request.node_id);
     }
 
     #[test]

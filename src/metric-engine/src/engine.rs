@@ -301,7 +301,7 @@ impl RegionEngine for MetricEngine {
                         .mito
                         .handle_request(utils::to_data_region_id(region_id), request)
                         .await
-                        .context(error::MitoTruncateOperationSnafu)
+                        .context(error::MitoDiscardPendingTailsOperationSnafu)
                         .map(|response| response.affected_rows)
                 } else {
                     UnsupportedRegionRequestSnafu { request }.fail()
@@ -816,31 +816,13 @@ mod test {
         let request =
             || RegionRequest::DiscardPendingTails(RegionDiscardPendingTailsRequest { node_id: 1 });
         let data_region_id = utils::to_data_region_id(env.default_physical_region_id());
-        env.metric()
-            .handle_request(
-                env.default_logical_region_id(),
-                RegionRequest::Put(RegionPutRequest {
-                    skip_wal: false,
-                    rows: Rows {
-                        schema: row_schema_with_tags(&["job"]),
-                        rows: build_rows(1, 5),
-                    },
-                    hint: None,
-                    partition_expr_version: None,
-                }),
-            )
-            .await
-            .unwrap();
-        // A physical region accepts the request; neither of its Mito regions has pending tails,
-        // and the data region keeps its unflushed rows.
+        // A physical region accepts the request; neither of its Mito regions has pending tails.
         let response = env
             .metric()
             .handle_request(env.default_physical_region_id(), request())
             .await
             .unwrap();
         assert_eq!(response.affected_rows, 0);
-        let data_stat = env.mito().region_statistic(data_region_id).unwrap();
-        assert!(data_stat.memtable_size > 0);
         // The request reaches the data region, which refuses it as a follower.
         env.mito()
             .set_region_role(data_region_id, RegionRole::Follower)

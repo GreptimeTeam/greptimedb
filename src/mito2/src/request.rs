@@ -1629,6 +1629,31 @@ mod tests {
         assert_eq!(receiver.await.unwrap().unwrap(), 1);
     }
 
+    #[tokio::test]
+    async fn test_discard_pending_tails_is_worker_control_request() {
+        let region_id = RegionId::new(7, 3);
+        let (request, receiver) = WorkerRequest::try_from_region_request(
+            region_id,
+            RegionRequest::DiscardPendingTails(
+                store_api::region_request::RegionDiscardPendingTailsRequest { node_id: 5 },
+            ),
+            None,
+        )
+        .unwrap();
+        let WorkerRequest::DiscardPendingTails {
+            region_id: actual_region_id,
+            node_id,
+            sender,
+        } = request
+        else {
+            panic!("a pending tails discard must bypass the DDL queue");
+        };
+        assert_eq!(actual_region_id, region_id);
+        assert_eq!(node_id, 5);
+        sender.send(Ok(2));
+        assert_eq!(receiver.await.unwrap().unwrap(), 2);
+    }
+
     fn new_column_schema(
         name: &str,
         data_type: ColumnDataType,
