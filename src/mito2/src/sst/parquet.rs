@@ -33,7 +33,7 @@ use store_api::storage::{ColumnId, FileId};
 
 use crate::error::{CompressionOptionsSnafu, Result, WriteParquetSnafu};
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::sst::file::FileTimeRange;
+use crate::sst::file::{FileFormat, FileTimeRange};
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 
@@ -235,7 +235,7 @@ pub struct SstInfo {
     /// Number of series
     pub num_series: u64,
     /// Physical encoding and inventory of the finalized output.
-    pub format: crate::sst::file::FileFormat,
+    pub format: FileFormat,
 }
 
 #[cfg(test)]

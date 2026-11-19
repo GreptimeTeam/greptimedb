@@ -371,16 +371,11 @@ impl RegionManifestBuilder {
     }
 
     fn removed_file(&self, file: &FileMeta) -> RemovedFile {
-        if self
-            .files
-            .get(&file.file_id)
-            .is_some_and(|meta| !matches!(meta.format, file::FileFormat::Parquet))
-        {
+        let existing = self.files.get(&file.file_id);
+        if existing.is_some_and(|meta| !matches!(meta.format, file::FileFormat::Parquet)) {
             return RemovedFile::Narthex(file.file_id);
         }
-        let index_version = self
-            .files
-            .get(&file.file_id)
+        let index_version = existing
             .and_then(|meta| meta.index_version())
             .or_else(|| file.index_version());
         RemovedFile::File(file.file_id, index_version)

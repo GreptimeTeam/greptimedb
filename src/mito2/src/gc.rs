@@ -730,6 +730,7 @@ impl LocalGcWorker {
                 self.access_layer
                     .delete_narthex_artifact(region_id, *id)
                     .await?;
+                debug!("Deleted Narthex artifact {id} for region {region_id}");
             }
         }
 

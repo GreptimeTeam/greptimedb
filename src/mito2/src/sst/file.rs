@@ -1186,6 +1186,7 @@ impl UncommittedSsts {
         }
     }
 
+    /// Performs best-effort cleanup, draining tracked files without retaining failed deletions for retry.
     async fn try_cleanup(&self) -> crate::error::Result<()> {
         let files = std::mem::take(&mut *self.files.lock().unwrap());
         if files.is_empty() {
@@ -1210,7 +1211,10 @@ impl UncommittedSsts {
                         .delete_narthex_artifact(self.region_id, id)
                         .await
                     {
-                        self.files.lock().unwrap().insert(id, file);
+                        debug!(
+                            "Failed to clean uncommitted Narthex artifact {id} for region {}: {error}",
+                            self.region_id
+                        );
                         failure = Some(error);
                     }
                 }

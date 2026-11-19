@@ -49,6 +49,7 @@ use crate::request::{
     RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
     SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
+use crate::sst::file::FileFormat;
 use crate::sst::index::IndexBuildType;
 use crate::sst::{file, location};
 use crate::wal::EntryId;
@@ -971,19 +972,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
     let region_id = region.region_id;
-    snafu::ensure!(
-        edit.series_indexes_to_add.is_empty()
-            && edit.series_indexes_to_remove.is_empty()
-            && edit
-                .files_to_add
-                .iter()
-                .chain(&edit.files_to_remove)
-                .all(|file| matches!(file.format, file::FileFormat::Parquet)),
-        crate::error::InvalidRequestSnafu {
-            region_id,
-            reason: "Importing authoritative Narthex artifacts is unsupported",
-        }
-    );
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
     let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;
@@ -1077,6 +1065,9 @@ async fn edit_region(
         && preload_sst_cache
     {
         for file_meta in &edit.files_to_add {
+            if !matches!(file_meta.format, FileFormat::Parquet) {
+                continue;
+            }
             let write_cache = write_cache.clone();
             let layer = region.access_layer.clone();
             let listener = listener.clone();
