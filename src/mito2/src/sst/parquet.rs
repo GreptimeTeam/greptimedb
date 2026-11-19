@@ -211,6 +211,13 @@ pub(crate) fn large_value_fields(metadata: &RegionMetadataRef, batch: &RecordBat
             .max()
             .unwrap_or(0)
     }
+    fn max_view_len(views: &[u128]) -> usize {
+        views
+            .iter()
+            .map(|view| *view as u32 as usize)
+            .max()
+            .unwrap_or(0)
+    }
 
     metadata
         .field_columns()
@@ -222,6 +229,8 @@ pub(crate) fn large_value_fields(metadata: &RegionMetadataRef, batch: &RecordBat
                 DataType::LargeBinary => max_len(array.as_binary::<i64>().value_offsets()),
                 DataType::Utf8 => max_len(array.as_string::<i32>().value_offsets()),
                 DataType::LargeUtf8 => max_len(array.as_string::<i64>().value_offsets()),
+                DataType::BinaryView => max_view_len(array.as_binary_view().views()),
+                DataType::Utf8View => max_view_len(array.as_string_view().views()),
                 _ => 0,
             };
             (max_len >= LARGE_VALUE_STATS_THRESHOLD).then(|| name.clone())
@@ -1390,6 +1399,26 @@ mod tests {
         assert_eq!(pk_stats.max_bytes_opt().unwrap(), pk.as_slice());
     }
 
+    #[test]
+    fn test_large_view_values_skip_statistics() {
+        let metadata = build_test_binary_test_region_metadata();
+        let large = "x".repeat(LARGE_VALUE_STATS_THRESHOLD);
+        let columns: [ArrayRef; 2] = [
+            Arc::new(arrow::array::StringViewArray::from_iter_values([
+                "a", &large,
+            ])),
+            Arc::new(arrow::array::BinaryViewArray::from_iter_values([
+                b"a".as_slice(),
+                large.as_bytes(),
+            ])),
+        ];
+        for array in columns {
+            let schema = Schema::new(vec![Field::new("field_0", array.data_type().clone(), true)]);
+            let batch = RecordBatch::try_new(Arc::new(schema), vec![array]).unwrap();
+            assert_eq!(large_value_fields(&metadata, &batch), ["field_0"]);
+        }
+    }
+
     #[tokio::test]
     async fn test_large_field_values_skip_chunk_statistics() {
         let mut env = TestEnv::new().await;
@@ -1416,7 +1445,7 @@ mod tests {
         .await;
         let info = writer
             .write_all_flat_as_primary_key(
-                new_flat_source_from_record_batches(vec![batch]),
+                new_flat_source_from_record_batches(vec![batch.slice(0, 0), batch]),
                 None,
                 &WriteOptions::default(),
             )

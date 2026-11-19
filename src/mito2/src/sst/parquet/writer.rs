@@ -750,6 +750,10 @@ where
             self.check_cancelled()?;
             let start = Instant::now();
             if self.writer.is_none() {
+                // The first non-empty batch of a file decides which columns skip statistics.
+                if arrow_batch.num_rows() == 0 {
+                    return Ok(());
+                }
                 self.large_value_columns = large_value_fields(&self.metadata, &arrow_batch);
             }
             self.maybe_init_writer(arrow_batch.schema_ref(), opts)
