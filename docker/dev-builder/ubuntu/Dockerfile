@@ -1,4 +1,4 @@
-FROM ubuntu:16.04
+FROM ubuntu:18.04
 
 # The root path under which contains all the dependencies to build this Dockerfile.
 ARG DOCKER_BUILD_ROOT=.
