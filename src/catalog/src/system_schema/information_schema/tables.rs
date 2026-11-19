@@ -24,7 +24,6 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::error;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -161,18 +160,10 @@ impl SystemTable for InformationSchemaTables {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = self.schema.arrow_schema().clone();
-        let mut builder = self.builder();
-        let stream = Box::pin(DfRecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(async move {
-                builder
-                    .make_tables(Some(request))
-                    .await
-                    .map(|x| x.into_df_record_batch())
-                    .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))
-            }),
-        ));
+        let stream = crate::system_schema::utils::record_batch_stream(
+            &self.schema,
+            self.builder().scan(Some(request)),
+        );
         Ok(Box::pin(
             RecordBatchStreamAdapter::try_new(stream)
                 .map_err(BoxedError::new)
@@ -253,115 +244,130 @@ impl InformationSchemaTablesBuilder {
     }
 
     /// Construct the `information_schema.tables` virtual table
-    async fn make_tables(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
-        let catalog_name = self.catalog_name.clone();
-        let catalog_manager = self
-            .catalog_manager
-            .upgrade()
-            .context(UpgradeWeakCatalogManagerRefSnafu)?;
-        let partition_manager = catalog_manager
-            .as_any()
-            .downcast_ref::<KvBackendCatalogManager>()
-            .map(|catalog_manager| catalog_manager.partition_manager());
-        let predicates = Predicates::from_scan_request(&request);
+    fn scan(
+        mut self,
+        request: Option<ScanRequest>,
+    ) -> impl futures::Stream<Item = Result<RecordBatch>> {
+        async_stream::try_stream!({
+            let catalog_name = self.catalog_name.clone();
+            let catalog_manager = self
+                .catalog_manager
+                .upgrade()
+                .context(UpgradeWeakCatalogManagerRefSnafu)?;
+            let partition_manager = catalog_manager
+                .as_any()
+                .downcast_ref::<KvBackendCatalogManager>()
+                .map(|catalog_manager| catalog_manager.partition_manager());
+            let predicates = Predicates::from_scan_request(&request);
 
-        let information_extension = utils::information_extension(&self.catalog_manager)?;
+            let information_extension = utils::information_extension(&self.catalog_manager)?;
 
-        // TODO(dennis): `region_stats` API is not stable in distributed cluster because of network issue etc.
-        // But we don't want the statements such as `show tables` fail,
-        // so using `unwrap_or_else` here instead of `?` operator.
-        let region_stats = {
-            let mut x = information_extension
+            // TODO(dennis): `region_stats` API is not stable in distributed cluster because of network issue etc.
+            // But we don't want the statements such as `show tables` fail,
+            // so using `unwrap_or_else` here instead of `?` operator.
+            let region_stats = {
+                let mut x = information_extension
                 .region_stats()
                 .await
                 .unwrap_or_else(|e| {
                     error!(e; "Failed to find region stats in information_schema, fallback to all empty");
                     vec![]
                 });
-            x.sort_unstable_by_key(|x| x.id);
-            x
-        };
+                x.sort_unstable_by_key(|x| x.id);
+                x
+            };
 
-        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
-            let table_stream = catalog_manager.tables(&catalog_name, &schema_name, None);
+            for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
+                let table_stream = catalog_manager.tables(&catalog_name, &schema_name, None);
 
-            const BATCH_SIZE: usize = 128;
-            // Split tables into chunks
-            let mut table_chunks = pin!(table_stream.ready_chunks(BATCH_SIZE));
+                const BATCH_SIZE: usize = 128;
+                // Split tables into chunks
+                let mut table_chunks = pin!(table_stream.ready_chunks(BATCH_SIZE));
 
-            while let Some(tables) = table_chunks.next().await {
-                let tables = tables.into_iter().collect::<Result<Vec<_>>>()?;
-                let mito_or_physical_table_ids = tables
-                    .iter()
-                    .filter(|table| {
-                        table.table_info().meta.engine == MITO_ENGINE
-                            || table.table_info().is_physical_table()
-                    })
-                    .map(|table| table.table_info().ident.table_id)
-                    .collect::<Vec<_>>();
+                while let Some(tables) = table_chunks.next().await {
+                    let mut tables = tables.into_iter().collect::<Result<Vec<_>>>()?;
+                    tables.retain(|table| {
+                        Self::matches(
+                            &predicates,
+                            &catalog_name,
+                            &schema_name,
+                            &table.table_info(),
+                            table.table_type(),
+                        )
+                    });
+                    if tables.is_empty() {
+                        continue;
+                    }
+                    let mito_or_physical_table_ids = tables
+                        .iter()
+                        .filter(|table| {
+                            table.table_info().meta.engine == MITO_ENGINE
+                                || table.table_info().is_physical_table()
+                        })
+                        .map(|table| table.table_info().ident.table_id)
+                        .collect::<Vec<_>>();
 
-                let table_routes = if let Some(partition_manager) = &partition_manager {
-                    partition_manager
-                        .batch_find_region_routes(&mito_or_physical_table_ids)
-                        .await
-                        .context(FindRegionRoutesSnafu)?
-                } else {
-                    mito_or_physical_table_ids
-                        .into_iter()
-                        .map(|id| (id, vec![]))
-                        .collect()
-                };
+                    let table_routes = if let Some(partition_manager) = &partition_manager {
+                        partition_manager
+                            .batch_cached_region_routes(&mito_or_physical_table_ids)
+                            .await
+                            .context(FindRegionRoutesSnafu)?
+                    } else {
+                        mito_or_physical_table_ids
+                            .into_iter()
+                            .map(|id| (id, vec![]))
+                            .collect()
+                    };
 
-                for table in tables {
-                    let table_region_stats =
-                        match table_routes.get(&table.table_info().ident.table_id) {
-                            Some(routes) => routes
-                                .iter()
-                                .flat_map(|route| {
-                                    let region_id = route.region.id;
-                                    region_stats
-                                        .binary_search_by_key(&region_id, |x| x.id)
-                                        .map(|i| &region_stats[i])
-                                })
-                                .collect::<Vec<_>>(),
-                            None => vec![],
-                        };
+                    for table in tables {
+                        let table_region_stats =
+                            match table_routes.get(&table.table_info().ident.table_id) {
+                                Some(routes) => routes
+                                    .iter()
+                                    .flat_map(|route| {
+                                        let region_id = route.region.id;
+                                        region_stats
+                                            .binary_search_by_key(&region_id, |x| x.id)
+                                            .map(|i| &region_stats[i])
+                                    })
+                                    .collect::<Vec<_>>(),
+                                None => vec![],
+                            };
 
-                    self.add_table(
-                        &predicates,
-                        &catalog_name,
-                        &schema_name,
-                        table.table_info(),
-                        table.table_type(),
-                        &table_region_stats,
-                    );
+                        self.add_table(
+                            &catalog_name,
+                            &schema_name,
+                            table.table_info(),
+                            table.table_type(),
+                            &table_region_stats,
+                        );
+                    }
+                    yield self.finish()?;
                 }
             }
-        }
-
-        self.finish()
+        })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn add_table(
-        &mut self,
-        predicates: &Predicates,
-        catalog_name: &str,
-        schema_name: &str,
-        table_info: Arc<TableInfo>,
-        table_type: TableType,
-        region_stats: &[&RegionStat],
-    ) {
-        let table_name = table_info.name.as_ref();
-        let table_id = table_info.table_id();
-        let engine = table_info.meta.engine.as_ref();
-
-        let table_type_text = match table_type {
+    fn table_type_name(table_type: TableType) -> &'static str {
+        match table_type {
             TableType::Base => "BASE TABLE",
             TableType::View => "VIEW",
             TableType::Temporary => "LOCAL TEMPORARY",
-        };
+        }
+    }
 
+    fn matches(
+        predicates: &Predicates,
+        catalog_name: &str,
+        schema_name: &str,
+        table_info: &TableInfo,
+        table_type: TableType,
+    ) -> bool {
+        let table_name = table_info.name.as_str();
+        let table_id = table_info.table_id();
+        let engine = table_info.meta.engine.as_str();
+
+        let table_type_text = Self::table_type_name(table_type);
         let row = [
             (TABLE_CATALOG, &Value::from(catalog_name)),
             (TABLE_ID, &Value::from(table_id)),
@@ -371,9 +377,21 @@ impl InformationSchemaTablesBuilder {
             (TABLE_TYPE, &Value::from(table_type_text)),
         ];
 
-        if !predicates.eval(&row) {
-            return;
-        }
+        predicates.eval(&row)
+    }
+
+    fn add_table(
+        &mut self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_info: Arc<TableInfo>,
+        table_type: TableType,
+        region_stats: &[&RegionStat],
+    ) {
+        let table_name = table_info.name.as_str();
+        let table_id = table_info.table_id();
+        let engine = table_info.meta.engine.as_str();
+        let table_type_text = Self::table_type_name(table_type);
 
         self.catalog_names.push(Some(catalog_name));
         self.schema_names.push(Some(schema_name));
@@ -462,17 +480,6 @@ impl DfPartitionStream for InformationSchemaTables {
     }
 
     fn execute(&self, _: Arc<TaskContext>) -> DfSendableRecordBatchStream {
-        let schema = self.schema.arrow_schema().clone();
-        let mut builder = self.builder();
-        Box::pin(DfRecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(async move {
-                builder
-                    .make_tables(None)
-                    .await
-                    .map(|x| x.into_df_record_batch())
-                    .map_err(Into::into)
-            }),
-        ))
+        crate::system_schema::utils::record_batch_stream(&self.schema, self.builder().scan(None))
     }
 }

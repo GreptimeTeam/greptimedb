@@ -36,6 +36,31 @@ use crate::information_schema::{
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::semantic_graph::EntityGraphProviderRef;
 
+/// Adapts incremental system-table output, including one schema-bearing batch for an empty scan.
+pub(super) fn record_batch_stream(
+    schema: &SchemaRef,
+    batches: impl futures::Stream<Item = Result<common_recordbatch::RecordBatch>> + Send + 'static,
+) -> common_recordbatch::DfSendableRecordBatchStream {
+    use futures::TryStreamExt;
+
+    let schema = schema.clone();
+    let arrow_schema = schema.arrow_schema().clone();
+    let stream = async_stream::try_stream!({
+        let mut batches = std::pin::pin!(batches);
+        let mut emitted = false;
+        while let Some(batch) = batches.try_next().await? {
+            if batch.num_rows() > 0 {
+                emitted = true;
+                yield batch.into_df_record_batch();
+            }
+        }
+        if !emitted {
+            yield common_recordbatch::RecordBatch::new_empty(schema).into_df_record_batch();
+        }
+    });
+    Box::pin(datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(arrow_schema, stream))
+}
+
 /// Projects an inspection table schema according to the scan request.
 pub(crate) fn projected_schema(schema: &SchemaRef, request: &ScanRequest) -> Result<SchemaRef> {
     if let Some(p) = request.projection.as_deref() {
