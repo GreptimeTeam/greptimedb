@@ -75,18 +75,7 @@ pub fn windowed_eval_stmt(
     first: usize,
     last: usize,
 ) -> Result<EvalStmt, WindowError> {
-    let admitted = admit(&original.expr).ok_or(WindowError::NotEligible)?;
-    if let Some(matrix) = admitted.matrix {
-        range_millis(matrix.range)?;
-    }
-    let step_ms = step_millis(original.interval)?;
-    // A lookback is not narrowed further than planning narrows it: both routes
-    // keep it in milliseconds, so a value that does not survive that conversion
-    // is one they cannot evaluate with.
-    i64::try_from(original.lookback_delta.as_millis()).map_err(|_| WindowError::Overflow)?;
-
-    let grid = StatementGrid::of(original, step_ms)?;
-    grid.window(original, first, last)
+    EvalGrid::of(original)?.window(original, first, last)
 }
 
 /// Whether `expr` is in the deliberately small v1 allowlist.
@@ -184,18 +173,92 @@ fn range_millis(duration: Duration) -> Result<i64, WindowError> {
     Ok(millis)
 }
 
-/// The grid of a statement, in the integers both planners evaluate on.
-struct StatementGrid {
+/// The evaluation grid of a statement, in the integers both planners evaluate on.
+///
+/// A planner-agnostic reader of the grid [`windowed_eval_stmt`] slices: the same
+/// integer points, exposed so a caller that has to place spans of its own (a cache
+/// of materialized windows, for example) can read them instead of laying out a
+/// second grid. It carries no cache, sink, or planner knowledge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvalGrid {
     /// First grid point, in milliseconds since the epoch.
     start_ms: i64,
     /// Positive length of one step, in milliseconds.
     step_ms: i64,
     /// How many points the statement's own `[start, end]` spans.
     points: u64,
+    /// Last grid point, in milliseconds since the epoch.
+    last_ms: i64,
 }
 
-impl StatementGrid {
-    fn of(original: &EvalStmt, step_ms: i64) -> Result<Self, WindowError> {
+impl EvalGrid {
+    /// The grid `stmt` is evaluated on.
+    ///
+    /// Every millisecond value planning derives from the statement is validated
+    /// the way planning validates it, exactly as [`windowed_eval_stmt`] does, so a
+    /// statement planning would refuse never yields a grid.
+    pub fn of(stmt: &EvalStmt) -> Result<Self, WindowError> {
+        let admitted = admit(&stmt.expr).ok_or(WindowError::NotEligible)?;
+        if let Some(matrix) = admitted.matrix {
+            range_millis(matrix.range)?;
+        }
+        let step_ms = step_millis(stmt.interval)?;
+        // A lookback is not narrowed further than planning narrows it: both routes
+        // keep it in milliseconds, so a value that does not survive that conversion
+        // is one they cannot evaluate with.
+        i64::try_from(stmt.lookback_delta.as_millis()).map_err(|_| WindowError::Overflow)?;
+
+        Self::layout(stmt, step_ms)
+    }
+
+    /// First grid point, in milliseconds since the epoch.
+    pub fn start_ms(&self) -> i64 {
+        self.start_ms
+    }
+
+    /// Positive length of one step, in milliseconds.
+    pub fn step_ms(&self) -> i64 {
+        self.step_ms
+    }
+
+    /// How many points the grid holds.
+    pub fn points(&self) -> u64 {
+        self.points
+    }
+
+    /// Last grid point, in milliseconds since the epoch.
+    pub fn last_ms(&self) -> i64 {
+        self.last_ms
+    }
+
+    /// The millisecond just past the last point, which is the exclusive upper
+    /// bound of the span the whole grid covers.
+    pub fn end_ms_exclusive(&self) -> Result<i64, WindowError> {
+        self.last_ms
+            .checked_add(self.step_ms)
+            .ok_or(WindowError::Overflow)
+    }
+
+    /// The phase of the grid, in milliseconds: the distance from the last
+    /// step-aligned instant at or before its first point.
+    ///
+    /// Two statements with the same step evaluate on the same grid exactly when
+    /// their phases are equal, so this is what makes spans laid out from one
+    /// statement's grid reusable by another.
+    pub fn phase_ms(&self) -> i64 {
+        self.start_ms.rem_euclid(self.step_ms)
+    }
+
+    /// The timestamp of grid index `index`, in milliseconds since the epoch.
+    ///
+    /// An index at or past [`EvalGrid::points`] continues the grid rather than
+    /// failing, so a caller can name the instant just past its last point.
+    pub fn point_ms(&self, index: u64) -> Result<i64, WindowError> {
+        let offset = i128::from(index) * i128::from(self.step_ms);
+        i64::try_from(i128::from(self.start_ms) + offset).map_err(|_| WindowError::Overflow)
+    }
+
+    fn layout(original: &EvalStmt, step_ms: i64) -> Result<Self, WindowError> {
         let start_ms = millis(original.start)?;
         let end_ms = millis(original.end)?;
         if end_ms < start_ms {
@@ -204,21 +267,22 @@ impl StatementGrid {
         // `(end - start) / step + 1`, the span an inclusive grid of these
         // endpoints holds, as the planners' own grid builds it.
         let points = (i128::from(end_ms) - i128::from(start_ms)) / i128::from(step_ms) + 1;
-        let grid = Self {
-            start_ms,
-            step_ms,
-            points: u64::try_from(points).map_err(|_| WindowError::Overflow)?,
-        };
+        let points = u64::try_from(points).map_err(|_| WindowError::Overflow)?;
         // A grid whose last point does not fit is one no planner builds, so no
         // window of it can be evaluated either.
-        grid.point_ms(grid.points - 1)?;
-        Ok(grid)
-    }
-
-    /// The timestamp of grid index `index`, in milliseconds since the epoch.
-    fn point_ms(&self, index: u64) -> Result<i64, WindowError> {
-        let offset = i128::from(index) * i128::from(self.step_ms);
-        i64::try_from(i128::from(self.start_ms) + offset).map_err(|_| WindowError::Overflow)
+        let last_ms = Self {
+            start_ms,
+            step_ms,
+            points,
+            last_ms: start_ms,
+        }
+        .point_ms(points - 1)?;
+        Ok(Self {
+            start_ms,
+            step_ms,
+            points,
+            last_ms,
+        })
     }
 
     fn window(
@@ -485,6 +549,72 @@ mod tests {
                 "{range:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_grid_reads_the_points_the_windows_are_cut_from() {
+        let original = stmt("rate(x[5m])");
+        let grid = EvalGrid::of(&original).unwrap();
+
+        assert_eq!(grid.start_ms(), 1_000);
+        assert_eq!(grid.step_ms(), 37_000);
+        assert_eq!(grid.points(), 5);
+        assert_eq!(grid.last_ms(), 1_000 + 4 * 37_000);
+        assert_eq!(grid.end_ms_exclusive().unwrap(), 1_000 + 5 * 37_000);
+        assert_eq!(grid.phase_ms(), 1_000);
+
+        for index in 0..grid.points() {
+            let window = windowed_eval_stmt(&original, index as usize, index as usize + 1)
+                .expect("every point of the grid windows");
+            assert_eq!(
+                grid.point_ms(index).unwrap(),
+                i64::try_from(millis(window.start)).unwrap()
+            );
+        }
+        // An index past the last point continues the grid instead of failing, so a
+        // caller can name the instant just past the last point.
+        assert_eq!(
+            grid.point_ms(grid.points()).unwrap(),
+            grid.end_ms_exclusive().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_grid_refuses_what_planning_refuses() {
+        assert_eq!(
+            EvalGrid::of(&stmt("sum(rate(x[5m]))")).unwrap_err(),
+            WindowError::NotEligible
+        );
+
+        let mut backwards = stmt("x");
+        backwards.end = backwards.start - Duration::from_secs(1);
+        assert_eq!(
+            EvalGrid::of(&backwards).unwrap_err(),
+            WindowError::InvalidSpan
+        );
+
+        let mut sub_millisecond = stmt("x");
+        sub_millisecond.interval = Duration::from_micros(1_500);
+        assert_eq!(
+            EvalGrid::of(&sub_millisecond).unwrap_err(),
+            WindowError::InvalidSpan
+        );
+    }
+
+    /// A grid that does not start on a step boundary keeps its residue as its
+    /// phase, which is what makes spans cut from it reusable by another window of
+    /// the same step.
+    #[test]
+    fn a_grid_reports_the_phase_of_an_off_step_start() {
+        let original = stmt_between(
+            "x",
+            UNIX_EPOCH + Duration::from_millis(1_001),
+            UNIX_EPOCH + Duration::from_millis(1_001 + 4 * 37_000),
+            Duration::from_secs(37),
+        );
+        let grid = EvalGrid::of(&original).unwrap();
+        assert_eq!(grid.phase_ms(), 1_001);
+        assert_eq!(grid.points(), 5);
     }
 
     #[test]

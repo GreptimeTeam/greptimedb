@@ -14,38 +14,74 @@
 
 //! Frontend-local rollup cache core.
 //!
-//! The cache holds whole, materialized PromQL results for historical spans of an
-//! evaluation grid ([`TimeChunk`]) and keys them by the query that produced them
-//! ([`QueryKey`]), so no chunk of one query is ever served to another. An entry
-//! remembers the authority cursor its payload was filled at ([`FillCursor`]) and
-//! is served only while the [`CacheAuthority`] still vouches for exactly that
-//! cursor: `cursor equal -> hit`, `cursor changed -> miss`, and an authority that
-//! is unknown, unhealthy, or stale always misses. A cursor that lags the storage
-//! sequence is accepted, so a hit may be bounded-stale by design.
+//! The cache holds whole, materialized PromQL results for canonical spans of an
+//! evaluation grid ([`TimeChunk`]), keyed by the request identity that makes a
+//! result reusable ([`QueryIdentity`]) and never by the window that happened to
+//! request it ([`QuerySpan`]). A dashboard sliding from `[10:00, 11:00)` to
+//! `[10:05, 11:05)` therefore keeps every interior chunk.
 //!
-//! Three properties are deliberate:
+//! # Canonical chunks
 //!
-//! - **The recent tail is never cached.** [`plan_chunks`] splits a statement into
-//!   complete historical chunks on the original grid plus the trailing span that
-//!   is still close enough to the query end that storage may be receiving data for
-//!   it. Output points in the tail go straight to storage.
-//! - **A lookup is local and cheap.** [`RollupCache::lookup`] reads the authority
-//!   status, one cache entry, and nothing else: it never queries storage and never
-//!   waits for cache maintenance. There is no single-flight, so a miss while
-//!   another fill of the same chunk is in progress proceeds; the competing fills
-//!   both reach [`RollupCache::insert`], where the older cursor loses.
-//! - **No lock is held across an await.** Everything here is synchronous and the
-//!   cache holds no lock across a fill, so a caller must not (and need not) hold a
-//!   cache lock while it awaits the storage read that fills a chunk.
+//! Chunk bounds are quantized to absolute time, not to the request: with a grid
+//! phase `p = start_ms.rem_euclid(step_ms)` and a chunk of `c` milliseconds, chunk
+//! `k` covers `[p + k*c, p + (k+1)*c)`, where `k` is the floor of
+//! `(t - p) / c`. Planning therefore requires `c` to be a whole multiple of the
+//! step ([`BypassReason::MisalignedChunk`] otherwise), so every bound is a grid
+//! point of every request with the same step and phase, and two requests with
+//! different phases can never produce the same bound.
+//!
+//! Only a chunk whose points are *all* requested and *all* older than the tail
+//! cutoff is cacheable. Partial chunks at either end of a window, and every point
+//! at or after the cutoff, are returned as [`DirectSpan`]s for the caller to
+//! execute without the cache.
+//!
+//! # Tail
+//!
+//! The tail is measured from the wall clock: points at or after `now - tail` may
+//! still be receiving data, so they are always direct. A historical query whose
+//! end is older than the cutoff therefore caches its whole range.
+//!
+//! # Validity
+//!
+//! An entry is served only while
+//!
+//! - with a [`CacheAuthority`]: the authority is ready, its reading is younger
+//!   than [`RollupCacheConfig::max_staleness`], and the authority cursor equals the
+//!   cursor the entry was filled at (`cursor equal -> hit`, `cursor changed ->
+//!   miss`, unknown/unhealthy/stale -> miss);
+//! - always: the entry is younger than [`RollupCacheConfig::max_age`], counted
+//!   from the instant the fill captured *before* it read storage, so a slow fill
+//!   is charged for the time it took.
+//!
+//! The authority is optional. Without one the cache is bounded only by
+//! [`RollupCacheConfig::max_age`], which is what a deployment with no sequence
+//! probe can serve; the cursor branch stays in place for the probe.
+//!
+//! # Memory
+//!
+//! The cache is bounded by bytes, not entries: each entry is charged its payload's
+//! buffer memory plus a fixed per-entry overhead, and moka evicts by that weight.
+//! A payload that is still being filled is not charged until it is inserted, since
+//! the cache cannot see it before then.
+//!
+//! # Concurrency
+//!
+//! A lookup is local: it reads the authority status and at most one entry, never
+//! storage, and never waits for an in-flight fill or for cache maintenance. There
+//! is no single-flight, so a miss while another fill of the same chunk is running
+//! proceeds; the competing fills both reach [`RollupCache::insert`], where the
+//! older cursor loses and an equal cursor is replaced. Everything here is
+//! synchronous and no lock is held across an await, so a caller may await its
+//! storage read without holding anything.
+//!
+//! # Not covered
 //!
 //! Chunks cover *output* points. The evaluator still has to read the input history
 //! every selected point folds: the first point of a `rate(x[5m])` chunk needs five
-//! minutes of samples *before* the chunk start, and widening the chunk does not
-//! widen that history.
+//! minutes of samples *before* the chunk start. Nothing here narrows that history.
 //!
-//! Not implemented here: the storage sequence probe that makes an authority
-//! concrete, the promotion of this cache into the query path, and any
-//! configuration option.
+//! Not implemented: the storage sequence probe behind a [`CacheAuthority`], the
+//! query-path wiring, and any configuration option.
 
 #![allow(dead_code)] // Wired into the query path by a later milestone.
 
@@ -58,10 +94,22 @@ use moka::ops::compute::Op;
 use moka::sync::Cache;
 use promql_parser::parser::EvalStmt;
 use query::promql::label_values::signed_millis_since_epoch;
-use query::promql::window::{is_windowable, windowed_eval_stmt};
+use query::promql::window::{EvalGrid, WindowError, is_windowable};
 
-/// The placeholder a [`QueryKey`] prints instead of its query text.
+/// The placeholder a [`QueryIdentity`] prints instead of its query text.
 const REDACTED_QUERY: &str = "<redacted>";
+
+/// What every entry is charged beyond the bytes of its payload.
+///
+/// The key and the entry itself are heap-allocated too; without a fixed charge an
+/// empty result would weigh nothing and the cache could hold unbounded keys.
+const ENTRY_OVERHEAD_BYTES: u64 = 256;
+
+/// The cursor recorded and compared when no authority is configured.
+///
+/// It is a placeholder, never a claim: without an authority the cache never
+/// compares cursors and bounds freshness by [`RollupCacheConfig::max_age`] alone.
+const NO_AUTHORITY_CURSOR: u64 = 0;
 
 /// The planner that evaluated a PromQL query.
 ///
@@ -75,18 +123,20 @@ pub enum QueryRoute {
     Native,
 }
 
-/// Every field two queries must agree on before one may reuse the other's chunks.
+/// Every dimension two requests must agree on before one may reuse the other's
+/// chunks.
 ///
-/// The key is compared verbatim: nothing is normalized, lowercased, or parsed, so
-/// two textually different queries never share an entry even when they would plan
-/// to the same result. A missing field would let one query answer another's
-/// points, which is why the fields are exhaustive rather than minimal.
+/// This is the reusable half of a request: it carries no window, so two requests
+/// that ask for overlapping windows of the same query produce the same identity
+/// and can share every canonical chunk they have in common. A missing dimension
+/// would let one request answer another's points, which is why the list is
+/// exhaustive rather than minimal.
 ///
 /// The query text is redacted in [`fmt::Debug`], since a query name and its
 /// selectors can carry tenant data; the alias and the read preference are not
 /// query text and are printed.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct QueryKey {
+pub struct QueryIdentity {
     /// The tenant the query runs as.
     pub tenant: String,
     /// The catalog the query reads.
@@ -95,6 +145,18 @@ pub struct QueryKey {
     pub schema: String,
     /// The query text exactly as the caller wrote it.
     pub query: String,
+    /// The evaluation step, in milliseconds.
+    ///
+    /// It has to be the step the statement is evaluated with: a chunk keyed on one
+    /// grid must never be served to another, so planning bypasses the cache when
+    /// the two disagree ([`BypassReason::StepMismatch`]).
+    pub step_ms: i64,
+    /// The lookback delta planning applies, in milliseconds.
+    pub lookback_ms: i64,
+    /// The planner that evaluated the query.
+    pub route: QueryRoute,
+    /// Whether the request asked for ordered output.
+    pub ordered: bool,
     /// The optional output alias of a PromQL statement
     /// (`QueryStatement::Promql(_, alias)`).
     ///
@@ -104,48 +166,74 @@ pub struct QueryKey {
     /// The read preference the request ran under, as
     /// `QueryContext::read_preference()` spells it.
     ///
-    /// It can change which replica serves the query, so it is part of the key even
-    /// while every session accepts the same preference. `None` means the caller has
-    /// not threaded one through; the cache never substitutes a default for it.
+    /// It can change which replica serves the query, so it is part of the identity
+    /// even while every session accepts the same preference. `None` means the
+    /// caller has not threaded one through; the cache never substitutes a default.
     pub read_preference: Option<String>,
-    /// The first evaluation instant, in milliseconds since the epoch.
-    pub start_ms: i64,
-    /// The last evaluation instant (inclusive), in milliseconds since the epoch.
-    pub end_ms: i64,
-    /// The evaluation step, in milliseconds.
-    pub step_ms: i64,
-    /// The lookback delta planning applies, in milliseconds.
-    pub lookback_ms: i64,
-    /// The planner that evaluated the query.
-    pub route: QueryRoute,
-    /// Whether the request asked for ordered output.
-    pub ordered: bool,
 }
 
-impl fmt::Debug for QueryKey {
+impl fmt::Debug for QueryIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("QueryKey")
+        f.debug_struct("QueryIdentity")
             .field("tenant", &self.tenant)
             .field("catalog", &self.catalog)
             .field("schema", &self.schema)
             .field("query", &REDACTED_QUERY)
-            .field("alias", &self.alias)
-            .field("read_preference", &self.read_preference)
-            .field("start_ms", &self.start_ms)
-            .field("end_ms", &self.end_ms)
             .field("step_ms", &self.step_ms)
             .field("lookback_ms", &self.lookback_ms)
             .field("route", &self.route)
             .field("ordered", &self.ordered)
+            .field("alias", &self.alias)
+            .field("read_preference", &self.read_preference)
             .finish()
+    }
+}
+
+/// The coverage one request asked for, in milliseconds.
+///
+/// It is deliberately not part of any key: it says which points a plan must cover
+/// exactly once, not which results are interchangeable. `end_ms` is the last
+/// requested grid point, so the coverage is inclusive there and half-open in the
+/// plans this module returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuerySpan {
+    start_ms: i64,
+    end_ms: i64,
+}
+
+impl QuerySpan {
+    /// The coverage `[start_ms, end_ms]`.
+    pub fn new(start_ms: i64, end_ms: i64) -> Self {
+        Self { start_ms, end_ms }
+    }
+
+    /// The coverage `stmt` evaluates.
+    pub fn of(stmt: &EvalStmt) -> Result<Self, BypassReason> {
+        let grid = EvalGrid::of(stmt).map_err(BypassReason::from)?;
+        Ok(Self::new(grid.start_ms(), grid.last_ms()))
+    }
+
+    /// The first requested grid point.
+    pub fn start_ms(&self) -> i64 {
+        self.start_ms
+    }
+
+    /// The last requested grid point.
+    pub fn end_ms(&self) -> i64 {
+        self.end_ms
+    }
+
+    /// Whether `ms` is inside the coverage.
+    pub fn contains_ms(&self, ms: i64) -> bool {
+        self.start_ms <= ms && ms <= self.end_ms
     }
 }
 
 /// A half-open `[start, end)` span of output grid points, in milliseconds.
 ///
-/// Both bounds come from the evaluation grid of the statement the span was planned
+/// Both bounds lie on the evaluation grid of the statement the span was planned
 /// from: `start` is a grid point, and `end` is either the next grid point past the
-/// last point the span holds or the grid point one step past the statement's last
+/// last point the span holds or the instant one step past the statement's last
 /// point. Spans are never rounded to wall-clock buckets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TimeChunk {
@@ -175,25 +263,55 @@ impl TimeChunk {
     }
 }
 
+/// Why a span must be executed without the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectReason {
+    /// A partial chunk at one end of the request, or the gaps around the cacheable
+    /// chunks. Its points are cacheable in principle but this request does not
+    /// cover a whole canonical chunk there.
+    Edge,
+    /// Points at or after `now - tail`, which may still be receiving data.
+    Tail,
+}
+
+/// A span the caller must execute directly, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectSpan {
+    span: TimeChunk,
+    reason: DirectReason,
+}
+
+impl DirectSpan {
+    /// The span to execute without the cache.
+    pub fn span(&self) -> TimeChunk {
+        self.span
+    }
+
+    /// Why the span is not cacheable.
+    pub fn reason(&self) -> DirectReason {
+        self.reason
+    }
+}
+
 /// The cache key of one materialized chunk.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TimeChunkKey {
-    query: QueryKey,
+    identity: QueryIdentity,
     chunk: TimeChunk,
 }
 
 impl TimeChunkKey {
-    /// The key of `chunk` of the query identified by `query`.
-    pub fn new(query: QueryKey, chunk: TimeChunk) -> Self {
-        Self { query, chunk }
+    /// The key of the canonical `chunk` of `identity`.
+    pub fn new(identity: QueryIdentity, chunk: TimeChunk) -> Self {
+        Self { identity, chunk }
     }
 
-    /// The query the chunk belongs to.
-    pub fn query(&self) -> &QueryKey {
-        &self.query
+    /// The request identity the chunk belongs to.
+    pub fn identity(&self) -> &QueryIdentity {
+        &self.identity
     }
 
-    /// The span the chunk covers.
+    /// The canonical span the chunk covers.
     pub fn chunk(&self) -> TimeChunk {
         self.chunk
     }
@@ -205,11 +323,16 @@ pub enum BypassReason {
     /// The expression is outside the windowable allowlist
     /// ([`query::promql::window::is_windowable`]).
     NotWindowable,
-    /// The statement's span, its step, or the requested durations cannot be
-    /// planned into chunks.
+    /// The statement's span or its step cannot be planned into chunks.
     InvalidSpan,
     /// The grid arithmetic, or a chunk bound, cannot be represented.
     Overflow,
+    /// The configured chunk is not a whole multiple of the query's step, so
+    /// canonical chunk bounds would fall between the evaluation grid's points.
+    MisalignedChunk,
+    /// The identity's step is not the step the statement is evaluated with, so its
+    /// chunks would be keyed as spans of another grid.
+    StepMismatch,
     /// The chunk is empty, so nothing was ever materialized for it.
     EmptyChunk,
 }
@@ -220,6 +343,10 @@ impl fmt::Display for BypassReason {
             Self::NotWindowable => f.write_str("the expression is not windowable"),
             Self::InvalidSpan => f.write_str("the statement cannot be split into chunks"),
             Self::Overflow => f.write_str("a chunk bound overflows the time grid"),
+            Self::MisalignedChunk => {
+                f.write_str("the chunk is not a whole multiple of the query's step")
+            }
+            Self::StepMismatch => f.write_str("the identity's step is not the statement's step"),
             Self::EmptyChunk => f.write_str("the chunk is empty"),
         }
     }
@@ -227,88 +354,221 @@ impl fmt::Display for BypassReason {
 
 impl std::error::Error for BypassReason {}
 
-/// The cacheable and non-cacheable output spans of one statement.
+impl From<WindowError> for BypassReason {
+    fn from(error: WindowError) -> Self {
+        match error {
+            WindowError::NotEligible => Self::NotWindowable,
+            WindowError::InvalidSpan => Self::InvalidSpan,
+            WindowError::Overflow => Self::Overflow,
+        }
+    }
+}
+
+/// The cacheable chunks and the direct spans of one statement.
 ///
-/// Concatenated in grid order, [`ChunkSpans::chunks`] and [`ChunkSpans::tail`]
-/// cover the statement's whole output grid exactly once. Neither is a claim about
-/// the input ranges the expression folds.
+/// [`ChunkSpans::chunks`] and [`ChunkSpans::direct`] partition the requested
+/// coverage exactly once each, in increasing order of time: the direct spans are
+/// disjoint, and together with the chunks they leave neither a gap nor an overlap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkSpans {
+    span: QuerySpan,
     chunks: Vec<TimeChunk>,
+    direct: Vec<DirectSpan>,
     tail: Option<TimeChunk>,
 }
 
 impl ChunkSpans {
-    /// The complete historical chunks, in grid order.
+    /// The coverage every span below partitions.
+    pub fn span(&self) -> QuerySpan {
+        self.span
+    }
+
+    /// The complete canonical chunks, in time order.
     pub fn chunks(&self) -> &[TimeChunk] {
         &self.chunks
     }
 
-    /// The trailing span that must not be cached, when the statement excludes one.
+    /// The spans to execute without the cache, in time order.
+    pub fn direct(&self) -> &[DirectSpan] {
+        &self.direct
+    }
+
+    /// The part of the coverage at or after `now - tail`.
     pub fn tail(&self) -> Option<TimeChunk> {
         self.tail
     }
 
-    /// The chunks and the tail span.
-    pub fn into_parts(self) -> (Vec<TimeChunk>, Option<TimeChunk>) {
-        (self.chunks, self.tail)
+    /// The coverage, chunks, direct spans, and tail.
+    pub fn into_parts(
+        self,
+    ) -> (
+        QuerySpan,
+        Vec<TimeChunk>,
+        Vec<DirectSpan>,
+        Option<TimeChunk>,
+    ) {
+        (self.span, self.chunks, self.direct, self.tail)
     }
 }
 
-/// Plans the cacheable chunks and the excluded tail of `stmt`.
+/// Plans the cacheable chunks and the direct spans of `stmt` as of `now`.
 ///
-/// Chunks are `chunk` long on the statement's own grid, anchored at its first
-/// point: a chunk holds the grid points in `[head, head + chunk)`, which is at
-/// least one point and never straddles a grid point of the next chunk. The tail is
-/// the trailing span whose points are within `tail` of the statement's last point;
-/// its points never enter the cache. `tail` of zero therefore caches the whole
-/// statement.
+/// The rule, in one place:
 ///
-/// The statement's grid, point count, and point timestamps come from
-/// [`query::promql::window::windowed_eval_stmt`], so this does not lay out a grid
-/// of its own: a statement planning would refuse is refused here too.
+/// - chunk bounds are canonical: with phase `p = start_ms.rem_euclid(step_ms)` and
+///   chunk length `chunk`, they are `p + k * chunk`, which requires `chunk` to be
+///   a whole multiple of the statement's step
+///   ([`BypassReason::MisalignedChunk`] otherwise);
+/// - a chunk is cacheable only when every one of its points is requested and every
+///   one of them is older than `now - tail`;
+/// - everything else — the partial chunks at either end and the whole tail — is
+///   returned as [`DirectSpan`]s, because a partial chunk must never be keyed as a
+///   full one.
+///
+/// Chunking selects output points only: the evaluator still has to read the input
+/// history each point folds.
 pub fn plan_chunks(
     stmt: &EvalStmt,
     tail: Duration,
     chunk: Duration,
+    now: SystemTime,
 ) -> Result<ChunkSpans, BypassReason> {
     if !is_windowable(&stmt.expr) {
         return Err(BypassReason::NotWindowable);
     }
-    let points = grid_len(stmt).ok_or(BypassReason::InvalidSpan)?;
-    let step_ms = step_ms(stmt)?;
-    let last_ms = grid_point_ms(stmt, points - 1).ok_or(BypassReason::InvalidSpan)?;
-    let end_ms = last_ms.checked_add(step_ms).ok_or(BypassReason::Overflow)?;
-
-    // The tail holds the points closer to the statement's end than `tail`.
+    let grid = EvalGrid::of(stmt)?;
+    let chunk_in_steps = chunk_steps(chunk, grid.step_ms()).ok_or(BypassReason::MisalignedChunk)?;
+    let chunk_ms = i64::try_from(chunk.as_millis()).map_err(|_| BypassReason::Overflow)?;
+    let now_ms = signed_millis_since_epoch(now).map_err(|_| BypassReason::Overflow)?;
     let tail_ms = i64::try_from(tail.as_millis()).unwrap_or(i64::MAX);
-    let tail_start = first_point_after(stmt, points, last_ms.saturating_sub(tail_ms))?;
+    let cutoff_ms = now_ms.saturating_sub(tail_ms);
 
-    let chunk_points = points_per_chunk(stmt, points, chunk)?;
+    let points = grid.points();
+    let span = QuerySpan::new(grid.start_ms(), grid.last_ms());
+    // The first requested point that must be read directly because of the tail.
+    let tail_start = first_index_at_or_after(&grid, cutoff_ms)?;
+
+    // The first canonical chunk bound at or after the coverage starts.
+    let first_chunk = first_canonical_chunk(&grid, chunk_ms)?;
+    // Chunks may only cover points before the tail cutoff.
+    let cacheable_end = points.min(tail_start);
+
     let mut chunks = Vec::new();
-    let mut first = 0_u64;
-    while first < tail_start {
-        let last = first.saturating_add(chunk_points).min(tail_start);
-        let start_ms = grid_point_ms(stmt, first).ok_or(BypassReason::InvalidSpan)?;
-        // A chunk that stops inside the grid ends on the next grid point; the one
-        // that runs to the end of the grid ends one step past its last point.
-        let chunk_end_ms = if last < points {
-            grid_point_ms(stmt, last).ok_or(BypassReason::InvalidSpan)?
-        } else {
-            end_ms
-        };
-        chunks.push(TimeChunk::new(start_ms, chunk_end_ms));
-        first = last;
+    let mut next = first_chunk;
+    while next.saturating_add(chunk_in_steps) <= cacheable_end {
+        let start_ms = grid.point_ms(next)?;
+        let end_ms = grid.point_ms(next + chunk_in_steps)?;
+        chunks.push(TimeChunk::new(start_ms, end_ms));
+        next += chunk_in_steps;
     }
 
-    let tail = if tail_start < points {
-        let start_ms = grid_point_ms(stmt, tail_start).ok_or(BypassReason::InvalidSpan)?;
-        Some(TimeChunk::new(start_ms, end_ms))
-    } else {
-        None
-    };
+    // What is left over: before the first chunk, and after the last one. With no
+    // cacheable chunk both ends collapse into one region covering the whole
+    // request.
+    let head_end = if chunks.is_empty() { 0 } else { first_chunk };
+    let tail_from = if chunks.is_empty() { 0 } else { next };
+    let mut direct = Vec::new();
+    push_direct_region(&grid, &mut direct, 0, head_end, tail_start)?;
+    push_direct_region(&grid, &mut direct, tail_from, points, tail_start)?;
+    let tail = direct
+        .iter()
+        .find(|span| span.reason == DirectReason::Tail)
+        .map(|span| span.span);
 
-    Ok(ChunkSpans { chunks, tail })
+    Ok(ChunkSpans {
+        span,
+        chunks,
+        direct,
+        tail,
+    })
+}
+
+/// The configured chunk as a whole number of steps of `step_ms`.
+///
+/// `None` means canonical chunk bounds would fall between the grid's points, so no
+/// span of that query could be cached at that chunk length.
+fn chunk_steps(chunk: Duration, step_ms: i64) -> Option<u64> {
+    let chunk_ms = i64::try_from(chunk.as_millis()).ok()?;
+    if step_ms <= 0 || chunk_ms <= 0 || chunk_ms % step_ms != 0 {
+        return None;
+    }
+    u64::try_from(chunk_ms / step_ms).ok()
+}
+
+/// `value / divisor` rounded towards positive infinity, for a positive `divisor`.
+///
+/// The signed `div_ceil` is not stable yet, and the bounds below may lie before the
+/// epoch, where truncating division would round the wrong way.
+fn div_ceil(value: i128, divisor: i128) -> i128 {
+    let quotient = value.div_euclid(divisor);
+    if value.rem_euclid(divisor) == 0 {
+        quotient
+    } else {
+        quotient + 1
+    }
+}
+
+/// The first grid index whose point is at or after `ms`, clamped to the grid.
+fn first_index_at_or_after(grid: &EvalGrid, ms: i64) -> Result<u64, BypassReason> {
+    let delta = i128::from(ms) - i128::from(grid.start_ms());
+    let index = div_ceil(delta, i128::from(grid.step_ms()));
+    let index = index.clamp(0, i128::from(grid.points()));
+    u64::try_from(index).map_err(|_| BypassReason::Overflow)
+}
+
+/// The grid index of the first canonical chunk bound at or after the grid starts.
+///
+/// Canonical bounds are `phase + k * chunk`, with the phase read from the grid, so
+/// this is the smallest such bound that is not before the grid's first point.
+fn first_canonical_chunk(grid: &EvalGrid, chunk_ms: i64) -> Result<u64, BypassReason> {
+    let phase = i128::from(grid.phase_ms());
+    let chunk = i128::from(chunk_ms);
+    let start = i128::from(grid.start_ms());
+    let bound = div_ceil(start - phase, chunk) * chunk + phase;
+    let index = (bound - start) / i128::from(grid.step_ms());
+    u64::try_from(index).map_err(|_| BypassReason::Overflow)
+}
+
+/// Appends the direct spans that the grid indexes `[from, to)` split into at
+/// `tail_start`.
+fn push_direct_region(
+    grid: &EvalGrid,
+    direct: &mut Vec<DirectSpan>,
+    from: u64,
+    to: u64,
+    tail_start: u64,
+) -> Result<(), BypassReason> {
+    let tail_from = from.max(tail_start).min(to);
+    push_direct_span(grid, direct, from, tail_from, DirectReason::Edge)?;
+    push_direct_span(grid, direct, tail_from, to, DirectReason::Tail)
+}
+
+/// Appends one direct span, merging it into the previous one when they are
+/// contiguous and direct for the same reason.
+fn push_direct_span(
+    grid: &EvalGrid,
+    direct: &mut Vec<DirectSpan>,
+    from: u64,
+    to: u64,
+    reason: DirectReason,
+) -> Result<(), BypassReason> {
+    if from >= to {
+        return Ok(());
+    }
+    let start_ms = grid.point_ms(from)?;
+    let end_ms = grid.point_ms(to)?;
+    if let Some(last) = direct.last_mut()
+        && last.reason == reason
+        && last.span.end_ms() == start_ms
+    {
+        last.span = TimeChunk::new(last.span.start_ms(), end_ms);
+        return Ok(());
+    }
+    direct.push(DirectSpan {
+        span: TimeChunk::new(start_ms, end_ms),
+        reason,
+    });
+    Ok(())
 }
 
 /// Why a lookup misses, so a caller can tell a cold chunk from an unusable one.
@@ -330,6 +590,11 @@ pub enum MissReason {
     /// The authority last confirmed its cursor longer ago than the staleness bound.
     AuthorityStale {
         /// How long ago the authority confirmed its cursor.
+        age: Duration,
+    },
+    /// The entry was filled longer ago than the hard age bound allows.
+    Expired {
+        /// How long ago the fill captured its read.
         age: Duration,
     },
 }
@@ -363,20 +628,26 @@ pub enum Insert {
     Bypassed,
 }
 
-/// The cursor a fill was planned at, captured before the fill starts.
+/// The cursor, and the instant, a fill was planned at.
 ///
-/// An entry records this cursor rather than the one the authority reports when the
-/// fill completes: a cursor that moved while the fill ran does not make the payload
-/// fresher than the state it actually read.
+/// Both are captured before the fill reads storage: the cursor is what the payload
+/// is validated against, and the instant is what its age is counted from, so a slow
+/// fill is neither fresher nor younger than the read it actually performed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FillCursor {
     cursor: u64,
+    captured_at: SystemTime,
 }
 
 impl FillCursor {
     /// The cursor the fill reads storage at.
     pub fn cursor(&self) -> u64 {
         self.cursor
+    }
+
+    /// When the fill was planned, before it read storage.
+    pub fn captured_at(&self) -> SystemTime {
+        self.captured_at
     }
 }
 
@@ -403,9 +674,9 @@ pub enum AuthorityStatus {
 /// A source of the cursor that decides which cache entries may be served.
 ///
 /// Absent, unknown, unhealthy, or stale authority readings all miss, so a
-/// deployment without a working authority simply never hits. The deterministic
-/// fake in the tests is the only implementation so far; the storage sequence probe
-/// that backs this in production is the next milestone.
+/// deployment without a working authority simply never hits. A cache built without
+/// an authority skips the cursor rule entirely and is bounded only by the hard age
+/// bound, which is what a deployment without the storage sequence probe serves.
 pub trait CacheAuthority: Send + Sync {
     /// The cursor the authority vouches for, and how fresh that reading is.
     fn status(&self) -> AuthorityStatus;
@@ -414,20 +685,23 @@ pub trait CacheAuthority: Send + Sync {
 /// Why a [`RollupCacheConfig`] is unusable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigError {
-    /// The cache must hold at least one entry.
-    Capacity,
+    /// The cache must be allowed some bytes.
+    Bytes,
     /// A chunk must cover at least one millisecond.
     Chunk,
     /// The staleness bound must accept an authority reading at all.
     MaxStaleness,
+    /// The age bound must accept an entry at all.
+    MaxAge,
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Capacity => f.write_str("the cache capacity must be positive"),
+            Self::Bytes => f.write_str("the cache byte budget must be positive"),
             Self::Chunk => f.write_str("the chunk duration must be positive"),
             Self::MaxStaleness => f.write_str("the max staleness must be positive"),
+            Self::MaxAge => f.write_str("the max age must be positive"),
         }
     }
 }
@@ -437,25 +711,32 @@ impl std::error::Error for ConfigError {}
 /// The bounds a [`RollupCache`] enforces.
 ///
 /// `tail` is a [`Duration`], so it is non-negative by construction and needs no
-/// check; `capacity`, `chunk`, and `max_staleness` all have to be positive.
+/// check; `max_bytes`, `chunk`, `max_staleness`, and `max_age` all have to be
+/// positive.
+///
+/// `chunk` cannot be validated against the step here, because the step belongs to
+/// the query, not the cache: [`RollupCacheConfig::chunk_steps`] reports whether a
+/// given step suits it, and planning bypasses the cache when it does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollupCacheConfig {
-    capacity: u64,
+    max_bytes: u64,
     tail: Duration,
     chunk: Duration,
     max_staleness: Duration,
+    max_age: Duration,
 }
 
 impl RollupCacheConfig {
     /// The validated configuration of a cache.
     pub fn new(
-        capacity: u64,
+        max_bytes: u64,
         tail: Duration,
         chunk: Duration,
         max_staleness: Duration,
+        max_age: Duration,
     ) -> Result<Self, ConfigError> {
-        if capacity == 0 {
-            return Err(ConfigError::Capacity);
+        if max_bytes == 0 {
+            return Err(ConfigError::Bytes);
         }
         if chunk.is_zero() {
             return Err(ConfigError::Chunk);
@@ -463,20 +744,24 @@ impl RollupCacheConfig {
         if max_staleness.is_zero() {
             return Err(ConfigError::MaxStaleness);
         }
+        if max_age.is_zero() {
+            return Err(ConfigError::MaxAge);
+        }
         Ok(Self {
-            capacity,
+            max_bytes,
             tail,
             chunk,
             max_staleness,
+            max_age,
         })
     }
 
-    /// How many chunks the cache holds before evicting.
-    pub fn capacity(&self) -> u64 {
-        self.capacity
+    /// The bytes resident entries may occupy before eviction.
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
     }
 
-    /// How close to the statement's end output points stop being cacheable.
+    /// How close to the wall clock output points stop being cacheable.
     pub fn tail(&self) -> Duration {
         self.tail
     }
@@ -490,22 +775,51 @@ impl RollupCacheConfig {
     pub fn max_staleness(&self) -> Duration {
         self.max_staleness
     }
+
+    /// How old an entry may be before it stops being served, counted from the
+    /// instant its fill captured before reading storage.
+    pub fn max_age(&self) -> Duration {
+        self.max_age
+    }
+
+    /// The configured chunk as a whole number of steps of `step_ms`.
+    ///
+    /// `None` means the chunk is not a whole multiple of the step, so canonical
+    /// chunk bounds would fall between the statement's grid points; planning
+    /// rejects such a combination ([`BypassReason::MisalignedChunk`]) rather than
+    /// caching spans the evaluator never produced.
+    pub fn chunk_steps(&self, step_ms: i64) -> Option<u64> {
+        chunk_steps(self.chunk, step_ms)
+    }
 }
 
-/// A statement planned into the chunk keys a lookup uses.
+/// A statement planned into the chunk keys a lookup uses, plus what to read
+/// directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedChunks {
+    span: QuerySpan,
     chunks: Vec<TimeChunkKey>,
+    direct: Vec<DirectSpan>,
     tail: Option<TimeChunk>,
 }
 
 impl PlannedChunks {
-    /// The cacheable chunks of the statement, in grid order.
+    /// The coverage every span below partitions.
+    pub fn span(&self) -> QuerySpan {
+        self.span
+    }
+
+    /// The cacheable chunks of the statement, in time order.
     pub fn chunks(&self) -> &[TimeChunkKey] {
         &self.chunks
     }
 
-    /// The trailing span that must not be cached.
+    /// The spans to execute without the cache, in time order.
+    pub fn direct(&self) -> &[DirectSpan] {
+        &self.direct
+    }
+
+    /// The part of the coverage at or after `now - tail`.
     pub fn tail(&self) -> Option<TimeChunk> {
         self.tail
     }
@@ -516,7 +830,7 @@ impl PlannedChunks {
 pub enum ChunkPlan {
     /// The statement must not use the cache at all.
     Bypass(BypassReason),
-    /// The statement's cacheable chunks and its excluded tail.
+    /// The statement's cacheable chunks and the spans to read directly.
     Planned(PlannedChunks),
 }
 
@@ -526,6 +840,10 @@ struct Entry {
     payload: Arc<RecordBatches>,
     /// The cursor the payload was filled at, never the one seen at insertion.
     cursor: u64,
+    /// The bytes this entry is charged: its payload plus a fixed overhead.
+    weight: u32,
+    /// When the fill that produced the payload captured its read.
+    validated_at: SystemTime,
     /// When the entry was inserted.
     inserted_at: SystemTime,
 }
@@ -534,18 +852,24 @@ struct Entry {
 ///
 /// The cache is read-through: [`RollupCache::lookup`] answers from memory or says
 /// why it cannot, and the caller executes storage and calls
-/// [`RollupCache::insert`]. Entries are evicted in moka's admission order once
-/// `capacity` is reached, which is bounded but not a strict recency ordering.
+/// [`RollupCache::insert`]. Entries are evicted by moka in admission order once the
+/// byte budget is spent, which is bounded but not a strict recency ordering.
 pub struct RollupCache {
     config: RollupCacheConfig,
-    authority: Arc<dyn CacheAuthority>,
+    authority: Option<Arc<dyn CacheAuthority>>,
     entries: Cache<TimeChunkKey, Entry>,
 }
 
 impl RollupCache {
-    /// A cache bounded by `config` and validated by `authority`.
-    pub fn new(config: RollupCacheConfig, authority: Arc<dyn CacheAuthority>) -> Self {
-        let entries = Cache::builder().max_capacity(config.capacity()).build();
+    /// A cache bounded by `config` and, when given, validated by `authority`.
+    ///
+    /// Without an authority the cache never compares cursors and serves entries
+    /// while they are younger than [`RollupCacheConfig::max_age`].
+    pub fn new(config: RollupCacheConfig, authority: Option<Arc<dyn CacheAuthority>>) -> Self {
+        let entries = Cache::builder()
+            .max_capacity(config.max_bytes())
+            .weigher(|_key: &TimeChunkKey, entry: &Entry| entry.weight)
+            .build();
         Self {
             config,
             authority,
@@ -558,20 +882,30 @@ impl RollupCache {
         &self.config
     }
 
-    /// Plans `stmt` into the chunk keys of `query`, or reports why it cannot.
+    /// Plans `stmt` of `identity` into chunk keys and direct spans as of `now`.
     ///
-    /// The returned tail span is the caller's to send to storage; its points are
-    /// never cached.
-    pub fn plan(&self, query: QueryKey, stmt: &EvalStmt) -> ChunkPlan {
-        match plan_chunks(stmt, self.config.tail(), self.config.chunk()) {
+    /// The returned direct spans are the caller's to send to storage; their points
+    /// are never cached.
+    pub fn plan(&self, identity: QueryIdentity, stmt: &EvalStmt, now: SystemTime) -> ChunkPlan {
+        // The identity claims the grid its chunks were cut from; a statement on a
+        // different step would key the same span under the wrong grid.
+        if EvalGrid::of(stmt).is_ok_and(|grid| grid.step_ms() != identity.step_ms) {
+            return ChunkPlan::Bypass(BypassReason::StepMismatch);
+        }
+        match plan_chunks(stmt, self.config.tail(), self.config.chunk(), now) {
             Err(reason) => ChunkPlan::Bypass(reason),
             Ok(spans) => {
-                let (chunks, tail) = spans.into_parts();
+                let (span, chunks, direct, tail) = spans.into_parts();
                 let chunks = chunks
                     .into_iter()
-                    .map(|chunk| TimeChunkKey::new(query.clone(), chunk))
+                    .map(|chunk| TimeChunkKey::new(identity.clone(), chunk))
                     .collect();
-                ChunkPlan::Planned(PlannedChunks { chunks, tail })
+                ChunkPlan::Planned(PlannedChunks {
+                    span,
+                    chunks,
+                    direct,
+                    tail,
+                })
             }
         }
     }
@@ -589,27 +923,35 @@ impl RollupCache {
             Ok(cursor) => cursor,
             Err(reason) => return Lookup::Miss(reason),
         };
-        match self.entries.get(key) {
-            None => Lookup::Miss(MissReason::NotFound),
-            Some(entry) if entry.cursor == cursor => Lookup::Hit {
-                payload: entry.payload,
-                cursor,
-                inserted_at: entry.inserted_at,
-            },
-            Some(entry) => Lookup::Miss(MissReason::CursorChanged {
+        let Some(entry) = self.entries.get(key) else {
+            return Lookup::Miss(MissReason::NotFound);
+        };
+        if self.authority.is_some() && entry.cursor != cursor {
+            return Lookup::Miss(MissReason::CursorChanged {
                 cached: entry.cursor,
                 authority: cursor,
-            }),
+            });
+        }
+        let age = now.duration_since(entry.validated_at).unwrap_or_default();
+        if age > self.config.max_age() {
+            return Lookup::Miss(MissReason::Expired { age });
+        }
+        Lookup::Hit {
+            payload: entry.payload,
+            cursor: entry.cursor,
+            inserted_at: entry.inserted_at,
         }
     }
 
-    /// The cursor a fill of `key` reads storage at, captured before the fill.
+    /// The cursor, and the instant, a fill of a chunk should be planned at.
     ///
     /// Callers must pass the returned [`FillCursor`] to [`RollupCache::insert`]
     /// instead of reading the authority again once the fill completes.
     pub fn fill_cursor(&self, now: SystemTime) -> Result<FillCursor, MissReason> {
-        self.authorized_cursor(now)
-            .map(|cursor| FillCursor { cursor })
+        self.authorized_cursor(now).map(|cursor| FillCursor {
+            cursor,
+            captured_at: now,
+        })
     }
 
     /// Stores `payload` as the whole result of `key`'s chunk, filled at `fill`.
@@ -617,8 +959,9 @@ impl RollupCache {
     /// The insertion is conditional: a fill at a cursor older than the entry
     /// already in place is dropped, so a slow fill cannot overwrite a newer one.
     /// A fill at the same cursor replaces the payload, since both read the same
-    /// storage state. The entry records the cursor of `fill`, not whichever cursor
-    /// the authority reports now.
+    /// storage state. The entry records the cursor and the instant of `fill`, not
+    /// whichever the authority reports now, and is charged the bytes of its payload
+    /// so eviction stays within the configured budget.
     pub fn insert(
         &self,
         key: TimeChunkKey,
@@ -629,8 +972,10 @@ impl RollupCache {
             return Insert::Bypassed;
         }
         let candidate = Entry {
+            weight: Entry::weigh(&payload),
             payload,
             cursor: fill.cursor(),
+            validated_at: fill.captured_at(),
             inserted_at: SystemTime::now(),
         };
         // `and_compute_with` serializes only the swap of this one key; nothing is
@@ -650,7 +995,11 @@ impl RollupCache {
 
     /// The cursor a lookup at `now` may serve, or why it may serve none.
     fn authorized_cursor(&self, now: SystemTime) -> Result<u64, MissReason> {
-        match self.authority.status() {
+        let Some(authority) = &self.authority else {
+            // No probe is deployed: freshness is bounded by age alone.
+            return Ok(NO_AUTHORITY_CURSOR);
+        };
+        match authority.status() {
             AuthorityStatus::Unknown => Err(MissReason::AuthorityUnknown),
             AuthorityStatus::Unhealthy => Err(MissReason::AuthorityUnhealthy),
             AuthorityStatus::Ready {
@@ -668,101 +1017,18 @@ impl RollupCache {
     }
 }
 
-/// The number of points on `stmt`'s evaluation grid.
-///
-/// TODO(rollup-cache): `query::promql::window` should expose the grid it already
-/// computes — its point count and point timestamps — instead of having callers
-/// probe for them through single-point windows.
-fn grid_len(stmt: &EvalStmt) -> Option<u64> {
-    grid_point_ms(stmt, 0)?;
-    // Exponential search for an index off the grid, then bisect the last index on
-    // it. Both bounds are read from the window helper, not recomputed.
-    let mut inside = 0_u64;
-    let mut probe = 1_u64;
-    while grid_point_ms(stmt, probe).is_some() {
-        inside = probe;
-        probe = probe.checked_mul(2)?;
+impl Entry {
+    /// The bytes `payload` is charged, clamped to what a cache weight can hold.
+    fn weigh(payload: &RecordBatches) -> u32 {
+        let data: usize = payload
+            .iter()
+            .map(|batch| batch.buffer_memory_size())
+            .sum::<usize>();
+        let bytes = u64::try_from(data)
+            .unwrap_or(u64::MAX)
+            .saturating_add(ENTRY_OVERHEAD_BYTES);
+        u32::try_from(bytes).unwrap_or(u32::MAX)
     }
-    let mut outside = probe;
-    while outside - inside > 1 {
-        let middle = inside + (outside - inside) / 2;
-        if grid_point_ms(stmt, middle).is_some() {
-            inside = middle;
-        } else {
-            outside = middle;
-        }
-    }
-    inside.checked_add(1)
-}
-
-/// The timestamp of grid point `index`, in milliseconds since the epoch.
-///
-/// The window helper owns the grid arithmetic, so a grid point is read as the
-/// single-point window `[index, index + 1)` rather than recomputed here.
-fn grid_point_ms(stmt: &EvalStmt, index: u64) -> Option<i64> {
-    let first = usize::try_from(index).ok()?;
-    let last = first.checked_add(1)?;
-    let window = windowed_eval_stmt(stmt, first, last).ok()?;
-    signed_millis_since_epoch(window.start).ok()
-}
-
-/// The positive whole-millisecond step the grid is laid out with.
-///
-/// The window helper refuses a step that is not a positive whole number of
-/// milliseconds, so a statement reaching the grid has one; this only reads it back
-/// to name the millisecond one step past the grid's last point.
-fn step_ms(stmt: &EvalStmt) -> Result<i64, BypassReason> {
-    if !stmt.interval.subsec_nanos().is_multiple_of(1_000_000) {
-        return Err(BypassReason::InvalidSpan);
-    }
-    let millis = i64::try_from(stmt.interval.as_millis()).map_err(|_| BypassReason::Overflow)?;
-    if millis <= 0 {
-        return Err(BypassReason::InvalidSpan);
-    }
-    Ok(millis)
-}
-
-/// The first grid index whose point is strictly later than `cutoff_ms`, or
-/// `points` when no point is.
-fn first_point_after(stmt: &EvalStmt, points: u64, cutoff_ms: i64) -> Result<u64, BypassReason> {
-    // `points` is one past the last point, so it is later than any cutoff.
-    let mut first = 0_u64;
-    let mut past = points;
-    while first < past {
-        let middle = first + (past - first) / 2;
-        let middle_ms = grid_point_ms(stmt, middle).ok_or(BypassReason::InvalidSpan)?;
-        if middle_ms > cutoff_ms {
-            past = middle;
-        } else {
-            first = middle + 1;
-        }
-    }
-    Ok(first)
-}
-
-/// How many grid points one chunk holds: the points in `[head, head + chunk)`.
-///
-/// A chunk shorter than one step, and any step, still covers the point it starts
-/// on; a chunk longer than the whole grid covers every point.
-fn points_per_chunk(stmt: &EvalStmt, points: u64, chunk: Duration) -> Result<u64, BypassReason> {
-    let head_ms = grid_point_ms(stmt, 0).ok_or(BypassReason::InvalidSpan)?;
-    let chunk_ms = i64::try_from(chunk.as_millis()).map_err(|_| BypassReason::Overflow)?;
-    let target_ms = head_ms
-        .checked_add(chunk_ms)
-        .ok_or(BypassReason::Overflow)?;
-    // The first point not inside the chunk.
-    let mut first = 0_u64;
-    let mut past = points;
-    while first < past {
-        let middle = first + (past - first) / 2;
-        let middle_ms = grid_point_ms(stmt, middle).ok_or(BypassReason::InvalidSpan)?;
-        if middle_ms < target_ms {
-            first = middle + 1;
-        } else {
-            past = middle;
-        }
-    }
-    Ok(first.max(1))
 }
 
 #[cfg(test)]
@@ -774,58 +1040,86 @@ mod tests {
 
     use super::*;
 
-    const STEP_MS: u64 = 37_000;
-    /// The first point of the test grid: neither an epoch boundary nor a whole
-    /// second, so any rounding would show as a shifted chunk.
-    const HEAD_MS: u64 = 1_001;
+    /// One minute, the step every clock-aligned test uses.
+    const STEP_MS: i64 = 60_000;
+    /// Five minutes: a whole number of steps, so canonical bounds are grid points.
+    const CHUNK_MS: i64 = 300_000;
+    /// The five-minute chunk every clock-aligned test plans with.
+    const CHUNK: Duration = Duration::from_millis(CHUNK_MS as u64);
+    /// A five-minute-aligned instant, standing in for 10:00.
+    const HEAD_MS: i64 = 36_000_000;
+    /// A wall clock far enough past every test window that no point is in its tail.
+    const LATER_MS: i64 = HEAD_MS + 24 * 3_600_000;
 
-    /// A statement whose grid starts at `start_ms` and steps `step_ms` over
-    /// `points` points.
-    fn stmt_between(expr: &str, start_ms: u64, points: u64, step_ms: u64) -> EvalStmt {
-        let start = UNIX_EPOCH + Duration::from_millis(start_ms);
-        let end = start + Duration::from_millis(step_ms * (points - 1));
+    fn at(ms: i64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_millis(ms.unsigned_abs())
+    }
+
+    /// A statement from `start_ms` to `end_ms` (inclusive), stepping `step_ms`.
+    fn stmt_between(expr: &str, start_ms: i64, end_ms: i64, step_ms: i64) -> EvalStmt {
         EvalStmt {
             expr: parse(expr).expect("the expression parses"),
-            start,
-            end,
-            interval: Duration::from_millis(step_ms),
+            start: at(start_ms),
+            end: at(end_ms),
+            interval: Duration::from_millis(step_ms.unsigned_abs()),
             lookback_delta: Duration::from_secs(300),
         }
     }
 
-    fn query_key() -> QueryKey {
-        QueryKey {
+    /// A statement of `points` points from `start_ms`.
+    fn stmt_from(expr: &str, start_ms: i64, points: u64, step_ms: i64) -> EvalStmt {
+        let end_ms = start_ms + (points as i64 - 1) * step_ms;
+        stmt_between(expr, start_ms, end_ms, step_ms)
+    }
+
+    fn identity() -> QueryIdentity {
+        QueryIdentity {
             tenant: "greptime".to_string(),
             catalog: "greptime".to_string(),
             schema: "public".to_string(),
             query: "rate(http_requests_total[5m])".to_string(),
-            alias: None,
-            read_preference: None,
-            start_ms: 1_000,
-            end_ms: 61_000,
-            step_ms: 15_000,
+            step_ms: STEP_MS,
             lookback_ms: 300_000,
             route: QueryRoute::Legacy,
             ordered: false,
+            alias: None,
+            read_preference: None,
         }
     }
 
     fn chunk_key() -> TimeChunkKey {
-        TimeChunkKey::new(query_key(), TimeChunk::new(1_001, 38_001))
+        TimeChunkKey::new(identity(), TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS))
     }
 
     fn payload() -> Arc<RecordBatches> {
         Arc::new(RecordBatches::empty())
     }
 
-    fn config(capacity: u64) -> RollupCacheConfig {
+    fn config() -> RollupCacheConfig {
         RollupCacheConfig::new(
-            capacity,
-            Duration::from_secs(300),
-            Duration::from_secs(120),
+            1 << 20,
+            CHUNK,
+            CHUNK,
             Duration::from_secs(60),
+            Duration::from_secs(3_600),
         )
         .expect("the test configuration is valid")
+    }
+
+    fn config_with(max_bytes: u64, tail: Duration, chunk: Duration) -> RollupCacheConfig {
+        RollupCacheConfig::new(
+            max_bytes,
+            tail,
+            chunk,
+            Duration::from_secs(60),
+            Duration::from_secs(3_600),
+        )
+        .expect("the test configuration is valid")
+    }
+
+    /// A cache with no authority: freshness is bounded by age alone.
+    fn cache() -> RollupCache {
+        RollupCache::new(config(), None)
     }
 
     /// An authority whose reading a test sets directly.
@@ -865,107 +1159,307 @@ mod tests {
         }
     }
 
-    fn cache(capacity: u64, authority: &FakeAuthority) -> RollupCache {
+    fn authority_cache(authority: &FakeAuthority) -> RollupCache {
         let authority: Arc<dyn CacheAuthority> = Arc::new(authority.clone());
-        RollupCache::new(config(capacity), authority)
+        RollupCache::new(config(), Some(authority))
     }
 
-    /// A grid of ten 37-second points from 1 001 ms, a tail of two points, and
-    /// three-point chunks.
-    fn planned() -> (RollupCache, FakeAuthority) {
-        let authority = FakeAuthority::default();
-        authority.ready(1, SystemTime::now());
-        let cache = cache(8, &authority);
-        (cache, authority)
+    fn planned(
+        cache: &RollupCache,
+        stmt: &EvalStmt,
+        now: SystemTime,
+    ) -> (
+        QuerySpan,
+        Vec<TimeChunk>,
+        Vec<DirectSpan>,
+        Option<TimeChunk>,
+    ) {
+        planned_for(identity(), cache, stmt, now)
     }
 
-    #[test]
-    fn tail_is_excluded_and_chunks_follow_the_original_grid() {
-        let stmt = stmt_between("rate(x[5m])", HEAD_MS, 10, STEP_MS);
-        let spans = plan_chunks(
-            &stmt,
-            Duration::from_millis(2 * STEP_MS),
-            Duration::from_millis(3 * STEP_MS),
-        )
-        .expect("the statement is windowable");
+    fn planned_for(
+        identity: QueryIdentity,
+        cache: &RollupCache,
+        stmt: &EvalStmt,
+        now: SystemTime,
+    ) -> (
+        QuerySpan,
+        Vec<TimeChunk>,
+        Vec<DirectSpan>,
+        Option<TimeChunk>,
+    ) {
+        match cache.plan(identity, stmt, now) {
+            ChunkPlan::Planned(planned) => (
+                planned.span(),
+                planned.chunks().iter().map(|key| key.chunk()).collect(),
+                planned.direct().to_vec(),
+                planned.tail(),
+            ),
+            ChunkPlan::Bypass(reason) => panic!("the statement should plan: {reason}"),
+        }
+    }
 
-        let at = |index: u64| HEAD_MS as i64 + index as i64 * STEP_MS as i64;
+    /// Every span a plan returns, in time order, must partition the coverage
+    /// exactly once.
+    fn assert_partition(span: QuerySpan, chunks: &[TimeChunk], direct: &[DirectSpan]) {
+        let mut spans: Vec<TimeChunk> = chunks
+            .iter()
+            .copied()
+            .chain(direct.iter().map(|span| span.span()))
+            .collect();
+        spans.sort_by_key(|span| span.start_ms());
         assert_eq!(
-            spans.chunks(),
-            &[
-                TimeChunk::new(at(0), at(3)),
-                TimeChunk::new(at(3), at(6)),
-                // The tail starts at point 8, so the last chunk is short rather
-                // than padded into the tail.
-                TimeChunk::new(at(6), at(8)),
-            ]
+            spans.first().map(|span| span.start_ms()),
+            Some(span.start_ms())
         );
-        assert_eq!(spans.tail(), Some(TimeChunk::new(at(8), at(10))));
-
-        // Every bound is a grid point of the original statement: none of them is
-        // rounded to a wall-clock bucket.
-        for chunk in spans.chunks() {
-            assert_eq!((chunk.start_ms() - at(0)) % STEP_MS as i64, 0);
-            assert!(chunk.start_ms() < chunk.end_ms());
+        let mut previous_end = span.start_ms();
+        for chunk in &spans {
+            assert_eq!(
+                chunk.start_ms(),
+                previous_end,
+                "gap or overlap at {chunk:?}"
+            );
+            assert!(chunk.start_ms() < chunk.end_ms(), "empty span {chunk:?}");
+            previous_end = chunk.end_ms();
+        }
+        assert!(
+            previous_end > span.end_ms(),
+            "the last span must reach past the last point of {:?}",
+            span
+        );
+        for direct in direct {
+            assert!(
+                direct.span().start_ms() <= span.end_ms(),
+                "a direct span escapes the coverage: {direct:?}"
+            );
         }
     }
 
     #[test]
-    fn a_zero_tail_caches_the_whole_statement() {
-        let stmt = stmt_between("rate(x[5m])", HEAD_MS, 10, STEP_MS);
-        let spans = plan_chunks(&stmt, Duration::ZERO, Duration::from_millis(3 * STEP_MS))
-            .expect("the statement is windowable");
+    fn a_sliding_window_reuses_every_interior_chunk() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let first = stmt_between("rate(x[5m])", HEAD_MS, HEAD_MS + 3_600_000, STEP_MS);
+        let second = stmt_between(
+            "rate(x[5m])",
+            HEAD_MS + CHUNK_MS,
+            HEAD_MS + 3_600_000 + CHUNK_MS,
+            STEP_MS,
+        );
 
-        assert_eq!(spans.tail(), None);
-        let at = |index: u64| HEAD_MS as i64 + index as i64 * STEP_MS as i64;
+        let (_, first_chunks, _, _) = planned(&cache, &first, now);
+        let (_, second_chunks, _, _) = planned(&cache, &second, now);
+
+        // The interior chunks are the same absolute spans, so they are the same
+        // keys even though the second request starts five minutes later.
+        let shared: Vec<TimeChunk> = second_chunks
+            .iter()
+            .copied()
+            .filter(|chunk| first_chunks.contains(chunk))
+            .collect();
+        assert_eq!(shared.len(), 11, "{shared:?}");
+        let interior = shared[5];
+        let fill = cache.fill_cursor(now).unwrap();
+        let filled = payload();
         assert_eq!(
-            spans.chunks(),
-            &[
-                TimeChunk::new(at(0), at(3)),
-                TimeChunk::new(at(3), at(6)),
-                TimeChunk::new(at(6), at(9)),
-                // One point left over, still a complete chunk of its own.
-                TimeChunk::new(at(9), at(10)),
-            ]
+            cache.insert(
+                TimeChunkKey::new(identity(), interior),
+                fill,
+                filled.clone()
+            ),
+            Insert::Stored
+        );
+        let Lookup::Hit { payload: hit, .. } =
+            cache.lookup(&TimeChunkKey::new(identity(), interior), now)
+        else {
+            panic!("the interior chunk is a hit under the second window too");
+        };
+        assert!(Arc::ptr_eq(&hit, &filled));
+
+        // The second window starts on a canonical bound, so only the point past
+        // its last chunk is executed directly.
+        let (span, second_all, direct, _) = planned(&cache, &second, now);
+        assert_eq!(second_all.len(), 12);
+        assert_eq!(direct.len(), 1, "{direct:?}");
+        assert_eq!(direct[0].span().start_ms(), span.end_ms());
+        assert_eq!(direct[0].span().end_ms(), span.end_ms() + STEP_MS);
+    }
+
+    #[test]
+    fn the_tail_is_measured_from_now_not_from_the_query_end() {
+        let cache = cache();
+        // A historical window: its end is an hour before `now`, so nothing of it
+        // can still be arriving and the whole range is cacheable.
+        let historical = stmt_between("rate(x[5m])", HEAD_MS, HEAD_MS + 3_600_000, STEP_MS);
+        let (span, chunks, direct, tail) = planned(&cache, &historical, at(LATER_MS));
+        assert_eq!(tail, None);
+        assert!(
+            direct
+                .iter()
+                .all(|span| span.reason() == DirectReason::Edge)
+        );
+        assert_partition(span, &chunks, &direct);
+        assert!(chunks.len() >= 11, "{chunks:?}");
+
+        // A window ending at `now` keeps its last tail direct.
+        let recent = stmt_between(
+            "rate(x[5m])",
+            HEAD_MS + 3_600_000,
+            HEAD_MS + 3_600_000 + 3_600_000,
+            STEP_MS,
+        );
+        let now = at(HEAD_MS + 3_600_000 + 3_600_000);
+        let (span, chunks, direct, tail) = planned(&cache, &recent, now);
+        let tail = tail.expect("the recent window has a tail");
+        assert_eq!(tail.end_ms(), span.end_ms() + STEP_MS);
+        assert_eq!(tail.start_ms(), HEAD_MS + 7_200_000 - CHUNK_MS);
+        assert!(
+            direct
+                .iter()
+                .any(|span| span.reason() == DirectReason::Tail)
+        );
+        assert_partition(span, &chunks, &direct);
+        assert!(chunks.iter().all(|chunk| chunk.end_ms() <= tail.start_ms()));
+    }
+
+    #[test]
+    fn edge_and_tail_spans_partition_an_odd_phase() {
+        // A grid that starts off a step boundary, and off a chunk boundary, so the
+        // request needs a leading and a trailing partial chunk.
+        let step = 37_000;
+        let chunk = 3 * step;
+        let start = 1_001 + 2 * step;
+        let stmt = stmt_from("rate(x[5m])", start, 11, step);
+        let cache = RollupCache::new(
+            config_with(1 << 20, Duration::ZERO, Duration::from_millis(chunk as u64)),
+            None,
+        );
+        let odd_grid = QueryIdentity {
+            step_ms: step,
+            ..identity()
+        };
+        let (span, chunks, direct, tail) = planned_for(odd_grid, &cache, &stmt, at(LATER_MS));
+
+        assert_eq!(tail, None);
+        assert_eq!(chunks.len(), 3, "{chunks:?}");
+        let filled = direct
+            .iter()
+            .filter(|s| s.reason() == DirectReason::Edge)
+            .count();
+        assert_eq!(filled, 2, "a leading and a trailing edge: {direct:?}");
+        assert_partition(span, &chunks, &direct);
+
+        // Every cacheable span is a whole configured chunk, and its bounds are
+        // canonical bounds of this grid's phase.
+        let phase = start.rem_euclid(step);
+        for chunk_span in &chunks {
+            assert_eq!(chunk_span.end_ms() - chunk_span.start_ms(), chunk);
+            assert_eq!((chunk_span.start_ms() - phase) % chunk, 0);
+        }
+        for direct in &direct {
+            assert!(
+                direct.span().end_ms() - direct.span().start_ms() < chunk,
+                "a partial chunk is never keyed as a full one: {direct:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_step_changes_the_identity() {
+        let finer = QueryIdentity {
+            step_ms: STEP_MS / 2,
+            ..identity()
+        };
+        assert_ne!(finer, identity());
+        assert_ne!(
+            TimeChunkKey::new(finer, TimeChunk::new(0, 1)),
+            TimeChunkKey::new(identity(), TimeChunk::new(0, 1))
         );
     }
 
     #[test]
-    fn a_chunk_shorter_than_a_step_still_covers_its_point() {
-        let stmt = stmt_between("x", HEAD_MS, 3, STEP_MS);
-        let spans = plan_chunks(&stmt, Duration::ZERO, Duration::from_millis(1))
-            .expect("the statement is windowable");
+    fn a_different_grid_phase_changes_the_chunk_bounds() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let aligned = stmt_from("rate(x[5m])", HEAD_MS, 11, STEP_MS);
+        let shifted = stmt_from("rate(x[5m])", HEAD_MS + 30_000, 11, STEP_MS);
 
-        assert_eq!(spans.chunks().len(), 3);
+        let (_, aligned_chunks, _, _) = planned(&cache, &aligned, now);
+        let (_, shifted_chunks, _, _) = planned(&cache, &shifted, now);
+        assert!(!aligned_chunks.is_empty() && !shifted_chunks.is_empty());
+        for chunk in &aligned_chunks {
+            assert!(!shifted_chunks.contains(chunk), "{chunk:?} is shared");
+        }
+    }
+
+    #[test]
+    fn the_query_span_is_not_part_of_the_identity() {
+        let first = QuerySpan::of(&stmt_between("x", HEAD_MS, HEAD_MS + 600_000, STEP_MS)).unwrap();
+        let second = QuerySpan::of(&stmt_between(
+            "x",
+            HEAD_MS + 60_000,
+            HEAD_MS + 660_000,
+            STEP_MS,
+        ))
+        .unwrap();
+        assert_ne!(first, second);
+
+        // ... while the identities of both requests are the same one.
+        let cache = cache();
+        let now = at(LATER_MS);
+        let (first_span, _, _, _) = planned(
+            &cache,
+            &stmt_between("x", HEAD_MS, HEAD_MS + 600_000, STEP_MS),
+            now,
+        );
+        let (second_span, _, _, _) = planned(
+            &cache,
+            &stmt_between("x", HEAD_MS + 60_000, HEAD_MS + 660_000, STEP_MS),
+            now,
+        );
+        assert_ne!(first_span, second_span);
+    }
+
+    #[test]
+    fn an_identity_on_another_grid_bypasses() {
+        let cache = cache();
+        let stmt = stmt_from("rate(x[5m])", HEAD_MS, 11, STEP_MS / 2);
         assert_eq!(
-            spans.chunks()[0].end_ms() - spans.chunks()[0].start_ms(),
-            STEP_MS as i64
+            cache.plan(identity(), &stmt, at(LATER_MS)),
+            ChunkPlan::Bypass(BypassReason::StepMismatch)
         );
     }
 
     #[test]
-    fn a_full_tail_leaves_nothing_to_cache() {
-        let stmt = stmt_between("x", HEAD_MS, 3, STEP_MS);
-        let spans = plan_chunks(&stmt, Duration::from_secs(3600), Duration::from_secs(60))
-            .expect("the statement is windowable");
+    fn a_chunk_that_is_not_a_whole_number_of_steps_bypasses() {
+        let odd_chunk = Duration::from_millis(100_000);
+        let stmt = stmt_from("rate(x[5m])", HEAD_MS, 11, STEP_MS);
 
-        assert!(spans.chunks().is_empty());
-        let at = |index: u64| HEAD_MS as i64 + index as i64 * STEP_MS as i64;
-        assert_eq!(spans.tail(), Some(TimeChunk::new(at(0), at(3))));
+        assert_eq!(
+            plan_chunks(&stmt, Duration::ZERO, odd_chunk, at(LATER_MS)),
+            Err(BypassReason::MisalignedChunk)
+        );
+        assert_eq!(
+            config_with(1 << 20, Duration::ZERO, odd_chunk).chunk_steps(STEP_MS),
+            None
+        );
+        assert_eq!(config().chunk_steps(STEP_MS), Some(5));
+        assert_eq!(config().chunk_steps(STEP_MS / 2), Some(10));
     }
 
     #[test]
     fn a_non_windowable_expression_bypasses_the_cache() {
-        let (cache, _authority) = planned();
+        let cache = cache();
+        let now = at(LATER_MS);
         for query in ["sum(rate(x[5m]))", "{host=\"a\"}", "rate(x[5m] offset 1m)"] {
-            let stmt = stmt_between(query, HEAD_MS, 10, STEP_MS);
+            let stmt = stmt_from(query, HEAD_MS, 11, STEP_MS);
             assert_eq!(
-                plan_chunks(&stmt, Duration::ZERO, Duration::from_secs(60)),
+                plan_chunks(&stmt, Duration::ZERO, CHUNK, now),
                 Err(BypassReason::NotWindowable),
                 "{query}"
             );
             assert_eq!(
-                cache.plan(query_key(), &stmt),
+                cache.plan(identity(), &stmt, now),
                 ChunkPlan::Bypass(BypassReason::NotWindowable),
                 "{query}"
             );
@@ -974,11 +1468,12 @@ mod tests {
 
     #[test]
     fn an_invalid_span_bypasses_the_cache() {
-        let stmt = stmt_between("x", HEAD_MS, 10, STEP_MS);
+        let now = at(LATER_MS);
+        let stmt = stmt_from("x", HEAD_MS, 11, STEP_MS);
         let mut backwards = stmt.clone();
-        backwards.end = backwards.start - Duration::from_millis(STEP_MS);
+        backwards.end = backwards.start - Duration::from_millis(STEP_MS as u64);
         assert_eq!(
-            plan_chunks(&backwards, Duration::ZERO, Duration::from_secs(60)),
+            plan_chunks(&backwards, Duration::ZERO, CHUNK, now),
             Err(BypassReason::InvalidSpan)
         );
 
@@ -987,62 +1482,54 @@ mod tests {
         let mut sub_millisecond = stmt;
         sub_millisecond.interval = Duration::from_micros(1_500);
         assert_eq!(
-            plan_chunks(&sub_millisecond, Duration::ZERO, Duration::from_secs(60)),
+            plan_chunks(&sub_millisecond, Duration::ZERO, CHUNK, now),
             Err(BypassReason::InvalidSpan)
         );
     }
 
     #[test]
-    fn query_key_fields_are_isolated() {
-        let base = query_key();
-        let chunk = TimeChunk::new(1_001, 38_001);
+    fn identity_fields_are_isolated() {
+        let base = identity();
+        let chunk = TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS);
         let cases = [
-            QueryKey {
+            QueryIdentity {
                 tenant: "other".to_string(),
                 ..base.clone()
             },
-            QueryKey {
+            QueryIdentity {
                 catalog: "other".to_string(),
                 ..base.clone()
             },
-            QueryKey {
+            QueryIdentity {
                 schema: "other".to_string(),
                 ..base.clone()
             },
-            QueryKey {
+            QueryIdentity {
                 query: "rate(http_requests_total[6m])".to_string(),
                 ..base.clone()
             },
-            QueryKey {
-                alias: Some("q".to_string()),
+            QueryIdentity {
+                step_ms: STEP_MS * 2,
                 ..base.clone()
             },
-            QueryKey {
-                read_preference: Some("LEADER".to_string()),
-                ..base.clone()
-            },
-            QueryKey {
-                start_ms: 2_000,
-                ..base.clone()
-            },
-            QueryKey {
-                end_ms: 62_000,
-                ..base.clone()
-            },
-            QueryKey {
-                step_ms: 30_000,
-                ..base.clone()
-            },
-            QueryKey {
+            QueryIdentity {
                 lookback_ms: 600_000,
                 ..base.clone()
             },
-            QueryKey {
+            QueryIdentity {
                 route: QueryRoute::Native,
                 ..base.clone()
             },
-            QueryKey {
+            QueryIdentity {
                 ordered: true,
+                ..base.clone()
+            },
+            QueryIdentity {
+                alias: Some("q".to_string()),
+                ..base.clone()
+            },
+            QueryIdentity {
+                read_preference: Some("LEADER".to_string()),
                 ..base.clone()
             },
         ];
@@ -1055,32 +1542,26 @@ mod tests {
             );
         }
 
-        // The chunks of the same query still share a key.
         assert_eq!(
             TimeChunkKey::new(base.clone(), chunk),
-            TimeChunkKey::new(base.clone(), chunk)
-        );
-        assert_ne!(
-            TimeChunkKey::new(base, chunk),
-            TimeChunkKey::new(query_key(), TimeChunk::new(1_001, 75_001))
+            TimeChunkKey::new(base, chunk)
         );
     }
 
     #[test]
-    fn a_query_key_prints_its_context_but_never_its_query_text() {
-        let key = query_key();
-        let printed = format!("{key:?}");
+    fn an_identity_prints_its_context_but_never_its_query_text() {
+        let printed = format!("{:?}", identity());
         assert!(printed.contains(REDACTED_QUERY), "{printed}");
         assert!(!printed.contains("http_requests_total"), "{printed}");
 
-        let chunk = TimeChunkKey::new(key, TimeChunk::new(1_001, 38_001));
+        let chunk = chunk_key();
         assert!(!format!("{chunk:?}").contains("http_requests_total"));
 
         // The alias and the read preference are not query text, so they print.
-        let aliased = QueryKey {
+        let aliased = QueryIdentity {
             alias: Some("q".to_string()),
             read_preference: Some("LEADER".to_string()),
-            ..query_key()
+            ..identity()
         };
         let printed = format!("{aliased:?}");
         assert!(printed.contains("alias: Some(\"q\")"), "{printed}");
@@ -1092,46 +1573,18 @@ mod tests {
     }
 
     #[test]
-    fn tenant_and_schema_isolation_reaches_the_entries() {
-        let (cache, _authority) = planned();
-        let now = SystemTime::now();
-        let key = chunk_key();
-        let fill = cache.fill_cursor(now).unwrap();
-        assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
-        assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
-
-        for other in [
-            QueryKey {
-                tenant: "other".to_string(),
-                ..query_key()
-            },
-            QueryKey {
-                schema: "other".to_string(),
-                ..query_key()
-            },
-        ] {
-            let other = TimeChunkKey::new(other, key.chunk());
-            assert!(matches!(
-                cache.lookup(&other, now),
-                Lookup::Miss(MissReason::NotFound)
-            ));
-        }
-    }
-
-    #[test]
     fn an_alias_change_separates_entries() {
-        let (cache, _authority) = planned();
-        let now = SystemTime::now();
+        let cache = cache();
+        let now = at(LATER_MS);
         let key = chunk_key();
         let fill = cache.fill_cursor(now).unwrap();
         assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
         assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
 
-        // The same expression under an output alias is a different result.
         let aliased = TimeChunkKey::new(
-            QueryKey {
+            QueryIdentity {
                 alias: Some("q".to_string()),
-                ..query_key()
+                ..identity()
             },
             key.chunk(),
         );
@@ -1143,18 +1596,17 @@ mod tests {
 
     #[test]
     fn a_read_preference_change_separates_entries() {
-        let (cache, _authority) = planned();
-        let now = SystemTime::now();
+        let cache = cache();
+        let now = at(LATER_MS);
         let key = chunk_key();
         let fill = cache.fill_cursor(now).unwrap();
         assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
         assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
 
-        // A different read preference may have been served by another replica.
         let other = TimeChunkKey::new(
-            QueryKey {
+            QueryIdentity {
                 read_preference: Some("LEADER".to_string()),
-                ..query_key()
+                ..identity()
             },
             key.chunk(),
         );
@@ -1166,15 +1618,15 @@ mod tests {
 
     #[test]
     fn a_missed_chunk_is_filled_and_then_hit() {
-        let (cache, _authority) = planned();
-        let now = SystemTime::now();
+        let cache = cache();
+        let now = at(LATER_MS);
         let key = chunk_key();
 
         assert!(matches!(
             cache.lookup(&key, now),
             Lookup::Miss(MissReason::NotFound)
         ));
-        let fill = cache.fill_cursor(now).expect("the authority is ready");
+        let fill = cache.fill_cursor(now).expect("no authority always fills");
         let filled = payload();
         assert_eq!(
             cache.insert(key.clone(), fill, filled.clone()),
@@ -1189,14 +1641,16 @@ mod tests {
         else {
             panic!("the filled chunk is a hit");
         };
-        assert_eq!(cursor, 1);
+        assert_eq!(cursor, NO_AUTHORITY_CURSOR);
         assert!(Arc::ptr_eq(&hit, &filled));
     }
 
     #[test]
     fn only_the_authority_cursor_is_served() {
-        let (cache, authority) = planned();
-        let now = SystemTime::now();
+        let authority = FakeAuthority::default();
+        authority.ready(1, at(LATER_MS));
+        let cache = authority_cache(&authority);
+        let now = at(LATER_MS);
         let key = chunk_key();
         let fill = cache.fill_cursor(now).unwrap();
         cache.insert(key.clone(), fill, payload());
@@ -1212,16 +1666,6 @@ mod tests {
             Lookup::Miss(MissReason::CursorChanged {
                 cached: 1,
                 authority: 2
-            })
-        ));
-
-        // A cursor that moved back is just another change.
-        authority.ready(0, now);
-        assert!(matches!(
-            cache.lookup(&key, now),
-            Lookup::Miss(MissReason::CursorChanged {
-                cached: 1,
-                authority: 0
             })
         ));
 
@@ -1245,18 +1689,20 @@ mod tests {
 
     #[test]
     fn a_stale_authority_reading_never_serves() {
-        let (cache, authority) = planned();
-        let now = SystemTime::now();
+        let authority = FakeAuthority::default();
+        authority.ready(1, at(LATER_MS));
+        let cache = authority_cache(&authority);
+        let now = at(LATER_MS);
         let key = chunk_key();
         let fill = cache.fill_cursor(now).unwrap();
         cache.insert(key.clone(), fill, payload());
 
         // Exactly at the bound the reading is still trusted...
-        authority.ready(1, now - config(8).max_staleness());
+        authority.ready(1, now - config().max_staleness());
         assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
 
         // ...and one millisecond past it, nothing is.
-        let observed_at = now - config(8).max_staleness() - Duration::from_millis(1);
+        let observed_at = now - config().max_staleness() - Duration::from_millis(1);
         authority.ready(1, observed_at);
         assert_eq!(
             cache.lookup(&key, now),
@@ -1268,9 +1714,34 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_older_than_the_age_bound_never_serves() {
+        let cache = cache();
+        let filled_at = at(LATER_MS);
+        let key = chunk_key();
+        let fill = cache.fill_cursor(filled_at).unwrap();
+        cache.insert(key.clone(), fill, payload());
+
+        // The age is counted from the fill's capture, not from the insertion.
+        let bound = config().max_age();
+        assert!(matches!(
+            cache.lookup(&key, filled_at + bound),
+            Lookup::Hit { .. }
+        ));
+        let now = filled_at + bound + Duration::from_millis(1);
+        assert_eq!(
+            cache.lookup(&key, now),
+            Lookup::Miss(MissReason::Expired {
+                age: bound + Duration::from_millis(1)
+            })
+        );
+    }
+
+    #[test]
     fn a_slow_fill_does_not_overwrite_a_newer_entry() {
-        let (cache, authority) = planned();
-        let now = SystemTime::now();
+        let authority = FakeAuthority::default();
+        authority.ready(1, at(LATER_MS));
+        let cache = authority_cache(&authority);
+        let now = at(LATER_MS);
         let key = chunk_key();
 
         // A fill captured at cursor 1 is still running.
@@ -1302,8 +1773,10 @@ mod tests {
 
     #[test]
     fn the_fill_cursor_is_recorded_not_the_current_one() {
-        let (cache, authority) = planned();
-        let now = SystemTime::now();
+        let authority = FakeAuthority::default();
+        authority.ready(1, at(LATER_MS));
+        let cache = authority_cache(&authority);
+        let now = at(LATER_MS);
         let key = chunk_key();
 
         let fill = cache.fill_cursor(now).unwrap();
@@ -1311,8 +1784,6 @@ mod tests {
         authority.ready(9, now);
         assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
 
-        // The entry is still the cursor of its fill, so it misses the new cursor
-        // rather than claiming to be as fresh as it is not.
         assert!(matches!(
             cache.lookup(&key, now),
             Lookup::Miss(MissReason::CursorChanged {
@@ -1323,49 +1794,34 @@ mod tests {
     }
 
     #[test]
-    fn capacity_bounds_the_entries() {
-        let (cache, _authority) = planned_capacity(2);
-        let now = SystemTime::now();
+    fn the_byte_budget_bounds_the_entries() {
+        // Two entries fit: each empty payload costs the per-entry overhead.
+        let cache = RollupCache::new(
+            config_with(ENTRY_OVERHEAD_BYTES * 2, Duration::ZERO, CHUNK),
+            None,
+        );
+        let now = at(LATER_MS);
         let fill = cache.fill_cursor(now).unwrap();
 
-        for start in [1_001, 38_001, 75_001] {
-            let key = TimeChunkKey::new(query_key(), TimeChunk::new(start, start + STEP_MS as i64));
+        for index in 0..4 {
+            let key = TimeChunkKey::new(
+                identity(),
+                TimeChunk::new(HEAD_MS + index * CHUNK_MS, HEAD_MS + (index + 1) * CHUNK_MS),
+            );
             cache.insert(key, fill, payload());
         }
         cache.entries.run_pending_tasks();
 
         // moka's admission policy picks the victim, so which chunks survive is not
-        // asserted: the bound is.
+        // asserted: the budget is.
+        assert!(cache.entries.weighted_size() <= ENTRY_OVERHEAD_BYTES * 2);
         assert!(cache.entries.entry_count() <= 2);
-        assert!(cache.entries.entry_count() > 0);
-    }
-
-    #[test]
-    fn a_single_entry_cache_keeps_one_entry() {
-        let (cache, _authority) = planned_capacity(1);
-        let now = SystemTime::now();
-        let fill = cache.fill_cursor(now).unwrap();
-
-        for start in [1_001, 38_001] {
-            let key = TimeChunkKey::new(query_key(), TimeChunk::new(start, start + STEP_MS as i64));
-            cache.insert(key, fill, payload());
-            cache.entries.run_pending_tasks();
-            assert_eq!(cache.entries.entry_count(), 1);
-        }
-    }
-
-    /// A cache of `capacity` entries whose authority is ready at cursor 1.
-    fn planned_capacity(capacity: u64) -> (RollupCache, FakeAuthority) {
-        let authority = FakeAuthority::default();
-        authority.ready(1, SystemTime::now());
-        let cache = cache(capacity, &authority);
-        (cache, authority)
     }
 
     #[test]
     fn a_miss_does_not_wait_for_an_in_flight_fill() {
-        let (cache, _authority) = planned();
-        let now = SystemTime::now();
+        let cache = cache();
+        let now = at(LATER_MS);
         let key = chunk_key();
 
         // One caller's fill is still running: it holds no lock and nothing else
@@ -1378,19 +1834,16 @@ mod tests {
             cache.lookup(&key, now),
             Lookup::Miss(MissReason::NotFound)
         ));
-        let first = payload();
-        assert_eq!(cache.insert(key.clone(), in_flight, first), Insert::Stored);
-
-        // The in-flight fill still finishes; because it filled at the same cursor
-        // it replaces the payload instead of being dropped. Nothing serialized the
-        // two fills.
+        assert_eq!(
+            cache.insert(key.clone(), in_flight, payload()),
+            Insert::Stored
+        );
         assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
     }
 
     #[test]
     fn concurrent_fills_do_not_block_each_other() {
-        let (cache, _authority) = planned();
-        let cache = Arc::new(cache);
+        let cache = Arc::new(cache());
         let key = chunk_key();
         let start = Arc::new(Barrier::new(2));
 
@@ -1400,8 +1853,8 @@ mod tests {
                 let key = key.clone();
                 let start = Arc::clone(&start);
                 std::thread::spawn(move || {
-                    let now = SystemTime::now();
-                    let fill = cache.fill_cursor(now).expect("the authority is ready");
+                    let now = at(LATER_MS);
+                    let fill = cache.fill_cursor(now).expect("no authority always fills");
                     // Both fills are in flight at once: neither has inserted.
                     start.wait();
                     assert!(matches!(
@@ -1420,16 +1873,16 @@ mod tests {
             );
         }
         assert!(matches!(
-            cache.lookup(&key, SystemTime::now()),
+            cache.lookup(&key, at(LATER_MS)),
             Lookup::Hit { .. }
         ));
     }
 
     #[test]
     fn an_empty_chunk_is_bypassed() {
-        let (cache, _authority) = planned();
-        let key = TimeChunkKey::new(query_key(), TimeChunk::new(1_001, 1_001));
-        let now = SystemTime::now();
+        let cache = cache();
+        let key = TimeChunkKey::new(identity(), TimeChunk::new(HEAD_MS, HEAD_MS));
+        let now = at(LATER_MS);
 
         assert_eq!(
             cache.lookup(&key, now),
@@ -1440,49 +1893,31 @@ mod tests {
     }
 
     #[test]
-    fn a_planned_statement_ends_before_its_tail() {
-        let (cache, _authority) = planned();
-        let stmt = stmt_between("rate(x[5m])", HEAD_MS, 10, STEP_MS);
-        let ChunkPlan::Planned(planned) = cache.plan(query_key(), &stmt) else {
-            panic!("the statement is windowable");
-        };
-
-        // The plan's chunks stop where the tail starts and every one of them is
-        // keyed by the same query.
-        let tail = planned.tail().expect("the statement excludes a tail");
-        let last_chunk_end = planned
-            .chunks()
-            .iter()
-            .map(|key| key.chunk().end_ms())
-            .max()
-            .expect("the statement has cacheable chunks");
-        assert_eq!(last_chunk_end, tail.start_ms());
-        for key in planned.chunks() {
-            assert_eq!(key.query(), &query_key());
-        }
-    }
-
-    #[test]
     fn configuration_validation_rejects_disabled_bounds() {
         let positive = Duration::from_secs(1);
         assert_eq!(
-            RollupCacheConfig::new(0, Duration::ZERO, positive, positive).unwrap_err(),
-            ConfigError::Capacity
+            RollupCacheConfig::new(0, Duration::ZERO, positive, positive, positive).unwrap_err(),
+            ConfigError::Bytes
         );
         assert_eq!(
-            RollupCacheConfig::new(1, positive, Duration::ZERO, positive).unwrap_err(),
+            RollupCacheConfig::new(1, positive, Duration::ZERO, positive, positive).unwrap_err(),
             ConfigError::Chunk
         );
         assert_eq!(
-            RollupCacheConfig::new(1, positive, positive, Duration::ZERO).unwrap_err(),
+            RollupCacheConfig::new(1, positive, positive, Duration::ZERO, positive).unwrap_err(),
             ConfigError::MaxStaleness
         );
+        assert_eq!(
+            RollupCacheConfig::new(1, positive, positive, positive, Duration::ZERO).unwrap_err(),
+            ConfigError::MaxAge
+        );
 
-        let valid = RollupCacheConfig::new(1, Duration::ZERO, positive, positive)
+        let valid = RollupCacheConfig::new(64, Duration::ZERO, positive, positive, positive)
             .expect("a zero tail is valid");
-        assert_eq!(valid.capacity(), 1);
+        assert_eq!(valid.max_bytes(), 64);
         assert_eq!(valid.tail(), Duration::ZERO);
         assert_eq!(valid.chunk(), positive);
         assert_eq!(valid.max_staleness(), positive);
+        assert_eq!(valid.max_age(), positive);
     }
 }
