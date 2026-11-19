@@ -65,8 +65,8 @@ use crate::memtable::{
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::MergeMode;
-use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::flat_format::field_column_start;
+use crate::sst::parquet::{DEFAULT_ROW_GROUP_SIZE, row_group_size_for};
 
 /// Default merge threshold for triggering compaction.
 const DEFAULT_MERGE_THRESHOLD: usize = 16;
@@ -1465,7 +1465,7 @@ impl MemtableCompactor {
         {
             let encoder = BulkPartEncoder::new_with_float_field_encoding(
                 metadata.clone(),
-                crate::sst::parquet::row_group_size_for(
+                row_group_size_for(
                     estimated_total_rows as u64,
                     uncompressed_total_bytes,
                     row_group_size,
@@ -1721,6 +1721,9 @@ mod tests {
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, metadata_for_test, region_metadata_to_row_schema,
+    };
+    use crate::test_util::sst_util::{
+        build_test_binary_test_region_metadata, new_record_batch_with_binary_values,
     };
 
     fn create_bulk_part_with_converter(
@@ -2030,7 +2033,7 @@ mod tests {
         // Encoded inputs report compressed sizes; these values compress well.
         #[values(false, true)] encoded_inputs: bool,
     ) {
-        let metadata = crate::test_util::sst_util::build_test_binary_test_region_metadata();
+        let metadata = build_test_binary_test_region_metadata();
         let part = |seed: usize| {
             let values: Vec<Vec<u8>> = (0..20)
                 .map(|i| {
@@ -2039,8 +2042,7 @@ mod tests {
                         .repeat(512 * 1024)
                 })
                 .collect();
-            let batch =
-                crate::test_util::sst_util::new_record_batch_with_binary_values("a", &values);
+            let batch = new_record_batch_with_binary_values("a", &values);
             let part = BulkPart {
                 max_timestamp: batch.num_rows() as i64 - 1,
                 min_timestamp: 0,
@@ -2109,12 +2111,11 @@ mod tests {
 
     #[test]
     fn test_merge_sizes_row_groups_of_repeated_values() {
-        let metadata = crate::test_util::sst_util::build_test_binary_test_region_metadata();
+        let metadata = build_test_binary_test_region_metadata();
         // Each part holds 2048 copies of one 64 KiB value: 128 MiB decoded, one value encoded.
         let part = || {
             let values = vec![vec![7u8; 64 * 1024]; 2048];
-            let batch =
-                crate::test_util::sst_util::new_record_batch_with_binary_values("a", &values);
+            let batch = new_record_batch_with_binary_values("a", &values);
             let part = BulkPart {
                 max_timestamp: batch.num_rows() as i64 - 1,
                 min_timestamp: 0,

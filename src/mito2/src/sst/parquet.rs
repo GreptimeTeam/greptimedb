@@ -405,6 +405,7 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::mito_engine_options::FloatFieldEncoding;
     use store_api::region_request::PathType;
+    use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
     use store_api::storage::{ColumnSchema, RegionId};
     use table::predicate::Predicate;
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
@@ -1381,7 +1382,7 @@ mod tests {
         // Chunk statistics keep exact primary keys; pruning decodes them.
         let pk_stats = parquet_meta
             .row_group(0)
-            .column(column(store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME))
+            .column(column(PRIMARY_KEY_COLUMN_NAME))
             .statistics()
             .unwrap();
         let pk = new_primary_key(&[&tag]);
@@ -1433,7 +1434,7 @@ mod tests {
         assert!(row_group.column(column("field_0")).statistics().is_none());
         // Primary keys keep exact statistics for pruning.
         let pk_stats = row_group
-            .column(column(store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME))
+            .column(column(PRIMARY_KEY_COLUMN_NAME))
             .statistics()
             .unwrap();
         assert_eq!(

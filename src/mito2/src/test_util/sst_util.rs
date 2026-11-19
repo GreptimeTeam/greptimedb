@@ -21,7 +21,7 @@ use api::v1::{OpType, SemanticType};
 use arrow_schema::Schema;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
-    ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
+    ArrayRef, BinaryArray, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
     TimestampMillisecondArray, UInt8Array, UInt64Array,
 };
 use datatypes::arrow::array::{Int64Array, StructArray};
@@ -458,7 +458,7 @@ pub fn new_record_batch_with_binary_values(tag: &str, values: &[Vec<u8>]) -> Rec
     }
     let columns: Vec<ArrayRef> = vec![
         Arc::new(tag_0_builder.finish()),
-        Arc::new(datatypes::arrow::array::BinaryArray::from_iter_values(
+        Arc::new(BinaryArray::from_iter_values(
             values.iter().map(|v| v.as_slice()),
         )),
         Arc::new(TimestampMillisecondArray::from_iter_values(

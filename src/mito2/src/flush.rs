@@ -71,6 +71,7 @@ use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
+    row_group_size_for,
 };
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::wal::DurabilityBarrier;
@@ -776,7 +777,7 @@ impl MemtableSstWriter {
                 mem_stats.bytes_allocated() as u64,
             )]);
             let mut mem_write_opts = write_opts.clone();
-            mem_write_opts.row_group_size = crate::sst::parquet::row_group_size_for(
+            mem_write_opts.row_group_size = row_group_size_for(
                 mem_stats.num_rows() as u64,
                 mem_stats.bytes_allocated() as u64,
                 write_opts.row_group_size,

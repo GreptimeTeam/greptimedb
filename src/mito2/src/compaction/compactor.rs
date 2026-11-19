@@ -68,7 +68,7 @@ use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::writer::SstWriteContext;
-use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::parquet::{SstInfo, WriteOptions, row_group_size_for};
 use crate::sst::version::{SstVersion, SstVersionRef};
 
 /// Region version for compaction that does not hold memtables.
@@ -1234,7 +1234,7 @@ pub(crate) fn row_group_size_for_inputs<'a>(
                 bytes + meta.max_row_group_uncompressed_size * meta.num_row_groups,
             )
         });
-    crate::sst::parquet::row_group_size_for(rows, bytes, configured)
+    row_group_size_for(rows, bytes, configured)
 }
 
 #[cfg(test)]
