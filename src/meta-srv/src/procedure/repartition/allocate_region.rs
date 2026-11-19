@@ -14,7 +14,6 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
 
 use common_meta::affinity::{
     AffinityFallback, AffinityReference, AffinityRequirements, AffinityResolver,
@@ -112,10 +111,10 @@ impl BuildPlan {
         let to_allocate = AllocateRegion::count_regions_to_allocate(&self.plan_entries);
         // A crash before the plan is persisted can leave a gap, but no datanode
         // can create a region until its number has been durably reserved.
-        let mut next_region_number = if let Some(count) = NonZeroUsize::new(to_allocate) {
+        let mut next_region_number = if to_allocate > 0 {
             ctx.table_metadata_manager
                 .table_route_manager()
-                .try_reserve_region_numbers(table_id, &table_route_value, count)
+                .try_reserve_region_numbers(table_id, &table_route_value, to_allocate)
                 .await
                 .context(error::TableMetadataManagerSnafu)?
                 .with_context(|| error::RetryLaterSnafu {
@@ -430,11 +429,7 @@ impl AllocateRegion {
     fn count_regions_to_allocate(plan_entries: &[AllocationPlanEntry]) -> usize {
         plan_entries
             .iter()
-            .map(|plan| {
-                plan.target_partition_exprs
-                    .len()
-                    .saturating_sub(plan.source_regions.len())
-            })
+            .map(|plan| plan.targets_to_allocate().len())
             .sum()
     }
 

@@ -14,7 +14,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -512,13 +511,14 @@ impl TableRouteManager {
             .transpose()
     }
 
-    /// Reserves consecutive region numbers without publishing their routes.
-    /// Returns the first reserved number, or `None` if the table route changed.
+    /// Reserves a positive number of consecutive region numbers without publishing their routes.
+    /// On success, advances the high-water mark and route version and returns the first reserved number.
+    /// If the table route changed, returns `None`. Reload the route before retrying.
     pub async fn try_reserve_region_numbers(
         &self,
         table_id: TableId,
         current: &DeserializedValueWithBytes<TableRouteValue>,
-        count: NonZeroUsize,
+        count: usize,
     ) -> Result<Option<RegionNumber>> {
         // The read path remaps peer addresses. Preserve the stored routes verbatim.
         let TableRouteValue::Physical(mut route) =
@@ -530,10 +530,10 @@ impl TableRouteManager {
             .fail();
         };
         let previous = route.max_region_number;
-        let last = RegionNumber::try_from(count.get())
+        let last = RegionNumber::try_from(count)
             .ok()
             .and_then(|count| previous.checked_add(count))
-            .filter(|last| *last <= MAX_REGION_SEQ)
+            .filter(|last| previous < *last && *last <= MAX_REGION_SEQ)
             .with_context(|| InvalidMetadataSnafu {
                 err_msg: format!(
                     "Cannot reserve {count} region numbers after {previous} for table {table_id}"
@@ -1004,10 +1004,15 @@ mod tests {
         let (txn, _) = storage.build_create_txn(table_id, &initial).unwrap();
         assert!(kv.txn(txn).await.unwrap().succeeded);
         let current = storage.get_with_raw_bytes(table_id).await.unwrap().unwrap();
-        let count = NonZeroUsize::new(2).unwrap();
+        assert!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 0)
+                .await
+                .is_err()
+        );
         assert_eq!(
             manager
-                .try_reserve_region_numbers(table_id, &current, count)
+                .try_reserve_region_numbers(table_id, &current, 2)
                 .await
                 .unwrap(),
             Some(MAX_REGION_SEQ - 2)
@@ -1015,7 +1020,7 @@ mod tests {
         // Another reservation based on the same snapshot must not claim this range.
         assert_eq!(
             manager
-                .try_reserve_region_numbers(table_id, &current, count)
+                .try_reserve_region_numbers(table_id, &current, 2)
                 .await
                 .unwrap(),
             None
@@ -1026,13 +1031,13 @@ mod tests {
         assert_eq!(current.version().unwrap(), 1);
         assert!(
             manager
-                .try_reserve_region_numbers(table_id, &current, count)
+                .try_reserve_region_numbers(table_id, &current, 2)
                 .await
                 .is_err()
         );
         assert_eq!(
             manager
-                .try_reserve_region_numbers(table_id, &current, NonZeroUsize::MIN)
+                .try_reserve_region_numbers(table_id, &current, 1)
                 .await
                 .unwrap(),
             Some(MAX_REGION_SEQ)
@@ -1040,7 +1045,7 @@ mod tests {
         let current = storage.get_with_raw_bytes(table_id).await.unwrap().unwrap();
         assert!(
             manager
-                .try_reserve_region_numbers(table_id, &current, NonZeroUsize::MIN)
+                .try_reserve_region_numbers(table_id, &current, 1)
                 .await
                 .is_err()
         );
