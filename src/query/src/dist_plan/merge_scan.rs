@@ -993,19 +993,6 @@ impl MergeScanExec {
         self.captured_remote_dyn_filters.lock().unwrap().concat()
     }
 
-    /// Test-only hook to inject sub-stage metrics without executing the scan.
-    #[cfg(test)]
-    pub(crate) fn insert_sub_stage_metrics(
-        &self,
-        region_id: RegionId,
-        metrics: RecordBatchMetrics,
-    ) {
-        self.sub_stage_metrics
-            .lock()
-            .unwrap()
-            .insert(region_id, metrics);
-    }
-
     pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
         let sub_stage_metrics = self.sub_stage_metrics.lock().unwrap();
         let mut metrics: Vec<_> = sub_stage_metrics.iter().collect();

@@ -169,7 +169,11 @@ pub enum FlowTableScanKind {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FlowQueryExtensions {
     /// Maps region id -> lower exclusive sequence bound for incremental reads.
+    /// Parsed options are treated as immutable after construction so the derived
+    /// incremental table membership remains valid.
     pub incremental_after_seqs: Option<HashMap<u64, u64>>,
+    /// Table membership derived once from the incremental region keys.
+    incremental_table_ids: BTreeSet<TableId>,
     /// Incremental read mode requested by the caller.
     pub incremental_mode: Option<FlowIncrementalMode>,
     /// Whether the caller expects per-region watermark metadata in terminal metrics.
@@ -278,8 +282,8 @@ impl FlowQueryExtensions {
             }
         }
 
+        let incremental_table_ids = incremental_table_ids(incremental_after_seqs.as_ref());
         if let Some(snapshot_table_ids) = &snapshot_table_ids {
-            let incremental_table_ids = incremental_table_ids(incremental_after_seqs.as_ref());
             if let Some(overlap) = snapshot_table_ids
                 .iter()
                 .find(|table_id| incremental_table_ids.contains(table_id))
@@ -293,6 +297,7 @@ impl FlowQueryExtensions {
 
         Ok(Some(Self {
             incremental_after_seqs,
+            incremental_table_ids,
             incremental_mode,
             return_region_seq,
             snapshot_table_ids,
@@ -308,13 +313,6 @@ impl FlowQueryExtensions {
         self.snapshot_table_ids.is_some()
     }
 
-    /// Returns whether the snapshot read set is non-empty.
-    fn is_snapshot_table_set_non_empty(&self) -> bool {
-        self.snapshot_table_ids
-            .as_ref()
-            .is_some_and(|table_ids| !table_ids.is_empty())
-    }
-
     /// Returns whether `table_id` must be read as one bound snapshot.
     pub fn is_snapshot_table(&self, table_id: TableId) -> bool {
         self.snapshot_table_ids
@@ -322,19 +320,9 @@ impl FlowQueryExtensions {
             .is_some_and(|table_ids| table_ids.contains(&table_id))
     }
 
-    /// Returns the table ids that participate in incremental replay, derived from
-    /// the [`FLOW_INCREMENTAL_AFTER_SEQS`] region keys.
-    pub fn incremental_table_ids(&self) -> BTreeSet<TableId> {
-        incremental_table_ids(self.incremental_after_seqs.as_ref())
-    }
-
-    /// Returns whether `table_id` is replayed incrementally, derived from the
-    /// [`FLOW_INCREMENTAL_AFTER_SEQS`] region keys.
+    /// Returns whether `table_id` is replayed incrementally.
     fn is_incremental_table(&self, table_id: TableId) -> bool {
-        self.incremental_after_seqs.as_ref().is_some_and(|seqs| {
-            seqs.keys()
-                .any(|region_id| RegionId::from_u64(*region_id).table_id() == table_id)
-        })
+        self.incremental_table_ids.contains(&table_id)
     }
 
     /// Classifies how `table_id` participates in this Flow query.
@@ -421,7 +409,10 @@ impl FlowQueryExtensions {
 
     pub fn should_collect_region_watermark(&self) -> bool {
         if self.is_table_scoped() {
-            return self.is_snapshot_table_set_non_empty()
+            return self
+                .snapshot_table_ids
+                .as_ref()
+                .is_some_and(|table_ids| !table_ids.is_empty())
                 || self
                     .incremental_after_seqs
                     .as_ref()
@@ -1181,6 +1172,8 @@ mod flow_extension_tests {
     fn test_classify_table_table_scoped_uses_membership_only() {
         let snapshot_region = RegionId::new(2048, 1);
         let incremental_region = RegionId::new(1024, 3);
+        let second_region = RegionId::new(1024, 4);
+        let other_incremental_region = RegionId::new(1025, 0);
         let exts = HashMap::from([
             (FLOW_SNAPSHOT_TABLE_IDS.to_string(), "[2048]".to_string()),
             (
@@ -1189,7 +1182,12 @@ mod flow_extension_tests {
             ),
             (
                 FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
-                format!(r#"{{"{}":10}}"#, incremental_region.as_u64()),
+                format!(
+                    r#"{{"{}":10,"{}":20,"{}":30}}"#,
+                    incremental_region.as_u64(),
+                    second_region.as_u64(),
+                    other_incremental_region.as_u64()
+                ),
             ),
         ]);
 
@@ -1199,8 +1197,8 @@ mod flow_extension_tests {
 
         assert!(parsed.is_table_scoped());
         assert_eq!(
-            parsed.incremental_table_ids(),
-            BTreeSet::from([1024]),
+            parsed.incremental_table_ids,
+            BTreeSet::from([1024, 1025]),
             "incremental table ids are derived from after-seq region keys"
         );
         assert_eq!(
@@ -1209,6 +1207,10 @@ mod flow_extension_tests {
         );
         assert_eq!(
             parsed.classify_table(incremental_region.table_id()),
+            FlowTableScanKind::Incremental
+        );
+        assert_eq!(
+            parsed.classify_table(other_incremental_region.table_id()),
             FlowTableScanKind::Incremental
         );
         assert_eq!(parsed.classify_table(9), FlowTableScanKind::Plain);

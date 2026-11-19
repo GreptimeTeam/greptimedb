@@ -135,6 +135,7 @@ pub struct DummyTableProvider {
     /// Keeping a mutable request makes it possible to change in the optimize phase.
     scan_request: Arc<Mutex<ScanRequest>>,
     query_ctx: Option<QueryContextRef>,
+    snapshot_required: bool,
 }
 
 impl fmt::Debug for DummyTableProvider {
@@ -175,12 +176,10 @@ impl TableProvider for DummyTableProvider {
         request.filters = filters.to_vec();
         request.limit = limit;
         if let Some(query_ctx) = &self.query_ctx {
-            let snapshot_required = flow_scan_requires_snapshot(query_ctx, self.region_id)
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
             apply_cached_snapshot_to_request(
                 query_ctx,
                 self.region_id,
-                snapshot_required,
+                self.snapshot_required,
                 &mut request,
             );
         }
@@ -258,6 +257,7 @@ impl DummyTableProvider {
                 ..Default::default()
             })),
             query_ctx: None,
+            snapshot_required: false,
         }
     }
 
@@ -324,10 +324,14 @@ impl DummyTableProviderFactory {
                     region_id,
                 })?;
 
-        let mut scan_request = if let Some(ctx) = query_ctx.as_ref() {
-            scan_request_from_query_context(region_id, ctx)?
+        let (mut scan_request, snapshot_required) = if let Some(ctx) = query_ctx.as_ref() {
+            let decision = decide_flow_scan(ctx, region_id)?;
+            (
+                build_scan_request(ctx, region_id, &decision),
+                decision.snapshot_required,
+            )
         } else {
-            ScanRequest::default()
+            (ScanRequest::default(), false)
         };
         scan_request.preserve_pk_dictionary_encoding =
             supports_pk_dictionary_encoding(engine.name());
@@ -338,10 +342,12 @@ impl DummyTableProviderFactory {
             metadata,
             scan_request: Arc::new(Mutex::new(scan_request)),
             query_ctx,
+            snapshot_required,
         })
     }
 }
 
+#[cfg(test)]
 fn scan_request_from_query_context(
     region_id: RegionId,
     query_ctx: &QueryContext,
@@ -498,7 +504,8 @@ fn build_scan_request(
         // `sst_min_sequence` is a checkpoint-style SST pruning hint: it may drop
         // SST files whose rows are older than the checkpoint. A pure snapshot read
         // must see every row under its bound, so it never takes the hint.
-        // Incremental (and legacy source) reads keep it.
+        // Incremental (and legacy source) reads keep it. The `sst_min_sequences`
+        // populator is enterprise/legacy, not an OSS producer.
         sst_min_sequence: (decision.snapshot_required
             && !decision.snapshot_only
             && !decision.exact_sequence_range)
@@ -514,6 +521,7 @@ fn build_scan_request(
 }
 
 /// Returns whether a scan of `region_id` binds or reuses a per-region snapshot.
+#[cfg(test)]
 fn flow_scan_requires_snapshot(query_ctx: &QueryContext, region_id: RegionId) -> Result<bool> {
     Ok(decide_flow_scan(query_ctx, region_id)?.snapshot_required)
 }
