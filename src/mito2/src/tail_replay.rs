@@ -361,7 +361,7 @@ impl<S: LogStore> TailReplayTask<S> {
     async fn wait_for_leader_lease(&self) -> bool {
         let region_id = self.region.region_id;
         info!(
-            "Region {region_id} waits for a Leader or StagingLeader lease to clear its unread listed tails"
+            "Region {region_id} waits for a lease that confirms it as the leader to clear its unread listed tails"
         );
         while self.region.can_replay_tails() {
             self.listener.on_tail_lease_check(region_id);

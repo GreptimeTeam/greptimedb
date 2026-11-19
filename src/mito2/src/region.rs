@@ -1932,12 +1932,13 @@ impl ManifestContext {
         // Clone before `action_list` is moved into `update_with_verification`
         // so the hook still sees what was written.
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
-        // The final flush of a downgrading leader must not start cleanup after the downgrade
-        // checkpoint barrier.
-        let allow_checkpoint = !is_staging
-            && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading);
-        // A lease that ends the wait during the write does not lift the check.
+        // A lease that ends the wait during the write does not lift the checks below.
         let awaited_leader_lease = self.awaits_leader_lease();
+        // The final flush of a downgrading leader must not start cleanup after the downgrade
+        // checkpoint barrier, nor may a region that may not hold the region yet.
+        let allow_checkpoint = !is_staging
+            && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading)
+            && !awaited_leader_lease;
         let version = self
             .commit_locked(manager, async |manager| {
                 manager
@@ -2927,6 +2928,7 @@ mod tests {
     use crate::region::{
         IndexBuildSource, IndexPublication, IndexPublicationStale, ManifestContext, ManifestStats,
         MitoRegion, RegionLeaderState, RegionRoleState, RegionStats, StagingPartitionInfo,
+        TailPublication, TailsEditor,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -3018,6 +3020,13 @@ mod tests {
     }
 
     async fn build_test_region(env: &SchedulerEnv) -> MitoRegion {
+        build_test_region_with_checkpoint_distance(env, 10).await
+    }
+
+    async fn build_test_region_with_checkpoint_distance(
+        env: &SchedulerEnv,
+        checkpoint_distance: u64,
+    ) -> MitoRegion {
         let builder = VersionControlBuilder::new();
         let version_control = Arc::new(builder.build());
         let metadata = version_control.current().version.metadata.clone();
@@ -3030,7 +3039,7 @@ mod tests {
                 manifest_dir: "".to_string(),
                 object_store: env.access_layer.object_store().clone(),
                 compress_type: CompressionType::Uncompressed,
-                checkpoint_distance: 10,
+                checkpoint_distance,
                 remove_file_options: Default::default(),
                 manifest_cache: None,
                 conditional_publication: false,
@@ -3242,6 +3251,29 @@ mod tests {
                 .promoted
         );
         assert!(manifest_ctx.leader_lease_received());
+    }
+
+    /// A replay of pending tails that commits while the region awaits its Leader lease starts no
+    /// checkpoint without conditional publication too, where no verification of the commit
+    /// turns it off.
+    #[tokio::test]
+    async fn test_tail_commit_awaiting_leader_lease_starts_no_checkpoint_unconditionally() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region_with_checkpoint_distance(&env, 1).await;
+        let manifest_ctx = &region.manifest_ctx;
+        manifest_ctx.start_leader_lease_wait_for_test(region.region_id);
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default()));
+
+        let publication = manifest_ctx
+            .update_manifest_for_tails(&[], action_list, TailsEditor::Replay)
+            .await
+            .unwrap();
+
+        assert!(matches!(publication, TailPublication::Committed(_)));
+        let manager = manifest_ctx.manifest_manager.read().await;
+        assert_eq!(0, manager.checkpointer().last_checkpoint_version());
+        assert!(!manager.checkpointer().is_doing_checkpoint());
     }
 
     /// Of the leases that apply together, only the one that ends the wait reports it.
