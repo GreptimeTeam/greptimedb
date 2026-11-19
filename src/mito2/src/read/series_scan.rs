@@ -133,6 +133,13 @@ type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
 /// Candidate assignment senders for output partitions.
 type CandidateSenderList = Vec<Option<mpsc::UnboundedSender<Result<SeriesReaderInput>>>>;
 
+/// One-shot rendezvous after a series range-cache key is admitted.
+#[cfg(test)]
+pub(crate) struct SeriesRangeCachePause {
+    pub(crate) admitted: tokio::sync::oneshot::Sender<crate::read::range_cache::RangeScanCacheKey>,
+    pub(crate) resume: tokio::sync::oneshot::Receiver<()>,
+}
+
 #[derive(Clone)]
 struct RawScanPreparation {
     schema: Arc<SeriesSchema>,
@@ -226,6 +233,11 @@ pub struct SeriesScan {
 impl SeriesScan {
     /// Creates a new [SeriesScan].
     pub(crate) fn new(input: ScanInput, experimental_series_scan_v2: bool) -> Self {
+        // A scan input owns a fresh predicate group, also shared with its memtables.
+        // Series distributors and range loaders can outlive a dropped stream/reset, so
+        // this phase declines dynamic filters until all execution state has independent
+        // ownership. Residual filters above the scan remain authoritative.
+        input.predicate.disable_dynamic_install_for_series();
         let mode = if experimental_series_scan_v2 && Self::supports_two_phase(&input) {
             SeriesScanMode::TwoPhase
         } else {
@@ -268,6 +280,23 @@ impl SeriesScan {
             #[cfg(test)]
             preflight_runs: AtomicUsize::new(0),
         }
+    }
+
+    /// Pauses the next legacy series range loader after static cache admission.
+    #[cfg(test)]
+    pub(crate) fn pause_range_cache_for_test(&self, pause: SeriesRangeCachePause) {
+        *self
+            .stream_ctx
+            .input
+            .series_range_cache_pause
+            .lock()
+            .unwrap() = Some(pause);
+    }
+
+    /// Returns this scanner's range-cache hit and miss counts.
+    #[cfg(test)]
+    pub(crate) fn range_cache_counts_for_test(&self) -> (usize, usize) {
+        self.metrics_list.range_cache_counts_for_test()
     }
 
     /// Returns the number of preflight computations this scanner has run.
@@ -1155,15 +1184,18 @@ impl RegionScanner for SeriesScan {
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
         let matched = self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs);
-        // The added filters change the predicate group the preflight inspects.
-        self.clear_preflight_cache();
+        // Rejected offers leave the preflight inputs unchanged.
+        if matched.iter().any(|accepted| *accepted) {
+            self.clear_preflight_cache();
+        }
         matched
     }
 
     fn reset_state(&mut self) {
         self.prepared = Arc::new(prepared::Preparation::default());
         self.clear_preflight_cache();
-        self.stream_ctx.input.predicate.clear_dyn_filters();
+        // Series never installs dynamic filters; keep the same static predicate for
+        // detached loaders from the previous execution, including its permanent gate.
         let num_workers = common_stat::get_total_cpu_cores().max(1);
         self.pruner = match self.mode {
             SeriesScanMode::Legacy => Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers)),

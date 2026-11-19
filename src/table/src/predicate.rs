@@ -15,6 +15,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use common_recordbatch::DfRecordBatch;
@@ -81,6 +82,8 @@ pub struct Predicate {
     ///
     /// They are usually from `TopK` or `Join` operators, and can dynamically filter data during query execution by using current runtime information to further reduce data scanning
     dyn_filters: Arc<ArcSwap<Vec<Arc<DynamicFilterPhysicalExpr>>>>,
+    /// Shared epoch invalidating cached plans across clears.
+    dyn_filter_reset_epoch: Arc<AtomicU64>,
 }
 
 impl Predicate {
@@ -91,6 +94,7 @@ impl Predicate {
         Self {
             exprs: Arc::new(exprs),
             dyn_filters: Arc::new(ArcSwap::new(Arc::new(vec![]))),
+            dyn_filter_reset_epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -101,6 +105,7 @@ impl Predicate {
         Self {
             exprs: Arc::new(exprs),
             dyn_filters: Arc::new(ArcSwap::new(Arc::new(dyn_filters))),
+            dyn_filter_reset_epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -119,7 +124,14 @@ impl Predicate {
 
     /// Removes dynamic filters while preserving the static logical expressions.
     pub fn clear_dyn_filters(&self) {
+        self.dyn_filter_reset_epoch.fetch_add(1, Ordering::SeqCst);
         self.dyn_filters.store(Arc::new(vec![]));
+    }
+
+    /// A clear/reset invalidates all cached dynamic-filter plans, even if filters are
+    /// added again before the next observation. Shared by all clones of this predicate.
+    pub fn dyn_filter_reset_epoch(&self) -> u64 {
+        self.dyn_filter_reset_epoch.load(Ordering::SeqCst)
     }
 
     /// Returns the logical exprs.
@@ -1492,7 +1504,11 @@ mod tests {
         let predicate =
             Predicate::with_dyn_filters(static_exprs.clone(), vec![dynamic_filter.clone()]);
 
-        predicate.clear_dyn_filters();
+        let clone = predicate.clone();
+        let before = predicate.dyn_filter_reset_epoch();
+        clone.clear_dyn_filters();
+        assert_eq!(predicate.dyn_filter_reset_epoch(), before + 1);
+        assert_eq!(clone.dyn_filter_reset_epoch(), before + 1);
         // An update from the old producer must not put its wrapper back into this execution.
         dynamic_filter.update(physical_lit(false)).unwrap();
 

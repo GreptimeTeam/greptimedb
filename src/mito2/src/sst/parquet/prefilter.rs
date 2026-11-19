@@ -280,6 +280,7 @@ pub(crate) fn build_primary_key_filter(
     expected_metadata: Option<&RegionMetadata>,
     predicate: Option<&Predicate>,
 ) -> Option<CachedPrimaryKeyFilter> {
+    decline_dynamic_primary_key_filter(predicate);
     let filters = simple_tag_filters(sst_metadata, expected_metadata, predicate)
         .into_iter()
         .map(|(_, filter)| filter)
@@ -291,6 +292,18 @@ pub(crate) fn build_primary_key_filter(
     let codec = build_primary_key_codec(sst_metadata.as_ref());
     let filter = codec.primary_key_filter(sst_metadata, Arc::new(filters));
     Some(CachedPrimaryKeyFilter::new(filter))
+}
+
+/// Dynamic expressions are not translated into encoded-primary-key filters.
+fn decline_dynamic_primary_key_filter(predicate: Option<&Predicate>) {
+    if predicate.is_some_and(|p| !p.dyn_filters().is_empty()) {
+        crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+            .with_label_values(&["encoded_pk", "offered"])
+            .inc();
+        crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+            .with_label_values(&["encoded_pk", "declined"])
+            .inc();
+    }
 }
 
 /// Extracts simple tag filters that can be applied to encoded primary keys or series indexes.
@@ -364,6 +377,7 @@ pub(crate) fn build_bulk_filter_plan(
             pk_filters: None,
         };
     }
+    decline_dynamic_primary_key_filter(predicate);
 
     let mut remaining_simple_filters = Vec::new();
     let mut pk_filters = Vec::new();
@@ -443,6 +457,9 @@ pub(crate) fn build_reader_filter_plan(
     // stored as separate parquet columns. Tag predicates must go through PK
     // decoding rather than direct column reads.
     let need_pk_prefilter = !read_format.batch_has_raw_pk_columns();
+    if enable_predicate_prefilter && need_pk_prefilter && !metadata.primary_key.is_empty() {
+        decline_dynamic_primary_key_filter(Some(predicate));
+    }
 
     // Whether a column can be read directly from parquet for prefiltering,
     // based on its semantic type and the current mode/format.
@@ -2421,6 +2438,87 @@ mod tests {
             remaining_simple_filter_columns(&field_only_plan.remaining_simple_filters),
             vec!["field_0"]
         );
+    }
+
+    #[test]
+    fn test_dynamic_index_encoded_pk_declines_with_static_results_unchanged() {
+        let metadata = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
+            Some(Arc::new(Schema::new(vec![
+                Field::new("field_0", DataType::UInt64, true),
+                Field::new("ts", DataType::Int64, false),
+                Field::new("__primary_key", DataType::Binary, false),
+                Field::new("__sequence", DataType::UInt64, false),
+                Field::new("__op_type", DataType::UInt8, false),
+            ]))),
+            "test",
+            false,
+        )
+        .unwrap();
+        assert!(!read_format.batch_has_raw_pk_columns());
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let static_predicate = Predicate::new(vec![col("tag_0").eq(lit("a"))]);
+        let dynamic_predicate = Predicate::with_dyn_filters(
+            static_predicate.exprs().to_vec(),
+            vec![Arc::new(DynamicFilterPhysicalExpr::new(
+                vec![],
+                physical_lit(true),
+            ))],
+        );
+        let build = |predicate: &Predicate| {
+            build_reader_filter_plan(
+                Some(predicate),
+                None,
+                PreFilterMode::All,
+                true,
+                false,
+                &read_format,
+                &codec,
+                &stats_metadata(&[vec![1]], None),
+            )
+        };
+        let baseline = build(&static_predicate);
+        let declined = crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+            .with_label_values(&["encoded_pk", "declined"])
+            .get();
+        let dynamic = build(&dynamic_predicate);
+        assert!(
+            crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["encoded_pk", "declined"])
+                .get()
+                > declined
+        );
+        let pk_a = new_primary_key(&["a", "x"]);
+        let pk_b = new_primary_key(&["b", "x"]);
+        for plan in [baseline, dynamic] {
+            let mut filter = plan
+                .prefilter_builder
+                .unwrap()
+                .build_primary_key_filter()
+                .unwrap();
+            assert!(filter.matches(&pk_a).unwrap());
+            assert!(!filter.matches(&pk_b).unwrap());
+        }
+
+        let declined = crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+            .with_label_values(&["encoded_pk", "declined"])
+            .get();
+        let baseline = build_bulk_filter_plan(&read_format, Some(&static_predicate));
+        let dynamic = build_bulk_filter_plan(&read_format, Some(&dynamic_predicate));
+        assert!(
+            crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["encoded_pk", "declined"])
+                .get()
+                > declined
+        );
+        for plan in [baseline, dynamic] {
+            let filter = codec.primary_key_filter(&metadata, plan.pk_filters.unwrap());
+            let mut filter = CachedPrimaryKeyFilter::new(filter);
+            assert!(filter.matches(&pk_a).unwrap());
+            assert!(!filter.matches(&pk_b).unwrap());
+        }
     }
 
     #[test]

@@ -159,6 +159,7 @@ pub(crate) struct ScanMetricsSet {
     rg_fulltext_filtered: usize,
     /// Number of row groups filtered by inverted index.
     rg_inverted_filtered: usize,
+    rg_dynamic_inverted_filtered: usize,
     /// Number of row groups filtered by min-max index.
     rg_minmax_filtered: usize,
     /// Number of row groups filtered by bloom filter index.
@@ -169,6 +170,7 @@ pub(crate) struct ScanMetricsSet {
     rows_fulltext_filtered: usize,
     /// Number of rows in row group filtered by inverted index.
     rows_inverted_filtered: usize,
+    rows_dynamic_inverted_filtered: usize,
     /// Number of rows in row group filtered by bloom filter index.
     rows_bloom_filtered: usize,
     /// Number of rows filtered by precise filter.
@@ -231,6 +233,7 @@ pub(crate) struct ScanMetricsSet {
     // Optional verbose metrics:
     /// Inverted index apply metrics.
     inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
+    dynamic_inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
     /// Bloom filter index apply metrics.
     bloom_filter_apply_metrics: Option<BloomFilterIndexApplyMetrics>,
     /// Fulltext index apply metrics.
@@ -305,11 +308,13 @@ impl fmt::Debug for ScanMetricsSet {
             rg_total,
             rg_fulltext_filtered,
             rg_inverted_filtered,
+            rg_dynamic_inverted_filtered,
             rg_minmax_filtered,
             rg_bloom_filtered,
             rows_before_filter,
             rows_fulltext_filtered,
             rows_inverted_filtered,
+            rows_dynamic_inverted_filtered,
             rows_bloom_filtered,
             rows_precise_filtered,
             fulltext_index_cache_hit,
@@ -344,6 +349,7 @@ impl fmt::Debug for ScanMetricsSet {
             mem_prefilter_cost,
             mem_prefilter_rows_filtered,
             inverted_index_apply_metrics,
+            dynamic_inverted_index_apply_metrics,
             bloom_filter_apply_metrics,
             fulltext_index_apply_metrics,
             fetch_metrics,
@@ -396,6 +402,12 @@ impl fmt::Debug for ScanMetricsSet {
         if *rg_inverted_filtered > 0 {
             write!(f, ", \"rg_inverted_filtered\":{rg_inverted_filtered}")?;
         }
+        if *rg_dynamic_inverted_filtered > 0 {
+            write!(
+                f,
+                ", \"rg_dynamic_inverted_filtered\":{rg_dynamic_inverted_filtered}"
+            )?;
+        }
         if *rg_minmax_filtered > 0 {
             write!(f, ", \"rg_minmax_filtered\":{rg_minmax_filtered}")?;
         }
@@ -407,6 +419,12 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if *rows_inverted_filtered > 0 {
             write!(f, ", \"rows_inverted_filtered\":{rows_inverted_filtered}")?;
+        }
+        if *rows_dynamic_inverted_filtered > 0 {
+            write!(
+                f,
+                ", \"rows_dynamic_inverted_filtered\":{rows_dynamic_inverted_filtered}"
+            )?;
         }
         if *rows_bloom_filtered > 0 {
             write!(f, ", \"rows_bloom_filtered\":{rows_bloom_filtered}")?;
@@ -517,6 +535,15 @@ impl fmt::Debug for ScanMetricsSet {
             && !metrics.is_empty()
         {
             write!(f, ", \"inverted_index_apply_metrics\":{:?}", metrics)?;
+        }
+        if let Some(metrics) = dynamic_inverted_index_apply_metrics
+            && !metrics.is_empty()
+        {
+            write!(
+                f,
+                ", \"dynamic_inverted_index_apply_metrics\":{:?}",
+                metrics
+            )?;
         }
         if let Some(metrics) = bloom_filter_apply_metrics
             && !metrics.is_empty()
@@ -658,9 +685,11 @@ impl ScanMetricsSet {
                     rg_inverted_filtered,
                     rg_minmax_filtered,
                     rg_bloom_filtered,
+                    rg_dynamic_inverted_filtered,
                     rows_total,
                     rows_fulltext_filtered,
                     rows_inverted_filtered,
+                    rows_dynamic_inverted_filtered,
                     rows_bloom_filtered,
                     rows_precise_filtered,
                     fulltext_index_cache_hit,
@@ -676,6 +705,7 @@ impl ScanMetricsSet {
                     pruner_prune_cost,
                     files_time_range_pruned,
                     inverted_index_apply_metrics,
+                    dynamic_inverted_index_apply_metrics,
                     bloom_filter_apply_metrics,
                     fulltext_index_apply_metrics,
                 },
@@ -697,12 +727,14 @@ impl ScanMetricsSet {
         self.rg_total += *rg_total;
         self.rg_fulltext_filtered += *rg_fulltext_filtered;
         self.rg_inverted_filtered += *rg_inverted_filtered;
+        self.rg_dynamic_inverted_filtered += *rg_dynamic_inverted_filtered;
         self.rg_minmax_filtered += *rg_minmax_filtered;
         self.rg_bloom_filtered += *rg_bloom_filtered;
 
         self.rows_before_filter += *rows_total;
         self.rows_fulltext_filtered += *rows_fulltext_filtered;
         self.rows_inverted_filtered += *rows_inverted_filtered;
+        self.rows_dynamic_inverted_filtered += *rows_dynamic_inverted_filtered;
         self.rows_bloom_filtered += *rows_bloom_filtered;
         self.rows_precise_filtered += *rows_precise_filtered;
 
@@ -725,6 +757,11 @@ impl ScanMetricsSet {
         // Merge optional verbose metrics
         if let Some(metrics) = inverted_index_apply_metrics {
             self.inverted_index_apply_metrics
+                .get_or_insert_with(InvertedIndexApplyMetrics::default)
+                .merge_from(metrics);
+        }
+        if let Some(metrics) = dynamic_inverted_index_apply_metrics {
+            self.dynamic_inverted_index_apply_metrics
                 .get_or_insert_with(InvertedIndexApplyMetrics::default)
                 .merge_from(metrics);
         }
@@ -968,6 +1005,22 @@ impl Drop for PartitionMetricsInner {
 pub(crate) struct PartitionMetricsList(Mutex<Vec<Option<PartitionMetrics>>>);
 
 impl PartitionMetricsList {
+    /// Returns the range-cache hit and miss counts for this scan.
+    #[cfg(test)]
+    pub(crate) fn range_cache_counts_for_test(&self) -> (usize, usize) {
+        let list = self.0.lock().unwrap();
+        list.iter().filter_map(|metrics| metrics.as_ref()).fold(
+            (0, 0),
+            |(hits, misses), metrics| {
+                let metrics = metrics.0.metrics.lock().unwrap();
+                (
+                    hits + metrics.range_cache_hit,
+                    misses + metrics.range_cache_miss,
+                )
+            },
+        )
+    }
+
     /// Sets a new [PartitionMetrics] at the specified partition.
     pub(crate) fn set(&self, partition: usize, metrics: PartitionMetrics) {
         let mut list = self.0.lock().unwrap();
@@ -1463,6 +1516,7 @@ pub(crate) fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
     if explain_verbose {
         ReaderFilterMetrics {
             inverted_index_apply_metrics: Some(InvertedIndexApplyMetrics::default()),
+            dynamic_inverted_index_apply_metrics: Some(InvertedIndexApplyMetrics::default()),
             bloom_filter_apply_metrics: Some(BloomFilterIndexApplyMetrics::default()),
             fulltext_index_apply_metrics: Some(FulltextIndexApplyMetrics::default()),
             ..Default::default()

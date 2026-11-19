@@ -2859,13 +2859,10 @@ async fn reset_state_and_other_bindings_drop_the_preflight_cache() {
     engine.stop().await.unwrap();
 }
 
-/// A dynamic filter joins the predicate group the preflight inspects, and the preflight rejects
-/// every dynamic filter because a fresh execution cannot promise to keep its semantics. An
-/// execution that already holds an answer must therefore recompute it once a filter is added:
-/// replaying the cached preparation would keep sending rows through the raw path that ignores the
-/// new predicate.
+/// Series declines dynamic filters in this phase because detached tasks can outlive reset.
+/// Until predicate ownership is per execution, rejecting an offer leaves preflight unchanged.
 #[tokio::test]
-async fn added_dynamic_filters_drop_the_preflight_cache() {
+async fn rejected_dynamic_filters_preserve_the_preflight_cache() {
     use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
 
     let (_env, engine, region) = fixture().await;
@@ -2880,20 +2877,19 @@ async fn added_dynamic_filters_drop_the_preflight_cache() {
     assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
     assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
 
-    // Only the presence of a dynamic filter matters to the preflight, not its contents.
+    assert_eq!(1, scanner.preflight_runs());
     let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(true)));
     assert_eq!(
-        vec![true],
+        vec![false],
         scanner.add_dyn_filter_to_predicate(vec![dynamic_filter])
     );
-
-    // The cached answer no longer describes the scan's predicate, so asking again must reject the
-    // raw path instead of replaying the preparation that ignored the filter.
-    assert!(
-        scanner.raw_series_schema(&binding).unwrap().is_none(),
-        "an added dynamic filter must reach the next preflight"
+    assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
+    assert!(scanner.raw_series_has_explicit_labels(&binding).unwrap());
+    assert_eq!(
+        1,
+        scanner.preflight_runs(),
+        "a rejected offer must not invalidate preflight"
     );
-    assert!(!scanner.raw_series_has_explicit_labels(&binding).unwrap());
     assert!(
         scanner
             .prepare_series(
@@ -2903,8 +2899,8 @@ async fn added_dynamic_filters_drop_the_preflight_cache() {
             )
             .await
             .unwrap()
-            .is_none(),
-        "the ordinary scan covers a scan that added a dynamic filter"
+            .is_some(),
+        "the unchanged scan remains eligible for prepared series"
     );
     engine.stop().await.unwrap();
 }

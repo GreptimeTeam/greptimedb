@@ -32,6 +32,7 @@ use crate::metrics::PRUNER_ACTIVE_BUILDERS;
 use crate::read::range::{FileRangeBuilder, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{FileScanMetrics, PartitionMetrics, new_filter_metrics};
+use crate::sst::index::inverted_index::dynamic_applier::DynamicInvertedIndexApplier;
 use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
 use crate::sst::parquet::reader::ReaderMetrics;
 
@@ -227,6 +228,8 @@ struct PrunerInner {
     file_entries: Vec<Mutex<FileBuilderEntry>>,
     /// StreamContext containing all context needed for pruning.
     stream_ctx: Arc<StreamContext>,
+    /// This execution owns its dynamic translation state.
+    dynamic_inverted_index_applier: Option<Arc<DynamicInvertedIndexApplier>>,
     /// Positive manifest-prune cache shared across all scan partitions.
     ///
     /// SAFETY: cached positives are valid because dynamic filters only tighten;
@@ -366,7 +369,9 @@ impl Pruner {
             receivers.push(rx);
         }
 
+        let dynamic_inverted_index_applier = stream_ctx.input.new_dynamic_inverted_applier();
         let inner = Arc::new(PrunerInner {
+            dynamic_inverted_index_applier,
             num_workers,
             file_entries,
             stream_ctx,
@@ -392,6 +397,14 @@ impl Pruner {
             worker_senders,
             inner,
         }
+    }
+
+    /// Returns this execution's dynamic applier for regression assertions.
+    #[cfg(test)]
+    pub(crate) fn dynamic_inverted_applier_for_test(
+        &self,
+    ) -> Option<&Arc<DynamicInvertedIndexApplier>> {
+        self.inner.dynamic_inverted_index_applier.as_ref()
     }
 
     /// Adds reference counts for partition ranges that the caller will scan.
@@ -594,6 +607,7 @@ impl Pruner {
                 pre_filter_mode,
                 self.inner.enable_predicate_prefilter,
                 predicate,
+                self.inner.dynamic_inverted_index_applier.clone(),
                 reader_metrics,
             )
             .await?;
@@ -683,6 +697,7 @@ impl Pruner {
                         pre_filter_mode,
                         inner.enable_predicate_prefilter,
                         predicate,
+                        inner.dynamic_inverted_index_applier.clone(),
                         &mut metrics,
                     )
                     .await

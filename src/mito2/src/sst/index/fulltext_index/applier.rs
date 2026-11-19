@@ -34,6 +34,7 @@ use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadata;
 use store_api::region_request::PathType;
+use table::predicate::Predicate;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -44,7 +45,7 @@ use crate::error::{
     ApplyBloomFilterIndexSnafu, ApplyFulltextIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu,
     PuffinReadBlobSnafu, Result,
 };
-use crate::metrics::INDEX_APPLY_ELAPSED;
+use crate::metrics::{DYNAMIC_INDEX_FILTER_TOTAL, INDEX_APPLY_ELAPSED};
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::column::fulltext_target_options;
 use crate::sst::index::fulltext_index::applier::builder::FulltextRequest;
@@ -269,6 +270,18 @@ impl FulltextIndexApplier {
 }
 
 impl FulltextIndexApplier {
+    /// Declines dynamic predicates locally, including when a static result is cached.
+    pub(crate) fn decline_dynamic(&self, predicate: Option<&Predicate>) {
+        if predicate.is_some_and(|p| !p.dyn_filters().is_empty()) {
+            DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["fulltext", "offered"])
+                .inc();
+            DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["fulltext", "declined"])
+                .inc();
+        }
+    }
+
     /// Applies fine-grained fulltext index to the specified SST file.
     /// Returns the row ids that match the queries.
     ///
@@ -286,8 +299,10 @@ impl FulltextIndexApplier {
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         requests: &BTreeMap<IndexTarget, FulltextRequest>,
+        predicate: Option<&Predicate>,
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
+        self.decline_dynamic(predicate);
         let apply_start = Instant::now();
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
@@ -414,8 +429,10 @@ impl FulltextIndexApplier {
         file_size_hint: Option<u64>,
         row_groups: impl Iterator<Item = (usize, bool)>,
         requests: &BTreeMap<IndexTarget, FulltextRequest>,
+        predicate: Option<&Predicate>,
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<Vec<(usize, Vec<Range<usize>>)>>> {
+        self.decline_dynamic(predicate);
         let apply_start = Instant::now();
 
         let (input, mut output) = Self::init_coarse_output(row_groups);

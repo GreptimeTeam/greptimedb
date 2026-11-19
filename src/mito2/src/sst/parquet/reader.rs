@@ -76,6 +76,7 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
+use crate::sst::index::inverted_index::dynamic_applier::DynamicInvertedIndexApplier;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
@@ -91,6 +92,8 @@ use crate::sst::parquet::push_decoder::{
 };
 use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_plan};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
+#[cfg(test)]
+use crate::sst::parquet::row_group::ParquetFetchMetricsData;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, Json2RewriteTargets, Json2TargetLayout};
@@ -161,6 +164,8 @@ fn should_read_pk_as_binary_with_limit(
         .any(|rg| rg.column(pk_idx).uncompressed_size() as usize > dict_page_size_limit)
 }
 const INDEX_TYPE_INVERTED: &str = "inverted";
+/// Index type of the live-handle dynamic inverted index.
+const INDEX_TYPE_DYNAMIC_INVERTED: &str = "inverted-dynamic";
 const INDEX_TYPE_BLOOM: &str = "bloom filter";
 
 macro_rules! handle_index_error {
@@ -196,6 +201,8 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     /// Predicate to push down.
     predicate: Option<Predicate>,
+    /// Live handle offered to indexes even if it was empty at reader construction.
+    index_predicate: Option<Predicate>,
     /// The columns to read.
     ///
     /// `None` reads all columns. Due to schema change, the projection
@@ -207,6 +214,8 @@ pub struct ParquetReaderBuilder {
     cache_strategy: CacheStrategy,
     /// Index appliers.
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
+    /// Per-execution dynamic applier; separate from static result-cache plans.
+    dynamic_inverted_index_applier: Option<Arc<DynamicInvertedIndexApplier>>,
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
     /// Expected metadata of the region while reading the SST.
@@ -229,6 +238,9 @@ pub struct ParquetReaderBuilder {
     batch_size: usize,
     /// Optional shared quota for projected row-group decoding.
     memory_tracker: Option<QueryMemoryTracker>,
+    /// Runs after a static min-max cache miss, for deterministic race tests.
+    #[cfg(test)]
+    minmax_cache_miss_hook: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl ParquetReaderBuilder {
@@ -253,10 +265,14 @@ impl ParquetReaderBuilder {
             file_handle,
             object_store,
             predicate: None,
+            index_predicate: None,
+            #[cfg(test)]
+            minmax_cache_miss_hook: None,
             read_cols: None,
             json2_rewrite_targets: Arc::default(),
             cache_strategy: CacheStrategy::Disabled,
             inverted_index_appliers: [None, None],
+            dynamic_inverted_index_applier: None,
             bloom_filter_index_appliers: [None, None],
             fulltext_index_appliers: [None, None],
             expected_metadata: None,
@@ -322,6 +338,22 @@ impl ParquetReaderBuilder {
         index_appliers: [Option<InvertedIndexApplierRef>; 2],
     ) -> Self {
         self.inverted_index_appliers = index_appliers;
+        self
+    }
+
+    /// Supplies the live predicate to index apply calls without changing static filtering.
+    pub(crate) fn index_predicate(mut self, predicate: Predicate) -> Self {
+        self.index_predicate = Some(predicate);
+        self
+    }
+
+    /// Attaches the live-handle dynamic inverted index applier.
+    #[must_use]
+    pub(crate) fn dynamic_inverted_index_applier(
+        mut self,
+        applier: Option<Arc<DynamicInvertedIndexApplier>>,
+    ) -> Self {
+        self.dynamic_inverted_index_applier = applier;
         self
     }
 
@@ -962,12 +994,24 @@ impl ParquetReaderBuilder {
         }
 
         self.prune_row_groups_by_inverted_index(
-            read_format.metadata(),
+            read_format,
             row_group_size,
             parquet_meta,
             &mut output,
             metrics,
             skip_fields,
+        )
+        .await;
+        if output.is_empty() {
+            return output;
+        }
+
+        self.prune_row_groups_by_dynamic_inverted_index(
+            read_format,
+            row_group_size,
+            parquet_meta,
+            &mut output,
+            metrics,
         )
         .await;
         if output.is_empty() {
@@ -1036,6 +1080,8 @@ impl ParquetReaderBuilder {
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
+                index_applier
+                    .decline_dynamic(self.index_predicate.as_ref().or(self.predicate.as_ref()));
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
                 metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
@@ -1050,6 +1096,7 @@ impl ParquetReaderBuilder {
                     self.file_handle.index_id(),
                     Some(file_size_hint),
                     &requests,
+                    self.index_predicate.as_ref().or(self.predicate.as_ref()),
                     metrics.fulltext_index_apply_metrics.as_mut(),
                 )
                 .await;
@@ -1084,7 +1131,7 @@ impl ParquetReaderBuilder {
     /// the correctness of the index.
     async fn prune_row_groups_by_inverted_index(
         &self,
-        sst_metadata: &RegionMetadataRef,
+        read_format: &FlatReadFormat,
         row_group_size: usize,
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
@@ -1095,6 +1142,7 @@ impl ParquetReaderBuilder {
             return false;
         }
 
+        let sst_metadata = read_format.metadata();
         let num_row_groups = parquet_meta.num_row_groups();
         let total_row_count = parquet_meta.file_metadata().num_rows() as usize;
         let mut pruned = false;
@@ -1177,6 +1225,70 @@ impl ParquetReaderBuilder {
         pruned
     }
 
+    /// Prunes rows by the live-handle dynamic inverted index.
+    ///
+    /// The dynamic selection is intersected with the rows the static selection kept: the
+    /// dynamic path can only drop further rows, never re-add rows another index removed.
+    /// Its plan is never read from, or written to, the shared index result cache, because
+    /// the predicate changes while the scan runs.
+    async fn prune_row_groups_by_dynamic_inverted_index(
+        &self,
+        read_format: &FlatReadFormat,
+        row_group_size: usize,
+        parquet_meta: &ParquetMetaData,
+        output: &mut RowGroupSelection,
+        metrics: &mut ReaderFilterMetrics,
+    ) -> bool {
+        let Some(index_applier) = &self.dynamic_inverted_index_applier else {
+            return false;
+        };
+        if !self.file_handle.meta_ref().inverted_index_available() {
+            return false;
+        }
+
+        let num_row_groups = parquet_meta.num_row_groups();
+        let total_row_count = parquet_meta.file_metadata().num_rows() as usize;
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        // Any failure inside the applier keeps every row, so a `None` here means the
+        // static selection stands.
+        let Some(apply_output) = index_applier
+            .apply(
+                read_format,
+                parquet_meta,
+                self.file_handle.index_id(),
+                Some(file_size_hint),
+                metrics.dynamic_inverted_index_apply_metrics.as_mut(),
+            )
+            .await
+        else {
+            return false;
+        };
+
+        let index_row_count = apply_output.total_row_count;
+        let Some(selection) = RowGroupSelection::from_inverted_index_apply_output(
+            row_group_size,
+            num_row_groups,
+            total_row_count,
+            apply_output,
+        ) else {
+            warn!(
+                "Ignore dynamic inverted index with mismatched row count, file_id: {:?}, index_row_count: {}, parquet_row_count: {}",
+                self.file_handle.file_id(),
+                index_row_count,
+                total_row_count,
+            );
+            return false;
+        };
+
+        apply_selection_and_update_metrics(
+            output,
+            &selection,
+            metrics,
+            INDEX_TYPE_DYNAMIC_INVERTED,
+        );
+        true
+    }
+
     async fn prune_row_groups_by_bloom_filter(
         &self,
         sst_metadata: &RegionMetadataRef,
@@ -1212,6 +1324,8 @@ impl ParquetReaderBuilder {
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
+                index_applier
+                    .decline_dynamic(self.index_predicate.as_ref().or(self.predicate.as_ref()));
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
                 metrics.bloom_filter_cache_hit += 1;
                 pruned = true;
@@ -1238,6 +1352,7 @@ impl ParquetReaderBuilder {
                     Some(file_size_hint),
                     &compatible_predicates,
                     rgs,
+                    self.index_predicate.as_ref().or(self.predicate.as_ref()),
                     metrics.bloom_filter_apply_metrics.as_mut(),
                 )
                 .await;
@@ -1303,6 +1418,8 @@ impl ParquetReaderBuilder {
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
+                index_applier
+                    .decline_dynamic(self.index_predicate.as_ref().or(self.predicate.as_ref()));
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
                 metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
@@ -1329,6 +1446,7 @@ impl ParquetReaderBuilder {
                     Some(file_size_hint),
                     rgs,
                     &requests,
+                    self.index_predicate.as_ref().or(self.predicate.as_ref()),
                     metrics.fulltext_index_apply_metrics.as_mut(),
                 )
                 .await;
@@ -1377,29 +1495,28 @@ impl ParquetReaderBuilder {
 
         let file_id = self.file_handle.file_id().file_id();
         let index_result_cache = self.cache_strategy.index_result_cache();
-        let cached_minmax_key =
-            if index_result_cache.is_some() && predicate.dyn_filters().is_empty() {
-                // Cache min-max pruning results keyed by predicate expressions. This avoids repeatedly
-                // building row-group pruning stats for identical predicates across queries.
-                let mut exprs = predicate
-                    .exprs()
-                    .iter()
-                    .map(|expr| format!("{expr:?}"))
-                    .collect::<Vec<_>>();
-                exprs.sort();
-                let schema_version = self
-                    .expected_metadata
-                    .as_ref()
-                    .map(|meta| meta.schema_version)
-                    .unwrap_or_else(|| read_format.metadata().schema_version);
-                Some(PredicateKey::new_minmax(
-                    Arc::new(exprs),
-                    schema_version,
-                    skip_fields,
-                ))
-            } else {
-                None
-            };
+        // Freeze the cacheable path to static expressions. A later installation must not
+        // narrow a result published under a static key. Any installed handle, including
+        // one currently equal to true, bypasses the cache and remains live for pruning.
+        let static_predicate = (index_result_cache.is_some() && predicate.dyn_filters().is_empty())
+            .then(|| Predicate::new(predicate.exprs().to_vec()));
+        let cached_minmax_key = static_predicate.as_ref().map(|predicate| {
+            // Cache min-max pruning results keyed by predicate expressions. This avoids repeatedly
+            // building row-group pruning stats for identical predicates across queries.
+            let mut exprs = predicate
+                .exprs()
+                .iter()
+                .map(|expr| format!("{expr:?}"))
+                .collect::<Vec<_>>();
+            exprs.sort();
+            let schema_version = self
+                .expected_metadata
+                .as_ref()
+                .map(|meta| meta.schema_version)
+                .unwrap_or_else(|| read_format.metadata().schema_version);
+            PredicateKey::new_minmax(Arc::new(exprs), schema_version, skip_fields)
+        });
+        let pruning_predicate = static_predicate.as_ref().unwrap_or(predicate);
 
         if let Some(index_result_cache) = index_result_cache
             && let Some(predicate_key) = cached_minmax_key.as_ref()
@@ -1413,6 +1530,10 @@ impl ParquetReaderBuilder {
             }
 
             metrics.minmax_cache_miss += 1;
+            #[cfg(test)]
+            if let Some(hook) = &self.minmax_cache_miss_hook {
+                hook();
+            }
         }
 
         let region_meta = read_format.metadata();
@@ -1432,7 +1553,7 @@ impl ParquetReaderBuilder {
         // Here we use the schema of the SST to build the physical expression. If the column
         // in the SST doesn't have the same column id as the column in the expected metadata,
         // we will get a None statistics for that column.
-        let mask = predicate.prune_with_stats(&stats, prune_schema);
+        let mask = pruning_predicate.prune_with_stats(&stats, prune_schema);
         let output = RowGroupSelection::from_full_row_group_ids(
             mask.iter()
                 .enumerate()
@@ -1530,6 +1651,10 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_fulltext_filtered: usize,
     /// Number of rows in row group filtered by inverted index.
     pub(crate) rows_inverted_filtered: usize,
+    /// Number of row groups filtered by the dynamic inverted index.
+    pub(crate) rg_dynamic_inverted_filtered: usize,
+    /// Number of rows filtered by the dynamic inverted index.
+    pub(crate) rows_dynamic_inverted_filtered: usize,
     /// Number of rows in row group filtered by bloom filter index.
     pub(crate) rows_bloom_filtered: usize,
     /// Number of rows filtered by precise filter.
@@ -1554,6 +1679,8 @@ pub(crate) struct ReaderFilterMetrics {
 
     /// Optional metrics for inverted index applier.
     pub(crate) inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
+    /// Optional metrics for the dynamic inverted index applier.
+    pub(crate) dynamic_inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
     /// Optional metrics for bloom filter index applier.
     pub(crate) bloom_filter_apply_metrics: Option<BloomFilterIndexApplyMetrics>,
     /// Optional metrics for fulltext index applier.
@@ -1581,6 +1708,8 @@ impl ReaderFilterMetrics {
         self.rows_total += other.rows_total;
         self.rows_fulltext_filtered += other.rows_fulltext_filtered;
         self.rows_inverted_filtered += other.rows_inverted_filtered;
+        self.rg_dynamic_inverted_filtered += other.rg_dynamic_inverted_filtered;
+        self.rows_dynamic_inverted_filtered += other.rows_dynamic_inverted_filtered;
         self.rows_bloom_filtered += other.rows_bloom_filtered;
         self.rows_precise_filtered += other.rows_precise_filtered;
 
@@ -1601,6 +1730,11 @@ impl ReaderFilterMetrics {
         // Merge optional applier metrics
         if let Some(other_metrics) = &other.inverted_index_apply_metrics {
             self.inverted_index_apply_metrics
+                .get_or_insert_with(Default::default)
+                .merge_from(other_metrics);
+        }
+        if let Some(other_metrics) = &other.dynamic_inverted_index_apply_metrics {
+            self.dynamic_inverted_index_apply_metrics
                 .get_or_insert_with(Default::default)
                 .merge_from(other_metrics);
         }
@@ -1625,6 +1759,10 @@ impl ReaderFilterMetrics {
             INDEX_TYPE_INVERTED => {
                 self.rg_inverted_filtered += row_group_count;
                 self.rows_inverted_filtered += row_count;
+            }
+            INDEX_TYPE_DYNAMIC_INVERTED => {
+                self.rg_dynamic_inverted_filtered += row_group_count;
+                self.rows_dynamic_inverted_filtered += row_count;
             }
             INDEX_TYPE_BLOOM => {
                 self.rg_bloom_filtered += row_group_count;
@@ -2570,6 +2708,16 @@ impl ParquetReader {
         self.context.reader_builder().parquet_meta.clone()
     }
 
+    /// Returns a snapshot of the fetch metrics of this reader, for tests.
+    #[cfg(test)]
+    pub(crate) fn fetch_metrics_snapshot(&self) -> ParquetFetchMetricsData {
+        self.fetch_metrics
+            .data
+            .lock()
+            .expect("fetch metrics lock poisoned")
+            .clone()
+    }
+
     #[cfg(feature = "enterprise")]
     pub(crate) fn fetched_store_page_bytes(&self) -> Result<u64> {
         self.fetch_metrics
@@ -3059,6 +3207,180 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_index_cache_hit_declines_without_changing_static_selection() {
+        use std::collections::BTreeMap;
+
+        use index::target::IndexTarget;
+
+        use crate::sst::file::{FileMeta, IndexType};
+        use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
+        use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
+        use crate::sst::index::fulltext_index::applier::builder::{FulltextRequest, FulltextTerm};
+        use crate::sst::index::puffin_manager::PuffinManagerFactory;
+        use crate::test_util::new_noop_file_purger;
+
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
+        let (fixture, _) = prefilter_test_builder(
+            object_store.clone(),
+            Predicate::new(vec![col("tag_0").eq(lit("a"))]),
+            CacheStrategy::Disabled,
+        )
+        .await;
+        let mut metadata = crate::test_util::sst_util::sst_region_metadata();
+        let tag = &mut metadata.column_metadatas[0].column_schema;
+        *tag = tag
+            .clone()
+            .with_fulltext_options(datatypes::schema::FulltextOptions {
+                enable: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let metadata = Arc::new(metadata);
+        let (_tempdir, factory) =
+            PuffinManagerFactory::new_for_test_async("dynamic_index_cache_hit").await;
+        let bloom = Arc::new(
+            BloomFilterIndexApplierBuilder::new(
+                "prefilter_test".into(),
+                PathType::Bare,
+                object_store.clone(),
+                &metadata,
+                factory.clone(),
+            )
+            .build(&[col("tag_1").eq(lit("x"))])
+            .unwrap()
+            .unwrap(),
+        );
+        let fulltext = Arc::new(FulltextIndexApplier::new(
+            "prefilter_test".into(),
+            PathType::Bare,
+            object_store.clone(),
+            BTreeMap::from([(
+                IndexTarget::ColumnId(0),
+                FulltextRequest {
+                    terms: vec![FulltextTerm {
+                        col_lowered: false,
+                        term: "a".into(),
+                    }],
+                    ..Default::default()
+                },
+            )]),
+            factory,
+            &metadata,
+        ));
+        let file_handle = FileHandle::new(
+            FileMeta {
+                file_id: FileId::random(),
+                region_id: metadata.region_id,
+                available_indexes: vec![IndexType::BloomFilterIndex, IndexType::FulltextIndex]
+                    .into(),
+                ..Default::default()
+            },
+            new_noop_file_purger(),
+        );
+        let cache = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder()
+                .index_result_cache_size(1024 * 1024)
+                .build(),
+        ));
+        let cached_selection = Arc::new(RowGroupSelection::from_row_ranges(
+            vec![(0, std::iter::once(0..3).collect()), (1, vec![])],
+            3,
+        ));
+        let bloom_key =
+            PredicateKey::new_bloom(bloom.compatible_predicate_for_sst(&metadata).unwrap());
+        let fulltext_key =
+            PredicateKey::new_fulltext(fulltext.compatible_requests_for_sst(&metadata).unwrap());
+        for key in [bloom_key, fulltext_key] {
+            cache.index_result_cache().unwrap().put(
+                key,
+                file_handle.file_id().file_id(),
+                cached_selection.clone(),
+            );
+        }
+        let live = Predicate::new(vec![]);
+        let builder = ParquetReaderBuilder::new(
+            "prefilter_test".into(),
+            PathType::Bare,
+            file_handle,
+            object_store,
+        )
+        .index_predicate(live.clone())
+        .cache(cache)
+        .bloom_filter_index_appliers([Some(bloom), None])
+        .fulltext_index_appliers([Some(fulltext), None]);
+
+        // Build first, then publish: every cache hit must still offer the live handle.
+        live.add_dyn_filters(vec![Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![],
+            physical_lit(true),
+        ))]);
+        let mut metrics = ReaderFilterMetrics::default();
+        let mut bloom_selection = RowGroupSelection::new(3, 6);
+        let before = crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+            .with_label_values(&["bloom", "declined"])
+            .get();
+        assert!(
+            builder
+                .prune_row_groups_by_bloom_filter(
+                    &metadata,
+                    3,
+                    &fixture.parquet_meta,
+                    &mut bloom_selection,
+                    &mut metrics,
+                    false,
+                )
+                .await
+        );
+        assert_eq!(bloom_selection.row_count(), 3);
+        assert_eq!(metrics.bloom_filter_cache_hit, 1);
+        assert!(
+            crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["bloom", "declined"])
+                .get()
+                > before
+        );
+
+        for coarse in [false, true] {
+            let mut selection = RowGroupSelection::new(3, 6);
+            let before = crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["fulltext", "declined"])
+                .get();
+            let pruned = if coarse {
+                builder
+                    .prune_row_groups_by_fulltext_bloom(
+                        &metadata,
+                        3,
+                        &fixture.parquet_meta,
+                        &mut selection,
+                        &mut metrics,
+                        false,
+                    )
+                    .await
+            } else {
+                builder
+                    .prune_row_groups_by_fulltext_index(
+                        &metadata,
+                        3,
+                        2,
+                        &mut selection,
+                        &mut metrics,
+                        false,
+                    )
+                    .await
+            };
+            assert!(pruned);
+            assert_eq!(selection.row_count(), 3);
+            assert!(
+                crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                    .with_label_values(&["fulltext", "declined"])
+                    .get()
+                    > before
+            );
+        }
+        assert_eq!(metrics.fulltext_index_cache_hit, 2);
     }
 
     async fn prefilter_test_builder(
@@ -4117,6 +4439,185 @@ mod tests {
         );
 
         assert!(!selection.is_empty());
+    }
+
+    /// A late dynamic installation cannot contaminate a static min-max cache entry.
+    #[tokio::test]
+    async fn test_dynamic_index_minmax_cache_uses_static_snapshot() {
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
+        let file_handle = sst_file_handle(0, 5);
+        let table_dir = "minmax_snapshot_test".to_string();
+        let file_path = file_handle.file_path(&table_dir, PathType::Bare);
+        let first_batch = new_record_batch_with_custom_sequence(&["a", "x"], 0, 3, 1);
+        let second_batch = new_record_batch_with_custom_sequence(&["a", "x"], 3, 6, 1);
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, first_batch.schema(), None).unwrap();
+        writer.write(&first_batch).unwrap();
+        writer.flush().unwrap();
+        writer.write(&second_batch).unwrap();
+        writer.flush().unwrap();
+        writer.close().unwrap();
+        let file_size = bytes.len() as u64;
+        object_store.write(&file_path, bytes).await.unwrap();
+
+        let metadata = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(
+                metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            ),
+            None,
+            &file_path,
+            false,
+        )
+        .unwrap();
+        let parquet_meta = MetadataLoader::new(object_store.clone(), &file_path, file_size)
+            .load(&mut MetadataCacheMetrics::default())
+            .await
+            .unwrap();
+        assert_eq!(2, parquet_meta.num_row_groups());
+        let cache = Arc::new(
+            CacheManager::builder()
+                .index_result_cache_size(1024 * 1024)
+                .index_content_page_size(1024 * 1024)
+                .build(),
+        );
+        let static_exprs = vec![col("field_0").gt_eq(lit(0_u64))];
+        let live = Predicate::new(static_exprs.clone());
+        let handle = new_test_dynamic_filter();
+        publish_membership(&handle, metadata.schema.arrow_schema(), vec![1]);
+        let mut builder = ParquetReaderBuilder::new(
+            table_dir.clone(),
+            PathType::Bare,
+            file_handle.clone(),
+            object_store.clone(),
+        )
+        .predicate(Some(live.clone()))
+        .cache(CacheStrategy::EnableAll(cache.clone()));
+        builder.minmax_cache_miss_hook = Some(Box::new({
+            let live = live.clone();
+            let handle = handle.clone();
+            move || live.add_dyn_filters(vec![handle.clone()])
+        }));
+
+        let mut metrics = ReaderFilterMetrics::default();
+        let selection =
+            builder.row_groups_by_minmax(&read_format, &parquet_meta, 3, 6, &mut metrics, false);
+        assert_eq!(
+            (0, 1),
+            (metrics.minmax_cache_hit, metrics.minmax_cache_miss)
+        );
+        assert_eq!(2, selection.row_group_count());
+        assert_eq!(1, live.dyn_filters().len());
+
+        // The installed filter bypasses the cache and prunes using its live value.
+        let mut dynamic_metrics = ReaderFilterMetrics::default();
+        let dynamic_selection = builder.row_groups_by_minmax(
+            &read_format,
+            &parquet_meta,
+            3,
+            6,
+            &mut dynamic_metrics,
+            false,
+        );
+        assert_eq!(
+            (0, 0),
+            (
+                dynamic_metrics.minmax_cache_hit,
+                dynamic_metrics.minmax_cache_miss
+            )
+        );
+        assert_eq!(1, dynamic_selection.row_group_count());
+        assert_eq!(
+            vec![0],
+            dynamic_selection
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>()
+        );
+
+        // A separate static reader really hits the complete entry, not a fresh scan.
+        let follower = ParquetReaderBuilder::new(
+            table_dir.clone(),
+            PathType::Bare,
+            file_handle.clone(),
+            object_store.clone(),
+        )
+        .predicate(Some(Predicate::new(static_exprs.clone())))
+        .cache(CacheStrategy::EnableAll(cache.clone()));
+        let mut follower_metrics = ReaderFilterMetrics::default();
+        let replayed = follower.row_groups_by_minmax(
+            &read_format,
+            &parquet_meta,
+            3,
+            6,
+            &mut follower_metrics,
+            false,
+        );
+        assert_eq!(
+            (1, 0),
+            (
+                follower_metrics.minmax_cache_hit,
+                follower_metrics.minmax_cache_miss
+            )
+        );
+        assert_eq!(2, replayed.row_group_count());
+
+        // An already-installed, initially true handle is not cacheable; after update
+        // the same builder still bypasses the static key and prunes the second group.
+        let initially_true = new_test_dynamic_filter();
+        let live_builder =
+            ParquetReaderBuilder::new(table_dir, PathType::Bare, file_handle, object_store)
+                .predicate(Some(Predicate::with_dyn_filters(
+                    static_exprs,
+                    vec![initially_true.clone()],
+                )))
+                .cache(CacheStrategy::EnableAll(cache));
+        let mut true_metrics = ReaderFilterMetrics::default();
+        let true_selection = live_builder.row_groups_by_minmax(
+            &read_format,
+            &parquet_meta,
+            3,
+            6,
+            &mut true_metrics,
+            false,
+        );
+        assert_eq!(
+            (0, 0),
+            (
+                true_metrics.minmax_cache_hit,
+                true_metrics.minmax_cache_miss
+            )
+        );
+        assert_eq!(2, true_selection.row_group_count());
+        publish_membership(&initially_true, metadata.schema.arrow_schema(), vec![1]);
+        let mut updated_metrics = ReaderFilterMetrics::default();
+        let updated_selection = live_builder.row_groups_by_minmax(
+            &read_format,
+            &parquet_meta,
+            3,
+            6,
+            &mut updated_metrics,
+            false,
+        );
+        assert_eq!(
+            (0, 0),
+            (
+                updated_metrics.minmax_cache_hit,
+                updated_metrics.minmax_cache_miss
+            )
+        );
+        assert_eq!(1, updated_selection.row_group_count());
+        assert_eq!(
+            vec![0],
+            updated_selection
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

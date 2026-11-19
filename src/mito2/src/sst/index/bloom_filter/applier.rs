@@ -34,6 +34,7 @@ use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
+use table::predicate::Predicate;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -44,7 +45,7 @@ use crate::error::{
     ApplyBloomFilterIndexSnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu,
     Result,
 };
-use crate::metrics::INDEX_APPLY_ELAPSED;
+use crate::metrics::{DYNAMIC_INDEX_FILTER_TOTAL, INDEX_APPLY_ELAPSED};
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
@@ -205,6 +206,19 @@ impl BloomFilterIndexApplier {
         self
     }
 
+    /// Declines dynamic predicates locally, including when a static result is cached.
+    pub(crate) fn decline_dynamic(&self, predicate: Option<&Predicate>) {
+        if predicate.is_some_and(|p| !p.dyn_filters().is_empty()) {
+            DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["bloom", "offered"])
+                .inc();
+            // Translation and a small-N heuristic belong here, not in the caller.
+            DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["bloom", "declined"])
+                .inc();
+        }
+    }
+
     /// Applies bloom filter predicates to the provided SST file and returns a
     /// list of row group ranges that match the predicates.
     ///
@@ -229,8 +243,10 @@ impl BloomFilterIndexApplier {
         file_size_hint: Option<u64>,
         predicates: &BTreeMap<IndexTarget, Vec<InListPredicate>>,
         row_groups: impl Iterator<Item = (usize, bool)>,
+        predicate: Option<&Predicate>,
         mut metrics: Option<&mut BloomFilterIndexApplyMetrics>,
     ) -> Result<Vec<(usize, Vec<Range<usize>>)>> {
+        self.decline_dynamic(predicate);
         let apply_start = Instant::now();
 
         // Calculates row groups' ranges based on start of the file.
@@ -653,10 +669,47 @@ mod tests {
                 // Run twice to cover cold reads and cached index reads.
                 for _ in 0..2 {
                     let result = applier
-                        .apply(index_id, None, &predicates, [(4, true)].into_iter(), None)
+                        .apply(
+                            index_id,
+                            None,
+                            &predicates,
+                            [(4, true)].into_iter(),
+                            None,
+                            None,
+                        )
                         .await
                         .unwrap();
                     assert!(result[0].1.is_empty());
+                    let dyn_predicate = Predicate::with_dyn_filters(
+                        vec![],
+                        vec![Arc::new(
+                            datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr::new(
+                                vec![],
+                                datafusion::physical_plan::expressions::lit(true),
+                            ),
+                        )],
+                    );
+                    let declined = DYNAMIC_INDEX_FILTER_TOTAL
+                        .with_label_values(&["bloom", "declined"])
+                        .get();
+                    let with_dynamic = applier
+                        .apply(
+                            index_id,
+                            None,
+                            &predicates,
+                            [(4, true)].into_iter(),
+                            Some(&dyn_predicate),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(result, with_dynamic);
+                    assert!(
+                        DYNAMIC_INDEX_FILTER_TOTAL
+                            .with_label_values(&["bloom", "declined"])
+                            .get()
+                            > declined
+                    );
                 }
                 assert!(
                     applier
@@ -676,7 +729,14 @@ mod tests {
             .unwrap();
             let predicates = applier.compatible_predicate_for_sst(&metadata).unwrap();
             let result = applier
-                .apply(index_id, None, &predicates, [(4, true)].into_iter(), None)
+                .apply(
+                    index_id,
+                    None,
+                    &predicates,
+                    [(4, true)].into_iter(),
+                    None,
+                    None,
+                )
                 .await
                 .unwrap();
             assert_eq!(result[0].1.len(), 1);
@@ -843,7 +903,14 @@ mod tests {
                     .compatible_predicate_for_sst(&Arc::new(metadata.clone()))
                     .unwrap();
                 applier
-                    .apply(file_id, None, &predicates, row_groups.into_iter(), None)
+                    .apply(
+                        file_id,
+                        None,
+                        &predicates,
+                        row_groups.into_iter(),
+                        None,
+                        None,
+                    )
                     .await
                     .unwrap()
                     .into_iter()
