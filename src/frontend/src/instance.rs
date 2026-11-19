@@ -1643,6 +1643,7 @@ impl Instance {
         // The cache key does not encode either bound, so such a request must never
         // hit or fill the ordinary entries.
         if !query_ctx.snapshots().is_empty()
+            || !query_ctx.sst_min_sequences().is_empty()
             || query_ctx
                 .extensions()
                 .keys()
@@ -3733,6 +3734,15 @@ mod tests {
         let uncached = promql_rows(&plain, &metric_range_query("cpu"), test_query_ctx(3)).await?;
         assert_eq!(printed(&uncached), printed(&bounded));
         assert_eq!(0, cache.entry_count(), "snapshot request fills nothing");
+
+        // An SST lower bound also changes which files a read may see.
+        let sst_bounded = QueryContextBuilder::default()
+            .sst_min_sequences(Arc::new(std::sync::RwLock::new(HashMap::from([(1, 90)]))))
+            .build();
+        let bounded =
+            promql_rows(&cached, &metric_range_query("cpu"), Arc::new(sst_bounded)).await?;
+        assert_eq!(printed(&uncached), printed(&bounded));
+        assert_eq!(0, cache.entry_count(), "SST-bounded request fills nothing");
         Ok(())
     }
 

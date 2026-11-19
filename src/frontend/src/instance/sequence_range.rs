@@ -49,6 +49,11 @@ use crate::query_cache::TimeChunk;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SourceProbeState {
     route_version: u64,
+    /// The fully-qualified name this cursor was last used with. A rename keeps the
+    /// table ID but changes the cache name, so the old name must be evicted.
+    table_name: String,
+    /// The bare source name used by [`crate::query_cache::QueryIdentity`].
+    source_name: String,
     cursors: BTreeMap<u64, u64>,
 }
 
@@ -214,23 +219,43 @@ impl Instance {
             return Ok(false);
         }
 
-        let (lower, route_changed) = {
-            let state = self.source_probe_cursors.lock().unwrap();
+        let qualified_name = table.to_string();
+        let (lower, route_changed, renamed_from) = {
+            let mut state = self.source_probe_cursors.lock().unwrap();
             // Cursors are per logical table: metric-engine logical tables share a
             // physical region sequence, and one logical table's scan must not
             // advance another's lower bound past rows it has not read.
-            match state.get(&table_id) {
-                Some(stored) if stored.route_version == version => (
-                    regions
-                        .iter()
-                        .map(|region| (*region, stored.cursors.get(region).copied().unwrap_or(0)))
-                        .collect::<BTreeMap<_, _>>(),
+            match state.get_mut(&table_id) {
+                Some(stored) => {
+                    let renamed_from = (stored.table_name != qualified_name).then(|| {
+                        stored.table_name.clone_from(&qualified_name);
+                        std::mem::replace(&mut stored.source_name, source_table.to_string())
+                    });
+                    let route_changed = stored.route_version != version;
+                    let lower = if route_changed {
+                        regions.iter().map(|region| (*region, 0)).collect()
+                    } else {
+                        regions
+                            .iter()
+                            .map(|region| {
+                                (*region, stored.cursors.get(region).copied().unwrap_or(0))
+                            })
+                            .collect::<BTreeMap<_, _>>()
+                    };
+                    (lower, route_changed, renamed_from)
+                }
+                None => (
+                    regions.iter().map(|region| (*region, 0)).collect(),
                     false,
+                    None,
                 ),
-                Some(_) => (regions.iter().map(|region| (*region, 0)).collect(), true),
-                None => (regions.iter().map(|region| (*region, 0)).collect(), false),
             }
         };
+        // A rename keeps the table ID but changes the cache key's name. Evict the
+        // old name before probing under the new one.
+        if let Some(old_name) = renamed_from {
+            cache.invalidate_table(&old_name);
+        }
         // A route change makes every old entry's input regions incomparable. Evict
         // before reading or advancing anything from the new route.
         if route_changed {
@@ -303,6 +328,8 @@ impl Instance {
                     table_id,
                     SourceProbeState {
                         route_version: version,
+                        table_name: qualified_name,
+                        source_name: source_table.to_string(),
                         cursors: high,
                     },
                 );
