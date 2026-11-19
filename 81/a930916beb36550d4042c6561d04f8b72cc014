@@ -12,6 +12,7 @@ src/common/meta/src/cache.rs
   s_c311425adc0214::t_0e6a113c5bfddb 21-24
 src/common/meta/src/cache/flow.rs
   s_c311425adc0214::t_554a2f7dcb38cb 19-23,25-34,36-39,41-42,43-46,51-63
+  s_c311425adc0214::t_77467ce71db178 24,35,40,47-50
 src/common/meta/src/key/flow/flow_info.rs
   s_c311425adc0214::t_353697d7fca7b4 39,388-404
 ---
