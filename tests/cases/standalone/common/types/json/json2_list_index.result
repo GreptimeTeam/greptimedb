@@ -92,6 +92,23 @@ ORDER BY ts;
 | 1970-01-01T00:00:00.006 | host6 |               |
 +-------------------------+-------+---------------+
 
+-- A TQL CTE leaves field access after a subscript as it is without one.
+WITH tql AS (TQL EVAL (0, 10, '5s') vector(1))
+SELECT ts, host, j.o.l[1].inner.l[2] AS deeply_nested
+FROM json2_list_index
+ORDER BY ts;
+
++-------------------------+-------+---------------+
+| ts                      | host  | deeply_nested |
++-------------------------+-------+---------------+
+| 1970-01-01T00:00:00.001 | host1 | z             |
+| 1970-01-01T00:00:00.002 | host2 |               |
+| 1970-01-01T00:00:00.003 | host3 |               |
+| 1970-01-01T00:00:00.004 | host4 |               |
+| 1970-01-01T00:00:00.005 | host5 |               |
+| 1970-01-01T00:00:00.006 | host6 |               |
++-------------------------+-------+---------------+
+
 SELECT ts,
        j.o.l[1].CASEKEY AS normalized,
        j.o.l[1]."UPPER" AS quoted_upper,

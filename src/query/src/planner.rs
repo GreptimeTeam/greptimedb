@@ -2442,6 +2442,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_plan_sql_field_access_after_subscript_with_tql_cte() {
+        // A query with a TQL CTE is normalized like any other query, so a dot access after a
+        // subscript plans instead of failing with "Dot access not supported for non-string expr".
+        let sql = "WITH tql AS (TQL EVAL (0, 10, '5s') some_metric) \
+            SELECT s.a[1].b FROM (SELECT named_struct('a', make_array(named_struct('b', 7))) AS s)";
+        let query_ctx = QueryContext::arc();
+        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
+        let plan = create_promql_test_engine()
+            .planner()
+            .plan(stmt, query_ctx)
+            .await
+            .unwrap();
+        assert_eq!(1, plan.schema().fields().len(), "{plan}");
+    }
+
+    #[tokio::test]
     async fn test_get_inferred_parameter_types_subquery() {
         let plan = parse_sql_to_plan(
             r#"SELECT * FROM test WHERE id = (SELECT id FROM test CROSS JOIN (SELECT parse_ident($1::TEXT) AS parts) p LIMIT 1)"#,
