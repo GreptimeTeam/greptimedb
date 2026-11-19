@@ -16,6 +16,7 @@ pub mod tables;
 
 use std::sync::{Arc, Weak};
 
+#[cfg(feature = "enterprise")]
 use common_meta::key::TableMetadataManagerRef;
 use common_query::logical_plan::is_lossless_substrait_type;
 use datafusion::common::DFSchema;
@@ -148,6 +149,7 @@ pub fn information_extension(
 }
 
 /// Try to get the `[TableMetadataManagerRef]` from `[CatalogManager]` weak reference.
+#[cfg(feature = "enterprise")]
 pub fn table_meta_manager(
     catalog_manager: &Weak<dyn CatalogManager>,
 ) -> Result<Option<TableMetadataManagerRef>> {
