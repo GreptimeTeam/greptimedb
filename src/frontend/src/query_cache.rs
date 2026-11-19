@@ -57,6 +57,30 @@
 //! [`RollupCacheConfig::max_age`], which is what a deployment with no sequence
 //! probe can serve; the cursor branch stays in place for the probe.
 //!
+//! # Invalidation
+//!
+//! A cursor says that *something* changed; it cannot say which chunks that change
+//! reached. [`RollupCache::invalidate_range`] answers that for one identity: it
+//! removes every entry of that identity whose *input dependency* overlaps a dirty
+//! range, leaves every disjoint chunk and every other identity resident, and
+//! returns how many it removed.
+//!
+//! The input dependency is the span of source data the payload was materialized
+//! from, recorded when the entry is stored. Deriving it from the evaluation
+//! window is not enough: a chunk's output points can all come before a dirty
+//! range while the history they folded — a lookback window, or the range of a
+//! `rate(x[5m])` — still reaches into it. [`RollupCache::insert`] therefore records
+//! the chunk itself as the dependency, and
+//! [`RollupCache::insert_with_dependency`] records a wider span where the caller
+//! knows one; overlap is half-open on both spans, so adjacent spans do not
+//! invalidate each other.
+//!
+//! Invalidation is bounded by an epoch, not by coordination. A fill captures the
+//! epoch in its [`FillCursor`] before it reads storage, and an insertion whose
+//! epoch is older than the cache's is dropped, so a fill that started before an
+//! invalidation cannot resurrect what it removed. Every invalidation advances the
+//! epoch exactly once, whether or not it removed anything.
+//!
 //! # Memory
 //!
 //! The cache is bounded by bytes, not entries: each entry is charged its payload's
@@ -74,19 +98,25 @@
 //! synchronous and no lock is held across an await, so a caller may await its
 //! storage read without holding anything.
 //!
+//! An invalidation takes no lock either: it advances the epoch, then scans the
+//! entries and removes the ones it overlaps. A fill that was already running is
+//! dealt with by the epoch rule instead of by waiting for it.
+//!
 //! # Not covered
 //!
 //! Chunks cover *output* points. The evaluator still has to read the input history
 //! every selected point folds: the first point of a `rate(x[5m])` chunk needs five
 //! minutes of samples *before* the chunk start. Nothing here narrows that history.
 //!
-//! Not implemented: the storage sequence probe behind a [`CacheAuthority`], the
-//! query-path wiring, and any configuration option.
+//! Not implemented: the storage sequence probe behind a [`CacheAuthority`], its
+//! call into [`RollupCache::invalidate_range`], the query-path wiring, and any
+//! configuration option.
 
 #![allow(dead_code)] // Wired into the query path by a later milestone.
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use common_recordbatch::RecordBatches;
@@ -261,6 +291,17 @@ impl TimeChunk {
     pub fn is_empty(&self) -> bool {
         self.start_ms >= self.end_ms
     }
+}
+
+/// Whether `left` and `right` share at least one millisecond.
+///
+/// Both spans are half-open, so a span ending where the other starts does not
+/// overlap it, and an empty span overlaps nothing.
+fn overlaps(left: TimeChunk, right: TimeChunk) -> bool {
+    !left.is_empty()
+        && !right.is_empty()
+        && left.start_ms() < right.end_ms()
+        && right.start_ms() < left.end_ms()
 }
 
 /// Why a span must be executed without the cache.
@@ -630,14 +671,17 @@ pub enum Insert {
     Bypassed,
 }
 
-/// The cursor, and the instant, a fill was planned at.
+/// The cursor, the invalidation epoch, and the instant, a fill was planned at.
 ///
-/// Both are captured before the fill reads storage: the cursor is what the payload
-/// is validated against, and the instant is what its age is counted from, so a slow
-/// fill is neither fresher nor younger than the read it actually performed.
+/// All three are captured before the fill reads storage: the cursor is what the
+/// payload is validated against, the epoch is what a concurrent invalidation
+/// invalidates the fill itself with, and the instant is what its age is counted
+/// from, so a slow fill is neither fresher nor younger than the read it actually
+/// performed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FillCursor {
     cursor: u64,
+    epoch: u64,
     captured_at: SystemTime,
 }
 
@@ -645,6 +689,14 @@ impl FillCursor {
     /// The cursor the fill reads storage at.
     pub fn cursor(&self) -> u64 {
         self.cursor
+    }
+
+    /// The invalidation epoch of the cache when the fill was planned.
+    ///
+    /// An insertion carries it back to [`RollupCache::insert`], which drops a fill
+    /// that an invalidation has since overtaken.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// When the fill was planned, before it read storage.
@@ -898,6 +950,14 @@ struct Entry {
     annotations: Arc<CachedAnnotations>,
     /// The cursor the payload was filled at, never the one seen at insertion.
     cursor: u64,
+    /// The span of source data the payload was materialized from.
+    ///
+    /// A dirty input range invalidates the entry when it overlaps this span, not
+    /// the chunk's own output span: the history a chunk folded can reach before
+    /// its first output point.
+    dependency: TimeChunk,
+    /// The invalidation epoch the fill captured before it read storage.
+    epoch: u64,
     /// The bytes this entry is charged: its payload plus a fixed overhead.
     weight: u32,
     /// When the fill that produced the payload captured its read.
@@ -916,6 +976,12 @@ pub struct RollupCache {
     config: RollupCacheConfig,
     authority: Option<Arc<dyn CacheAuthority>>,
     entries: Cache<TimeChunkKey, Entry>,
+    /// How many invalidations have run, which is what a fill is validated against.
+    ///
+    /// It is advanced by [`RollupCache::invalidate_range`] and never read as a
+    /// clock: only the ordering between the epoch a fill captured and the current
+    /// one matters.
+    invalidation_epoch: AtomicU64,
 }
 
 impl RollupCache {
@@ -932,12 +998,21 @@ impl RollupCache {
             config,
             authority,
             entries,
+            invalidation_epoch: AtomicU64::new(0),
         }
     }
 
     /// The configuration this cache enforces.
     pub fn config(&self) -> &RollupCacheConfig {
         &self.config
+    }
+
+    /// How many invalidations this cache has run.
+    ///
+    /// A fill captures it in its [`FillCursor`] and an insertion compares it with
+    /// the value current at insertion time; nothing else reads it.
+    pub fn invalidation_epoch(&self) -> u64 {
+        self.invalidation_epoch.load(Ordering::SeqCst)
     }
 
     /// How many entries the cache holds once pending maintenance has run.
@@ -1013,13 +1088,17 @@ impl RollupCache {
         }
     }
 
-    /// The cursor, and the instant, a fill of a chunk should be planned at.
+    /// The cursor, the epoch, and the instant, a fill of a chunk should be planned
+    /// at.
     ///
     /// Callers must pass the returned [`FillCursor`] to [`RollupCache::insert`]
-    /// instead of reading the authority again once the fill completes.
+    /// instead of reading the authority, or the epoch, again once the fill
+    /// completes.
     pub fn fill_cursor(&self, now: SystemTime) -> Result<FillCursor, MissReason> {
+        let epoch = self.invalidation_epoch();
         self.authorized_cursor(now).map(|cursor| FillCursor {
             cursor,
+            epoch,
             captured_at: now,
         })
     }
@@ -1027,11 +1106,18 @@ impl RollupCache {
     /// Stores `payload` as the whole result of `key`'s chunk, filled at `fill`.
     ///
     /// The insertion is conditional: a fill at a cursor older than the entry
-    /// already in place is dropped, so a slow fill cannot overwrite a newer one.
-    /// A fill at the same cursor replaces the payload, since both read the same
-    /// storage state. The entry records the cursor and the instant of `fill`, not
-    /// whichever the authority reports now, and is charged the bytes of its payload
-    /// so eviction stays within the configured budget.
+    /// already in place is dropped, so a slow fill cannot overwrite a newer one, and
+    /// a fill an invalidation has overtaken is dropped as well, so a slow fill
+    /// cannot resurrect what that invalidation removed. A fill at the same cursor
+    /// replaces the payload, since both read the same storage state. The entry
+    /// records the cursor and the instant of `fill`, not whichever the authority
+    /// reports now, and is charged the bytes of its payload so eviction stays within
+    /// the configured budget.
+    ///
+    /// The entry's input dependency is the chunk itself: the payload covers exactly
+    /// the points of its span and reads nothing else.
+    /// [`RollupCache::insert_with_dependency`] records a wider span for a read that
+    /// folded history outside it.
     pub fn insert(
         &self,
         key: TimeChunkKey,
@@ -1053,30 +1139,133 @@ impl RollupCache {
         payload: Arc<RecordBatches>,
         annotations: Arc<CachedAnnotations>,
     ) -> Insert {
+        let dependency = key.chunk();
+        self.insert_with_dependency(key, fill, payload, annotations, dependency)
+    }
+
+    /// [`RollupCache::insert_annotated`] with the input span the payload was
+    /// materialized from.
+    ///
+    /// `dependency` is the span of source data the read touched, which
+    /// [`RollupCache::invalidate_range`] compares against a dirty range. It must
+    /// contain the chunk's own span, and is wider than it whenever the evaluation
+    /// folded history before the chunk start (a lookback window, or the range of
+    /// `rate(x[5m])`); an entry whose dependency is only the chunk is invalidated
+    /// only by a range that reaches its output points.
+    ///
+    /// The insertion is guarded by `fill`: a fill overtaken by a
+    /// [`RollupCache::invalidate_range`] is dropped, even though its key and cursor
+    /// are still current, because the read behind it may have returned exactly what
+    /// that invalidation removed.
+    pub fn insert_with_dependency(
+        &self,
+        key: TimeChunkKey,
+        fill: FillCursor,
+        payload: Arc<RecordBatches>,
+        annotations: Arc<CachedAnnotations>,
+        dependency: TimeChunk,
+    ) -> Insert {
         if key.chunk.is_empty() {
             return Insert::Bypassed;
+        }
+        // An invalidation ran after this fill captured its epoch, so the data the
+        // fill read may be the data the invalidation removed. The fill loses.
+        if self.invalidation_epoch() > fill.epoch() {
+            return Insert::Rejected;
         }
         let candidate = Entry {
             weight: Entry::weigh(&payload, &annotations),
             payload,
             annotations,
             cursor: fill.cursor(),
+            dependency,
+            epoch: fill.epoch(),
             validated_at: fill.captured_at(),
             inserted_at: SystemTime::now(),
         };
+        let stored = Arc::clone(&candidate.payload);
         // `and_compute_with` serializes only the swap of this one key; nothing is
         // locked across the storage read that produced `payload`.
         let result = self
             .entries
-            .entry(key)
+            .entry(key.clone())
             .and_compute_with(|existing| match existing {
                 Some(entry) if entry.value().cursor > candidate.cursor => Op::Nop,
                 _ => Op::Put(candidate),
             });
-        match result.into_entry() {
-            Some(entry) if entry.value().cursor > fill.cursor() => Insert::Rejected,
-            _ => Insert::Stored,
+        if let Some(entry) = result.into_entry()
+            && entry.value().cursor > fill.cursor()
+        {
+            return Insert::Rejected;
         }
+        // The epoch may have moved between the check above and the store, and the
+        // invalidation that moved it may have scanned this chunk before the store
+        // landed. Drop the entry rather than serve what that invalidation was
+        // meant to remove; a newer fill of the same chunk keeps its own entry, as
+        // only this payload is dropped.
+        if self.invalidation_epoch() > fill.epoch() {
+            self.remove_own_entry(&key, &stored, fill.epoch());
+            return Insert::Rejected;
+        }
+        Insert::Stored
+    }
+
+    /// Removes `key` while it still holds `payload` filled at `epoch`.
+    ///
+    /// A concurrent fill may have replaced the entry since it was written, so the
+    /// removal is conditional on the entry still being the one that lost the epoch
+    /// race.
+    fn remove_own_entry(&self, key: &TimeChunkKey, payload: &Arc<RecordBatches>, epoch: u64) {
+        self.entries
+            .entry(key.clone())
+            .and_compute_with(|existing| match existing {
+                Some(entry)
+                    if entry.value().epoch == epoch
+                        && Arc::ptr_eq(&entry.value().payload, payload) =>
+                {
+                    Op::Remove
+                }
+                _ => Op::Nop,
+            });
+    }
+
+    /// Drops every entry of `identity` whose input dependency overlaps
+    /// `input_span`, and returns how many entries were removed.
+    ///
+    /// `input_span` is a dirty half-open `[start, end)` range of *source* data, not
+    /// of output points: an entry goes when any part of the history it was
+    /// materialized from is in the range, so a chunk whose output points are all
+    /// earlier can still be invalidated by a dependency that reaches into it.
+    /// Overlap is half-open on both sides, so a range that ends where a dependency
+    /// starts removes nothing. Entries of other identities, and of this identity
+    /// whose dependency is disjoint, stay resident.
+    ///
+    /// The epoch advances once per call, whether or not anything was removed, so a
+    /// fill that captured its epoch before the call cannot store afterwards. The
+    /// method is synchronous and takes no lock, so it never waits for a fill and
+    /// nothing it does is held across an await.
+    ///
+    /// The scan and the removals are not one atomic step: a fill that lands between
+    /// them is removed too, even though it read storage after this call. That costs
+    /// a later miss, never a wrong answer, and is why no fill has to be waited for.
+    pub fn invalidate_range(&self, identity: &QueryIdentity, input_span: TimeChunk) -> usize {
+        // Advanced before the scan: a fill that captures the new epoch from now on
+        // read storage after this point, and one that captured an older epoch is
+        // refused by `insert_with_dependency`.
+        self.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
+
+        // The keys are collected first because the scan borrows the cache that the
+        // removals mutate.
+        let mut dirty = Vec::new();
+        for (key, entry) in self.entries.iter() {
+            if key.identity() == identity && overlaps(entry.dependency, input_span) {
+                dirty.push(key);
+            }
+        }
+        dirty
+            .into_iter()
+            .filter(|key| self.entries.remove(key.as_ref()).is_some())
+            .count()
     }
 
     /// The cursor a lookup at `now` may serve, or why it may serve none.
@@ -1179,7 +1368,14 @@ mod tests {
     }
 
     fn chunk_key() -> TimeChunkKey {
-        TimeChunkKey::new(identity(), TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS))
+        chunk_key_at(0)
+    }
+
+    /// The key of the chunk `index` chunks after `HEAD_MS`, so `-1` is the chunk
+    /// that ends where the first one starts.
+    fn chunk_key_at(index: i64) -> TimeChunkKey {
+        let start = HEAD_MS + index * CHUNK_MS;
+        TimeChunkKey::new(identity(), TimeChunk::new(start, start + CHUNK_MS))
     }
 
     fn payload() -> Arc<RecordBatches> {
@@ -2048,6 +2244,226 @@ mod tests {
         );
         let fill = cache.fill_cursor(now).unwrap();
         assert_eq!(cache.insert(key, fill, payload()), Insert::Bypassed);
+    }
+
+    #[test]
+    fn a_dirty_range_removes_the_chunks_whose_input_it_overlaps() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let fill = cache.fill_cursor(now).unwrap();
+        for index in -1..=2 {
+            assert_eq!(
+                cache.insert(chunk_key_at(index), fill, payload()),
+                Insert::Stored
+            );
+        }
+        assert_eq!(cache.entry_count(), 4);
+
+        // `[10:00, 10:10)` covers the first two chunks, and neither the chunk that
+        // ends where it starts nor the chunk that starts where it ends is half-open
+        // overlapping it.
+        let dirty = TimeChunk::new(HEAD_MS, HEAD_MS + 2 * CHUNK_MS);
+        assert_eq!(cache.invalidate_range(&identity(), dirty), 2);
+
+        for index in [0, 1] {
+            assert_eq!(
+                cache.lookup(&chunk_key_at(index), now),
+                Lookup::Miss(MissReason::NotFound),
+                "chunk {index} overlaps the dirty range"
+            );
+        }
+        for index in [-1, 2] {
+            assert!(
+                matches!(cache.lookup(&chunk_key_at(index), now), Lookup::Hit { .. }),
+                "chunk {index} is disjoint from the dirty range"
+            );
+        }
+        assert_eq!(cache.entry_count(), 2);
+    }
+
+    #[test]
+    fn a_lookback_dependency_invalidates_a_chunk_whose_output_the_dirty_range_misses() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let fill = cache.fill_cursor(now).unwrap();
+
+        // Chunk `[10:00, 10:05)` was materialized from ten minutes of history, so
+        // its input dependency reaches back to `09:50` even though its output starts
+        // at `10:00`.
+        let dependency = TimeChunk::new(HEAD_MS - 2 * CHUNK_MS, HEAD_MS + CHUNK_MS);
+        assert_eq!(
+            cache.insert_with_dependency(
+                chunk_key_at(0),
+                fill,
+                payload(),
+                Arc::default(),
+                dependency,
+            ),
+            Insert::Stored
+        );
+        // Its neighbours record only their own chunk as their dependency.
+        for index in [-1, 1] {
+            assert_eq!(
+                cache.insert(chunk_key_at(index), fill, payload()),
+                Insert::Stored
+            );
+        }
+
+        // The dirty range is `[09:51, 09:54)`: earlier than every cached output
+        // point, but inside the history the middle chunk folded.
+        let dirty = TimeChunk::new(HEAD_MS - 9 * 60_000, HEAD_MS - 6 * 60_000);
+        assert_eq!(cache.invalidate_range(&identity(), dirty), 1);
+
+        // The chunk whose window read the dirty range is gone, although its own
+        // output starts six minutes after it...
+        assert_eq!(
+            cache.lookup(&chunk_key_at(0), now),
+            Lookup::Miss(MissReason::NotFound)
+        );
+        // ...and the neighbours, whose dependency is only their own span and cannot
+        // have read it, stay resident.
+        for index in [-1, 1] {
+            assert!(
+                matches!(cache.lookup(&chunk_key_at(index), now), Lookup::Hit { .. }),
+                "chunk {index} does not depend on the dirty range"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalidation_leaves_the_same_chunk_of_another_identity_resident() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let fill = cache.fill_cursor(now).unwrap();
+        let mut other = identity();
+        other.query = "sum(rate(http_requests_total[5m]))".to_string();
+        let key = chunk_key();
+        let other_key = TimeChunkKey::new(other.clone(), key.chunk());
+
+        assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
+        assert_eq!(
+            cache.insert(other_key.clone(), fill, payload()),
+            Insert::Stored
+        );
+
+        // The dirty range is exactly the chunk both identities hold.
+        assert_eq!(cache.invalidate_range(&identity(), key.chunk()), 1);
+
+        assert_eq!(cache.lookup(&key, now), Lookup::Miss(MissReason::NotFound));
+        assert!(matches!(cache.lookup(&other_key, now), Lookup::Hit { .. }));
+
+        // The other identity is invalidatable on its own.
+        assert_eq!(cache.invalidate_range(&other, key.chunk()), 1);
+        assert_eq!(
+            cache.lookup(&other_key, now),
+            Lookup::Miss(MissReason::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_fill_that_started_before_an_invalidation_cannot_land() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let key = chunk_key();
+
+        // The fill captures its epoch, then reads storage.
+        let outstanding = cache.fill_cursor(now).unwrap();
+
+        // The probe invalidates while that read is still running. The scan takes no
+        // lock and waits for nothing, so it completes against an empty cache.
+        assert_eq!(cache.invalidate_range(&identity(), key.chunk()), 0);
+
+        // The fill's read predates the invalidation, so its payload is dropped even
+        // though its key and cursor are current.
+        assert_eq!(
+            cache.insert(key.clone(), outstanding, payload()),
+            Insert::Rejected
+        );
+        assert_eq!(cache.lookup(&key, now), Lookup::Miss(MissReason::NotFound));
+
+        // A fill that captured the epoch after the invalidation lands normally.
+        let fresh = cache.fill_cursor(now).unwrap();
+        assert_eq!(cache.insert(key.clone(), fresh, payload()), Insert::Stored);
+        assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
+    }
+
+    #[test]
+    fn every_invalidation_advances_the_epoch_exactly_once() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        assert_eq!(cache.invalidation_epoch(), 0);
+
+        let before = cache.fill_cursor(now).unwrap();
+        assert_eq!(before.epoch(), 0);
+
+        // Nothing is resident: a removal count of zero still advances the epoch.
+        assert_eq!(cache.invalidate_range(&identity(), chunk_key().chunk()), 0);
+        assert_eq!(cache.invalidation_epoch(), 1);
+        assert_eq!(
+            cache.insert(chunk_key(), before, payload()),
+            Insert::Rejected
+        );
+
+        let after = cache.fill_cursor(now).unwrap();
+        assert_eq!(after.epoch(), 1);
+        assert_eq!(cache.insert(chunk_key(), after, payload()), Insert::Stored);
+
+        // A dirty range that overlaps nothing removes nothing, advances the epoch
+        // once, and leaves the entry resident.
+        let disjoint = TimeChunk::new(HEAD_MS + 10 * CHUNK_MS, HEAD_MS + 11 * CHUNK_MS);
+        assert_eq!(cache.invalidate_range(&identity(), disjoint), 0);
+        assert_eq!(cache.invalidation_epoch(), 2);
+        assert!(matches!(
+            cache.lookup(&chunk_key(), now),
+            Lookup::Hit { .. }
+        ));
+
+        // An invalidation of another identity removes nothing here either.
+        let mut other = identity();
+        other.alias = Some("other".to_string());
+        let fill = cache.fill_cursor(now).unwrap();
+        assert_eq!(fill.epoch(), 2);
+        assert_eq!(cache.insert(chunk_key(), fill, payload()), Insert::Stored);
+        assert_eq!(cache.invalidate_range(&other, chunk_key().chunk()), 0);
+        assert_eq!(cache.invalidation_epoch(), 3);
+        assert!(matches!(
+            cache.lookup(&chunk_key(), now),
+            Lookup::Hit { .. }
+        ));
+    }
+
+    #[test]
+    fn an_invalidation_rejects_a_fill_held_by_another_thread() {
+        let cache = Arc::new(cache());
+        let now = at(LATER_MS);
+        let key = chunk_key();
+        let captured = Arc::new(Barrier::new(2));
+        let invalidated = Arc::new(Barrier::new(2));
+
+        // A fill captures its epoch and is still reading storage when the probe
+        // invalidates: it holds nothing the invalidation needs.
+        let filler = {
+            let cache = Arc::clone(&cache);
+            let key = key.clone();
+            let captured = Arc::clone(&captured);
+            let invalidated = Arc::clone(&invalidated);
+            std::thread::spawn(move || {
+                let fill = cache.fill_cursor(now).unwrap();
+                captured.wait();
+                invalidated.wait();
+                cache.insert(key, fill, payload())
+            })
+        };
+
+        captured.wait();
+        assert_eq!(cache.invalidate_range(&identity(), key.chunk()), 0);
+        invalidated.wait();
+
+        assert_eq!(
+            filler.join().expect("the fill thread panicked"),
+            Insert::Rejected
+        );
+        assert_eq!(cache.lookup(&key, now), Lookup::Miss(MissReason::NotFound));
     }
 
     #[test]
