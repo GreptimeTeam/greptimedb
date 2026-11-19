@@ -109,6 +109,7 @@ mysql_async = { version = "0.37", default-features = false, features = [
 opentelemetry-proto.workspace = true
 operator = { workspace = true, features = ["testing"] }
 otel-arrow-rust.workspace = true
+partition.workspace = true
 paste.workspace = true
 plugins.workspace = true
 promql = { workspace = true, features = ["test-utils"] }

@@ -15564,6 +15564,7 @@ dependencies = [
  "opentelemetry-proto",
  "operator",
  "otel-arrow-rust",
+ "partition",
  "paste",
  "pipeline",
  "plugins",
