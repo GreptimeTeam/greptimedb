@@ -4,7 +4,7 @@ A generated protobuf fixture of `greptime.v1.region.RegionRequest`, not a captur
 from a released binary.
 
 `discard_pending_tails.pb` uses the schema at greptime-proto revision
-`ed646b77855a96cab14d147cbff3e4976cdeded9`, which adds
+`8aa45418597636516410c0c892dbd0269754a02c`, which adds
 `DiscardPendingTailsRequest` as body field 24. Logical contents: region
 `4398046511105` (table `1024`, region number `1`) and datanode `7`.
 

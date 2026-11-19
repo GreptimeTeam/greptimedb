@@ -164,7 +164,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "ed646b77855a96cab14d147cbff3e4976cdeded9" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "8aa45418597636516410c0c892dbd0269754a02c" }
 hdfs-native = "0.14.6"
 hex = "0.4"
 hostname = "0.4.0"
