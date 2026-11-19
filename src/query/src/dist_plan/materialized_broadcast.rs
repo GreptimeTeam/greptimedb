@@ -60,7 +60,13 @@ impl PartialOrd for MaterializedBroadcastNode {
 
 impl MaterializedBroadcastNode {
     pub const NAME: &'static str = "greptime.materialized_broadcast";
+    /// Upper bound on the materialized rows. The row cap keeps the plan payload and the
+    /// per-region transfer bounded for narrow rows; the byte cap below bounds wide rows.
     pub const MAX_ROWS: usize = 10_000;
+    /// Upper bound on the decoded Arrow memory of the materialized batches. This is a
+    /// conservative budget, not a derived value: it keeps one materialization from
+    /// dominating frontend memory while the stream is collected.
+    pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 
     pub fn new(schema: DFSchemaRef, batches: Vec<RecordBatch>) -> Self {
         let row_count = batches.iter().map(RecordBatch::num_rows).sum();

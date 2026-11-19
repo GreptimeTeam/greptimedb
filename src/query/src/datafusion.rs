@@ -223,6 +223,28 @@ impl DatafusionQueryEngine {
             }
         }
 
+        /// A `LIMIT 0` above the join makes the query empty; the optimized plan never
+        /// evaluates the small side, so materializing it eagerly would surface errors
+        /// (e.g. a cast) that the baseline never raises.
+        fn contains_zero_limit(plan: &LogicalPlan) -> bool {
+            if let DfLogicalPlan::Limit(limit) = plan
+                && let Some(fetch) = limit.fetch.as_deref()
+                && matches!(
+                    fetch,
+                    datafusion_expr::Expr::Literal(
+                        datafusion_common::ScalarValue::Int64(Some(0)),
+                        _
+                    ) | datafusion_expr::Expr::Literal(
+                        datafusion_common::ScalarValue::UInt64(Some(0)),
+                        _
+                    )
+                )
+            {
+                return true;
+            }
+            plan.inputs().iter().any(|input| contains_zero_limit(input))
+        }
+
         fn find_materializable_small(
             plan: &LogicalPlan,
         ) -> Option<(
@@ -239,6 +261,13 @@ impl DatafusionQueryEngine {
                 // The pinned Substrait producer rejects `JoinConstraint::Using`, so a
                 // materialized payload containing such a join could not be encoded.
                 && join.join_constraint == datafusion_expr::JoinConstraint::On
+                // A volatile join key is evaluated by the remote join on every probe
+                // region, so materializing the input rows alone cannot make it
+                // consistent. Keep such joins on the frontend.
+                && !join
+                    .on
+                    .iter()
+                    .any(|(left, right)| left.is_volatile() || right.is_volatile())
                 && !join.on.is_empty()
                 && let Some((large_plan, large)) = strip_merge_scan(&join.left)
                 && let Some((small_plan, small)) = strip_merge_scan(&join.right)
@@ -260,6 +289,9 @@ impl DatafusionQueryEngine {
             .configuration_parameter()
             .experimental_dist_join()
         {
+            return Ok(analyzed_plan.clone());
+        }
+        if contains_zero_limit(analyzed_plan) {
             return Ok(analyzed_plan.clone());
         }
         let Some((original_join, large_plan, large, small_plan, small_scan)) =
@@ -304,18 +336,45 @@ impl DatafusionQueryEngine {
             .execute(small_plan.clone(), ctx.query_ctx().clone())
             .await?;
         let batches = match small_output.data {
-            common_query::OutputData::RecordBatches(batches) => batches
-                .iter()
-                .map(|batch| batch.df_record_batch().clone())
-                .collect::<Vec<_>>(),
-            common_query::OutputData::Stream(stream) => {
-                let collected = common_recordbatch::util::collect_batches(stream)
-                    .await
-                    .map_err(|e| datafusion_common::DataFusionError::External(Box::new(e)))?;
+            common_query::OutputData::RecordBatches(batches) => {
+                let mut rows = 0usize;
+                let mut bytes = 0usize;
+                let mut collected = Vec::new();
+                for batch in batches.iter() {
+                    let batch = batch.df_record_batch().clone();
+                    rows += batch.num_rows();
+                    bytes += batch.get_array_memory_size();
+                    if rows > MaterializedBroadcastNode::MAX_ROWS
+                        || bytes > MaterializedBroadcastNode::MAX_BYTES
+                    {
+                        return Ok(analyzed_plan.clone());
+                    }
+                    collected.push(batch);
+                }
                 collected
-                    .iter()
-                    .map(|batch| batch.df_record_batch().clone())
-                    .collect::<Vec<_>>()
+            }
+            common_query::OutputData::Stream(mut stream) => {
+                // Enforce the row and memory budgets while consuming the stream: the
+                // small side can be large even when the disk-size heuristic favors it,
+                // and collecting it first would let one query exhaust frontend memory
+                // before the cap is checked.
+                let mut rows = 0usize;
+                let mut bytes = 0usize;
+                let mut collected = Vec::new();
+                while let Some(batch) = stream.next().await {
+                    let batch = batch
+                        .map_err(|e| datafusion_common::DataFusionError::External(Box::new(e)))?;
+                    let batch = batch.df_record_batch().clone();
+                    rows += batch.num_rows();
+                    bytes += batch.get_array_memory_size();
+                    if rows > MaterializedBroadcastNode::MAX_ROWS
+                        || bytes > MaterializedBroadcastNode::MAX_BYTES
+                    {
+                        return Ok(analyzed_plan.clone());
+                    }
+                    collected.push(batch);
+                }
+                collected
             }
             common_query::OutputData::AffectedRows(_) => {
                 return Err(datafusion_common::DataFusionError::Internal(
