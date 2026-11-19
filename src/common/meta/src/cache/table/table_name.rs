@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use table::metadata::TableId;
@@ -22,7 +21,6 @@ use table::table_name::TableName;
 
 use crate::cache::{CacheContainer, Initializer};
 use crate::error;
-use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::table_name::{TableNameKey, TableNameManager, TableNameManagerRef};
 use crate::kv_backend::KvBackendRef;
@@ -35,14 +33,14 @@ pub type TableNameCacheRef = Arc<TableNameCache>;
 /// Constructs a [TableNameCache].
 pub fn new_table_name_cache(
     name: String,
-    cache: Cache<TableName, TableId>,
+    cache: Cache<(usize, TableName), TableId>,
     kv_backend: KvBackendRef,
 ) -> TableNameCache {
     let table_name_manager = Arc::new(TableNameManager::new(kv_backend));
     let init = init_factory(table_name_manager.clone());
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter).with_batch_initializer(
-        Arc::new(move |names| {
+    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_name_key)
+        .with_batch_initializer(Arc::new(move |names| {
             let manager = table_name_manager.clone();
             Box::pin(async move {
                 let keys = names
@@ -58,8 +56,7 @@ pub fn new_table_name_cache(
                     .filter_map(|(name, id)| id.map(|id| (name, id.table_id())))
                     .collect())
             })
-        }),
-    )
+        }))
 }
 
 fn init_factory(table_name_manager: TableNameManagerRef) -> Initializer<TableName, TableId> {
@@ -85,24 +82,6 @@ fn init_factory(table_name_manager: TableNameManagerRef) -> Initializer<TableNam
             })
         },
     )
-}
-
-fn invalidator<'a>(
-    cache: &'a Cache<TableName, TableId>,
-    idents: &'a [&CacheIdent],
-) -> BoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        for ident in idents {
-            if let CacheIdent::TableName(table_name) = ident {
-                cache.invalidate(table_name).await
-            }
-        }
-        Ok(())
-    })
-}
-
-fn filter(ident: &CacheIdent) -> bool {
-    matches!(ident, CacheIdent::TableName(_))
 }
 
 #[cfg(test)]
@@ -157,37 +136,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invalidate_cache() {
-        let mem_kv = Arc::new(MemoryKvBackend::default());
-        let cache = CacheBuilder::new(128).build();
-        let cache = new_table_name_cache("test".to_string(), cache, mem_kv.clone());
-        // Puts a new value.
-        let table_name_manager = TableNameManager::new(mem_kv.clone());
-        let table_id = 1024;
-        let table_name = TableName {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: "my_table".to_string(),
-        };
-        let txn = table_name_manager
-            .build_create_txn(
-                &TableNameKey {
-                    catalog: DEFAULT_CATALOG_NAME,
-                    schema: DEFAULT_SCHEMA_NAME,
-                    table: "my_table",
-                },
-                table_id,
-            )
-            .unwrap();
-        mem_kv.txn(txn).await.unwrap();
-        let got = cache.get_by_ref(&table_name).await.unwrap().unwrap();
-        assert_eq!(got, table_id);
+    async fn test_lookup_after_same_name_recreation() {
+        use crate::cache::new_table_info_cache;
+        use crate::ddl::test_util::create_table::test_create_table_task;
+        use crate::key::TableMetadataManager;
+        use crate::key::table_route::TableRouteValue;
 
-        assert!(cache.contains_key(&table_name));
-        cache
-            .invalidate(&[CacheIdent::TableName(table_name.clone())])
+        let kv = Arc::new(MemoryKvBackend::default());
+        let metadata = TableMetadataManager::new(kv.clone());
+        let names = new_table_name_cache("names".into(), Cache::new(128), kv.clone());
+        let infos = new_table_info_cache("infos".into(), Cache::new(128), kv);
+        let route = TableRouteValue::physical(vec![]);
+        let old = test_create_table_task("my_table", 1024).table_info;
+        let new = test_create_table_task("my_table", 1025).table_info;
+        let name = TableName {
+            catalog_name: old.catalog_name.clone(),
+            schema_name: old.schema_name.clone(),
+            table_name: old.name.clone(),
+        };
+        metadata
+            .create_table_metadata(old, route.clone(), Default::default())
             .await
             .unwrap();
-        assert!(!cache.contains_key(&table_name));
+        assert_eq!(names.get_by_ref(&name).await.unwrap(), Some(1024));
+        assert!(infos.get(1024).await.unwrap().is_some());
+
+        metadata
+            .delete_table_metadata(1024, &name, &route, &Default::default(), None)
+            .await
+            .unwrap();
+        metadata
+            .create_table_metadata(new, route, Default::default())
+            .await
+            .unwrap();
+        let tokens = [
+            CacheIdent::TableName(name.clone()),
+            CacheIdent::TableId(1024),
+        ];
+        names.invalidate(&tokens).await.unwrap();
+        infos.invalidate(&tokens).await.unwrap();
+
+        let ids = names.get_many(&[name]).await.unwrap();
+        assert_eq!(ids, [Some(1025)]);
+        let result = infos.get_many(&[1024, ids[0].unwrap()]).await.unwrap();
+        assert!(result[0].is_none());
+        assert_eq!(result[1].as_ref().unwrap().ident.table_id, 1025);
     }
 }
