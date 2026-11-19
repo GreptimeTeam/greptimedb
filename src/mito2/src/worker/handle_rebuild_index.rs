@@ -35,7 +35,7 @@ use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
 use crate::region::options::IndexOptions;
 use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
-use crate::sst::file::{self, FileHandle, FileMeta, RegionFileId, RegionIndexId};
+use crate::sst::file::{self, FileHandle, FileMeta, FileMetaRef, RegionFileId, RegionIndexId};
 use crate::sst::index::handler::{IndexKindProviderRef, PlanContext};
 use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
 use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
@@ -67,11 +67,29 @@ pub(crate) fn needs_background_indexes(file: &FileMeta) -> bool {
     })
 }
 
-/// Returns whether a build of `build_type` for every file of a region may replace the index of
-/// `file`. A flush build, which the end of a wait for the Leader lease asks for, builds no
-/// extension index, so it leaves the files that have one.
-fn is_whole_region_candidate(build_type: &IndexBuildType, file: &FileMeta) -> bool {
-    *build_type != IndexBuildType::Flush || needs_background_indexes(file)
+/// Selects the files that a build of `build_type` for every file of a region builds, from the
+/// region's files that its manifest records (`candidates`, each with the manifest's file meta).
+/// A flush build, which the end of a wait for the Leader lease asks for, builds no extension
+/// index, so it leaves the files that have one. Of the others it builds those whose index in the
+/// version (`version_meta`) is not current for the plan of `build_type`: a publication committed
+/// to the manifest but not yet applied is still invisible to queries, and its build still holds
+/// the file, so the manual task waits for it.
+fn select_whole_region_builds<F>(
+    candidates: Vec<(F, FileMetaRef)>,
+    version_meta: impl Fn(&F) -> &FileMeta,
+    registry: &IndexRegistry,
+    snapshot: &IndexBuildSnapshot,
+    build_type: &IndexBuildType,
+) -> Vec<(F, FileMetaRef)> {
+    candidates
+        .into_iter()
+        .filter(|(_, file_meta)| {
+            *build_type != IndexBuildType::Flush || needs_background_indexes(file_meta)
+        })
+        .filter(|(file, _)| {
+            index_needs_rebuild(registry, snapshot, version_meta(file), build_type.clone())
+        })
+        .collect()
 }
 
 impl<S> RegionWorkerLoop<S> {
@@ -293,7 +311,6 @@ impl<S> RegionWorkerLoop<S> {
                     let file_meta = current_file_meta(file.meta_ref().file_id)?;
                     Some((file.clone(), file_meta))
                 })
-                .filter(|(_, file_meta)| is_whole_region_candidate(&request.build_type, file_meta))
                 .collect::<Vec<_>>()
         } else {
             request
@@ -327,20 +344,13 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         let build_tasks = if request.file_metas.is_empty() {
-            // Check the version rather than the manifest: a publication committed
-            // to the manifest but not yet applied is still invisible to queries.
-            // Its build still holds the file, so the manual task waits for it.
-            candidates
-                .into_iter()
-                .filter(|(file, _)| {
-                    index_needs_rebuild(
-                        &registry,
-                        &snapshot,
-                        file.meta_ref(),
-                        request.build_type.clone(),
-                    )
-                })
-                .collect::<Vec<_>>()
+            select_whole_region_builds(
+                candidates,
+                |file: &FileHandle| file.meta_ref(),
+                &registry,
+                &snapshot,
+                &request.build_type,
+            )
         } else {
             candidates
         };
@@ -616,23 +626,46 @@ mod tests {
 
     #[test]
     fn test_whole_region_flush_build_leaves_files_with_extension_indexes() {
+        let request = CreateRequestBuilder::new().build_with_index();
+        let mut metadata = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        metadata.primary_key(request.primary_key);
+        for column in request.column_metadatas {
+            metadata.push_column_metadata(column);
+        }
+        let snapshot = IndexBuildSnapshot {
+            metadata: Arc::new(metadata.build().unwrap()),
+            index_options: IndexOptions::default(),
+        };
+        let registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
         let sketched = FileMeta {
-            available_indexes: [crate::sst::file::IndexType::HllIndex]
-                .into_iter()
-                .collect(),
+            file_id: FileId::random(),
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: smallvec::smallvec![crate::sst::file::IndexType::HllIndex],
+                ..Default::default()
+            }],
             ..Default::default()
         };
-        let plain = FileMeta::default();
+        let plain = FileMeta {
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let select = |build_type| {
+            let candidates = [&sketched, &plain]
+                .map(|file| (file.clone(), FileMetaRef::from(file.clone())))
+                .to_vec();
+            select_whole_region_builds(candidates, |file| file, &registry, &snapshot, &build_type)
+                .into_iter()
+                .map(|(file, _)| file.file_id)
+                .collect::<Vec<_>>()
+        };
 
-        assert!(!is_whole_region_candidate(
-            &IndexBuildType::Flush,
-            &sketched
-        ));
-        assert!(is_whole_region_candidate(&IndexBuildType::Flush, &plain));
-        assert!(is_whole_region_candidate(
-            &IndexBuildType::Manual,
-            &sketched
-        ));
+        assert_eq!(vec![plain.file_id], select(IndexBuildType::Flush));
+        assert_eq!(
+            vec![sketched.file_id, plain.file_id],
+            select(IndexBuildType::Manual)
+        );
     }
 
     #[derive(Debug)]
