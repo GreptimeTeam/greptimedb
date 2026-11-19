@@ -14,7 +14,7 @@
 
 //! Per-series scan implementation.
 
-mod prepared;
+pub(crate) mod prepared;
 mod raw;
 
 use std::collections::HashSet;
@@ -134,7 +134,7 @@ type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
 type CandidateSenderList = Vec<Option<mpsc::UnboundedSender<Result<SeriesReaderInput>>>>;
 
 #[derive(Clone)]
-struct RawScanPreparation {
+pub(crate) struct RawScanPreparation {
     schema: Arc<SeriesSchema>,
     fields: Vec<(usize, ConcreteDataType)>,
     predicates: Vec<Arc<dyn PhysicalExpr>>,
@@ -173,6 +173,7 @@ struct SeriesReaderInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SeriesScanMode {
+    Prepared,
     Legacy,
     TwoPhase,
 }
@@ -180,6 +181,7 @@ enum SeriesScanMode {
 impl SeriesScanMode {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Prepared => "prepared",
             Self::Legacy => "legacy",
             Self::TwoPhase => "two_phase",
         }
@@ -226,7 +228,9 @@ pub struct SeriesScan {
 impl SeriesScan {
     /// Creates a new [SeriesScan].
     pub(crate) fn new(input: ScanInput, experimental_series_scan_v2: bool) -> Self {
-        let mode = if experimental_series_scan_v2 && Self::supports_two_phase(&input) {
+        let mode = if input.requires_narthex_preparation() {
+            SeriesScanMode::Prepared
+        } else if experimental_series_scan_v2 && Self::supports_two_phase(&input) {
             SeriesScanMode::TwoPhase
         } else {
             SeriesScanMode::Legacy
@@ -244,7 +248,9 @@ impl SeriesScan {
         // Create the shared pruner with number of workers equal to CPU cores.
         let num_workers = common_stat::get_total_cpu_cores().max(1);
         let pruner = match mode {
-            SeriesScanMode::Legacy => Arc::new(Pruner::new(stream_ctx.clone(), num_workers)),
+            SeriesScanMode::Legacy | SeriesScanMode::Prepared => {
+                Arc::new(Pruner::new(stream_ctx.clone(), num_workers))
+            }
             SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
                 stream_ctx.clone(),
                 num_workers,
@@ -305,11 +311,13 @@ impl SeriesScan {
     }
 
     fn uses_columnar(&self) -> bool {
-        self.stream_ctx
-            .input
-            .series_index
-            .as_ref()
-            .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
+        self.stream_ctx.input.requires_narthex_preparation()
+            || self
+                .stream_ctx
+                .input
+                .series_index
+                .as_ref()
+                .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
     }
 
     /// Whether every selected *field* is a `Float64`, which is all the columnar prepared reader
@@ -366,6 +374,16 @@ impl SeriesScan {
             return Ok(cached);
         }
         let computed = self.prepare_raw_scan_uncached(label_source)?;
+        if self.stream_ctx.input.requires_narthex_preparation()
+            && !matches!(computed, Some((_, true)))
+        {
+            return Err(BoxedError::new(
+                InvalidRecordBatchSnafu {
+                    reason: "Narthex raw scans require prepared-series support",
+                }
+                .build(),
+            ));
+        }
         // Both sides of the cache are cheap to clone, and callers own their copy: the merge schema
         // helper rewrites the field indices and predicates of the preparation it is given, which
         // must never reach the stored answer.
@@ -593,6 +611,7 @@ impl SeriesScan {
         'static,
         Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
     > {
+        let scan_pool = ctx.memory_pool.clone();
         let state = self.prepared.clone();
         let stream_ctx = self.stream_ctx.clone();
         let ranges = self
@@ -619,7 +638,7 @@ impl SeriesScan {
                 return Ok(None);
             }
             state
-                .prepare(stream_ctx, ranges, labels, preparation, metrics)
+                .prepare(stream_ctx, ranges, labels, preparation, metrics, scan_pool)
                 .await
                 .map(Some)
         })
@@ -705,6 +724,20 @@ impl SeriesScan {
         );
 
         match self.mode {
+            SeriesScanMode::Prepared => Ok(prepared::scan_batches(
+                self.prepared.clone(),
+                self.stream_ctx.clone(),
+                self.properties
+                    .partitions
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect(),
+                partition,
+                self.properties.num_partitions().max(1),
+                part_metrics,
+                ctx.memory_pool.clone(),
+            )),
             SeriesScanMode::Legacy => self.scan_legacy_batch_in_partition(
                 partition,
                 part_metrics,
@@ -1154,6 +1187,9 @@ impl RegionScanner for SeriesScan {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
+        if self.stream_ctx.input.requires_narthex_preparation() {
+            return vec![false; filter_exprs.len()];
+        }
         let matched = self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs);
         // The added filters change the predicate group the preflight inspects.
         self.clear_preflight_cache();
@@ -1166,7 +1202,9 @@ impl RegionScanner for SeriesScan {
         self.stream_ctx.input.predicate.clear_dyn_filters();
         let num_workers = common_stat::get_total_cpu_cores().max(1);
         self.pruner = match self.mode {
-            SeriesScanMode::Legacy => Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers)),
+            SeriesScanMode::Legacy | SeriesScanMode::Prepared => {
+                Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers))
+            }
             SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
                 self.stream_ctx.clone(),
                 num_workers,

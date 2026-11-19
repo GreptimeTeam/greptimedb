@@ -524,6 +524,11 @@ impl TestEnv {
         self
     }
 
+    pub(crate) fn with_file_ref_manager(mut self, manager: FileReferenceManagerRef) -> Self {
+        self.file_ref_manager = manager;
+        self
+    }
+
     /// Overwrites the original `log_store_factory`.
     pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;

@@ -402,6 +402,21 @@ impl AccessLayer {
             provider.can_merge_inputs &= write_opts.max_file_size.is_none();
         }
         let context = context.unwrap_or_default();
+        if request.sst_write_format == FormatType::Narthex {
+            if context.limits.is_some() {
+                return crate::error::UnsupportedOperationSnafu {
+                    err_msg: "Narthex table compaction is unsupported",
+                }
+                .fail();
+            }
+            return crate::sst::narthex::write_samples(
+                self,
+                request,
+                context.guard,
+                context.cancellation,
+            )
+            .await;
+        }
         let limits = context.limits;
         let guard = context.guard.clone();
         let cancellation = context.cancellation.clone();
@@ -491,6 +506,12 @@ impl AccessLayer {
                             write_opts,
                         )
                         .await?
+                }
+                FormatType::Narthex => {
+                    return crate::error::UnsupportedOperationSnafu {
+                        err_msg: "narthex writer must bypass Parquet cache",
+                    }
+                    .fail();
                 }
                 FormatType::Flat => {
                     writer
@@ -649,7 +670,8 @@ impl AccessLayer {
                 }
 
                 let path = entry.path();
-                if !path.ends_with(".parquet") && !path.ends_with(".puffin") {
+                if !path.ends_with(".parquet") && !path.ends_with(".puffin")
+                    && crate::sst::location::parse_narthex_file_id(path).is_none() {
                     continue;
                 }
 

@@ -68,7 +68,10 @@ fn cache_flat_range_stream_bench(c: &mut Criterion) {
     let encoded_part = encoder.encode_part(&bulk_part).unwrap().unwrap();
 
     // Decode all record batches
-    let num_row_groups = encoded_part.metadata().parquet_metadata.num_row_groups();
+    let num_row_groups = encoded_part
+        .parquet_metadata()
+        .expect("benchmark uses Parquet")
+        .num_row_groups();
     let context = Arc::new(
         BulkIterContext::new(
             metadata.clone(),

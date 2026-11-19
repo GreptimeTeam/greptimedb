@@ -208,7 +208,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Err(e));
             return;
         }
-        if let Err(e) = options.validate_column_compression(&new_meta) {
+        if let Err(e) = options.validate_schema(&new_meta) {
             sender.send(Err(e));
             return;
         }
@@ -285,6 +285,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         }
                         .build()
                     })?;
+                    ensure!(
+                        new_format == current_options.sst_format.unwrap_or_default()
+                            || (new_format != FormatType::Narthex
+                                && current_options.sst_format != Some(FormatType::Narthex)),
+                        store_api::metadata::InvalidRegionRequestSnafu {
+                            region_id: region.region_id,
+                            err: "Changing an existing region to or from Narthex is unsupported",
+                        }
+                    );
                     // If the format is unchanged, we also consider the option is altered.
                     if new_format != current_options.sst_format.unwrap_or_default() {
                         all_options_altered = false;
@@ -377,15 +386,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             .build()
         })?;
-        candidate
-            .validate_column_compression(&version.metadata)
-            .map_err(|e| {
-                store_api::metadata::InvalidRegionRequestSnafu {
-                    region_id: region.region_id,
-                    err: e.to_string(),
-                }
-                .build()
-            })?;
+        candidate.validate_schema(&version.metadata).map_err(|e| {
+            store_api::metadata::InvalidRegionRequestSnafu {
+                region_id: region.region_id,
+                err: e.to_string(),
+            }
+            .build()
+        })?;
         if all_options_altered {
             region.version_control.alter_options(candidate);
             Ok(None)

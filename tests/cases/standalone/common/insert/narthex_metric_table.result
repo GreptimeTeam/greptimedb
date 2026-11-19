@@ -1,0 +1,58 @@
+CREATE TABLE narthex_physical (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    cpu DOUBLE
+) ENGINE=metric WITH (physical_metric_table='true', sst_format='narthex');
+
+Affected Rows: 0
+
+CREATE TABLE narthex_cpu (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    cpu DOUBLE
+) ENGINE=metric WITH (on_physical_table='narthex_physical');
+
+Affected Rows: 0
+
+INSERT INTO narthex_cpu (ts, host, cpu) VALUES (1000, 'a', 1.5), (2000, 'b', 2.5);
+
+Affected Rows: 2
+
+SELECT host, cpu FROM narthex_cpu ORDER BY host;
+
++------+-----+
+| host | cpu |
++------+-----+
+| a    | 1.5 |
+| b    | 2.5 |
++------+-----+
+
+ADMIN FLUSH_TABLE('narthex_physical');
+
++---------------------------------------+
+| ADMIN FLUSH_TABLE('narthex_physical') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+INSERT INTO narthex_cpu (ts, host, cpu) VALUES (3000, 'a', 3.0);
+
+Affected Rows: 1
+
+SELECT host, SUM(cpu) FROM narthex_cpu GROUP BY host ORDER BY host;
+
++------+----------------------+
+| host | sum(narthex_cpu.cpu) |
++------+----------------------+
+| a    | 4.5                  |
+| b    | 2.5                  |
++------+----------------------+
+
+DROP TABLE narthex_cpu;
+
+Affected Rows: 0
+
+DROP TABLE narthex_physical;
+
+Affected Rows: 0
+

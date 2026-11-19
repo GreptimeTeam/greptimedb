@@ -22,6 +22,8 @@ pub mod multi_region;
 mod overlap;
 pub mod picker;
 mod reader;
+#[cfg(test)]
+pub(crate) use reader::CompactionSstReaderBuilder;
 pub mod run;
 mod scheduler;
 mod task;
