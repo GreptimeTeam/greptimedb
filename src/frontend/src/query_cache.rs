@@ -882,6 +882,17 @@ impl RollupCache {
         &self.config
     }
 
+    /// How many entries the cache holds once pending maintenance has run.
+    ///
+    /// Tests state with it that a request filled exactly the chunks it read, or that
+    /// it filled nothing because it never took the cached path. Production reads
+    /// nothing of the sort, so it is not part of the cache's surface.
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> u64 {
+        self.entries.run_pending_tasks();
+        self.entries.entry_count()
+    }
+
     /// Plans `stmt` of `identity` into chunk keys and direct spans as of `now`.
     ///
     /// The returned direct spans are the caller's to send to storage; their points
@@ -1451,7 +1462,8 @@ mod tests {
     fn a_non_windowable_expression_bypasses_the_cache() {
         let cache = cache();
         let now = at(LATER_MS);
-        for query in ["sum(rate(x[5m]))", "{host=\"a\"}", "rate(x[5m] offset 1m)"] {
+        // `sum` is admitted by the window allowlist, `avg` is not.
+        for query in ["avg(rate(x[5m]))", "{host=\"a\"}", "rate(x[5m] offset 1m)"] {
             let stmt = stmt_from(query, HEAD_MS, 11, STEP_MS);
             assert_eq!(
                 plan_chunks(&stmt, Duration::ZERO, CHUNK, now),

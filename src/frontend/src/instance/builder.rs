@@ -63,6 +63,7 @@ use crate::instance::Instance;
 use crate::instance::entity_graph::EntityGraphProviderImpl;
 use crate::instance::otlp::TraceAuxCache;
 use crate::instance::region_query::FrontendRegionQueryHandler;
+use crate::query_cache::RollupCache;
 use crate::service_config::BatcherOptions;
 
 /// The frontend [`Instance`] builder.
@@ -77,6 +78,7 @@ pub struct FrontendBuilder {
     procedure_executor: ProcedureExecutorRef,
     process_manager: ProcessManagerRef,
     local_file_access: LocalFileAccess,
+    rollup_cache: Option<Arc<RollupCache>>,
 }
 
 impl FrontendBuilder {
@@ -104,7 +106,19 @@ impl FrontendBuilder {
             procedure_executor,
             process_manager,
             local_file_access: LocalFileAccess::Disabled,
+            rollup_cache: None,
         }
+    }
+
+    /// Installs the frontend-local rollup cache of PromQL range queries.
+    ///
+    /// Off by default, and not configurable from `FrontendOptions` yet: the cache is
+    /// installed by an embedder that already holds one, which today is a test. This is
+    /// the only seam that turns the cached range path on, so wiring the option later
+    /// is a matter of building a [`RollupCache`] here when the option says so.
+    pub fn with_rollup_cache(mut self, rollup_cache: Arc<RollupCache>) -> Self {
+        self.rollup_cache = Some(rollup_cache);
+        self
     }
 
     #[cfg(test)]
@@ -450,6 +464,7 @@ impl FrontendBuilder {
             trace_aux_limiter,
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),
+            rollup_cache: self.rollup_cache,
         })
     }
 }

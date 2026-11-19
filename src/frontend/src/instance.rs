@@ -29,6 +29,7 @@ mod opentsdb;
 mod otlp;
 pub mod prom_store;
 mod promql;
+mod promql_cache;
 mod region_query;
 mod schema_selection;
 
@@ -50,7 +51,7 @@ use catalog::process_manager::{
 };
 use client::OutputData;
 use common_base::Plugins;
-use common_base::cancellation::CancellableFuture;
+use common_base::cancellation::{CancellableFuture, CancellationHandle};
 use common_batcher::request_limiter::RequestLimiter;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
@@ -59,9 +60,9 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
-use common_query::Output;
-use common_recordbatch::RecordBatchStreamWrapper;
+use common_query::{Output, OutputMeta};
 use common_recordbatch::error::StreamTimeoutSnafu;
+use common_recordbatch::{RecordBatchStreamWrapper, RecordBatches};
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
 use common_time::timestamp::TimeUnit;
@@ -76,7 +77,10 @@ use operator::statement::{StatementExecutor, StatementExecutorRef};
 use partition::manager::PartitionRuleManagerRef;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
+// The absolute path names the `promql` crate, not this module's `promql` submodule.
+use ::promql::extension_plan::{FusedSeries, RawSeriesSource};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher};
+use promql_parser::parser::EvalStmt;
 use promql_parser::util::{ExprVisitor, walk_expr};
 use query::QueryEngineRef;
 use query::metrics::OnDone;
@@ -115,8 +119,11 @@ use crate::error::{
     InvalidSqlSnafu, ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result,
     SqlExecInterceptedSnafu, StatementTimeoutSnafu, TableOperationSnafu,
 };
+use crate::query_cache::{QueryIdentity, QueryRoute, RollupCache};
 use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
+
+use self::promql_cache::{RangeOutcome, WindowExecutor, execute_range, may_record_annotations};
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -147,6 +154,13 @@ pub struct Instance {
     trace_aux_limiter: Option<RequestLimiter>,
     otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
+    /// The frontend-local rollup cache of PromQL range queries, when one is
+    /// installed.
+    ///
+    /// Disabled by default: there is no configuration option that installs it yet,
+    /// so only an embedder (a test, today) that supplies one through the builder
+    /// turns the cached range path on.
+    rollup_cache: Option<Arc<RollupCache>>,
 }
 
 impl Instance {
@@ -223,6 +237,11 @@ impl Instance {
 
     pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
         self.statement_executor.procedure_executor()
+    }
+
+    /// The rollup cache a range query may be served from, when one is installed.
+    pub fn rollup_cache(&self) -> Option<&Arc<RollupCache>> {
+        self.rollup_cache.as_ref()
     }
 
     pub fn suspend_state(&self) -> Arc<AtomicBool> {
@@ -1565,6 +1584,177 @@ impl Instance {
     }
 }
 
+impl Instance {
+    /// Serves a PromQL range query from the rollup cache when one is installed and
+    /// the request is cacheable, or answers [`None`] to keep the original plan.
+    ///
+    /// Everything that decides whether a request is cacheable is checked here,
+    /// before a single span is executed, so a refused request never pays for a
+    /// partial chunked execution:
+    ///
+    /// - no cache installed (the default): the original path;
+    /// - an instant query (`start == end`): the original path, since the cache
+    ///   holds chunks of an evaluation grid;
+    /// - a statement that can record a PromQL annotation: the original path, since
+    ///   a chunk served from memory is never re-evaluated and so cannot replay what
+    ///   its read recorded (see [`may_record_annotations`]).
+    ///
+    /// The statement itself then has to survive [`RollupCache::plan`], which refuses
+    /// anything outside the window allowlist and any grid whose chunk bounds would
+    /// fall between its points.
+    #[allow(clippy::too_many_arguments)]
+    async fn cached_range_output(
+        &self,
+        query: &PromQuery,
+        eval_stmt: &EvalStmt,
+        alias: Option<String>,
+        requires_output_ordering: bool,
+        plan: &LogicalPlan,
+        query_ctx: &QueryContextRef,
+        cancellation_handle: Arc<CancellationHandle>,
+    ) -> server_error::Result<Option<RecordBatches>> {
+        let Some(cache) = self.rollup_cache.as_ref() else {
+            return Ok(None);
+        };
+        // An instant query is one point, and the cache keys whole chunks of a grid.
+        if eval_stmt.start == eval_stmt.end {
+            return Ok(None);
+        }
+        if may_record_annotations(&eval_stmt.expr) {
+            return Ok(None);
+        }
+        let Some(identity) = Self::range_query_identity(
+            query,
+            eval_stmt,
+            alias.clone(),
+            requires_output_ordering,
+            plan,
+            query_ctx,
+        ) else {
+            return Ok(None);
+        };
+        let executor = StatementWindowExecutor {
+            instance: self,
+            query_ctx: query_ctx.clone(),
+            alias,
+            ordered: requires_output_ordering,
+            cancellation_handle,
+        };
+        match execute_range(&executor, cache, identity, eval_stmt, SystemTime::now()).await? {
+            RangeOutcome::Merged(rows) => Ok(Some(rows)),
+            RangeOutcome::Bypassed => Ok(None),
+        }
+    }
+
+    /// The reusable half of this request: every dimension two requests must agree on
+    /// before one may answer the other's points.
+    ///
+    /// [`None`] when a dimension does not fit the identity's integer fields, because
+    /// a narrowed value would key the same span under a different grid.
+    fn range_query_identity(
+        query: &PromQuery,
+        eval_stmt: &EvalStmt,
+        alias: Option<String>,
+        ordered: bool,
+        plan: &LogicalPlan,
+        query_ctx: &QueryContextRef,
+    ) -> Option<QueryIdentity> {
+        Some(QueryIdentity {
+            tenant: query_ctx.current_user().username().to_string(),
+            catalog: query_ctx.current_catalog().to_string(),
+            schema: query_ctx.current_schema(),
+            query: query.query.clone(),
+            step_ms: i64::try_from(eval_stmt.interval.as_millis()).ok()?,
+            lookback_ms: i64::try_from(eval_stmt.lookback_delta.as_millis()).ok()?,
+            route: plan_route(plan),
+            ordered,
+            alias,
+            read_preference: Some(query_ctx.read_preference().to_string()),
+        })
+    }
+}
+
+/// The planner that evaluated `plan`, which every cache key records.
+///
+/// Both routes evaluate the same expression on the same grid but build different
+/// plans and different row layouts, so a chunk of one must never answer the other.
+/// The native route is the one that builds a [`FusedSeries`] node; the legacy route
+/// never does, so its absence is what makes a plan the legacy one.
+fn plan_route(plan: &LogicalPlan) -> QueryRoute {
+    fn is_native(plan: &LogicalPlan) -> bool {
+        if let LogicalPlan::Extension(extension) = plan {
+            let name = extension.node.name();
+            if name == FusedSeries::name() || name == RawSeriesSource::name() {
+                return true;
+            }
+        }
+        plan.inputs().into_iter().any(is_native)
+    }
+
+    if is_native(plan) {
+        QueryRoute::Native
+    } else {
+        QueryRoute::Legacy
+    }
+}
+
+/// Executes the subwindows of one range query through the statement executor.
+///
+/// A subwindow is planned and executed exactly as the request itself would be, so
+/// route selection, planning, and execution behave the same; the request's
+/// cancellation handle covers every window, and the caller's interceptors and
+/// process-list entry stay around the whole call.
+struct StatementWindowExecutor<'a> {
+    instance: &'a Instance,
+    query_ctx: QueryContextRef,
+    alias: Option<String>,
+    ordered: bool,
+    cancellation_handle: Arc<CancellationHandle>,
+}
+
+#[async_trait]
+impl WindowExecutor for StatementWindowExecutor<'_> {
+    async fn execute_window(&self, eval_stmt: EvalStmt) -> server_error::Result<RecordBatches> {
+        let statement = QueryStatement::Promql(eval_stmt, self.alias.clone());
+        let plan = self
+            .instance
+            .statement_executor
+            .plan(&statement, self.query_ctx.clone())
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)?;
+        let plan = if self.ordered {
+            plan
+        } else {
+            promql::remove_output_sort(plan)
+        };
+        let output = CancellableFuture::new(
+            self.instance
+                .statement_executor
+                .exec_plan(plan, self.query_ctx.clone()),
+            self.cancellation_handle.clone(),
+        )
+        .await
+        .map_err(|_| server_error::CancelledSnafu.build())?
+        .map_err(BoxedError::new)
+        .context(ExecuteQuerySnafu)?;
+        let output = map_query_output(output)
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)?;
+        match output.data {
+            OutputData::RecordBatches(batches) => Ok(batches),
+            OutputData::Stream(stream) => RecordBatches::try_collect(stream)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteQuerySnafu),
+            OutputData::AffectedRows(_) => Err(UnexpectedResultSnafu {
+                reason: "a PromQL range query answered with affected rows".to_string(),
+            }
+            .build()),
+        }
+    }
+}
+
 #[async_trait]
 impl PrometheusHandler for Instance {
     async fn query_exemplars(
@@ -1639,9 +1829,10 @@ impl PrometheusHandler for Instance {
         let requires_output_ordering = query.requires_output_ordering();
         let (query, stmt) = query.into_parts();
 
-        let QueryStatement::Promql(eval_stmt, _) = &stmt else {
+        let QueryStatement::Promql(eval_stmt, alias) = &stmt else {
             unreachable!("query is parsed from promql");
         };
+        let cached_alias = alias.clone();
 
         let plan = self
             .statement_executor
@@ -1658,16 +1849,10 @@ impl PrometheusHandler for Instance {
 
         interceptor.pre_execute(&query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
 
-        // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
-        let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
-            CatalogQueryStatement::Promql(eval_stmt, alias)
-        } else {
-            // It should not happen since the query is already parsed successfully.
-            return UnexpectedResultSnafu {
-                reason: "The query should always be promql.".to_string(),
-            }
-            .fail();
-        };
+        // Take the EvalStmt from the original QueryStatement and use it to create the
+        // CatalogQueryStatement. It is copied rather than moved, because the statement
+        // passed the `let else` above and the range path may still read it below.
+        let query_statement = CatalogQueryStatement::Promql(eval_stmt.clone(), alias.clone());
         let raw_query = query_statement.to_string();
 
         let slow_query_timer = self.slow_query_options.enable.then(|| {
@@ -1690,16 +1875,42 @@ impl PrometheusHandler for Instance {
             slow_query_timer,
         );
 
-        let query_fut = self.statement_executor.exec_plan(plan, query_ctx.clone());
+        // A range query over a whole evaluation grid is the one shape the rollup cache
+        // serves. It is consulted after authorization, after `pre_execute`, and under the
+        // same process-list ticket, so a cached answer passes exactly the checks an
+        // executed one does; anything the cache declines keeps the original plan below.
+        let cached = self
+            .cached_range_output(
+                &query,
+                eval_stmt,
+                cached_alias,
+                requires_output_ordering,
+                &plan,
+                &query_ctx,
+                ticket.cancellation_handle.clone(),
+            )
+            .await?;
 
-        let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
-            .await
-            .map_err(|_| servers::error::CancelledSnafu.build())?
-            .map_err(BoxedError::new)
-            .context(ExecuteQuerySnafu)?;
-        let output = map_query_output(output)
-            .map_err(BoxedError::new)
-            .context(ExecuteQuerySnafu)?;
+        let output = match cached {
+            Some(rows) => Output {
+                data: OutputData::RecordBatches(rows),
+                // Every row was read into memory above, so the merged answer carries no
+                // stretches of one plan to point at.
+                meta: OutputMeta::default(),
+            },
+            None => {
+                let query_fut = self.statement_executor.exec_plan(plan, query_ctx.clone());
+
+                let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                    .await
+                    .map_err(|_| servers::error::CancelledSnafu.build())?
+                    .map_err(BoxedError::new)
+                    .context(ExecuteQuerySnafu)?;
+                map_query_output(output)
+                    .map_err(BoxedError::new)
+                    .context(ExecuteQuerySnafu)?
+            }
+        };
         let Output { meta, data } = output;
         let data = match data {
             OutputData::Stream(stream) => {
@@ -3050,6 +3261,260 @@ mod tests {
         Ok(EmptyTable::from_table_info(&table_info))
     }
 
+    /// A metric table of one series whose rows are exactly `rows`.
+    ///
+    /// A PromQL range query reads a table through its time index and its value
+    /// columns, which a table's metadata names, so the fixture states both: the
+    /// `ts` column is the time index and `cpu` is the single value column. Every
+    /// scan sees the same rows, which is what makes a cached answer and an executed
+    /// one comparable.
+    fn test_metric_table_with_rows(rows: Vec<(i64, f64)>) -> TableRef {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let (timestamps, values): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+        let recordbatch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(timestamps)) as VectorRef,
+                Arc::new(Float64Vector::from_vec(values)) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            // No tag columns: the fixture is one series.
+            .primary_key_indices(vec![])
+            .value_indices(vec![1])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::new("cpu", table_meta)
+            .table_id(1024)
+            .catalog_name("greptime")
+            .schema_name("public")
+            .build()
+            .unwrap();
+        Arc::new(Table::new(
+            Arc::new(table_info),
+            FilterPushDownType::Unsupported,
+            Arc::new(StaticRowsDataSource { recordbatch }),
+        ))
+    }
+
+    /// A data source that answers every scan with the same rows.
+    struct StaticRowsDataSource {
+        recordbatch: RecordBatch,
+    }
+
+    impl StaticRowsDataSource {
+        /// The fixture has no storage error of its own, so a failure to lay its one
+        /// batch out is reported as the test bug it is.
+        fn boxed(error: impl std::fmt::Display) -> BoxedError {
+            BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
+        }
+    }
+
+    impl DataSource for StaticRowsDataSource {
+        fn get_stream(
+            &self,
+            request: ScanRequest,
+        ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+            let projected = match request.projection.as_deref() {
+                Some(indices) => self
+                    .recordbatch
+                    .df_record_batch()
+                    .project(indices)
+                    .map_err(Self::boxed)?,
+                None => self.recordbatch.df_record_batch().clone(),
+            };
+            let schema = Arc::new(GtSchema::try_from(projected.schema()).map_err(Self::boxed)?);
+            let recordbatch = RecordBatch::from_df_record_batch(schema.clone(), projected);
+            Ok(RecordBatches::try_new(schema, vec![recordbatch])
+                .map_err(Self::boxed)?
+                .as_stream())
+        }
+    }
+
+    /// Runs one PromQL request and returns the rows it answered with, in order.
+    async fn promql_rows(
+        instance: &Instance,
+        query: &PromQuery,
+        ctx: QueryContextRef,
+    ) -> TestResult<RecordBatches> {
+        let output = PrometheusHandler::do_query(instance, query, ctx)
+            .await
+            .with_context(|_| ExecutePromqlSnafu {
+                query: query.query.clone(),
+            })
+            .with_context(|_| ExecuteSqlSnafu {
+                sql: query.query.clone(),
+            })?;
+        match output.data {
+            OutputData::RecordBatches(rows) => Ok(rows),
+            OutputData::Stream(stream) => RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)
+                .with_context(|_| ExecuteSqlSnafu {
+                    sql: query.query.clone(),
+                }),
+            OutputData::AffectedRows(_) => unreachable!("a PromQL query returns rows"),
+        }
+    }
+
+    /// The rows of a result, in order, as one printed table.
+    ///
+    /// The spans of a chunked request read into several batches while a request that
+    /// executed its whole plan reads into one, so comparing batch by batch would
+    /// compare layouts rather than rows; one table prints the rows either way.
+    fn printed(rows: &RecordBatches) -> String {
+        rows.pretty_print().unwrap()
+    }
+
+    /// A range cache whose chunk is five minutes of a one-minute query, with no
+    /// tail, so a request over whole chunks is cacheable in a test that runs at
+    /// wall-clock time.
+    fn test_rollup_cache() -> Arc<crate::query_cache::RollupCache> {
+        let config = crate::query_cache::RollupCacheConfig::new(
+            1 << 20,
+            Duration::ZERO,
+            Duration::from_secs(300),
+            Duration::from_secs(60),
+            Duration::from_secs(3_600),
+        )
+        .unwrap();
+        Arc::new(crate::query_cache::RollupCache::new(config, None))
+    }
+
+    /// One-minute steps from 10:00, with a gap between minutes 12 and 19: a
+    /// lookback of one minute leaves the points inside the gap without a sample.
+    fn metric_rows() -> Vec<(i64, f64)> {
+        const HEAD_MS: i64 = 36_000_000;
+        (0..30i64)
+            .filter(|minute| !(13..19).contains(minute))
+            .map(|minute| (HEAD_MS + minute * 60_000, minute as f64))
+            .collect()
+    }
+
+    /// The range query `expr` asks for: 10:00 to 10:29, one-minute steps, a
+    /// one-minute lookback.
+    fn metric_range_query(expr: &str) -> PromQuery {
+        PromQuery {
+            query: expr.to_string(),
+            start: "36000".to_string(),
+            end: "37740".to_string(),
+            step: "60".to_string(),
+            lookback: "60".to_string(),
+            alias: None,
+        }
+    }
+
+    /// An instance over [`test_metric_table_with_rows`], with `cache` installed
+    /// when one is given.
+    async fn metric_instance(
+        rollup_cache: Option<Arc<crate::query_cache::RollupCache>>,
+    ) -> TestResult<Instance> {
+        let catalog_manager = catalog::memory::MemoryCatalogManager::new_with_table(
+            test_metric_table_with_rows(metric_rows()),
+        );
+        test_instance_with_catalog_manager_and_cache(
+            catalog_manager,
+            test_table(1025, "target")?,
+            Plugins::default(),
+            None,
+            Arc::new(NoopProcedureExecutor),
+            rollup_cache,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn rollup_cache_is_disabled_by_default() -> TestResult<()> {
+        let instance = metric_instance(None).await?;
+
+        assert!(instance.rollup_cache().is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_repeated_range_query_is_served_from_the_rollup_cache() -> TestResult<()> {
+        let cached = metric_instance(Some(test_rollup_cache())).await?;
+        let cache = cached.rollup_cache().unwrap().clone();
+        let plain = metric_instance(None).await?;
+        let query = metric_range_query("cpu");
+
+        let cold = promql_rows(&cached, &query, test_query_ctx(1)).await?;
+        let filled = cache.entry_count();
+        assert!(filled > 0, "the range query filled its chunks");
+
+        let warm = promql_rows(&cached, &query, test_query_ctx(2)).await?;
+        let uncached = promql_rows(&plain, &query, test_query_ctx(3)).await?;
+
+        assert_eq!(printed(&uncached), printed(&cold));
+        assert_eq!(printed(&uncached), printed(&warm));
+        assert_eq!(
+            filled,
+            cache.entry_count(),
+            "a repeated request fills nothing new"
+        );
+        // The gap is in the answer: the points inside it have no sample within the
+        // one-minute lookback, so the range query holds fewer rows than the thirty
+        // grid points it evaluates.
+        let rows = warm.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        assert!(
+            rows > 0 && rows < 30,
+            "the gap leaves points unanswered: {rows}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_instant_query_bypasses_the_rollup_cache() -> TestResult<()> {
+        let cached = metric_instance(Some(test_rollup_cache())).await?;
+        let cache = cached.rollup_cache().unwrap().clone();
+        let plain = metric_instance(None).await?;
+        let mut query = metric_range_query("cpu");
+        query.end = query.start.clone();
+
+        let instant = promql_rows(&cached, &query, test_query_ctx(1)).await?;
+        let uncached = promql_rows(&plain, &query, test_query_ctx(2)).await?;
+
+        assert_eq!(printed(&uncached), printed(&instant));
+        assert_eq!(0, cache.entry_count(), "an instant query fills nothing");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rate_range_query_keeps_the_original_path() -> TestResult<()> {
+        // A window folding float samples and native histograms records an
+        // annotation, which a chunk served from memory cannot replay; the range path
+        // therefore leaves such a statement to the original plan until annotations
+        // are stored with the payload.
+        let cached = metric_instance(Some(test_rollup_cache())).await?;
+        let cache = cached.rollup_cache().unwrap().clone();
+        let plain = metric_instance(None).await?;
+        let query = metric_range_query("rate(cpu[1m])");
+
+        let first = promql_rows(&cached, &query, test_query_ctx(1)).await?;
+        let second = promql_rows(&cached, &query, test_query_ctx(2)).await?;
+        let uncached = promql_rows(&plain, &query, test_query_ctx(3)).await?;
+
+        assert_eq!(printed(&uncached), printed(&first));
+        assert_eq!(printed(&uncached), printed(&second));
+        assert_eq!(0, cache.entry_count(), "a rate query is not cached");
+
+        Ok(())
+    }
+
     fn test_metric_names_table() -> TableRef {
         let schema = Arc::new(GtSchema::new(vec![
             ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
@@ -3279,6 +3744,27 @@ mod tests {
         metric_names_table: Option<TableRef>,
         procedure_executor: ProcedureExecutorRef,
     ) -> TestResult<Instance> {
+        test_instance_with_catalog_manager_and_cache(
+            catalog_manager,
+            target_table,
+            plugins,
+            metric_names_table,
+            procedure_executor,
+            None,
+        )
+        .await
+    }
+
+    /// [`test_instance_with_catalog_manager`] with the rollup cache the PromQL range
+    /// path serves from, when a test installs one.
+    async fn test_instance_with_catalog_manager_and_cache(
+        catalog_manager: Arc<catalog::memory::MemoryCatalogManager>,
+        target_table: TableRef,
+        plugins: Plugins,
+        metric_names_table: Option<TableRef>,
+        procedure_executor: ProcedureExecutorRef,
+        rollup_cache: Option<Arc<crate::query_cache::RollupCache>>,
+    ) -> TestResult<Instance> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
         let target_table_name = "target";
@@ -3315,7 +3801,7 @@ mod tests {
 
         let cache_registry = test_cache_registry(kv_backend.clone())?;
 
-        FrontendBuilder::new(
+        let builder = FrontendBuilder::new(
             FrontendOptions::default(),
             kv_backend,
             cache_registry,
@@ -3324,10 +3810,12 @@ mod tests {
             procedure_executor,
             process_manager,
         )
-        .with_plugin(plugins)
-        .try_build()
-        .await
-        .context(BuildFrontendSnafu)
+        .with_plugin(plugins);
+        let builder = match rollup_cache {
+            Some(cache) => builder.with_rollup_cache(cache),
+            None => builder,
+        };
+        builder.try_build().await.context(BuildFrontendSnafu)
     }
 
     async fn execute_one_sql(

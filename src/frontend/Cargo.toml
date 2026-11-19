@@ -65,6 +65,7 @@ otel-arrow-rust.workspace = true
 partition.workspace = true
 pipeline.workspace = true
 prometheus.workspace = true
+promql.workspace = true
 promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
