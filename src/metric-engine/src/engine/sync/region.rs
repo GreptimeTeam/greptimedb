@@ -53,6 +53,16 @@ impl MetricEngineInner {
             source_region_id, region_id, parallelism
         );
 
+        // Cleanup removes the original copied file IDs, so compaction must not replace them.
+        let guard = self
+            .mito
+            .pause_compaction(target_metadata_region_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(MitoCopyRegionFromOperationSnafu {
+                source_region_id: source_metadata_region_id,
+                target_region_id: target_metadata_region_id,
+            })?;
         let res = self
             .mito
             .copy_region_from(
@@ -131,6 +141,7 @@ impl MetricEngineInner {
             .context(MitoEditRegionSnafu {
                 region_id: target_metadata_region_id,
             })?;
+        drop(guard);
         info!(
             "Successfully edit metadata region: {} after syncing from source metadata region: {}, files to remove: {:?}",
             target_metadata_region_id,
@@ -205,6 +216,74 @@ mod tests {
             .collect::<Vec<_>>();
         columns.sort_unstable();
         assert_eq!(columns, expected_columns);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_sync_blocks_compaction_until_cleanup() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let source = env.default_physical_region_id();
+        let logical = env.default_logical_region_id();
+        let target = RegionId::new(source.table_id(), 7);
+        env.create_physical_region(target, &TestEnv::default_table_dir(), vec![])
+            .await;
+        // Leave target rows in the memtable so the intervening flush creates an SST.
+        let existing = RegionId::new(4, target.region_number());
+        env.create_logical_region(target, existing).await;
+        let metric = env.metric();
+        metric
+            .handle_request(source, RegionRequest::Flush(Default::default()))
+            .await
+            .unwrap();
+        let target_metadata = crate::utils::to_metadata_region_id(target);
+        let metadata = &metric.inner.metadata_region;
+        let mito = env.mito();
+
+        // Hold the transform at its metadata write. The copied source marker is
+        // observable through a key-only scan while the sync waits for the lock.
+        let observe = metadata.with_writes_paused(target_metadata, async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !metadata
+                    .logical_regions(target)
+                    .await
+                    .unwrap()
+                    .contains(&logical)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            mito.handle_request(target_metadata, RegionRequest::Flush(Default::default()))
+                .await
+                .unwrap();
+            let err = mito
+                .handle_request(target_metadata, RegionRequest::Compact(Default::default()))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                err.into_inner()
+                    .as_any()
+                    .downcast_ref::<mito2::error::Error>(),
+                Some(mito2::error::Error::CompactionCancelled { .. })
+            ));
+        });
+        let sync = metric.sync_region(
+            target,
+            SyncRegionFromRequest::FromRegion {
+                source_region_id: source,
+                parallelism: 1,
+            },
+        );
+        let ((), result) = tokio::join!(observe, sync);
+        result.unwrap();
+        let remapped = RegionId::new(logical.table_id(), target.region_number());
+        let mut recovered = metadata.logical_regions(target).await.unwrap();
+        recovered.sort_unstable();
+        assert_eq!(recovered, [remapped, existing]);
+        mito.handle_request(target_metadata, RegionRequest::Compact(Default::default()))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
