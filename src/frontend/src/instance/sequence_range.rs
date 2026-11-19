@@ -54,6 +54,9 @@ pub(crate) struct SourceProbeState {
     table_name: String,
     /// The bare source name used by [`crate::query_cache::QueryIdentity`].
     source_name: String,
+    /// A name or route transition generation. A probe carries the generation it
+    /// started under and may not advance a cursor after a later transition.
+    generation: u64,
     cursors: BTreeMap<u64, u64>,
 }
 
@@ -223,46 +226,48 @@ impl Instance {
         }
 
         let qualified_name = table.to_string();
-        let lower = {
+        let (lower, generation) = {
             let mut state = self.source_probe_cursors.lock().unwrap();
             // Cursors are per logical table: metric-engine logical tables share a
             // physical region sequence, and one logical table's scan must not
             // advance another's lower bound past rows it has not read.
-            let (lower, route_changed, renamed_from) = match state.get_mut(&table_id) {
+            match state.get_mut(&table_id) {
                 Some(stored) => {
+                    // A name transition or a route change invalidates the cursor
+                    // that an older probe may still be carrying.
                     let renamed_from = (stored.table_name != qualified_name).then(|| {
                         stored.table_name.clone_from(&qualified_name);
                         std::mem::replace(&mut stored.source_name, source_table.to_string())
                     });
                     let route_changed = stored.route_version != version;
-                    let lower = if route_changed {
-                        regions.iter().map(|region| (*region, 0)).collect()
-                    } else {
-                        regions
-                            .iter()
-                            .map(|region| {
-                                (*region, stored.cursors.get(region).copied().unwrap_or(0))
-                            })
-                            .collect::<BTreeMap<_, _>>()
-                    };
-                    (lower, route_changed, renamed_from)
+                    if renamed_from.is_some() || route_changed {
+                        stored.generation = stored.generation.saturating_add(1);
+                    }
+                    if route_changed {
+                        stored.route_version = version;
+                        stored.cursors.clear();
+                    }
+                    let generation = stored.generation;
+                    let lower = regions
+                        .iter()
+                        .map(|region| (*region, stored.cursors.get(region).copied().unwrap_or(0)))
+                        .collect::<BTreeMap<_, _>>();
+                    // Publish the name transition and the evictions together under
+                    // the cursor lock: a concurrent probe must not observe the new
+                    // name with the old name's entries still resident.
+                    if let Some(old_name) = renamed_from {
+                        cache.invalidate_table(&old_name);
+                    }
+                    if route_changed {
+                        cache.invalidate_table(source_table);
+                    }
+                    (lower, generation)
                 }
-                None => (
-                    regions.iter().map(|region| (*region, 0)).collect(),
-                    false,
-                    None,
-                ),
-            };
-            // Publish the name transition and the evictions together under the
-            // cursor lock: a concurrent probe must not observe the new name with
-            // the old name's entries still resident.
-            if let Some(old_name) = renamed_from {
-                cache.invalidate_table(&old_name);
+                None => {
+                    let lower = regions.iter().map(|region| (*region, 0)).collect();
+                    (lower, 0)
+                }
             }
-            if route_changed {
-                cache.invalidate_table(source_table);
-            }
-            lower
         };
 
         let (high, min, max) = match self.probe_sequence_range(table, &lower, query_ctx).await {
@@ -314,10 +319,11 @@ impl Instance {
 
         let mut state = self.source_probe_cursors.lock().unwrap();
         match state.get_mut(&table_id) {
-            Some(stored) if stored.route_version > version => {
-                // A newer repartition won the race; do not move its cursor back.
-            }
-            Some(stored) if stored.route_version == version => {
+            Some(stored)
+                if stored.route_version == version
+                    && stored.generation == generation
+                    && stored.table_name == qualified_name =>
+            {
                 for (region, watermark) in high {
                     stored
                         .cursors
@@ -326,6 +332,11 @@ impl Instance {
                         .or_insert(watermark);
                 }
             }
+            Some(_) => {
+                // A concurrent rename or repartition superseded this probe. Its
+                // invalidation was conservative, but its cursor observation is
+                // from an older generation and must not advance the state.
+            }
             _ => {
                 state.insert(
                     table_id,
@@ -333,6 +344,7 @@ impl Instance {
                         route_version: version,
                         table_name: qualified_name,
                         source_name: source_table.to_string(),
+                        generation,
                         cursors: high,
                     },
                 );
