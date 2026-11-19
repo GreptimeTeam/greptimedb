@@ -34,10 +34,10 @@ mod region_query;
 mod schema_selection;
 mod sequence_range;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock, atomic};
+use std::sync::{Arc, Mutex, OnceLock, atomic};
 use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
@@ -118,6 +118,7 @@ use sql::util::{
     extract_tables_from_statement_checked,
 };
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
+use table::table_name::TableName;
 use tracing::Span;
 
 use crate::error::{
@@ -130,6 +131,7 @@ use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
 
 use self::promql_cache::{RangeOutcome, WindowExecutor, WindowOutput, execute_range};
+use self::sequence_range::SourceProbeState;
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -167,6 +169,9 @@ pub struct Instance {
     /// so only an embedder (a test, today) that supplies one through the builder
     /// turns the cached range path on.
     rollup_cache: Option<Arc<RollupCache>>,
+    /// Per logical (queryable) table, the route version and region cursor last
+    /// advanced after invalidating the rollup cache.
+    source_probe_cursors: Arc<Mutex<HashMap<u32, SourceProbeState>>>,
 }
 
 impl Instance {
@@ -1639,6 +1644,24 @@ impl Instance {
         ) else {
             return Ok(None);
         };
+        if cache.source_probe_enabled() {
+            // A sequence-validated cache may not answer until this table's changes
+            // have been invalidated and its cursor advanced. A probe that cannot
+            // prove the whole table bypasses the cache instead of serving stale
+            // points or guessing a range.
+            let table = TableName::new(
+                query_ctx.current_catalog().to_string(),
+                query_ctx.current_schema(),
+                identity.source_table.clone(),
+            );
+            if !self
+                .refresh_cache_source(&table, &identity.source_table, query_ctx)
+                .await
+                .unwrap_or(false)
+            {
+                return Ok(None);
+            }
+        }
         let executor = StatementWindowExecutor {
             instance: self,
             query_ctx: query_ctx.clone(),
@@ -3604,6 +3627,35 @@ mod tests {
             "the gap leaves points unanswered: {rows}"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_source_probe_bypasses_the_cache_instead_of_failing_the_query()
+    -> TestResult<()> {
+        let cache = Arc::new(
+            crate::query_cache::RollupCache::new(
+                crate::query_cache::RollupCacheConfig::new(
+                    1 << 20,
+                    Duration::ZERO,
+                    Duration::from_secs(300),
+                    Duration::from_secs(60),
+                    Duration::from_secs(3_600),
+                )
+                .unwrap(),
+                None,
+            )
+            .with_source_probe(),
+        );
+        let cached = metric_instance(Some(cache.clone())).await?;
+        let plain = metric_instance(None).await?;
+        let query = metric_range_query("cpu");
+
+        let answer = promql_rows(&cached, &query, test_query_ctx(1)).await?;
+        let uncached = promql_rows(&plain, &query, test_query_ctx(2)).await?;
+
+        assert_eq!(printed(&uncached), printed(&answer));
+        assert_eq!(0, cache.entry_count(), "a failed probe fills nothing");
         Ok(())
     }
 

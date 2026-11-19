@@ -982,9 +982,16 @@ pub struct RollupCache {
     entries: Cache<TimeChunkKey, Entry>,
     /// How many invalidations have run, which is what a fill is validated against.
     ///
-    /// It is advanced by both invalidation methods and never read as a clock: only
+    /// It is advanced by every invalidation method and never read as a clock: only
     /// the ordering between the epoch a fill captured and the current one matters.
     invalidation_epoch: AtomicU64,
+    /// Whether callers validate the source sequence before serving an entry.
+    ///
+    /// Off by default so an embedder that has no sequence authority (a test, or a
+    /// deployment without the probe) keeps the age-bounded behavior. A deployment
+    /// that can probe turns it on and invalidates the affected table before a
+    /// lookup.
+    source_probe: bool,
 }
 
 impl RollupCache {
@@ -1002,7 +1009,24 @@ impl RollupCache {
             authority,
             entries,
             invalidation_epoch: AtomicU64::new(0),
+            source_probe: false,
         }
+    }
+
+    /// Requires callers to validate the source sequence before serving entries.
+    ///
+    /// This is a construction-time switch: a cache that never receives a source
+    /// probe must not pretend to be sequence-consistent, and a cache that does must
+    /// call [`Self::invalidate_table_range`] or [`Self::invalidate_table`] before
+    /// advancing its own cursor.
+    pub fn with_source_probe(mut self) -> Self {
+        self.source_probe = true;
+        self
+    }
+
+    /// Whether this cache expects its caller to validate the source sequence.
+    pub fn source_probe_enabled(&self) -> bool {
+        self.source_probe
     }
 
     /// The configuration this cache enforces.
@@ -1283,6 +1307,29 @@ impl RollupCache {
         let mut dirty = Vec::new();
         for (key, entry) in self.entries.iter() {
             if key.identity().source_table == table && overlaps(entry.dependency, input_span) {
+                dirty.push(key);
+            }
+        }
+        dirty
+            .into_iter()
+            .filter(|key| self.entries.remove(key.as_ref()).is_some())
+            .count()
+    }
+
+    /// Drops every entry whose source table is `table`, regardless of span, and
+    /// returns the number removed.
+    ///
+    /// This is the conservative invalidation for a source change whose timestamp
+    /// range cannot be proved: a row removed by compaction may advance the source
+    /// sequence without leaving a timestamp in the new range. Keeping an entry is
+    /// never worth serving a point whose input was erased, so the caller evicts the
+    /// whole table instead of guessing a span.
+    pub fn invalidate_table(&self, table: &str) -> usize {
+        self.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
+
+        let mut dirty = Vec::new();
+        for (key, _) in self.entries.iter() {
+            if key.identity().source_table == table {
                 dirty.push(key);
             }
         }
@@ -2464,6 +2511,51 @@ mod tests {
         for key in [&other_table, &disjoint] {
             assert!(matches!(cache.lookup(key, now), Lookup::Hit { .. }));
         }
+    }
+
+    #[test]
+    fn whole_table_invalidation_removes_every_span_of_that_table() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let fill = cache.fill_cursor(now).unwrap();
+        let table_a = QueryIdentity {
+            query: "rate(table_a[5m])".to_string(),
+            source_table: "table_a".to_string(),
+            ..identity()
+        };
+        let table_b = QueryIdentity {
+            query: "rate(table_b[5m])".to_string(),
+            source_table: "table_b".to_string(),
+            ..identity()
+        };
+        let first = TimeChunkKey::new(table_a.clone(), TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS));
+        let far = TimeChunkKey::new(
+            table_a,
+            TimeChunk::new(HEAD_MS + 10 * CHUNK_MS, HEAD_MS + 11 * CHUNK_MS),
+        );
+        let other = TimeChunkKey::new(table_b, first.chunk());
+        for key in [&first, &far, &other] {
+            assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
+        }
+
+        // A sequence advance without a timestamp hull may mean an erased row, so
+        // every span of the table goes, not only the one a guessed range covers.
+        assert_eq!(cache.invalidate_table("table_a"), 2);
+        for key in [&first, &far] {
+            assert_eq!(cache.lookup(key, now), Lookup::Miss(MissReason::NotFound));
+        }
+        assert!(matches!(cache.lookup(&other, now), Lookup::Hit { .. }));
+        assert_eq!(cache.entry_count(), 1);
+    }
+
+    #[test]
+    fn source_probe_validation_is_opt_in() {
+        assert!(!cache().source_probe_enabled());
+        assert!(
+            RollupCache::new(config(), None)
+                .with_source_probe()
+                .source_probe_enabled()
+        );
     }
 
     #[test]

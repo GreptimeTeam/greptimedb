@@ -55,7 +55,7 @@ async fn test_sequence_range_probe_standalone(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     execute_sql(
         &frontend,
-        r#"CREATE TABLE sequence_probe (host STRING PRIMARY KEY, "observed""At" TIMESTAMP(3) TIME INDEX, value DOUBLE) WITH (append_mode = 'true', preserve_row_sequence = 'true')"#,
+        r#"CREATE TABLE sequence_probe (host STRING PRIMARY KEY, "observed""At" TIMESTAMP(3) TIME INDEX, val DOUBLE) WITH (append_mode = 'true', preserve_row_sequence = 'true')"#,
     ).await;
     let table = get_table(&frontend, "sequence_probe").await;
     let table_id = table.table_info().table_id();
@@ -76,7 +76,7 @@ async fn test_sequence_range_probe_standalone(instance: Arc<dyn MockInstance>) {
     assert!(initial.contains_key(&region));
     assert_eq!(context.get_snapshot(region), Some(u64::MAX));
 
-    execute_sql(&frontend, r#"INSERT INTO sequence_probe (host, "observed""At", value) VALUES ('a', 3000, 1), ('b', 1000, 2), ('c', 2000, 3)"#).await;
+    execute_sql(&frontend, r#"INSERT INTO sequence_probe (host, "observed""At", val) VALUES ('a', 3000, 1), ('b', 1000, 2), ('c', 2000, 3)"#).await;
     let (high, min, max) = frontend
         .probe_sequence_range(&name, &lower, &context)
         .await
@@ -106,6 +106,32 @@ async fn test_sequence_range_probe_standalone(instance: Arc<dyn MockInstance>) {
             .await
             .is_err()
     );
+
+    // The internal probe opts non-append deduplicating tables into a
+    // superset timestamp scan. Regular sequence reads remain fail-closed.
+    execute_sql(&frontend, "CREATE TABLE sequence_probe_dedup (host STRING PRIMARY KEY, observed_at TIMESTAMP(3) TIME INDEX, val DOUBLE)").await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO sequence_probe_dedup VALUES ('a', 1000, 1), ('a', 1000, 2)",
+    )
+    .await;
+    let dedup = get_table(&frontend, "sequence_probe_dedup").await;
+    let dedup_region = RegionId::new(dedup.table_info().table_id(), 0).as_u64();
+    let dedup_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "sequence_probe_dedup",
+    );
+    let (_, min, max) = frontend
+        .probe_sequence_range(
+            &dedup_name,
+            &BTreeMap::from([(dedup_region, 0)]),
+            &QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(min, Some(Timestamp::new_millisecond(1000)));
+    assert_eq!(max, Some(Timestamp::new_millisecond(1000)));
 }
 
 #[apply(both_instances_cases)]

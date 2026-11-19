@@ -20,24 +20,37 @@ use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::RecordBatchMetrics;
-use common_time::Timestamp;
+use common_time::{Timestamp, timestamp::TimeUnit};
 use datatypes::vectors::Helper;
 use futures::TryStreamExt;
 use query::metrics::terminal_recordbatch_metrics_from_plan;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
-    FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
+    FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID, INTERNAL_SEQUENCE_RANGE_PROBE,
 };
 use query::parser::QueryStatement;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{IntoError, OptionExt, ResultExt};
 use sqlparser::ast::Ident;
+use store_api::storage::RegionId;
 use table::table_name::TableName;
 
 use super::{Instance, parse_stmt};
 use crate::error::{
     CatalogSnafu, CollectRecordbatchSnafu, Error, ExternalSnafu, Result, TableNotFoundSnafu,
 };
+use crate::query_cache::TimeChunk;
+
+/// The sequence cursor frontend has already invalidated the rollup cache up to.
+///
+/// The route version is part of the state: a repartition changes which regions
+/// participate, so an old per-region cursor is not comparable and the table is
+/// evicted before a fresh scan.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SourceProbeState {
+    route_version: u64,
+    cursors: BTreeMap<u64, u64>,
+}
 
 fn unavailable(reason: impl Into<String>) -> Error {
     ExternalSnafu.into_error(BoxedError::new(PlainError::new(
@@ -71,15 +84,13 @@ impl Instance {
         // retaining the request's identity, options and dialect.
         let options_ctx = query_ctx
             .query_option_snapshot()
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+            .map_err(|error| unavailable(error.to_string()))?;
         let mut wire_ctx = api::v1::QueryContext::from(&options_ctx);
         wire_ctx.snapshot_seqs = None;
         // A sink-table marker suppresses incremental semantics for that table.
         wire_ctx.extensions.remove(FLOW_SINK_TABLE_ID);
-        let mut probe_ctx = QueryContext::try_from(wire_ctx)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+        let mut probe_ctx =
+            QueryContext::try_from(wire_ctx).map_err(|error| unavailable(error.to_string()))?;
         probe_ctx.set_current_user(query_ctx.current_user());
         probe_ctx.set_extension(
             FLOW_INCREMENTAL_AFTER_SEQS,
@@ -87,6 +98,7 @@ impl Instance {
         );
         probe_ctx.set_extension(FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE);
         probe_ctx.set_extension(FLOW_RETURN_REGION_SEQ, "true");
+        probe_ctx.set_extension(INTERNAL_SEQUENCE_RANGE_PROBE, "true");
         let probe_ctx = Arc::new(probe_ctx);
 
         let resolved = self
@@ -136,6 +148,151 @@ impl Instance {
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
         collect_sequence_range(output, lower).await
+    }
+
+    /// Refreshes the rollup cache's view of one source table.
+    ///
+    /// The cache is invalidated *before* the per-region cursor advances. A probe
+    /// that cannot prove every participating region, or that advances a cursor
+    /// without a timestamp hull, evicts the whole table: a removed row may have
+    /// advanced the sequence without leaving a timestamp to invalidate by. A put
+    /// that replaces a row at the same timestamp is covered by the hull; an
+    /// explicit DELETE whose timestamp the ordinary scan hides is not, which is
+    /// why a DELETE-only advance evicts the whole table. `false` means the caller
+    /// must bypass the cache, and no cursor has advanced.
+    pub(crate) async fn refresh_cache_source(
+        &self,
+        table: &TableName,
+        source_table: &str,
+        query_ctx: &QueryContextRef,
+    ) -> Result<bool> {
+        let Some(cache) = self.rollup_cache.as_ref() else {
+            return Ok(false);
+        };
+        let resolved = self
+            .catalog_manager
+            .table(
+                &table.catalog_name,
+                &table.schema_name,
+                &table.table_name,
+                Some(query_ctx),
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table.to_string(),
+            })?;
+        let table_info = resolved.table_info();
+        let table_id = table_info.table_id();
+        let (_physical_table_id, route) = self
+            .partition_manager()
+            .find_physical_table_route_with_id(table_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let version = route.version();
+        let regions = route
+            .region_routes
+            .iter()
+            // The probe scans the queryable table: a metric logical table owns the
+            // logical region IDs even though its route points at a physical table.
+            .map(|route| RegionId::new(table_id, route.region.id.region_number()).as_u64())
+            .collect::<Vec<_>>();
+        if regions.is_empty() {
+            return Ok(false);
+        }
+
+        let (lower, route_changed) = {
+            let state = self.source_probe_cursors.lock().unwrap();
+            // Cursors are per logical table: metric-engine logical tables share a
+            // physical region sequence, and one logical table's scan must not
+            // advance another's lower bound past rows it has not read.
+            match state.get(&table_id) {
+                Some(stored) if stored.route_version == version => (
+                    regions
+                        .iter()
+                        .map(|region| (*region, stored.cursors.get(region).copied().unwrap_or(0)))
+                        .collect::<BTreeMap<_, _>>(),
+                    false,
+                ),
+                Some(_) => (regions.iter().map(|region| (*region, 0)).collect(), true),
+                None => (regions.iter().map(|region| (*region, 0)).collect(), false),
+            }
+        };
+        // A route change makes every old entry's input regions incomparable. Evict
+        // before reading or advancing anything from the new route.
+        if route_changed {
+            cache.invalidate_table(source_table);
+        }
+
+        let (high, min, max) = match self.probe_sequence_range(table, &lower, query_ctx).await {
+            Ok(probe) => probe,
+            Err(_) => return Ok(false),
+        };
+        if high.len() != regions.len()
+            || high.keys().any(|region| !lower.contains_key(region))
+            || high
+                .iter()
+                .any(|(region, watermark)| watermark < &lower[region])
+        {
+            return Ok(false);
+        }
+        let changed = high != lower;
+        match (min, max) {
+            (Some(min), Some(max)) => {
+                let Some(min_ms) = min.convert_to(TimeUnit::Millisecond) else {
+                    return Ok(false);
+                };
+                let Some(max_ms) = max.convert_to(TimeUnit::Millisecond) else {
+                    return Ok(false);
+                };
+                // Round outward: a sub-millisecond timestamp still lies inside the
+                // span, and an extra millisecond only costs a later miss. A put that
+                // overwrites a row at the same timestamp is caught by the same span;
+                // an explicit DELETE whose timestamp the ordinary scan hides is the
+                // one operation a timestamp hull cannot represent.
+                let span = TimeChunk::new(
+                    min_ms.value().saturating_sub(1),
+                    max_ms.value().saturating_add(1),
+                );
+                cache.invalidate_table_range(source_table, span);
+            }
+            // A sequence advance without a timestamp can mean erased rows. Do not
+            // guess a span: no entry of this table may survive.
+            (None, None) if changed => {
+                cache.invalidate_table(source_table);
+            }
+            // A half hull is not a proof.
+            _ => {
+                cache.invalidate_table(source_table);
+            }
+        }
+
+        let mut state = self.source_probe_cursors.lock().unwrap();
+        match state.get_mut(&table_id) {
+            Some(stored) if stored.route_version > version => {
+                // A newer repartition won the race; do not move its cursor back.
+            }
+            Some(stored) if stored.route_version == version => {
+                for (region, watermark) in high {
+                    stored
+                        .cursors
+                        .entry(region)
+                        .and_modify(|cursor| *cursor = (*cursor).max(watermark))
+                        .or_insert(watermark);
+                }
+            }
+            _ => {
+                state.insert(
+                    table_id,
+                    SourceProbeState {
+                        route_version: version,
+                        cursors: high,
+                    },
+                );
+            }
+        }
+        Ok(true)
     }
 }
 

@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use auth::PermissionCheckerRef;
 use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
@@ -56,7 +57,7 @@ use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
+use crate::error::{self, DataFusionSnafu, ExternalSnafu, InvalidRollupCacheConfigSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::instance::Instance;
@@ -439,6 +440,26 @@ impl FrontendBuilder {
             None
         };
 
+        let rollup_cache = match self.rollup_cache {
+            Some(cache) => Some(cache),
+            None if self.options.rollup_cache.enable => {
+                let config = self.options.rollup_cache.config().map_err(|error| {
+                    InvalidRollupCacheConfigSnafu {
+                        reason: error.to_string(),
+                    }
+                    .build()
+                })?;
+                let cache = RollupCache::new(config, None);
+                let cache = if self.options.rollup_cache.source_probe {
+                    cache.with_source_probe()
+                } else {
+                    cache
+                };
+                Some(Arc::new(cache))
+            }
+            None => None,
+        };
+
         Ok(Instance {
             server_memory_limiter,
             logical_batcher: Default::default(),
@@ -464,7 +485,8 @@ impl FrontendBuilder {
             trace_aux_limiter,
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),
-            rollup_cache: self.rollup_cache,
+            rollup_cache,
+            source_probe_cursors: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }

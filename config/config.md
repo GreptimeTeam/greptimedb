@@ -285,7 +285,14 @@
 | `event_recorder.event_types` | Array | All | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`, `admin_function`, `reconcile_catalog`,<br/>`reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
-
+| `rollup_cache` | -- | -- | The frontend-local cache of PromQL range-query chunks. It is disabled by default; enabling it does not change instant queries or expressions outside the window allowlist. |
+| `rollup_cache.enable` | Bool | `false` | Whether range queries may be served from the cache. |
+| `rollup_cache.max_bytes` | String | `256MiB` | The total memory budget for cached chunks and their annotations. |
+| `rollup_cache.chunk` | String | `5m` | The canonical chunk duration. A query whose step does not divide it bypasses the cache. |
+| `rollup_cache.tail` | String | `10m` | Output points this close to wall-clock now may still be receiving data, so they are executed directly and never cached. |
+| `rollup_cache.max_staleness` | String | `30s` | How old a source-sequence reading may be before lookups stop trusting it. |
+| `rollup_cache.max_age` | String | `1h` | How old a cached chunk may be before it is evicted, independent of source changes. |
+| `rollup_cache.source_probe` | Bool | `true` | Whether lookups probe the source table's sequence and invalidate affected spans before serving an entry. Required for correctness on writable tables. |
 
 ## Distributed Mode
 
@@ -448,7 +455,14 @@
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
 | `event_recorder.event_types` | Array | All | Event types to record. Current available event type: `admin_function`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
-
+| `rollup_cache` | -- | -- | The frontend-local cache of PromQL range-query chunks. It is disabled by default; enabling it does not change instant queries or expressions outside the window allowlist. |
+| `rollup_cache.enable` | Bool | `false` | Whether range queries may be served from the cache. |
+| `rollup_cache.max_bytes` | String | `256MiB` | The total memory budget for cached chunks and their annotations. |
+| `rollup_cache.chunk` | String | `5m` | The canonical chunk duration. A query whose step does not divide it bypasses the cache. |
+| `rollup_cache.tail` | String | `10m` | Output points this close to wall-clock now may still be receiving data, so they are executed directly and never cached. |
+| `rollup_cache.max_staleness` | String | `30s` | How old a source-sequence reading may be before lookups stop trusting it. |
+| `rollup_cache.max_age` | String | `1h` | How old a cached chunk may be before it is evicted, independent of source changes. |
+| `rollup_cache.source_probe` | Bool | `true` | Whether lookups probe the source table's sequence and invalidate affected spans before serving an entry. Required for correctness on writable tables. |
 
 ### Metasrv
 
