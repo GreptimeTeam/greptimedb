@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::{MAX_REGION_SEQ, RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{
@@ -511,6 +511,43 @@ impl TableRouteManager {
             .transpose()
     }
 
+    /// Reserves a positive number of consecutive region numbers without publishing their routes.
+    /// On success, advances the high-water mark and route version and returns the first reserved number.
+    /// If the table route changed, returns `None`. Reload the route before retrying.
+    pub async fn try_reserve_region_numbers(
+        &self,
+        table_id: TableId,
+        current: &DeserializedValueWithBytes<TableRouteValue>,
+        count: usize,
+    ) -> Result<Option<RegionNumber>> {
+        // The read path remaps peer addresses. Preserve the stored routes verbatim.
+        let TableRouteValue::Physical(mut route) =
+            TableRouteValue::try_from_raw_value(&current.bytes)?
+        else {
+            return UnexpectedLogicalRouteTableSnafu {
+                err_msg: format!("Cannot reserve region numbers for logical table {table_id}"),
+            }
+            .fail();
+        };
+        let previous = route.max_region_number;
+        let last = RegionNumber::try_from(count)
+            .ok()
+            .and_then(|count| previous.checked_add(count))
+            .filter(|last| previous < *last && *last <= MAX_REGION_SEQ)
+            .with_context(|| InvalidMetadataSnafu {
+                err_msg: format!(
+                    "Cannot reserve {count} region numbers after {previous} for table {table_id}"
+                ),
+            })?;
+        route.max_region_number = last;
+        route.version += 1;
+        let (txn, _) =
+            self.storage
+                .build_update_txn(table_id, current, &TableRouteValue::Physical(route))?;
+        let response = self.storage.kv_backend.txn(txn).await?;
+        Ok(response.succeeded.then_some(previous + 1))
+    }
+
     /// Sets the staging state for a specific region.
     ///
     /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
@@ -948,6 +985,70 @@ mod tests {
             .unwrap()
             .into_physical_table_route();
         assert_eq!(new_table_route.max_region_number, 3);
+    }
+
+    #[tokio::test]
+    async fn test_reserve_region_numbers() {
+        let table_id = 1024;
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TableRouteManager::new(kv.clone());
+        let storage = manager.table_route_storage();
+        let routes = vec![RegionRoute {
+            region: Region {
+                id: RegionId::new(table_id, MAX_REGION_SEQ - 3),
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        let initial = TableRouteValue::physical(routes.clone());
+        let (txn, _) = storage.build_create_txn(table_id, &initial).unwrap();
+        assert!(kv.txn(txn).await.unwrap().succeeded);
+        let current = storage.get_with_raw_bytes(table_id).await.unwrap().unwrap();
+        assert!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 0)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 2)
+                .await
+                .unwrap(),
+            Some(MAX_REGION_SEQ - 2)
+        );
+        // Another reservation based on the same snapshot must not claim this range.
+        assert_eq!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 2)
+                .await
+                .unwrap(),
+            None
+        );
+        let current = storage.get_with_raw_bytes(table_id).await.unwrap().unwrap();
+        assert_eq!(current.region_routes().unwrap(), &routes);
+        assert_eq!(current.max_region_number().unwrap(), MAX_REGION_SEQ - 1);
+        assert_eq!(current.version().unwrap(), 1);
+        assert!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 2)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 1)
+                .await
+                .unwrap(),
+            Some(MAX_REGION_SEQ)
+        );
+        let current = storage.get_with_raw_bytes(table_id).await.unwrap().unwrap();
+        assert!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 1)
+                .await
+                .is_err()
+        );
     }
 
     #[test]

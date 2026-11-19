@@ -165,6 +165,15 @@ pub struct AllocationPlanEntry {
     pub transition_map: Vec<Vec<usize>>,
 }
 
+impl AllocationPlanEntry {
+    /// Returns the target partitions that need a new region.
+    pub(super) fn targets_to_allocate(&self) -> impl ExactSizeIterator<Item = &PartitionExpr> {
+        self.target_partition_exprs
+            .iter()
+            .skip(self.source_regions.len())
+    }
+}
+
 /// A plan entry for the dispatch phase after region allocation,
 /// with concrete source and target region descriptors.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -216,20 +225,19 @@ impl RepartitionPlanEntry {
 pub fn convert_allocation_plan_to_repartition_plan(
     table_id: TableId,
     next_region_number: &mut RegionNumber,
-    AllocationPlanEntry {
+    plan: &AllocationPlanEntry,
+) -> RepartitionPlanEntry {
+    let AllocationPlanEntry {
         group_id,
         source_regions,
         target_partition_exprs,
         transition_map,
-        ..
-    }: &AllocationPlanEntry,
-) -> RepartitionPlanEntry {
+    } = plan;
     match source_regions.len().cmp(&target_partition_exprs.len()) {
         Ordering::Less => {
             // requires to allocate regions
-            let pending_allocate_target_partition_exprs = target_partition_exprs
-                .iter()
-                .skip(source_regions.len())
+            let pending_allocate_target_partition_exprs = plan
+                .targets_to_allocate()
                 .map(|target_partition_expr| {
                     let desc = TargetRegionDescriptor {
                         region_id: RegionId::new(table_id, *next_region_number),
