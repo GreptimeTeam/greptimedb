@@ -1896,8 +1896,44 @@ async fn test_capture_sequence_range_timestamps_returns_raw_values_and_proven_hi
             .collect::<Vec<_>>()
     );
 
-    // Even when rows are present, they must not escape without a complete,
-    // non-regressing proof for both lower-bound regions.
+    // The streaming visitor can compute a bounded hull without retaining rows.
+    *handler.output.lock().unwrap() = Some(recovery_stream_output(
+        vec![recovery_timestamp_batch(vec![
+            Some(11_000),
+            Some(-5_000),
+            Some(1_000),
+        ])],
+        Some(vec![(1, Some(12)), (2, Some(20))]),
+        false,
+    ));
+    let mut bounds: Option<(Timestamp, Timestamp)> = None;
+    let high = visit_sequence_range_timestamps(
+        &query_engine,
+        &frontend,
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        &timestamp_plan,
+        &lower,
+        |timestamp| {
+            bounds = Some(bounds.map_or((timestamp, timestamp), |(min, max)| {
+                (min.min(timestamp), max.max(timestamp))
+            }));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(high, BTreeMap::from([(1, 12), (2, 20)]));
+    assert_eq!(
+        bounds,
+        Some((
+            Timestamp::new_millisecond(-5_000),
+            Timestamp::new_millisecond(11_000)
+        ))
+    );
+
+    // Callback observations remain tentative until a complete,
+    // non-regressing proof for both lower-bound regions has arrived.
     for watermarks in [
         None,
         Some(vec![(1, Some(12))]),
@@ -1910,18 +1946,22 @@ async fn test_capture_sequence_range_timestamps_returns_raw_values_and_proven_hi
             watermarks,
             false,
         ));
-        assert!(
-            capture_sequence_range_timestamps(
-                &query_engine,
-                &frontend,
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                &timestamp_plan,
-                &lower,
-            )
-            .await
-            .is_err()
-        );
+        let mut observed = Vec::new();
+        let result = visit_sequence_range_timestamps(
+            &query_engine,
+            &frontend,
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            &timestamp_plan,
+            &lower,
+            |timestamp| {
+                observed.push(timestamp);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(observed, vec![Timestamp::new_millisecond(1_000)]);
     }
 }
 
