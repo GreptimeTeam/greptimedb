@@ -1,0 +1,24 @@
+src/common/procedure/src/local/runner.rs
+  s_8221d1372c4881::t_dc013b83684a4f 536,549-555
+src/common/procedure/src/local.rs
+  s_8221d1372c4881::t_7312df0d862742 339-345
+  s_8221d1372c4881::t_24004080b5f276 753-763
+  s_8221d1372c4881::t_dc013b83684a4f 366-373,751-752,764-769
+  s_8221d1372c4881::t_d2c4ebcf2f3dd5 346-347
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "de84110be7d6ee4ad24c6751da8d79aab3d023ae",
+  "prompts": {},
+  "sessions": {
+    "s_8221d1372c4881": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1a0c3a386ffeuHnHggr3VdpOb6",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

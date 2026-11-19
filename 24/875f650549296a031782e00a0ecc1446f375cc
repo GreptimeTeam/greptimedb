@@ -1,0 +1,29 @@
+src/log-store/src/metrics.rs
+  s_17057bba187655::t_3524baf4c068ca 302-310
+src/log-store/src/object_store_wal/store.rs
+  s_b7d7dd5280bd00::t_97c16cccf1ca1d 56,451,1583-1584,1673-1675,3032-3035,3090-3092,3685-3719
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "24875f650549296a031782e00a0ecc1446f375cc",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

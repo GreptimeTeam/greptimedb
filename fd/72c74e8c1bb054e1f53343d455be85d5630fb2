@@ -1,0 +1,44 @@
+src/partition/src/splitter.rs
+  s_8b40584f3081c3::t_45a3a34597aea4 168,179
+  s_8b40584f3081c3::t_f1a7bc193eabf7 369-375,377-383,385-390,392-398
+  s_8b40584f3081c3::t_27971c5fbbb3ed 20,146,368,376,384,391
+src/partition/src/multi_dim.rs
+  s_8b40584f3081c3::t_45a3a34597aea4 83,123
+  s_8b40584f3081c3::t_c9d6a52b7f185c 26,312-315,330-343
+src/operator/src/test_util/partition_manager.rs
+  s_8b40584f3081c3::t_1a381673bd2fe4 286-287
+  s_8b40584f3081c3::t_347ddf05f89607 293
+  s_8b40584f3081c3::t_0457393e200617 284-285,296
+  s_8b40584f3081c3::t_4028967e79a3b9 277-283,288-292,294-295,297-310,312-353,355-362,364-380
+tests-integration/tests/repartition.rs
+  s_8b40584f3081c3::t_45a3a34597aea4 1626-1627,1636,1745-1747,1749-1751,1753,1762,1898,1912,1924,2036
+  s_8b40584f3081c3::t_f1a7bc193eabf7 1642-1653,1727-1738,1740-1743
+  s_8b40584f3081c3::t_c9b496de62da43 1739,1744,1748,1752
+src/operator/src/req_convert/common/partitioner.rs
+  s_8b40584f3081c3::t_45a3a34597aea4 32,651
+  s_8b40584f3081c3::t_1a381673bd2fe4 650
+  s_8b40584f3081c3::t_5b5a44f4268429 1225-1228,1230-1236,1238-1251,1253,1255-1256,1258-1276,1278-1298
+  s_8b40584f3081c3::t_fc54d7cff7a424 1224,1229,1237,1252,1254,1257,1277
+src/partition/src/manager.rs
+  s_8b40584f3081c3::t_1a381673bd2fe4 25-27,239-240,246,248-258
+src/partition/src/partition.rs
+  s_8b40584f3081c3::t_45a3a34597aea4 52-53
+src/partition/src/error.rs
+  s_8b40584f3081c3::t_45a3a34597aea4 104-110,276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fd72c74e8c1bb054e1f53343d455be85d5630fb2",
+  "prompts": {},
+  "sessions": {
+    "s_8b40584f3081c3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e458-dc8c-79a1-af2d-f222c3933c62",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

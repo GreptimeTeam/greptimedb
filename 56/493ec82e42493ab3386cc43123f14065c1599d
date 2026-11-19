@@ -1,0 +1,19 @@
+src/datanode/src/heartbeat/handler/flush_region.rs
+  s_17057bba187655::t_d0862983495255 25,182-184,365-449
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "56493ec82e42493ab3386cc43123f14065c1599d",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

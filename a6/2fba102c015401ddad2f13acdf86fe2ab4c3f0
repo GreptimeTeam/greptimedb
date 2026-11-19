@@ -1,0 +1,32 @@
+src/frontend/src/events.rs
+  h_623774b620da8e 38-48
+src/meta-srv/src/metasrv/builder.rs
+  h_623774b620da8e 241-251,559-571
+src/meta-srv/src/utils/insert_forwarder.rs
+  h_623774b620da8e 20,31,41,44-50,61-64
+src/operator/src/insert.rs
+  h_623774b620da8e 67-70,495-496,509-520,522-523
+src/operator/src/statement.rs
+  h_623774b620da8e 80-83,951,955,960,963-969,982-987
+src/table/src/requests.rs
+  h_623774b620da8e 176-177
+tests-integration/src/cluster.rs
+  h_623774b620da8e 172,206,253-259,542
+tests-integration/src/standalone.rs
+  h_623774b620da8e 30,88,107,118-127,384
+tests-integration/tests/database_ddl_event.rs
+  h_623774b620da8e 18,23,27,33-174,189
+tests-integration/tests/grpc.rs
+  h_623774b620da8e 87,412,424,485-585
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "a62fba102c015401ddad2f13acdf86fe2ab4c3f0",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

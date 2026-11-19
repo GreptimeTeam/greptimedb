@@ -1,0 +1,31 @@
+src/common/wal/Cargo.toml
+  s_60b64c7401857d::t_3a927c8eaea10d 33
+Cargo.toml
+  s_60b64c7401857d::t_f6e372f6391b29 226
+Cargo.lock
+  h_623774b620da8e 6636,9166,12971,13885,14882
+  s_60b64c7401857d::t_a1722393e58dd8 12674
+src/log-store/src/metrics.rs
+  h_623774b620da8e 54-55,57-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "cb12fe2d0261689ecb759f6c5f88195f2dcd111c",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_60b64c7401857d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a060ff-196a-7a21-b2f8-10c725cd9db6",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

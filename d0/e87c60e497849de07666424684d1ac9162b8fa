@@ -1,0 +1,16 @@
+src/mito2/src/region/opener.rs
+  h_623774b620da8e 404,409
+src/mito2/src/worker/handle_create.rs
+  h_623774b620da8e 20,26,29,65,86,128-145
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d0e87c60e497849de07666424684d1ac9162b8fa",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

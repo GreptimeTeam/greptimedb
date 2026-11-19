@@ -1,0 +1,22 @@
+src/common/meta/src/kv_backend/rds/postgres.rs
+  s_4b1fbc048e2731::t_085ec147b59c10 957
+  s_4b1fbc048e2731::t_e97f4e49afbce4 1275,1286-1296,1306,1309,1313,1320-1321,1325-1327
+  s_4b1fbc048e2731::t_3694973d6a2450 52-62,763-786,1272,1274,1278-1285,1297-1305,1307-1308,1310-1312,1314-1319,1322-1324
+  s_4b1fbc048e2731::t_11c3f5388b4290 18,947-953,1259-1271,1273,1276-1277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2444c4feccc7e85f114fccbd1ff073267d8cd7a8",
+  "prompts": {},
+  "sessions": {
+    "s_4b1fbc048e2731": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e9f4-5a61-7992-99d3-b1532b10f960",
+        "model": "gpt-6-astra"
+      },
+      "human_author": null
+    }
+  }
+}

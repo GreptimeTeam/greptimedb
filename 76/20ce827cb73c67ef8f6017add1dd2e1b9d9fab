@@ -1,0 +1,33 @@
+src/common/grpc-expr/src/alter.rs
+  s_94bfd1120537b0::t_5bf7486372b164 52,54-56,58-59,567-691,742,764
+src/common/meta/src/ddl/tests/alter_table.rs
+  s_94bfd1120537b0::t_5192852b3dd2de 1126-1206
+src/common/meta/src/ddl_manager.rs
+  s_94bfd1120537b0::t_637fe62e46d435 2039-2058
+src/operator/src/statement/ddl.rs
+  s_94bfd1120537b0::t_036883f44d528e 2590,3529-3558
+src/table/src/requests.rs
+  s_94bfd1120537b0::t_54350673810535 78,97,181-183,315,320,324,331-334,351-352,363,369-416,444-446,465-468,486,525-533,789-831,842-843
+tests/cases/standalone/common/show/show_create.result
+  s_94bfd1120537b0::t_982eafaf2cbe85 183-486
+tests/cases/standalone/common/show/show_create.sql
+  s_94bfd1120537b0::t_f234d2a2f3c77e 64-155
+src/table/src/metadata.rs
+  s_94bfd1120537b0::t_00c239c3d3f2c1 42-45,450,453,455-456,505,508,510-511,1480,1933-2086,2285,2290-2293,2313-2317,3082,3105,3121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "7620ce827cb73c67ef8f6017add1dd2e1b9d9fab",
+  "prompts": {},
+  "sessions": {
+    "s_94bfd1120537b0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a084d6-c55d-7f20-b13d-a848c6ff89de",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

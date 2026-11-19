@@ -1,0 +1,32 @@
+src/metric-engine/src/error.rs
+  h_623774b620da8e 257-262,420
+src/metric-engine/src/engine/put.rs
+  h_623774b620da8e 58,89-95,100-106,110
+  s_5f9072c8df1e76::t_10325839acabdb 1240-1316
+  s_5f9072c8df1e76::t_695a8379ae6d28 34
+tests/cases/standalone/common/insert/physical_metric_table_insert.result
+  s_5f9072c8df1e76::t_023d04ff840019 1-27
+tests/cases/standalone/common/insert/physical_metric_table_insert.sql
+  s_5f9072c8df1e76::t_023d04ff840019 1-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.11",
+  "base_commit_sha": "ecefc79a0e6d08d0839f22b98c2522a33df7ec8c",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_5f9072c8df1e76": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1b15c38baffe6dGmcYuXf1eO39",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

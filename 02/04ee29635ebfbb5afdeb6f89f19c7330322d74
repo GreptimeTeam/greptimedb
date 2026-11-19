@@ -1,0 +1,21 @@
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_b9ec553b894038 683-731
+src/frontend/src/service_config/pending_rows_batcher.rs
+  s_c8f343c7af25c4::t_2e04766626c42d 18,21,45,48,50-57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "0204ee29635ebfbb5afdeb6f89f19c7330322d74",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

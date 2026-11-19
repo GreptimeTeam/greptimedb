@@ -1,0 +1,21 @@
+src/mito2/src/sst/index.rs
+  s_17057bba187655::t_eebb402aac2bf8 26
+src/mito2/src/sst/index/primary_key.rs
+  s_17057bba187655::t_445beae1caab78 24,30-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "196cc828b93bd52b326655ee1924c7d424c9f9df",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

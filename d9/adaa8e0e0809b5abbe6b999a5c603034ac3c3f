@@ -1,0 +1,103 @@
+src/common/batcher/src/worker_registry.rs
+  s_c8f343c7af25c4::t_3fa09f55456b96 19,55-71,205-248
+src/datatypes/src/timestamp.rs
+  s_c8f343c7af25c4::t_a73dcb2b15720a 16,182-194,197-199,232-273
+src/frontend/src/instance/builder.rs
+  s_c8f343c7af25c4::t_92e2c81ba8c068 53,240-261
+src/frontend/src/instance/prom_store.rs
+  s_c8f343c7af25c4::t_89021b66334d06 45
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_b6d374f0d32831 27-29,137,685
+src/frontend/src/service_config/prom_store.rs
+  s_c8f343c7af25c4::t_4a342be676ebd2 69
+src/operator/src/batcher.rs
+  s_c8f343c7af25c4::t_ec6087142bbdae 18,21,23,25-30,32-34,40
+src/operator/src/bulk_insert.rs
+  s_c8f343c7af25c4::t_d133b728f39898 34,41,46
+src/operator/src/insert.rs
+  s_c8f343c7af25c4::t_b6b6b12dfbef50 86,99,174-177,344,465,478,1706
+src/operator/src/lib.rs
+  s_c8f343c7af25c4::t_d49ab28032018f 29-30
+src/operator/src/req_convert/delete/table_to_region.rs
+  s_c8f343c7af25c4::t_9ef2163fc413b6 65
+src/operator/src/req_convert/insert.rs
+  s_c8f343c7af25c4::t_03c1f8cf2abae6 17,21,27,33
+src/operator/src/req_convert/insert/row_to_batch.rs
+  s_c8f343c7af25c4::t_d91c817c40332d 32,144
+src/operator/src/req_convert/insert/row_to_region.rs
+  s_c8f343c7af25c4::t_b5167ead6e759e 95
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_c8f343c7af25c4::t_baae3ffdc990b4 97
+src/operator/src/req_convert/insert/timestamps.rs
+  s_c8f343c7af25c4::t_c967d3eeaffca9 1-38
+src/operator/src/test_util.rs
+  s_c8f343c7af25c4::t_8b73d4b1ea1813 18-19
+src/operator/src/test_util/partition_manager.rs
+  s_c8f343c7af25c4::t_03233eb3696dcf 18,20,22,24,100,105,150
+src/servers/Cargo.toml
+  s_c8f343c7af25c4::t_f73256eb37a913 164
+src/servers/benches/flush_batch_physical.rs
+  s_c8f343c7af25c4::t_7e9435a6b3a1ed 31,35
+src/servers/src/batcher/flow_notifier.rs
+  s_c8f343c7af25c4::t_abf34d80282184 1-176
+src/servers/src/batcher/flow_sender.rs
+  s_c8f343c7af25c4::t_dd7f2f5909fc2f 1-212
+src/servers/src/batcher/logical_table.rs
+  s_c8f343c7af25c4::t_91ee2670aae05c 15-23,25,28-29,34-39,42-59,61-78,81-87,90-100,104-119,122-167,169-185,189-199,201-209,211-225,227-266,268,270-280,284-310,313,319-341,343-344,347-359,362-366,369-373,376-391,393-406,408-416,418-422,424-432,434-435
+src/servers/src/batcher/logical_table/batch.rs
+  s_c8f343c7af25c4::t_cc9c8be97c6009 1-748
+src/servers/src/batcher/logical_table/batch_convert.rs
+  s_c8f343c7af25c4::t_8b41e864906741 19,22,26,29-30,32,38,40,95,129-163,167-181,183,185-186,188-189,191-206,208-218,220-221,223-224,226-235,237-240,242-253,255,257,259-264,266-269,271-273,275-286,288-291,293-304
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_c8f343c7af25c4::t_fccf8ae9ca38ab 1-334
+src/servers/src/batcher/logical_table/pending_worker.rs
+  s_c8f343c7af25c4::t_a704e43fd892f9 1-663
+src/servers/src/batcher/logical_table/region_write.rs
+  s_c8f343c7af25c4::t_152c5eab118c00 1-591
+src/servers/src/batcher/logical_table/tables.rs
+  s_c8f343c7af25c4::t_0d42daef85ae13 1-551
+src/servers/src/batcher/logical_table/test_util.rs
+  s_c8f343c7af25c4::t_6edfcd347a755c 1-162
+src/servers/src/batcher/table/batch.rs
+  s_c8f343c7af25c4::t_f5b4e4eae51c8b 20-21,25-26,29,32,37-38,61,112
+src/servers/src/batcher/table/metrics.rs
+  s_c8f343c7af25c4::t_885b98a1c49f30 21,26-32,37,42,47,52,58
+src/servers/src/batcher/table/pending_batch.rs
+  s_c8f343c7af25c4::t_50050e7965c51d 18,24,32,45-46,50
+src/servers/src/batcher/table/pending_worker.rs
+  s_c8f343c7af25c4::t_f6a3ee71c6c24c 25,30-34,36,41,46,135,143,150
+src/servers/src/batcher/test_util.rs
+  s_c8f343c7af25c4::t_1fbcaba9586500 1-46
+src/servers/src/http.rs
+  s_c8f343c7af25c4::t_5269f55b2fc073 56,728
+src/servers/src/http/prom_store.rs
+  s_c8f343c7af25c4::t_a1be2d149f71c5 43,78,361,363,390,456
+src/servers/src/lib.rs
+  s_c8f343c7af25c4::t_457726367aa54c 25
+src/servers/src/prom_row_builder.rs
+  s_c8f343c7af25c4::t_da9c63c95368b8 38
+tests-integration/src/test_util.rs
+  s_c8f343c7af25c4::t_d95a4c39d82ca3 50,674
+src/servers/src/batcher.rs
+  s_c8f343c7af25c4::t_ffa0400af6bb02 1-23
+src/servers/src/batcher/table.rs
+  s_c8f343c7af25c4::t_d2b4ab701f9846 1-706
+src/servers/src/batcher/table/flow_notifier.rs
+  s_c8f343c7af25c4::t_321ca5aed82840 20,22,26-29,42-43,53-55,81,99,101-102,108-112,163-167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "d9adaa8e0e0809b5abbe6b999a5c603034ac3c3f",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

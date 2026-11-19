@@ -1,0 +1,16 @@
+config/config.md
+  h_623774b620da8e 463-464
+config/metasrv.example.toml
+  h_623774b620da8e 232-239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "3b947319ba0bec9c4485a975b198b83a64934917",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

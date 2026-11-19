@@ -1,0 +1,29 @@
+src/catalog/src/system_schema/information_schema/region_statistics.rs
+  s_10fbd04729022c::t_9dd40abf7fa61b 94-103
+  s_10fbd04729022c::t_fcfbb2abdf1b28 44-45,64-65,168-169,190-191,224-231,252-255,273-274
+tests/cases/standalone/common/information_schema/region_statistics.sql
+  s_10fbd04729022c::t_9ba7122ccfb8e9 23-24
+src/mito2/src/region.rs
+  h_623774b620da8e 1807
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "b049afd509ea76fec43f46d59a94b742ceefa7e0",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_10fbd04729022c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0df3e1963ffe2s74hrRp5vj9gk",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

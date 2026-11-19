@@ -1,0 +1,68 @@
+src/common/meta/src/rpc/ddl.rs
+  s_f9f42fa04e4dc7::t_5ea7c8625a6e6f 33-34
+  s_f9f42fa04e4dc7::t_d056d968bc2067 458
+src/meta-srv/src/gc/mock/misc.rs
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 20
+  s_f9f42fa04e4dc7::t_b3b8dc0c461314 79,172
+src/meta-srv/src/gc/mock.rs
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 33
+  s_f9f42fa04e4dc7::t_b3b8dc0c461314 218
+src/operator/src/statement/ddl.rs
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 40
+tests-integration/tests/gc_event.rs
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 19,140-142
+src/meta-srv/src/gc/mock/full_list.rs
+  s_f9f42fa04e4dc7::t_b3b8dc0c461314 86,160,187,263,287
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 20
+src/meta-srv/src/gc/ctx.rs
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 330-331
+  s_f9f42fa04e4dc7::t_b3b8dc0c461314 35,332-334
+src/meta-srv/src/gc/mock/basic.rs
+  s_f9f42fa04e4dc7::t_b3b8dc0c461314 40,109,254
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 20
+src/meta-client/src/client.rs
+  s_f9f42fa04e4dc7::t_d056d968bc2067 353,426,437,812,817
+src/meta-srv/src/procedure/region_migration/manager.rs
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 27-29,511-512,515,626-627,630
+src/meta-srv/src/gc/mock/concurrent.rs
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 21
+  s_f9f42fa04e4dc7::t_b3b8dc0c461314 105,193,299,416,560
+src/common/meta/src/ddl/tests/event/flow.rs
+  s_f9f42fa04e4dc7::t_aa175084b83c67 22-23
+  s_f9f42fa04e4dc7::t_b3b8dc0c461314 242
+src/common/meta/src/ddl/tests/event/view.rs
+  s_f9f42fa04e4dc7::t_aa175084b83c67 20-21
+  s_f9f42fa04e4dc7::t_b3b8dc0c461314 336
+src/meta-client/src/client/procedure.rs
+  s_f9f42fa04e4dc7::t_aa175084b83c67 24
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 25-26,250-253,319-322,372-375
+src/meta-srv/src/service/procedure.rs
+  s_f9f42fa04e4dc7::t_ac70e971deed05 52-53,103,158,301,338,721,725,728,731-732
+  s_f9f42fa04e4dc7::t_658f765b403faa 21,54-55,718-720,722-724,726-727,729-730,733
+  s_f9f42fa04e4dc7::t_8cc8bf3e8f632c 22-23,104,160,303,340,574,581
+  s_f9f42fa04e4dc7::t_e27f49eee5982d 24
+  s_f9f42fa04e4dc7::t_1e3e80ae9ccf8b 734
+src/common/meta/src/ddl_manager.rs
+  s_f9f42fa04e4dc7::t_b3b8dc0c461314 403,492,513,531,550,568,586,626,668,691,717,730,746,761,776,792,808,878,973,1013,1060,1078,1096,1114,1140,1185,1208,1229,1251,1296,1319,1379,1418,1444,1474,1712,1729,1738
+  s_f9f42fa04e4dc7::t_d056d968bc2067 344
+  s_f9f42fa04e4dc7::t_5ea7c8625a6e6f 23-24
+tests-integration/tests/table_ddl_event.rs
+  s_f9f42fa04e4dc7::t_d056d968bc2067 32
+  s_f9f42fa04e4dc7::t_5ea7c8625a6e6f 382-384,424-426
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "dd074cf5f8611f76bb48430f3d6d117997c48214",
+  "prompts": {},
+  "sessions": {
+    "s_f9f42fa04e4dc7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff18c-729f-7dd2-9ff0-4d84b144a51a",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

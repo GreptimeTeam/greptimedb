@@ -1,0 +1,50 @@
+src/meta-srv/src/region/lease_keeper.rs
+  36153f7efba44e98 66-68,318-322
+src/meta-srv/src/handler/persist_stats_handler.rs
+  36153f7efba44e98 124-127
+src/meta-srv/src/handler/collect_cluster_info_handler.rs
+  36153f7efba44e98 132
+src/datanode/src/alive_keeper.rs
+  f1bfc1bf415ea1ad 506,625-643,645-670
+src/store-api/src/region_engine.rs
+  f1bfc1bf415ea1ad 246,256
+src/meta-srv/src/handler/collect_leader_region_handler.rs
+  36153f7efba44e98 43
+src/common/meta/src/datanode.rs
+  f1bfc1bf415ea1ad 576-597
+src/datanode/src/heartbeat.rs
+  36153f7efba44e98 151-152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "b94062d00e5b0d6cc5b526cebf11ba28274e6cd0",
+  "prompts": {
+    "36153f7efba44e98": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_292fc2caeffeCcI5PZCmCzXp3A",
+        "model": "github-copilot/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 94,
+      "total_deletions": 76,
+      "accepted_lines": 424,
+      "overriden_lines": 1
+    },
+    "f1bfc1bf415ea1ad": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_28e81583dffes9EBl85vuBOy6u",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 191,
+      "total_deletions": 128,
+      "accepted_lines": 107,
+      "overriden_lines": 2
+    }
+  }
+}

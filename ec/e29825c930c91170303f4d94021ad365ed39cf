@@ -1,0 +1,25 @@
+src/mito2/src/engine/set_role_state_test.rs
+  36153f7efba44e98 478-591
+src/mito2/src/region.rs
+  36153f7efba44e98 1111,1113-1121,1144-1149,1190-1203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "ece29825c930c91170303f4d94021ad365ed39cf",
+  "prompts": {
+    "36153f7efba44e98": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_292fc2caeffeCcI5PZCmCzXp3A",
+        "model": "github-copilot/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 148,
+      "total_deletions": 7,
+      "accepted_lines": 144,
+      "overriden_lines": 1
+    }
+  }
+}

@@ -1,0 +1,25 @@
+src/mito2/src/region.rs
+  s_ddea6fc151abfa::t_01a184dfb3677b 593-594
+  s_ddea6fc151abfa::t_a1f6986ec15af7 587-588
+src/store-api/src/region_engine.rs
+  s_ddea6fc151abfa::t_8c529b3fefa60a 486-488,497-499,501-503,505-507
+src/mito2/src/sst/version.rs
+  s_ddea6fc151abfa::t_a1f6986ec15af7 21,143,150,161,168,269-281,283-289,291-297,299-305,308-309,312-313
+  s_ddea6fc151abfa::t_01a184dfb3677b 111,118,129,132-138,282,290,298,306-307,310-311
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "ab8b879e80be0df62a9f73dd959019d2374e7f69",
+  "prompts": {},
+  "sessions": {
+    "s_ddea6fc151abfa": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_196ce9752ffeCnlYMvRN7pLTPo",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

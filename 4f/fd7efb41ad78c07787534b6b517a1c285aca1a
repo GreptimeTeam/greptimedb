@@ -1,0 +1,16 @@
+Cargo.lock
+  h_623774b620da8e 6636,9166,12674,12971,13885,14882
+src/log-store/src/metrics.rs
+  h_623774b620da8e 54-55,57-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "4ffd7efb41ad78c07787534b6b517a1c285aca1a",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

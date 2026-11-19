@@ -1,0 +1,16 @@
+src/client/src/error.rs
+  h_6bf4f2d0301578 200
+src/client/src/database.rs
+  h_6bf4f2d0301578 505
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "d4c6c7d354f1304c16bf4c1526b273a2812c5834",
+  "prompts": {},
+  "humans": {
+    "h_6bf4f2d0301578": {
+      "author": "WenyXu"
+    }
+  }
+}

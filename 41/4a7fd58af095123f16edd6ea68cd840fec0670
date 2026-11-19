@@ -1,0 +1,28 @@
+config/metasrv.example.toml
+  s_daf696910e023b::t_8597726bf6fc80 234-237
+src/meta-srv/src/metasrv/builder.rs
+  s_daf696910e023b::t_8597726bf6fc80 469
+src/meta-srv/src/procedure/wal_prune/manager.rs
+  s_daf696910e023b::t_8597726bf6fc80 120-121,131,144,204,358
+src/common/wal/src/config/kafka/metasrv.rs
+  s_c230139cef7d3f::t_ba103060adaa8b 21-22
+  s_daf696910e023b::t_8597726bf6fc80 23,41-42,58
+config/config.md
+  s_c230139cef7d3f::t_707ff58a76e8da 410
+src/common/wal/src/config.rs
+  s_daf696910e023b::t_8597726bf6fc80 69-70,224
+  s_c230139cef7d3f::t_ba103060adaa8b 23-24
+src/meta-srv/src/procedure/wal_prune.rs
+  s_daf696910e023b::t_8597726bf6fc80 63-65,83,89,127-140
+  s_daf696910e023b::t_b70d50c0b6e2de 233
+  s_c230139cef7d3f::t_ba103060adaa8b 313-314
+  s_daf696910e023b::t_1590426b6d429c 311-312,315-320,337-343,374-405
+src/common/wal/src/config/kafka/common.rs
+  s_daf696910e023b::t_8597726bf6fc80 41-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "414a7fd58af095123f16edd6ea68cd840fec0670",
+  "prompts": {}
+}

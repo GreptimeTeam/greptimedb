@@ -1,0 +1,19 @@
+grafana/dashboards/events/dashboard.json
+  s_1574815378a775::t_38e11d176d0d1d 189,235,411,435,504,559,668,854,890
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "daef4f127ecf18b8a240483e502fcd11516b821d",
+  "prompts": {},
+  "sessions": {
+    "s_1574815378a775": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc6b3-3cb6-7611-b5fc-4d3a514c0e22",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

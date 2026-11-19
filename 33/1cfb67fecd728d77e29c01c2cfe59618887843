@@ -1,0 +1,23 @@
+src/servers/src/batcher/logical_table/region_write.rs
+  s_2432582dedaf5f::t_0c952a4d0746df 1-356
+src/servers/src/batcher/logical_table.rs
+  s_2432582dedaf5f::t_70d2a5928d736f 15-16,19,26,28,40,45-46,49-61,75,93,95,97,100,111,178,273,275,354,356,395,397,418,420,446,448,509,511-512,578,580,618,620-621,677,679,706,708,725,727,1323,1344-1350,1364,1378,1385,1387-1390,1394
+src/servers/src/batcher/logical_table/batch_convert.rs
+  s_2432582dedaf5f::t_27a49f53c04bd4 1-286
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "331cfb67fecd728d77e29c01c2cfe59618887843",
+  "prompts": {},
+  "sessions": {
+    "s_2432582dedaf5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e51-436e-7e22-8f81-250159664969",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

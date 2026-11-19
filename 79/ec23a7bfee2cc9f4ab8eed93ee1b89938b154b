@@ -1,0 +1,20 @@
+src/common/meta/src/ddl/create_table.rs
+  s_df30678d20bee1::t_4ccd63c3a6463f 424,426-428
+  s_df30678d20bee1::t_8a10fd17ad9659 425
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "79ec23a7bfee2cc9f4ab8eed93ee1b89938b154b",
+  "prompts": {},
+  "sessions": {
+    "s_df30678d20bee1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019feaa1-5c5f-7711-9824-7f85f2ff6b3c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,54 @@
+src/meta-srv/src/procedure/test_util.rs
+  s_abc59d71f18a4d::t_9c3a83871f5a3b 98-106,116
+src/meta-srv/src/procedure/region_migration/downgrade_leader_region.rs
+  s_abc59d71f18a4d::t_57bd6bca8c664d 38,150-153,160
+  s_abc59d71f18a4d::t_c3a379f727c7a3 155-158
+src/meta-srv/src/procedure/utils.rs
+  s_abc59d71f18a4d::t_9b0d4c05ec18cd 63
+  s_abc59d71f18a4d::t_c48266092a00a0 18-20,38-62,64-70,75,92-106,201-203,207-217,223
+src/meta-srv/src/procedure/region_migration/close_downgraded_region.rs
+  s_abc59d71f18a4d::t_57bd6bca8c664d 31,135-142,146
+src/meta-srv/src/procedure/repartition/group/enter_staging_region.rs
+  s_abc59d71f18a4d::t_c3a379f727c7a3 366-369
+  s_abc59d71f18a4d::t_310348c9d0e13f 42,361-364,371
+src/meta-srv/src/procedure/repartition/group/remap_manifest.rs
+  s_abc59d71f18a4d::t_b6cb3c0a01c8b4 232
+  s_abc59d71f18a4d::t_310348c9d0e13f 34,230-231,233,239
+src/meta-srv/src/procedure/repartition/group/apply_staging_manifest.rs
+  s_abc59d71f18a4d::t_310348c9d0e13f 41,378-381,387
+src/meta-srv/src/procedure/region_migration.rs
+  s_abc59d71f18a4d::t_f10471e5149fdf 1501-1507
+src/meta-srv/src/procedure/repartition/group/sync_region.rs
+  s_abc59d71f18a4d::t_310348c9d0e13f 40,321-323,330
+src/meta-srv/src/procedure/region_migration/upgrade_candidate_region.rs
+  s_abc59d71f18a4d::t_57bd6bca8c664d 38,183-186,193
+src/meta-srv/src/procedure/region_migration/open_candidate_region.rs
+  s_abc59d71f18a4d::t_999541e8be00f9 206-208
+  s_abc59d71f18a4d::t_8a41183ee4c540 235-236,238,250-251,496-566
+  s_abc59d71f18a4d::t_57bd6bca8c664d 38,196-199,204
+src/meta-srv/src/gc/procedure.rs
+  s_abc59d71f18a4d::t_b6cb3c0a01c8b4 675
+  s_abc59d71f18a4d::t_9b0d4c05ec18cd 47,162-164,168,674,676-685,689-691
+  s_abc59d71f18a4d::t_c3a379f727c7a3 686-688
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "c27dbdc5bf45a0882e5aa1e05132903e816548b4",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_abc59d71f18a4d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a7bfa0affeEwe6BgYqF7nPHZ",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+src/common/meta/src/ddl/drop_table.rs
+  s_3f02b45448515f::t_801c182321ecea 427-429
+src/common/meta/src/ddl/truncate_table.rs
+  s_3f02b45448515f::t_9de0f634a94b53 103-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "93a28b40549624064138b1dd8933697ce30df0e2",
+  "prompts": {},
+  "sessions": {
+    "s_3f02b45448515f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019feb04-12f9-7d33-93fd-394a212a696d",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

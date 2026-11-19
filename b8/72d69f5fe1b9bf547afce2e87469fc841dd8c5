@@ -1,0 +1,21 @@
+src/common/telemetry/src/logging/file_retention.rs
+  s_cd17afc428d85a::t_4de07b9e7a0bc5 456-458,469,471-473
+.github/workflows/rust.yml
+  s_cd17afc428d85a::t_82b2a73aa5da90 125-153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "b872d69f5fe1b9bf547afce2e87469fc841dd8c5",
+  "prompts": {},
+  "sessions": {
+    "s_cd17afc428d85a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e5e-c225-7e83-b498-f3fe753a8217",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+config/config.md
+  s_c8f343c7af25c4::t_25b4c104ac1cf7 36,77-83,289,342-348
+config/frontend.example.toml
+  s_abcb81dd1a0af3::t_2271dc1398c5c9 57,236
+config/standalone.example.toml
+  s_abcb81dd1a0af3::t_0a612cc3791fd4 82,215
+src/frontend/src/frontend.rs
+  s_c8f343c7af25c4::t_b6db6b328216c6 69,105,130,229,236,251,256,263-265,270
+src/frontend/src/instance/builder.rs
+  s_c8f343c7af25c4::t_e6791add4f9ba3 262-265
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_b1a14c3be2b15b 110,435,455,528,591-593,685-687,689-690,692,698,700,702
+src/standalone/src/options.rs
+  s_c8f343c7af25c4::t_0a99213844e391 60,102,136,165,222,230,245,250,258-259,262,267,272,276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "0773d5eee24856612bdf6505056ffa8c01d150db",
+  "prompts": {},
+  "sessions": {
+    "s_abcb81dd1a0af3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a902-af21-7a91-91e8-dcfb869d9c59",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,48 @@
+src/mito2/src/region.rs
+  f1bfc1bf415ea1ad 402-403,827,845-846,860-861,881-885,893,897-913,915-918,920-930,1124-1139
+src/mito2/src/worker/handle_enter_staging.rs
+  f1bfc1bf415ea1ad 45,282,284
+src/mito2/src/engine/staging_test.rs
+  f1bfc1bf415ea1ad 550
+src/mito2/src/region/opener.rs
+  f1bfc1bf415ea1ad 20
+src/mito2/src/worker/handle_apply_staging.rs
+  f1bfc1bf415ea1ad 78
+src/mito2/src/engine/apply_staging_manifest_test.rs
+  f1bfc1bf415ea1ad 336
+src/mito2/src/engine/set_role_state_test.rs
+  f1bfc1bf415ea1ad 22-24,377-382,386-393,399-406,433-440,444,457-462,466-471,473,475
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "1d2ffda57d5ff0c8d01491745891f2da391b5cf4",
+  "prompts": {
+    "36153f7efba44e98": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_292fc2caeffeCcI5PZCmCzXp3A",
+        "model": "github-copilot/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 462,
+      "overriden_lines": 0
+    },
+    "f1bfc1bf415ea1ad": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_28e81583dffes9EBl85vuBOy6u",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 175,
+      "total_deletions": 92,
+      "accepted_lines": 138,
+      "overriden_lines": 3
+    }
+  }
+}

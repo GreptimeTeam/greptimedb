@@ -1,0 +1,54 @@
+src/common/meta/src/error.rs
+  s_abc59d71f18a4d::t_3169e5b728c845 32-33
+  s_abc59d71f18a4d::t_8ed341a696c0cd 1291-1293,1321-1333
+  s_abc59d71f18a4d::t_85672ec01be22d 1437-1448
+  s_abc59d71f18a4d::t_a907e6aceca44e 34-38
+src/common/meta/src/error/retry_hint.rs
+  s_abc59d71f18a4d::t_12dd5def1266ea 1-14,17-18,20,22
+  s_abc59d71f18a4d::t_fba416aed1f350 15-16,19,21,23-25
+src/common/meta/src/error/retry_hint/mysql.rs
+  s_abc59d71f18a4d::t_a907e6aceca44e 24,47,87
+  s_abc59d71f18a4d::t_cdca86b08d3a2c 117-119
+  s_abc59d71f18a4d::t_fba416aed1f350 1-19,26,28,32,36,38,40,44,46,75-76,78,80,89,91-93,95-96,116,133-135,144-187,243,248-250,255-257,259-261,263-266
+  s_abc59d71f18a4d::t_9c703aaf3e1683 121,123-125
+  s_abc59d71f18a4d::t_3d6192d53b5639 30-31,120,132
+  s_abc59d71f18a4d::t_4be84ed500f3d1 25,27,29,35,37,39,43,45,77,79,88,90
+  s_abc59d71f18a4d::t_2f897f3c469a40 188-242,244-247,251-254,258,262
+  s_abc59d71f18a4d::t_992b01b4e87f96 20-21
+  s_abc59d71f18a4d::t_0abf0303402810 22-23,33-34,41-42,48-74,81-86,94,97-115,122,126-131,136-143
+src/common/meta/src/error/retry_hint/etcd.rs
+  s_abc59d71f18a4d::t_89ae0857164989 26,36,54,58,70
+  s_abc59d71f18a4d::t_60fa5fb1a25dc1 66
+  s_abc59d71f18a4d::t_a61d8d1c395ff1 38-40
+  s_abc59d71f18a4d::t_fba416aed1f350 1-25,27-35,37,41-53,55-57,59-61,67-69,71-74
+  s_abc59d71f18a4d::t_2f897f3c469a40 62-65
+src/common/meta/src/error/retry_hint/postgres.rs
+  s_abc59d71f18a4d::t_8aa02f23c7f103 52-62
+  s_abc59d71f18a4d::t_066b5477854a86 78-80
+  s_abc59d71f18a4d::t_fba416aed1f350 1-38,40,42,44,46,48,50,63-77,81-92,117-126
+  s_abc59d71f18a4d::t_4be84ed500f3d1 39,41,43,45,47,49,51
+  s_abc59d71f18a4d::t_2f897f3c469a40 93-116
+src/meta-srv/src/error.rs
+  s_abc59d71f18a4d::t_df7b85defb28af 1305-1306,1309-1379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "9917261e4717e61a57ab336fc9c86ceb0a125d4e",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_abc59d71f18a4d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a7bfa0affeEwe6BgYqF7nPHZ",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

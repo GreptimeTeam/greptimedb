@@ -1,0 +1,29 @@
+config/metasrv.example.toml
+  s_b7d7dd5280bd00::t_b4afa186b1553f 66-67
+config/standalone.example.toml
+  s_b7d7dd5280bd00::t_b4afa186b1553f 440-441
+src/common/wal/src/config/object_store.rs
+  s_b7d7dd5280bd00::t_b4afa186b1553f 68-70
+config/config.md
+  s_b7d7dd5280bd00::t_b4afa186b1553f 131,463,623
+config/datanode.example.toml
+  s_b7d7dd5280bd00::t_b4afa186b1553f 230-231
+src/cmd/tests/load_config_test.rs
+  s_b7d7dd5280bd00::t_b4afa186b1553f 594-599,643-644,677-679,728-732,736,741,745-754,759
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3760f3d796d8dc54e577b791460b374e63e185d2",
+  "prompts": {},
+  "sessions": {
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

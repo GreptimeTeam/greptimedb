@@ -1,0 +1,167 @@
+src/metric-engine/src/engine.rs
+  s_cbf051d9e59a54::t_abdb3aaf3f5743 639
+src/metric-engine/src/engine/bulk_insert.rs
+  s_cbf051d9e59a54::t_e5e82218a86e55 602
+src/metric-engine/src/engine/flush.rs
+  s_cbf051d9e59a54::t_891e5b1e9907e9 93
+src/metric-engine/src/engine/put.rs
+  s_cbf051d9e59a54::t_010492c7b8fa28 1232,1244,1417,1493,1517,1539,1600,1612,1624,1676,1688,1700,1739,1774,1786,1822,1901,1944,1959,1974,2043,2100,2155
+  s_cbf051d9e59a54::t_0246d1df130fae 156
+  s_862264a208b693::t_59b21be59e3b7c 156,181-192,794,801-802,807-808,814,817-850,867,879,903,906,921,927,930-933,939-940,958-960,981,983,988,990-992,996,1057,1058-1059,1270,1274-1275,1290
+  s_cbf051d9e59a54::t_851f21978ab7c2 148,151-155,157-160,175,180,193-202,210-213,216-217,220-232,240-241,252-264,276-279,285-286,314-321,344,349,352-364,371,851,918,934,966,1271-1277,1279-1290
+  s_cbf051d9e59a54::t_789afcd2df4e71 145-146
+  s_ee5e15630afc9a::t_0e71e6a7f2e84d 852-866,868-878,880-902,904-905,907-917,919-926,928-929,935-955,957-965,967-970,972-999,1001-1008,1010-1057
+src/metric-engine/src/engine/read.rs
+  s_cbf051d9e59a54::t_75c2116b98731d 503
+src/metric-engine/src/metadata_region.rs
+  s_cbf051d9e59a54::t_4b0d5f0828c8a6 589
+  s_862264a208b693::t_18f09650510c23 588,824-854
+src/mito2/src/engine/alter_test.rs
+  s_cbf051d9e59a54::t_90db08b8da45f0 3414
+src/mito2/src/engine/apply_staging_manifest_test.rs
+  s_cbf051d9e59a54::t_ccc2a525d634ba 955
+src/mito2/src/engine/basic_test.rs
+  s_cbf051d9e59a54::t_3c0088b2c71893 735
+  h_623774b620da8e 1324-1326,1332,1389-1392,1435-1436,1458,1465-1467,1475-1488,1504-1508,1610,1628,1675-1676,1679-1684,1686-1687,1690-1692,1700-1702,1704-1705,1708
+  s_cbf051d9e59a54::t_4ea4afeaaa2753 1324-1326,1332,1389
+  s_ee5e15630afc9a::t_de013cce67fe0b 1327-1388,1393-1434,1437-1457,1459-1464,1468-1474,1489-1503,1509-1537,1542-1547,1560-1578,1587-1609,1611-1627,1629-1633,1636,1644-1645,1648-1669,1671,1674
+src/mito2/src/engine/edit_region_test.rs
+  s_cbf051d9e59a54::t_d41825ddb565a7 289,404
+src/mito2/src/engine/flush_test.rs
+  s_cbf051d9e59a54::t_fc374469fa88b5 743,939
+src/mito2/src/engine/open_test.rs
+  s_cbf051d9e59a54::t_88f81bfb27aaae 481
+src/mito2/src/engine/scan_test.rs
+  s_cbf051d9e59a54::t_2c158c50b0572e 1129
+src/mito2/src/engine/set_role_state_test.rs
+  s_cbf051d9e59a54::t_a7234e5ef658ed 117,212
+src/mito2/src/engine/skip_wal_test.rs
+  s_cbf051d9e59a54::t_af52346b1b02c6 525,557,584
+src/mito2/src/engine/staging_test.rs
+  s_cbf051d9e59a54::t_1ee8b96b1ac5e2 288,359,381,399,447,465,492
+src/mito2/src/request.rs
+  s_cbf051d9e59a54::t_b0fedbb88002e2 79-80,142
+  h_623774b620da8e 148-153,684,1886-1904
+  s_cbf051d9e59a54::t_0371d85a02c4c2 148-153,684,1886-1904
+src/mito2/src/test_util.rs
+  s_cbf051d9e59a54::t_09d531a61cbfa2 1354
+src/store-api/src/region_request.rs
+  s_f8719206b67ded::t_bf39b62b05df6b 528-530
+  h_623774b620da8e 224,1871-1900
+  s_cbf051d9e59a54::t_55ae35bc9407f7 224,1871-1900
+src/flow/src/server.rs
+  s_ee5e15630afc9a::t_9a7fb1d6437464 127
+  s_cbf051d9e59a54::t_c0cecf83cd6a2d 127
+src/mito2/src/region/opener.rs
+  h_623774b620da8e 956
+  s_cbf051d9e59a54::t_1c57a3c6738bd7 956
+src/mito2/src/region_write_ctx.rs
+  h_623774b620da8e 159,165,170,219-220,546,555-557,560-561,577,579-580,582-585,587,671-697,700-711
+  s_cbf051d9e59a54::t_1f1a6a4196c42d 159,165,170,219-220,546,555-557,560-561,577,579-580,582-585,587,671-697,700-711
+src/mito2/src/worker/handle_write.rs
+  h_623774b620da8e 454,617,624-625,628-631,891,920,925-928,953-954,965,968,1069,1090
+  s_cbf051d9e59a54::t_4d9e5ccaa8302e 454,617,624-625,628-631,891,920,925-928,953-954,965,968,1069,1090
+src/operator/src/insert.rs
+  s_cbf051d9e59a54::t_57a8537bccd8bb 268-269,302,316-317,350,1750-1751,1766-1767
+src/operator/src/req_convert/common/partitioner.rs
+  s_cbf051d9e59a54::t_cbb54f8631a28e 37,48
+src/operator/src/req_convert/insert/row_to_region.rs
+  s_cbf051d9e59a54::t_48973e3040cded 48,59,85-100,108-110,159-160
+src/operator/src/req_convert/insert/stmt_to_region.rs
+  s_cbf051d9e59a54::t_120412945ddcc6 157
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_cbf051d9e59a54::t_5d475a46d8798c 173,176
+src/servers/src/grpc/context_auth.rs
+  s_cbf051d9e59a54::t_c15abebbee90ec 24,32,50-56,68-69,179-214,225-233
+  s_ee5e15630afc9a::t_9244aa67b58dcc 57-67,215-224
+src/servers/src/grpc/greptime_handler.rs
+  s_cbf051d9e59a54::t_aa8a2c789f6fff 41,332-380
+  s_ee5e15630afc9a::t_836907de1f7b66 205,244-271,381-406
+src/servers/src/hint_headers.rs
+  s_cbf051d9e59a54::t_787f9a147b1009 62-77
+src/servers/src/http.rs
+  s_cbf051d9e59a54::t_0f7876a2985ef3 120,1063-1064
+src/servers/src/http/header.rs
+  s_cbf051d9e59a54::t_50383f875731a9 47,98-101
+src/servers/src/http/skip_wal.rs
+  s_cbf051d9e59a54::t_8a7c044d700c42 1-56
+src/servers/tests/http/http_handler_test.rs
+  s_cbf051d9e59a54::t_d7de591f2a1a16 983-1081
+src/session/src/context.rs
+  s_cbf051d9e59a54::t_588e5af70b0977 156-164,360-368,760-790
+src/session/src/hints.rs
+  s_cbf051d9e59a54::t_1ec8c80317eaf5 26-28
+src/session/src/lib.rs
+  s_cbf051d9e59a54::t_8ba8ec83678b62 63-64,79
+src/operator/src/statement.rs
+  s_ee5e15630afc9a::t_19fba272cb773d 66,537
+src/operator/src/statement/set.rs
+  s_ee5e15630afc9a::t_b0e62af6256a67 41-69,413-417,420-464
+tests-integration/Cargo.toml
+  h_623774b620da8e 68
+tests-integration/src/standalone.rs
+  h_623774b620da8e 65-66,347
+tests-integration/src/test_util.rs
+  h_623774b620da8e 15-17,32,34-35,47-48,51-53,76-79,81,84-247
+tests-integration/src/tests/instance_test.rs
+  h_623774b620da8e 1177-1225
+tests-integration/src/tests/test_util.rs
+  h_623774b620da8e 45,91
+tests-integration/tests/grpc.rs
+  h_623774b620da8e 18-20,24-27,67,69-70,784-830,1207-1344
+tests-integration/tests/http.rs
+  h_623774b620da8e 74,76,82-83,448-468,1653-1673,2695-2733,4220-4240,5449-5469,6650-6666,7462-7499,8570-8587,8878-8910,9319-9331,11035-11047,11156-11277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "82ce8f35dd3bf81d8c3ab302db9d6d592a3ebefe",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_348dabf0db493c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1de4-7f41-8d62-7f7167f88197",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_862264a208b693": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08664-6b18-72e2-b914-5a8d9ffb183a",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_ee5e15630afc9a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08741-8460-7082-b1e4-8cbcb2450830",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_f8719206b67ded": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08664-a608-7680-8708-a58ad70495a3",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

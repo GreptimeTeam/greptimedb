@@ -1,0 +1,33 @@
+src/partition/src/multi_dim.rs
+  s_8b40584f3081c3::t_01a98aa654085f 127-132,533
+  s_8b40584f3081c3::t_cd4b70bf01d6b8 515-532,534-535
+src/partition/src/splitter.rs
+  s_8b40584f3081c3::t_01a98aa654085f 43-44,46
+  s_8b40584f3081c3::t_e454a9b738858a 45
+src/partition/src/error.rs
+  s_8b40584f3081c3::t_01a98aa654085f 252-258,296
+src/operator/src/req_convert/common/partitioner.rs
+  s_8b40584f3081c3::t_01a98aa654085f 1027-1032,1034-1037,1040-1041,1043-1171,1173,1176-1178,1180-1396
+  s_8b40584f3081c3::t_dbcb09a786491a 1033,1038-1039,1042,1172,1174-1175,1179
+src/partition/src/manager.rs
+  s_8b40584f3081c3::t_01a98aa654085f 15,24-30,39,210,234-247,301-377
+  s_8b40584f3081c3::t_990656533dce74 378
+tests-integration/tests/repartition.rs
+  s_8b40584f3081c3::t_929b72693fa0b4 113-121,1519-1732
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "62cb69b4493540f8ea9eed55b9f55cb0cb2c7506",
+  "prompts": {},
+  "sessions": {
+    "s_8b40584f3081c3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e458-dc8c-79a1-af2d-f222c3933c62",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

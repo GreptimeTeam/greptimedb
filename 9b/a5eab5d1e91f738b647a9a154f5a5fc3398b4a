@@ -1,0 +1,23 @@
+src/datatypes/src/extension/json.rs
+  s_abcb81dd1a0af3::t_f228e6a97e4ae0 18,22,31-51
+src/mito2/src/memtable/bulk/part.rs
+  s_abcb81dd1a0af3::t_7cf0a1916896be 42
+src/operator/src/req_convert/insert/row_to_batch.rs
+  s_abcb81dd1a0af3::t_e3d28a6d0ab0a5 26,149-150,350-408
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "9ba5eab5d1e91f738b647a9a154f5a5fc3398b4a",
+  "prompts": {},
+  "sessions": {
+    "s_abcb81dd1a0af3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a902-af21-7a91-91e8-dcfb869d9c59",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

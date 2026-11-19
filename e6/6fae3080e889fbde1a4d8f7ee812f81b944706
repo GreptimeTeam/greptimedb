@@ -1,0 +1,63 @@
+src/metric-engine/src/engine.rs
+  s_cbf051d9e59a54::t_abdb3aaf3f5743 639
+src/metric-engine/src/engine/bulk_insert.rs
+  s_cbf051d9e59a54::t_e5e82218a86e55 602
+src/metric-engine/src/engine/flush.rs
+  s_cbf051d9e59a54::t_891e5b1e9907e9 93
+src/metric-engine/src/engine/put.rs
+  s_cbf051d9e59a54::t_010492c7b8fa28 236,295,926,938,1102,1178,1202,1224,1285,1297,1309,1361,1373,1385,1424,1459,1471,1507,1586,1629,1644,1659,1728,1785,1840
+src/metric-engine/src/engine/read.rs
+  s_cbf051d9e59a54::t_75c2116b98731d 498
+src/metric-engine/src/metadata_region.rs
+  s_cbf051d9e59a54::t_4b0d5f0828c8a6 588
+src/mito2/src/engine/alter_test.rs
+  s_cbf051d9e59a54::t_90db08b8da45f0 3344
+src/mito2/src/engine/apply_staging_manifest_test.rs
+  s_cbf051d9e59a54::t_ccc2a525d634ba 955
+src/mito2/src/engine/basic_test.rs
+  s_cbf051d9e59a54::t_3c0088b2c71893 735
+src/mito2/src/engine/edit_region_test.rs
+  s_cbf051d9e59a54::t_d41825ddb565a7 289,404
+src/mito2/src/engine/flush_test.rs
+  s_cbf051d9e59a54::t_fc374469fa88b5 743,939
+src/mito2/src/engine/open_test.rs
+  s_cbf051d9e59a54::t_88f81bfb27aaae 481
+src/mito2/src/engine/scan_test.rs
+  s_cbf051d9e59a54::t_2c158c50b0572e 1110
+src/mito2/src/engine/set_role_state_test.rs
+  s_cbf051d9e59a54::t_a7234e5ef658ed 117,212
+src/mito2/src/engine/skip_wal_test.rs
+  s_cbf051d9e59a54::t_af52346b1b02c6 525,557,584
+src/mito2/src/engine/staging_test.rs
+  s_cbf051d9e59a54::t_1ee8b96b1ac5e2 288,359,381,399,447,465,492
+src/mito2/src/request.rs
+  s_cbf051d9e59a54::t_b0fedbb88002e2 79-80,142
+src/mito2/src/test_util.rs
+  s_cbf051d9e59a54::t_09d531a61cbfa2 1354
+src/store-api/src/region_request.rs
+  s_f8719206b67ded::t_bf39b62b05df6b 220,526-528
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "e66fae3080e889fbde1a4d8f7ee812f81b944706",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_f8719206b67ded": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08664-a608-7680-8708-a58ad70495a3",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+src/log-store/src/object_store_wal/store.rs
+  s_b7d7dd5280bd00::t_54cdd5ef3d2181 80-81,83-85,87,429-430,1284-1288,1369-1396,1415-1416,1426,1452,1539-1540,1542-1545,1575,1626-1627,1799-1801,1805,1808,1911,1941,2085,2103,2187-2188,2241-2242,2258-2271,3452-3468,8196,8203,8206,9476-9492,9496-9497,9499,9502-9554,9556,9559-9576,9578-9597,9599-9600,9605-9671
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2dab68d60fcac0e10a8768193b40fdf4ca20157d",
+  "prompts": {},
+  "sessions": {
+    "s_b7d7dd5280bd00": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c5e7-c137-7441-95b6-d8a603300cd9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

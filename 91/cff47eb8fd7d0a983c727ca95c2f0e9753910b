@@ -1,0 +1,14 @@
+src/client/src/database.rs
+  h_623774b620da8e 1312-1315
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "91cff47eb8fd7d0a983c727ca95c2f0e9753910b",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

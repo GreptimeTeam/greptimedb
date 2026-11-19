@@ -1,0 +1,19 @@
+src/common/event-recorder/src/recorder.rs
+  s_b6df70616bf082::t_4b60209acb9e8e 56,59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6dfc9ee2ab4462094b358683ad370b185a1c220c",
+  "prompts": {},
+  "sessions": {
+    "s_b6df70616bf082": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa19c-ed21-7f23-a85f-c4ca1333776f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

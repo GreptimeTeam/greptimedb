@@ -1,0 +1,19 @@
+src/common/meta/src/snapshot.rs
+  s_c6b2d81349dd81::t_59168f725348a8 422-424,427,431,442-446
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0ee0684642b053bb737cc9847f94f990a9b93533",
+  "prompts": {},
+  "sessions": {
+    "s_c6b2d81349dd81": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cc75-e8c6-70f2-904e-a26da67a84cb",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+src/mito2/src/sst/parquet/writer.rs
+  s_17057bba187655::t_ee7c263b9b319f 766-767,895-897,900-902
+src/mito2/src/sst/index.rs
+  s_17057bba187655::t_ee7c263b9b319f 295-299
+src/mito2/src/compaction/multi_region.rs
+  s_17057bba187655::t_ee7c263b9b319f 41,135-136,140-143
+  s_17057bba187655::t_9d9a68278098c6 33
+src/mito2/src/sst/index/registry.rs
+  s_17057bba187655::t_ee7c263b9b319f 121-163
+src/mito2/src/engine/index_build_test.rs
+  s_17057bba187655::t_774b00fea99e21 2832,2922,2924,2927-2931,2939-2945,2992-3007,3097,3099,3123,3229,3298,3304-3309,3320
+  s_17057bba187655::t_43818a49c3446a 2920-2921,2925,3310-3319
+  s_17057bba187655::t_876ce933379946 2869-2880
+src/mito2/src/compaction/compactor.rs
+  s_17057bba187655::t_cae38361e54074 2040,2105-2114,2138-2139
+  s_17057bba187655::t_ee7c263b9b319f 479-484,973,1054,1059
+src/mito2/src/compaction/multi_region/tests.rs
+  s_17057bba187655::t_cae38361e54074 2568,2603-2623
+src/mito2/src/worker/handle_compaction.rs
+  s_17057bba187655::t_ee7c263b9b319f 30,32,35-47,89-93,95,101,254-257
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "800a4fcb7b9dd007b59a81852f9e0ad114acc3df",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

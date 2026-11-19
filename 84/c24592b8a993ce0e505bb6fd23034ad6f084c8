@@ -1,0 +1,44 @@
+src/mito2/src/compaction/task.rs
+  s_67412438ee4b4f::t_f52d4e65634b4b 165
+src/mito2/src/request.rs
+  s_67412438ee4b4f::t_10d3968c5f95eb 1113-1141,1148
+  s_67412438ee4b4f::t_878398fd3c0e8d 55
+src/mito2/src/worker.rs
+  h_623774b620da8e 69,1125,1129,1200-1207
+  s_67412438ee4b4f::t_86ebafa0e228c8 1124,1126-1128,1130-1134
+  s_67412438ee4b4f::t_4ae61516b4d452 1103-1104
+src/mito2/src/worker/utils.rs
+  s_67412438ee4b4f::t_912174f149d725 17,24-30
+src/mito2/src/manifest/updater.rs
+  s_67412438ee4b4f::t_827bd17ef76a59 160,162,164
+  s_67412438ee4b4f::t_d48f1062b4b9d0 103
+  s_67412438ee4b4f::t_65e2e3abd3de2c 22,25,28-33,41,82,89-96,109-119
+  s_67412438ee4b4f::t_7176b17593297c 46-79
+src/mito2/src/worker/handle_manifest.rs
+  s_67412438ee4b4f::t_a28d4944dbe128 258,295
+  s_67412438ee4b4f::t_ba3fb4ad9f06de 179-184,186,212
+  s_67412438ee4b4f::t_69053fa3affc65 35,41
+  s_67412438ee4b4f::t_f4ed21aca3abbd 191,228
+  s_67412438ee4b4f::t_01785ffd816377 43-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "84c24592b8a993ce0e505bb6fd23034ad6f084c8",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_67412438ee4b4f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1d3d35f80ffenLbCcEJXYCWiLL",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

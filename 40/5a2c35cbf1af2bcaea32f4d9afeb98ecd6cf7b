@@ -1,0 +1,24 @@
+src/mito2/src/worker/handle_flush.rs
+  s_313f6d000e4ee5::t_418ab5bdcf1042 88-89,214-215
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "405a2c35cbf1af2bcaea32f4d9afeb98ecd6cf7b",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_313f6d000e4ee5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1d5844c5dffevvF9sjoMiB3h71",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

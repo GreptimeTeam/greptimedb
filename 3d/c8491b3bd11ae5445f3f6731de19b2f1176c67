@@ -1,0 +1,21 @@
+src/partition/src/partition.rs
+  s_8b40584f3081c3::t_7ba44a984493f7 51-53
+src/servers/src/batcher/logical_table/batch_convert.rs
+  s_8b40584f3081c3::t_2eb963b5be202f 199-201,263-265,285-290,314-315,609-615
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3dc8491b3bd11ae5445f3f6731de19b2f1176c67",
+  "prompts": {},
+  "sessions": {
+    "s_8b40584f3081c3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e458-dc8c-79a1-af2d-f222c3933c62",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

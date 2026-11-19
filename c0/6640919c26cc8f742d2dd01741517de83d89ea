@@ -1,0 +1,12 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "c06640919c26cc8f742d2dd01741517de83d89ea",
+  "prompts": {},
+  "humans": {
+    "h_6bf4f2d0301578": {
+      "author": "WenyXu"
+    }
+  }
+}

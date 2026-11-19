@@ -1,0 +1,31 @@
+src/common/event-recorder/src/event_table.rs
+  s_bab36d2c764e36::t_b0179d2e27e248 127-129,260-262
+src/meta-srv/src/event.rs
+  s_bab36d2c764e36::t_b0179d2e27e248 23
+src/meta-srv/src/gc/procedure.rs
+  s_bab36d2c764e36::t_b0179d2e27e248 29-30,43,1028-1052
+tests-integration/tests/main.rs
+  s_bab36d2c764e36::t_b0179d2e27e248 24
+config/config.md
+  s_bab36d2c764e36::t_b0179d2e27e248 234
+src/meta-srv/src/event/gc.rs
+  s_bab36d2c764e36::t_b0179d2e27e248 1-539
+tests-integration/tests/gc_event.rs
+  s_bab36d2c764e36::t_b0179d2e27e248 1-213
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "bc914311324e64acde73fea6a8558a6ee7300c21",
+  "prompts": {},
+  "sessions": {
+    "s_bab36d2c764e36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa8b5-aa96-72a0-b7fd-65f77a728723",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

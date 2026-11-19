@@ -1,0 +1,23 @@
+tests-integration/tests/region_migration.rs
+  s_0a5145b617cd2c::t_3129fe3f7b0a40 1348-1351,1367-1372
+tests-integration/tests/wal_prune_event.rs
+  s_0a5145b617cd2c::t_3129fe3f7b0a40 102
+tests-integration/tests/table_ddl_event.rs
+  s_0a5145b617cd2c::t_3129fe3f7b0a40 343,360,378,397,421,441
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "0e6ad1b82b44686066f79ed693cca061a015917b",
+  "prompts": {},
+  "sessions": {
+    "s_0a5145b617cd2c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb619-1787-79b3-b8de-754931cc8e13",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

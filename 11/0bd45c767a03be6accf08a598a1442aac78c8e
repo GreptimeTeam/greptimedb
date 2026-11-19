@@ -1,0 +1,16 @@
+src/meta-srv/src/service/heartbeat.rs
+  h_623774b620da8e 74-89
+src/meta-srv/src/handler.rs
+  h_623774b620da8e 331-336
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.11",
+  "base_commit_sha": "110bd45c767a03be6accf08a598a1442aac78c8e",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

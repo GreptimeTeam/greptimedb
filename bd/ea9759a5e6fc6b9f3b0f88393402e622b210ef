@@ -1,0 +1,21 @@
+src/common/meta/src/ddl/event.rs
+  s_386ae40ce19d4b::t_a18d7274f22998 15-16
+tests-integration/tests/database_ddl_events.rs
+  s_386ae40ce19d4b::t_1682c7594b9215 16,19,140-151,154-169,174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "bdea9759a5e6fc6b9f3b0f88393402e622b210ef",
+  "prompts": {},
+  "sessions": {
+    "s_386ae40ce19d4b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa417-65b4-7d13-a763-977980c6e9cb",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

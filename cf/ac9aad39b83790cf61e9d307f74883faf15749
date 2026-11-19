@@ -1,0 +1,25 @@
+Cargo.lock
+  s_c8f343c7af25c4::t_f2a553c6eebe2e 13494
+src/common/batcher/src/lib.rs
+  s_c8f343c7af25c4::t_5acfc32a182a92 18
+src/servers/Cargo.toml
+  s_c8f343c7af25c4::t_26f8aff50e707a 39
+src/servers/src/pending_rows_batcher.rs
+  s_c8f343c7af25c4::t_eefbe33a6a9d0f 33-36,350,355,392-395,411,418,889-890,942-943,946,948,959-965,977-985,989,1008,1025-1026,1033,1038,1077-1088,1115,1117,1880,1934-1935,1937-1940,2381-2382,2386-2396,2411-2416,2419-2421,2428-2479,3084,3124,3136-3137,3145,3156-3159,3176-3191,3193-3200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "cfac9aad39b83790cf61e9d307f74883faf15749",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

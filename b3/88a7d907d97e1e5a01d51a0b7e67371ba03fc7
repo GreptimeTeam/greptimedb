@@ -1,0 +1,19 @@
+tests-integration/tests/http.rs
+  s_cbf051d9e59a54::t_fa67b1a7e9c83c 11331
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "b388a7d907d97e1e5a01d51a0b7e67371ba03fc7",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

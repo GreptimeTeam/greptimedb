@@ -1,0 +1,46 @@
+tests-integration/src/standalone.rs
+  s_d8e3b40ff4bca6::t_7f91130aead02f 287
+src/common/procedure/src/local/runner.rs
+  s_d8e3b40ff4bca6::t_97f35867cda846 22,779
+src/frontend/src/instance/builder.rs
+  s_d8e3b40ff4bca6::t_7d0af2f39167f4 307-314
+src/frontend/src/instance.rs
+  s_d8e3b40ff4bca6::t_64c1dd99f45647 49
+src/frontend/src/frontend.rs
+  s_d8e3b40ff4bca6::t_dfc388d6deab2f 119
+src/common/procedure/src/local.rs
+  s_d8e3b40ff4bca6::t_97f35867cda846 26,647-648
+  s_d8e3b40ff4bca6::t_bd209b37deb548 1085-1086,1094-1095
+  s_d8e3b40ff4bca6::t_8418fc471747de 1047,1050,1054-1060,1083-1084,1090-1093,1318-1320,1329,1445
+  s_d8e3b40ff4bca6::t_7c463fe7caaca8 644,1363,1396
+src/cmd/src/standalone.rs
+  s_d8e3b40ff4bca6::t_7f91130aead02f 611
+src/common/event-recorder/src/recorder.rs
+  s_d8e3b40ff4bca6::t_97f35867cda846 235,237,372-373
+  s_d8e3b40ff4bca6::t_25adbf6048036f 236
+  h_623774b620da8e 321
+  s_d8e3b40ff4bca6::t_bdf4b3d02cccaf 607,612,615-618
+  s_d8e3b40ff4bca6::t_ba5fe287c0f926 374-375
+  s_d8e3b40ff4bca6::t_cb3cf2aa21db7a 619
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "72c02b81df014584c607f10261f966e32bb3adb6",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_d8e3b40ff4bca6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa260-6126-7662-9521-5caddee588d3",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

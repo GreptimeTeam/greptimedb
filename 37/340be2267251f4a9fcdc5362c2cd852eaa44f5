@@ -1,0 +1,30 @@
+src/meta-srv/src/region/flush_trigger.rs
+  s_c9a37f2d9d2643::t_80a270becd99f1 630,639,903-907,913-944,950-969
+  s_c9a37f2d9d2643::t_364367adfc412c 156,162,164,172,178,181-184,194-226,230-232,235-240,247-248,251-259,262-266,311,329,335-337,339-340,343,363
+  s_c9a37f2d9d2643::t_1a66cf168d023c 629,631-638,640-693
+  s_c9a37f2d9d2643::t_7f40127ba7b412 499,501-548
+  s_c9a37f2d9d2643::t_33d8e42278e245 908-912,945-949
+  s_c9a37f2d9d2643::t_99fc5b2f055be5 49,227-229,233,249-250,327,500
+  s_c9a37f2d9d2643::t_0d38253c13a15d 175,260-261,338,352-355
+  s_c9a37f2d9d2643::t_9e721132fef483 48,50,90-91,131
+  s_c9a37f2d9d2643::t_5a660b60b49fc5 241-246,322
+remote-wal-checkpoint-periodic-plan.md
+  s_c9a37f2d9d2643::t_8f13e24d00e2c7 1-176,178-216,218-353,355-357,359-413,415-467,469-497
+  s_c9a37f2d9d2643::t_e49fecbe77ade6 177,217,354,358,414,468
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "37340be2267251f4a9fcdc5362c2cd852eaa44f5",
+  "prompts": {},
+  "sessions": {
+    "s_c9a37f2d9d2643": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_178d298adffeGIJEg6GiJ7jt01",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

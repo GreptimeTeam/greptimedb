@@ -1,0 +1,38 @@
+src/common/event-recorder/src/recorder.rs
+  s_d8e3b40ff4bca6::t_498e3d99028d09 567-570
+  s_d8e3b40ff4bca6::t_ab9cc3a4ebc06b 279,291-294,562-566
+  s_d8e3b40ff4bca6::t_c0074d9d405a04 571-572
+config/standalone.example.toml
+  s_d8e3b40ff4bca6::t_ab9cc3a4ebc06b 891-899
+config/metasrv.example.toml
+  s_d8e3b40ff4bca6::t_ab9cc3a4ebc06b 309-312
+src/meta-srv/src/metasrv.rs
+  s_d8e3b40ff4bca6::t_ab9cc3a4ebc06b 411-415
+src/standalone/src/options.rs
+  s_d8e3b40ff4bca6::t_ab9cc3a4ebc06b 123-127
+config/config.md
+  s_d8e3b40ff4bca6::t_db1b0022282756 230-232,439
+src/frontend/src/frontend.rs
+  s_d8e3b40ff4bca6::t_ab9cc3a4ebc06b 119-123
+src/meta-srv/src/procedure/region_migration.rs
+  s_d8e3b40ff4bca6::t_c76e091977a6d5 1054
+src/cmd/tests/load_config_test.rs
+  s_d8e3b40ff4bca6::t_ab9cc3a4ebc06b 415-442
+  s_d8e3b40ff4bca6::t_f12009c831296e 414
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "782b1fcb0818db7f4dd8b68f1d015c4c743a5d52",
+  "prompts": {},
+  "sessions": {
+    "s_d8e3b40ff4bca6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa260-6126-7662-9521-5caddee588d3",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

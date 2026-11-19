@@ -1,0 +1,19 @@
+src/metric-engine/src/engine/put.rs
+  s_cbf051d9e59a54::t_851f21978ab7c2 146,149-153,155-158,173,178,191-200,208-211,214-215,218-230,238-239,250-262,274-277,283-284,312-319,342,347,350-362,369,849,865,882,908-909,914-921,923-924,930,932-933,954-957,961,994,1049-1050,1057,1225-1235,1251,1253,1259-1265,1267-1278
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "82c59c576ee04b27ce5e0966ca4af1b1a0099bbf",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
