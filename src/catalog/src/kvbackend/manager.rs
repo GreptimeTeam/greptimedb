@@ -418,9 +418,6 @@ impl CatalogManager for KvBackendCatalogManager {
     }
 
     async fn table_ids(&self, names: &[TableName]) -> Result<Vec<Option<TableId>>> {
-        let cache: TableNameCacheRef = self.cache_registry.get().context(CacheNotFoundSnafu {
-            name: "table_name_cache",
-        })?;
         let mut results = vec![None; names.len()];
         let mut missing = Vec::new();
         let mut positions = Vec::new();
@@ -437,6 +434,12 @@ impl CatalogManager for KvBackendCatalogManager {
                 positions.push(index);
             }
         }
+        if missing.is_empty() {
+            return Ok(results);
+        }
+        let cache: TableNameCacheRef = self.cache_registry.get().context(CacheNotFoundSnafu {
+            name: "table_name_cache",
+        })?;
         for (index, value) in positions
             .into_iter()
             .zip(cache.get_many(&missing).await.context(GetTableCacheSnafu)?)
@@ -447,6 +450,9 @@ impl CatalogManager for KvBackendCatalogManager {
     }
 
     async fn table_infos_by_ids(&self, ids: &[TableId]) -> Result<Vec<Option<TableInfoRef>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let cache: TableInfoCacheRef = self.cache_registry.get().context(CacheNotFoundSnafu {
             name: "table_info_cache",
         })?;
@@ -743,21 +749,138 @@ impl SystemCatalog {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use common_meta::cache::{CacheContainer, Initializer};
-    use common_meta::key::table_route::LogicalTableRouteValue;
+    use common_catalog::consts::NUMBERS_TABLE_ID;
+    use common_meta::cache::{
+        CacheContainer, CacheRegistryBuilder, Initializer, LayeredCacheRegistryBuilder,
+    };
+    use common_meta::ddl::test_util::create_table::test_create_table_task;
+    use common_meta::key::table_route::{LogicalTableRouteValue, TableRouteValue};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use moka::future::Cache as FutureCache;
+    use partition::cache::PartitionInfoCacheRef;
     use table::metadata::TableInfo;
+    use table::table::numbers::NUMBERS_TABLE_NAME;
 
     use super::*;
+
+    fn batch_lookup_manager(
+        backend: KvBackendRef,
+        registry: LayeredCacheRegistryRef,
+    ) -> Arc<KvBackendCatalogManager> {
+        crate::kvbackend::KvBackendCatalogManagerBuilder::new(
+            Arc::new(crate::information_schema::NoopInformationExtension),
+            backend,
+            registry,
+        )
+        .build()
+    }
+
+    #[tokio::test]
+    async fn test_batch_lookups_without_table_caches() {
+        let backend = Arc::new(MemoryKvBackend::default());
+        let caches = cache::build_datanode_layered_cache_registry(backend.clone());
+        let routing = CacheRegistryBuilder::default()
+            .add_cache(caches.get::<TableRouteCacheRef>().unwrap())
+            .add_cache(caches.get::<PartitionInfoCacheRef>().unwrap())
+            .build();
+        let registry = LayeredCacheRegistryBuilder::default()
+            .add_cache_registry(routing)
+            .build();
+        let manager = batch_lookup_manager(backend, Arc::new(registry));
+        assert!(manager.table_ids(&[]).await.unwrap().is_empty());
+        assert!(manager.table_infos_by_ids(&[]).await.unwrap().is_empty());
+        let numbers = TableName::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            NUMBERS_TABLE_NAME,
+        );
+        assert_eq!(
+            manager.table_ids(&[numbers]).await.unwrap(),
+            [Some(NUMBERS_TABLE_ID)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_lookups_preserve_positions_and_system_table_precedence() {
+        let backend = Arc::new(MemoryKvBackend::default());
+        let registry = cache::build_datanode_layered_cache_registry(backend.clone());
+        let manager = batch_lookup_manager(backend, Arc::new(registry));
+        for (name, id) in [
+            ("warm", 1024),
+            ("cold", 1025),
+            (NUMBERS_TABLE_NAME, 1026),
+            ("other", 1027),
+        ] {
+            manager
+                .table_metadata_manager
+                .create_table_metadata(
+                    test_create_table_task(name, id).table_info,
+                    TableRouteValue::physical(vec![]),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            manager
+                .table_id(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "warm", None)
+                .await
+                .unwrap(),
+            Some(1024)
+        );
+        assert_eq!(
+            manager.table_info_by_id(1024).await.unwrap().unwrap().name,
+            "warm"
+        );
+        let names = [
+            "other",
+            NUMBERS_TABLE_NAME,
+            "cold",
+            "missing",
+            "warm",
+            "other",
+        ]
+        .map(|name| TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, name));
+        assert_eq!(
+            manager.table_ids(&names).await.unwrap(),
+            [
+                Some(1027),
+                Some(NUMBERS_TABLE_ID),
+                Some(1025),
+                None,
+                Some(1024),
+                Some(1027)
+            ]
+        );
+        let infos = manager
+            .table_infos_by_ids(&[1026, 4040, 1024, 1025, 1026])
+            .await
+            .unwrap();
+        let entries: Vec<_> = infos
+            .iter()
+            .map(|info| {
+                info.as_ref()
+                    .map(|info| (info.table_id(), info.name.as_str()))
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                Some((1026, NUMBERS_TABLE_NAME)),
+                None,
+                Some((1024, "warm")),
+                Some((1025, "cold")),
+                Some((1026, NUMBERS_TABLE_NAME))
+            ]
+        );
+    }
 
     fn metric_table_info(
         table_id: TableId,
         table_name: &str,
         partition_key_indices: Vec<usize>,
     ) -> TableInfo {
-        let mut table_info =
-            common_meta::ddl::test_util::create_table::test_create_table_task(table_name, table_id)
-                .table_info;
+        let mut table_info = test_create_table_task(table_name, table_id).table_info;
         table_info.meta.engine = METRIC_ENGINE_NAME.to_string();
         table_info.meta.partition_key_indices = partition_key_indices;
         table_info

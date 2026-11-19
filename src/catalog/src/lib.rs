@@ -101,7 +101,9 @@ pub trait CatalogManager: Send + Sync {
             .map(|t| t.table_info().ident.table_id))
     }
 
-    /// Returns table IDs in input order, including missing names.
+    /// Returns one ID per input name in order, preserving duplicates and returning
+    /// `None` for missing names. Names are resolved in the supplied catalog and
+    /// schema without a query context or an implicit PostgreSQL catalog lookup.
     async fn table_ids(&self, names: &[TableName]) -> Result<Vec<Option<TableId>>> {
         let mut result = Vec::with_capacity(names.len());
         for name in names {
@@ -118,7 +120,8 @@ pub trait CatalogManager: Send + Sync {
         Ok(result)
     }
 
-    /// Returns table metadata in input order, including missing tables.
+    /// Returns one metadata entry per input ID in order, preserving duplicates
+    /// and returning `None` for missing tables.
     async fn table_infos_by_ids(&self, ids: &[TableId]) -> Result<Vec<Option<TableInfoRef>>> {
         let mut result = Vec::with_capacity(ids.len());
         for &id in ids {
