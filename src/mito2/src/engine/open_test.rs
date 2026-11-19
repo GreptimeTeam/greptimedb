@@ -1174,7 +1174,7 @@ async fn test_compaction_region_opens_preserve_live_index_files() {
 }
 
 /// Returns a dummy fetcher that returns the expr_json only once.
-fn new_dummy_fetcher(region_id: RegionId, expr_json: String) -> PartitionExprFetcherRef {
+pub(crate) fn new_dummy_fetcher(region_id: RegionId, expr_json: String) -> PartitionExprFetcherRef {
     struct DummyFetcher {
         region_id: RegionId,
         expr_json: String,

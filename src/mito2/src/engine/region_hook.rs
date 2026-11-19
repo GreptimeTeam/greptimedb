@@ -121,8 +121,10 @@
 //! tail replay task), immediately after SST files are written but **before** the manifest
 //! is committed.
 //!
-//! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
-//! which calls the low-level [`RegionManifestManager::update_with_verification`]
+//! `on_manifest_updated` is funneled through the write that
+//! [`ManifestContext::update_locked`] makes after its Leader lease check (a
+//! replay of pending tails makes the same write without the check), which calls
+//! the low-level [`RegionManifestManager::update_with_verification`]
 //! and packages each successful write into a [`PendingManifestHook`]. The caller
 //! owns the write lock, drops it, and *then* fires the receipt — the hook must
 //! never run under the lock. [`ManifestContext::update_manifest`] is the common
@@ -171,7 +173,8 @@ use crate::sst::file::{FileMeta, RegionFileId};
 use crate::sst::parquet::SstInfo;
 
 /// A deferred [`RegionHook::on_manifest_updated`] notification produced by a
-/// logical manifest write via [`ManifestContext::update_locked`](crate::region::ManifestContext::update_locked).
+/// logical manifest write via [`ManifestContext::update_locked`](crate::region::ManifestContext::update_locked)
+/// or a replay of pending tails.
 ///
 /// Must be [`fire`](Self::fire)d **after** the manifest write lock is released
 /// (the hook may read the manifest). `#[must_use]` so a forgotten receipt warns.

@@ -531,6 +531,12 @@ impl TestEnv {
     }
 
     /// Sets the original `object_store_mock_layer`.
+    /// Uses `fetcher` for the partition expressions of regions whose manifest lacks one.
+    pub(crate) fn with_partition_expr_fetcher(mut self, fetcher: PartitionExprFetcherRef) -> Self {
+        self.partition_expr_fetcher = fetcher;
+        self
+    }
+
     pub fn with_mock_layer(mut self, mock_layer: MockLayer) -> TestEnv {
         self.object_store_mock_layer = Some(mock_layer);
         self

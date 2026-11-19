@@ -816,16 +816,24 @@ impl MitoRegion {
         {
             return None;
         }
-        // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr)
-        let manifest_meta = &manager.manifest().metadata;
-        let current_version = self.version();
-        let current_meta = &current_version.metadata;
-        if manifest_meta.partition_expr.is_some() || current_meta.partition_expr.is_none() {
+        // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr).
+        // Only the metadata and the format are kept, so the memtables of the version are not
+        // pinned across the write below.
+        let (current_meta, sst_format) = {
+            let current_version = self.version();
+            (
+                current_version.metadata.clone(),
+                current_version.options.sst_format.unwrap_or_default(),
+            )
+        };
+        if manager.manifest().metadata.partition_expr.is_some()
+            || current_meta.partition_expr.is_none()
+        {
             return None;
         }
         let action = RegionMetaAction::Change(RegionChange {
-            metadata: current_meta.clone(),
-            sst_format: current_version.options.sst_format.unwrap_or_default(),
+            metadata: current_meta,
+            sst_format,
             append_mode: None,
         });
         let action_list = RegionMetaActionList::with_action(action);
@@ -1438,7 +1446,8 @@ pub(crate) struct LeaderLeasePromotion {
 pub(crate) struct ManifestContext {
     /// Manager to maintain manifest for this region. Logical writes go through
     /// [`update_locked`](Self::update_locked) (or an [`update_manifest`](Self::update_manifest)
-    /// variant) so they produce a [`PendingManifestHook`].
+    /// variant; a replay of pending tails through the same write without its Leader lease
+    /// check) so they produce a [`PendingManifestHook`].
     pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
     /// The state of the region. The region checks the state before updating
     /// manifest.
@@ -1900,9 +1909,11 @@ impl ManifestContext {
 
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
-    /// dropping the lock. It calls
+    /// dropping the lock. The write itself, `write_locked`, calls
     /// [`RegionManifestManager::update_with_verification`] and is the funnel
-    /// through which all logical manifest writes notify the hook.
+    /// through which logical manifest writes notify the hook; this function adds
+    /// the Leader lease check below, and only a replay of pending tails calls
+    /// `write_locked` without it.
     ///
     /// Fails an update that is not staged while the region [awaits its Leader
     /// lease](Self::awaits_leader_lease) and is not downgrading. Does not

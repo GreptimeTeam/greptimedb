@@ -57,6 +57,7 @@ use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::engine::listener::{EventListener, FlushCancellationListener};
+use crate::engine::open_test::new_dummy_fetcher;
 use crate::engine::region_hook::{RegionHook, RegionHookRef};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::storage::{delta_file, gen_path, manifest_dir};
@@ -1217,6 +1218,75 @@ async fn test_conflict_reloads_region() {
     );
     assert_eq!(6, count_rows(&engine, region_id).await);
     assert!(!engine.is_region_catching_up(region_id));
+}
+
+/// The persisting of backfilled metadata that the end of a wait for the Leader lease spawns
+/// outside the worker asks the worker to reload the region it fenced on a newer manifest.
+#[tokio::test]
+async fn test_conflicting_backfill_after_leader_lease_reloads_region() {
+    let region_id = RegionId::new(1, 1);
+    let fetcher = new_dummy_fetcher(
+        region_id,
+        r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#.to_string(),
+    );
+    let mut env = TestEnv::with_prefix("backfill-conflict-reloads")
+        .await
+        .with_partition_expr_fetcher(fetcher);
+    // The periodic region check never runs, so only the save's notification reloads.
+    let time_provider = Arc::new(MockTimeProvider::new(current_time_millis()));
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            MitoConfig::default(),
+            new_log_store().await,
+            time_provider,
+            None,
+        )
+        .await;
+    engine.require_write_lease();
+    let request = CreateRequestBuilder::new()
+        .insert_option(WAL_OPTIONS_KEY, &wal_options()[WAL_OPTIONS_KEY])
+        .partition_expr_json(None)
+        .build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    close_region(&engine, region_id).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(open_request(table_dir.clone())),
+        )
+        .await
+        .unwrap();
+    promote_to_await_leader_lease(&engine, region_id).await;
+    let old = engine.get_region(region_id).unwrap();
+    assert!(old.metadata().partition_expr.is_some());
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    let version = next_manifest_version(&old).await;
+    let store = env.get_object_store().unwrap();
+    publish_delta(
+        &store,
+        &region_dir,
+        version,
+        encode_delta(nop_action()).await,
+    )
+    .await;
+
+    let now = Instant::now();
+    engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            now,
+            now + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+
+    wait_until(|| is_replaced(&engine, &old)).await;
+    assert!(old.manifest_ctx.is_reload_pending());
 }
 
 #[tokio::test]
