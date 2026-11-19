@@ -19,6 +19,7 @@ pub mod count_wildcard;
 pub mod enforce_sorting;
 pub(crate) mod expr_depth;
 pub mod global_limit;
+pub mod global_topk;
 pub(crate) mod infer_aggregate_input_bounds;
 pub(crate) mod insert_assignment;
 pub(crate) mod json_schema_concretize;
@@ -33,6 +34,7 @@ pub(crate) mod sst_manifest_aggregate;
 pub mod string_normalization;
 #[cfg(test)]
 pub(crate) mod test_util;
+pub mod topk_filter_batch;
 pub mod transcribe_atat;
 pub mod type_conversion;
 pub mod windowed_sort;
