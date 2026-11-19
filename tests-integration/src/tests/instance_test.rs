@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
 
@@ -36,6 +37,8 @@ use rstest_reuse::apply;
 use servers::error as server_error;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
+use store_api::storage::RegionId;
+use table::table_name::TableName;
 
 use crate::tests::test_util::{
     MockInstance, both_instances_cases, both_instances_cases_with_custom_storages,
@@ -43,6 +46,67 @@ use crate::tests::test_util::{
     distributed_with_multiple_object_stores, find_testing_resource, prepare_path, standalone,
     standalone_instance_case, standalone_with_multiple_object_stores,
 };
+
+#[apply(standalone_instance_case)]
+async fn test_sequence_range_probe_standalone(instance: Arc<dyn MockInstance>) {
+    use common_time::Timestamp;
+    use query::options::FLOW_SINK_TABLE_ID;
+
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE sequence_probe (host STRING PRIMARY KEY, "observed""At" TIMESTAMP(3) TIME INDEX, value DOUBLE) WITH (append_mode = 'true', preserve_row_sequence = 'true')"#,
+    ).await;
+    let table = get_table(&frontend, "sequence_probe").await;
+    let table_id = table.table_info().table_id();
+    let region = RegionId::new(table_id, 0).as_u64();
+    let lower = BTreeMap::from([(region, 0)]);
+    let name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "sequence_probe");
+
+    // A caller's snapshot and Flow sink marker must not suppress the scan-open probe.
+    let mut context = QueryContext::with_db_name(None);
+    context.set_snapshot(region, u64::MAX);
+    context.set_extension(FLOW_SINK_TABLE_ID, table_id.to_string());
+    let context = Arc::new(context);
+    let (initial, min, max) = frontend
+        .probe_sequence_range(&name, &lower, &context)
+        .await
+        .unwrap();
+    assert_eq!((min, max), (None, None));
+    assert!(initial.contains_key(&region));
+    assert_eq!(context.get_snapshot(region), Some(u64::MAX));
+
+    execute_sql(&frontend, r#"INSERT INTO sequence_probe (host, "observed""At", value) VALUES ('a', 3000, 1), ('b', 1000, 2), ('c', 2000, 3)"#).await;
+    let (high, min, max) = frontend
+        .probe_sequence_range(&name, &lower, &context)
+        .await
+        .unwrap();
+    assert!(high[&region] > lower[&region]);
+    assert_eq!(min, Some(Timestamp::new_millisecond(1000)));
+    assert_eq!(max, Some(Timestamp::new_millisecond(3000)));
+    assert_eq!(context.get_snapshot(region), Some(u64::MAX));
+
+    let (unchanged, min, max) = frontend
+        .probe_sequence_range(&name, &high, &context)
+        .await
+        .unwrap();
+    assert_eq!(unchanged, high);
+    assert_eq!((min, max), (None, None));
+    let above = BTreeMap::from([(region, high[&region] + 1)]);
+    assert!(
+        frontend
+            .probe_sequence_range(&name, &above, &context)
+            .await
+            .is_err()
+    );
+    let missing = BTreeMap::from([(RegionId::new(table_id, 99).as_u64(), 0)]);
+    assert!(
+        frontend
+            .probe_sequence_range(&name, &missing, &context)
+            .await
+            .is_err()
+    );
+}
 
 #[apply(both_instances_cases)]
 async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstance>) {

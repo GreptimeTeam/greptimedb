@@ -32,6 +32,7 @@ mod promql;
 mod promql_cache;
 mod region_query;
 mod schema_selection;
+mod sequence_range;
 
 use std::collections::HashSet;
 use std::pin::Pin;
