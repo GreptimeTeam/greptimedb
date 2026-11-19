@@ -148,8 +148,8 @@ EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 
 DROP TABLE test_pk;
 
--- More ranges than partitions: the TopK on the time index reads all partitions
--- through one heap, and its threshold reaches the scan.
+-- More ranges (6 files) than sqlness partitions (4): the TopK on the time index
+-- reads all partitions through one heap and publishes its threshold.
 CREATE TABLE test_one_heap(i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='16');
 
 INSERT INTO test_one_heap VALUES (1, 1), (2, 2);
