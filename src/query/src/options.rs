@@ -41,6 +41,18 @@ pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
 pub const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
 pub const FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE: &str = "sequence_range";
 
+/// Internal-only opt-in that relaxes a `sequence_range` scan into a **superset
+/// probe** (see `store_api::storage::ScanRequest::internal_sequence_range_probe`).
+///
+/// The key lives in the reserved extension list
+/// (`session::hints::RESERVED_EXTENSION_KEYS`), so HTTP hints and gRPC metadata
+/// cannot set it: only internal Rust code that builds a `QueryContext` itself
+/// (for example a frontend cache probe) can request the relaxation. It is
+/// deliberately not a public query option and has no effect unless the caller
+/// also asks for `flow.incremental_mode=sequence_range`.
+pub const INTERNAL_SEQUENCE_RANGE_PROBE: &str =
+    session::hints::INTERNAL_SEQUENCE_RANGE_PROBE_EXTENSION_KEY;
+
 /// Query spill mode controlling disk manager behavior.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -154,6 +166,11 @@ pub struct FlowQueryExtensions {
     pub return_region_seq: bool,
     /// Optional sink table id used to distinguish source scans from sink reads.
     pub sink_table_id: Option<TableId>,
+    /// Whether the internal superset sequence-range probe was requested.
+    ///
+    /// Only meaningful together with `incremental_mode = sequence_range`; on its
+    /// own it relaxes nothing.
+    pub sequence_range_probe: bool,
 }
 
 impl FlowQueryExtensions {
@@ -239,6 +256,7 @@ impl FlowQueryExtensions {
             incremental_mode,
             return_region_seq,
             sink_table_id,
+            sequence_range_probe: sequence_range_probe_enabled_from_extensions(extensions)?,
         }))
     }
 
@@ -372,6 +390,21 @@ fn parse_bool(option_name: &str, value: &str) -> Result<bool> {
             option_name, value
         ))),
     }
+}
+
+/// Returns whether the internal superset sequence-range probe was requested.
+///
+/// Absent key means `false`. The key is reserved (see
+/// [`INTERNAL_SEQUENCE_RANGE_PROBE`]), so this can only become `true` for
+/// internally built query contexts.
+pub fn sequence_range_probe_enabled_from_extensions(
+    extensions: &HashMap<String, String>,
+) -> Result<bool> {
+    extensions
+        .get(INTERNAL_SEQUENCE_RANGE_PROBE)
+        .map(|value| parse_bool(INTERNAL_SEQUENCE_RANGE_PROBE, value.as_str()))
+        .transpose()
+        .map(|value| value.unwrap_or(false))
 }
 
 /// Parse the scheduled time (in milliseconds since Unix epoch) from extensions.
@@ -704,6 +737,65 @@ mod flow_extension_tests {
 
         let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
         assert!(format!("{err}").contains(FLOW_SINK_TABLE_ID));
+    }
+
+    #[test]
+    fn test_sequence_range_probe_enabled_from_extensions() {
+        assert!(!sequence_range_probe_enabled_from_extensions(&HashMap::new()).unwrap());
+        for (value, expected) in [("true", true), ("TRUE", true), ("false", false)] {
+            let exts = HashMap::from([(INTERNAL_SEQUENCE_RANGE_PROBE.to_string(), value.into())]);
+            assert_eq!(
+                expected,
+                sequence_range_probe_enabled_from_extensions(&exts).unwrap()
+            );
+        }
+
+        let exts = HashMap::from([(INTERNAL_SEQUENCE_RANGE_PROBE.to_string(), "x".to_string())]);
+        let err = sequence_range_probe_enabled_from_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(INTERNAL_SEQUENCE_RANGE_PROBE));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_sequence_range_probe() {
+        let exts = HashMap::from([
+            (
+                FLOW_INCREMENTAL_MODE.to_string(),
+                FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                r#"{"1":10}"#.to_string(),
+            ),
+            (
+                INTERNAL_SEQUENCE_RANGE_PROBE.to_string(),
+                "true".to_string(),
+            ),
+        ]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        assert!(parsed.sequence_range_probe);
+
+        // The probe key alone carries no flow context, so no probe is requested.
+        let exts = HashMap::from([(
+            INTERNAL_SEQUENCE_RANGE_PROBE.to_string(),
+            "true".to_string(),
+        )]);
+        assert!(
+            FlowQueryExtensions::parse_flow_extensions(&exts)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_sequence_range_probe_key_is_reserved() {
+        // User-supplied hints/gRPC metadata are filtered by the reserved list, so
+        // ordinary requests can never ask mito for a superset sequence read.
+        assert!(session::hints::is_reserved_extension_key(
+            INTERNAL_SEQUENCE_RANGE_PROBE
+        ));
     }
 
     #[test]
