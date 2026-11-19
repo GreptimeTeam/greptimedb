@@ -112,16 +112,8 @@ impl BuildPlan {
         // A crash before the plan is persisted can leave a gap, but no datanode
         // can create a region until its number has been durably reserved.
         let mut next_region_number = if to_allocate > 0 {
-            ctx.table_metadata_manager
-                .table_route_manager()
-                .try_reserve_region_numbers(table_id, &table_route_value, to_allocate)
-                .await
-                .context(error::TableMetadataManagerSnafu)?
-                .with_context(|| error::RetryLaterSnafu {
-                    reason: format!(
-                        "Table route changed while reserving region numbers for table {table_id}"
-                    ),
-                })?
+            ctx.reserve_region_numbers(&table_route_value, to_allocate)
+                .await?
         } else {
             0
         };
@@ -205,9 +197,23 @@ impl ExecutePlan {
                 .context(error::AllocateRegionRoutesSnafu { table_id })?;
             new_allocated_region_routes.extend(routes);
         }
+        // Older Execute checkpoints can contain region numbers that Build did not reserve.
+        let table_route_value = ctx.get_table_route_value().await?;
+        let current = table_route_value
+            .max_region_number()
+            .context(error::TableMetadataManagerSnafu)?;
+        if let Some(required) = allocate_regions
+            .iter()
+            .map(|r| r.region_id.region_number())
+            .max()
+            && required > current
+        {
+            ctx.reserve_region_numbers(&table_route_value, (required - current) as usize)
+                .await?;
+        }
+
         let skip_wal = table_info_value.table_info.meta.options.skip_wal;
         let allocate_noop = if skip_wal {
-            let table_route_value = ctx.get_table_route_value().await?;
             let region_wal_options =
                 get_region_wal_options(&ctx.table_metadata_manager, &table_route_value, table_id)
                     .await
