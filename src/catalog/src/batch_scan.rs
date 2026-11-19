@@ -23,11 +23,13 @@ pub(crate) struct BatchScanner {
 }
 
 impl BatchScanner {
+    /// At most 128 ready keys per batch and eight concurrent loads per scan.
     pub(crate) const METADATA: Self = Self {
         batch_size: 128,
         max_in_flight: 8,
     };
 
+    /// Emits loaded batches in input order. A partial batch can start as soon as input is pending.
     pub(crate) fn scan<T, U, E, F, Fut>(
         &self,
         input: impl Stream<Item = Result<T, E>>,

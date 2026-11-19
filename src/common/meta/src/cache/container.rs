@@ -61,7 +61,7 @@ enum InitStrategy<K, V, T> {
     },
 }
 
-pub(super) enum CoordinatedInvalidation<K, V, T> {
+pub(crate) enum CoordinatedInvalidation<K, V, T> {
     Key(fn(&T) -> Option<&K>),
     Events(EventHandler<K, V, T>),
 }
@@ -69,7 +69,7 @@ pub(super) enum CoordinatedInvalidation<K, V, T> {
 type EventHandler<K, V, T> = for<'a> fn(CoordinatedEntries<'a, K, V>, &'a [T]) -> BoxFuture<'a, ()>;
 
 /// Event handlers use the same epoch and per-key compute lock as cache loads.
-pub(super) struct CoordinatedEntries<'a, K, V> {
+pub(crate) struct CoordinatedEntries<'a, K, V> {
     cache: &'a Cache<(usize, K), V>,
     epoch: &'a AtomicUsize,
 }
@@ -79,7 +79,7 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
-    pub(super) async fn compute(&self, key: &K, update: impl FnOnce(Option<V>) -> Op<V>) {
+    pub(crate) async fn compute(&self, key: &K, update: impl FnOnce(Option<V>) -> Op<V>) {
         let key = (self.epoch.load(Ordering::Acquire), key.clone());
         self.cache
             .entry(key.clone())
@@ -94,7 +94,7 @@ where
             .await;
     }
 
-    pub(super) fn invalidate_all(&self) {
+    pub(crate) fn invalidate_all(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.cache.invalidate_all();
     }
@@ -154,7 +154,7 @@ where
         )
     }
 
-    pub(super) fn with_coordinated_invalidation(
+    pub(crate) fn with_coordinated_invalidation(
         name: String,
         cache: Cache<(usize, K), V>,
         initializer: Initializer<K, V>,

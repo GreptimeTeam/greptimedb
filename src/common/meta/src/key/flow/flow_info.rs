@@ -385,10 +385,8 @@ impl FlowInfoManager {
             .transpose()
     }
 
-    pub async fn batch_get(
-        &self,
-        ids: &[FlowId],
-    ) -> Result<std::collections::HashMap<FlowId, FlowInfoValue>> {
+    /// Returns the existing flow definitions keyed by ID. Missing IDs are omitted.
+    pub async fn batch_get(&self, ids: &[FlowId]) -> Result<HashMap<FlowId, FlowInfoValue>> {
         let keys = ids
             .iter()
             .map(|id| FlowInfoKey::new(*id).to_bytes())

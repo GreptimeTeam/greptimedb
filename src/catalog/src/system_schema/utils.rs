@@ -38,7 +38,7 @@ use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::semantic_graph::EntityGraphProviderRef;
 
 /// Adapts incremental system-table output, including one schema-bearing batch for an empty scan.
-pub(super) fn record_batch_stream(
+pub(crate) fn record_batch_stream(
     schema: &SchemaRef,
     batches: impl futures::Stream<Item = Result<common_recordbatch::RecordBatch>> + Send + 'static,
 ) -> common_recordbatch::DfSendableRecordBatchStream {

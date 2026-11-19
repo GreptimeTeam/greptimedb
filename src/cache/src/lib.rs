@@ -43,6 +43,7 @@ fn default_cache<K: Send + Sync + Hash + Eq + 'static, V: Send + Sync + Clone + 
         .build()
 }
 
+pub const FLOW_INFO_CACHE_NAME: &str = "flow_info_cache";
 pub const TABLE_INFO_CACHE_NAME: &str = "table_info_cache";
 pub const VIEW_INFO_CACHE_NAME: &str = "view_info_cache";
 pub const TABLE_NAME_CACHE_NAME: &str = "table_name_cache";
@@ -166,7 +167,7 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
         kv_backend.clone(),
     ));
     let flow_info_cache = Arc::new(new_flow_info_cache(
-        "flow_info_cache".to_string(),
+        FLOW_INFO_CACHE_NAME.to_string(),
         default_cache(),
         kv_backend.clone(),
     ));

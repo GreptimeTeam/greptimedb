@@ -14,7 +14,6 @@
 
 use std::sync::{Arc, Weak};
 
-use crate::kvbackend::KvBackendCatalogManager;
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_SCHEMATA_TABLE_ID;
 use common_error::ext::BoxedError;
@@ -35,6 +34,7 @@ use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
+use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::SystemTable;
 use crate::system_schema::information_schema::{
     InformationSchemaTableScope, InformationTable, Predicates, SCHEMATA,
