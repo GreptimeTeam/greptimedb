@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use core::pin::pin;
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::{INFORMATION_SCHEMA_TABLES_TABLE_ID, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_meta::datanode::RegionStat;
+use common_meta::rpc::router::RegionRoute;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::error;
@@ -32,8 +34,10 @@ use datatypes::vectors::{
     StringVectorBuilder, TimestampSecondVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
 };
 use futures::StreamExt;
+use partition::manager::PartitionRuleManager;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
+use table::TableRef;
 use table::metadata::{TableInfo, TableType};
 
 use crate::CatalogManager;
@@ -260,22 +264,7 @@ impl InformationSchemaTablesBuilder {
                 .map(|catalog_manager| catalog_manager.partition_manager());
             let predicates = Predicates::from_scan_request(&request);
 
-            let information_extension = utils::information_extension(&self.catalog_manager)?;
-
-            // TODO(dennis): `region_stats` API is not stable in distributed cluster because of network issue etc.
-            // But we don't want the statements such as `show tables` fail,
-            // so using `unwrap_or_else` here instead of `?` operator.
-            let region_stats = {
-                let mut x = information_extension
-                .region_stats()
-                .await
-                .unwrap_or_else(|e| {
-                    error!(e; "Failed to find region stats in information_schema, fallback to all empty");
-                    vec![]
-                });
-                x.sort_unstable_by_key(|x| x.id);
-                x
-            };
+            let region_stats = Self::load_region_stats(&self.catalog_manager).await?;
 
             for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
                 let table_stream = catalog_manager.tables(&catalog_name, &schema_name, None);
@@ -285,67 +274,102 @@ impl InformationSchemaTablesBuilder {
                 let mut table_chunks = pin!(table_stream.ready_chunks(BATCH_SIZE));
 
                 while let Some(tables) = table_chunks.next().await {
-                    let mut tables = tables.into_iter().collect::<Result<Vec<_>>>()?;
-                    tables.retain(|table| {
-                        Self::matches(
+                    let tables = tables.into_iter().collect::<Result<Vec<_>>>()?;
+                    if let Some(batch) = self
+                        .append_table_batch(
+                            tables,
+                            &catalog_name,
+                            &schema_name,
                             &predicates,
-                            &catalog_name,
-                            &schema_name,
-                            &table.table_info(),
-                            table.table_type(),
+                            partition_manager.as_deref(),
+                            &region_stats,
                         )
-                    });
-                    if tables.is_empty() {
-                        continue;
+                        .await?
+                    {
+                        yield batch;
                     }
-                    let mito_or_physical_table_ids = tables
-                        .iter()
-                        .filter(|table| {
-                            table.table_info().meta.engine == MITO_ENGINE
-                                || table.table_info().is_physical_table()
-                        })
-                        .map(|table| table.table_info().ident.table_id)
-                        .collect::<Vec<_>>();
-
-                    let table_routes = if let Some(partition_manager) = &partition_manager {
-                        partition_manager
-                            .batch_cached_region_routes(&mito_or_physical_table_ids)
-                            .await
-                            .context(FindRegionRoutesSnafu)?
-                    } else {
-                        mito_or_physical_table_ids
-                            .into_iter()
-                            .map(|id| (id, vec![]))
-                            .collect()
-                    };
-
-                    for table in tables {
-                        let table_region_stats =
-                            match table_routes.get(&table.table_info().ident.table_id) {
-                                Some(routes) => routes
-                                    .iter()
-                                    .flat_map(|route| {
-                                        let region_id = route.region.id;
-                                        region_stats
-                                            .binary_search_by_key(&region_id, |x| x.id)
-                                            .map(|i| &region_stats[i])
-                                    })
-                                    .collect::<Vec<_>>(),
-                                None => vec![],
-                            };
-
-                        self.add_table(
-                            &catalog_name,
-                            &schema_name,
-                            table.table_info(),
-                            table.table_type(),
-                            &table_region_stats,
-                        );
-                    }
-                    yield self.finish()?;
                 }
             }
         })
+    }
+
+    async fn load_region_stats(manager: &Weak<dyn CatalogManager>) -> Result<Vec<RegionStat>> {
+        let extension = utils::information_extension(manager)?;
+        // SHOW TABLES can still return metadata when region statistics are unavailable.
+        let mut stats = extension.region_stats().await.unwrap_or_else(|e| {
+            error!(e; "Failed to find region stats in information_schema, fallback to all empty");
+            Vec::new()
+        });
+        stats.sort_unstable_by_key(|stat| stat.id);
+        Ok(stats)
+    }
+
+    async fn append_table_batch(
+        &mut self,
+        mut tables: Vec<TableRef>,
+        catalog_name: &str,
+        schema_name: &str,
+        predicates: &Predicates,
+        partition_manager: Option<&PartitionRuleManager>,
+        sorted_stats: &[RegionStat],
+    ) -> Result<Option<RecordBatch>> {
+        tables.retain(|table| {
+            Self::matches(
+                predicates,
+                catalog_name,
+                schema_name,
+                &table.table_info(),
+                table.table_type(),
+            )
+        });
+        if tables.is_empty() {
+            return Ok(None);
+        }
+        let routes = Self::load_table_routes(partition_manager, &tables).await?;
+        for table in tables {
+            let info = table.table_info();
+            let routes = routes
+                .get(&info.table_id())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let stats = Self::stats_for_routes(routes, sorted_stats);
+            self.add_table(catalog_name, schema_name, info, table.table_type(), &stats);
+        }
+        self.finish().map(Some)
+    }
+
+    async fn load_table_routes(
+        manager: Option<&PartitionRuleManager>,
+        tables: &[TableRef],
+    ) -> Result<HashMap<TableId, Vec<RegionRoute>>> {
+        let Some(manager) = manager else {
+            return Ok(HashMap::new());
+        };
+        let ids = tables
+            .iter()
+            .map(|table| table.table_info())
+            .filter(|info| info.meta.engine == MITO_ENGINE || info.is_physical_table())
+            .map(|info| info.table_id())
+            .collect::<Vec<_>>();
+        manager
+            .batch_cached_region_routes(&ids)
+            .await
+            .context(FindRegionRoutesSnafu)
+    }
+
+    fn stats_for_routes<'a>(
+        routes: &[RegionRoute],
+        sorted_stats: &'a [RegionStat],
+    ) -> Vec<&'a RegionStat> {
+        routes
+            .iter()
+            .filter_map(|route| {
+                let index = sorted_stats
+                    .binary_search_by_key(&route.region.id, |stat| stat.id)
+                    .ok()?;
+                Some(&sorted_stats[index])
+            })
+            .collect()
     }
 
     fn table_type_name(table_type: TableType) -> &'static str {
