@@ -17,8 +17,6 @@ use std::sync::{Arc, Weak};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_VIEW_TABLE_ID;
 use common_error::ext::BoxedError;
-use common_meta::cache::ViewInfoCache;
-use common_meta::key::view_info::ViewInfoValue;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
@@ -31,16 +29,17 @@ use datatypes::vectors::StringVectorBuilder;
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
-use table::metadata::{TableInfoRef, TableType};
+use table::metadata::TableType;
 
 use crate::CatalogManager;
 use crate::batch_scan::BatchScanner;
 use crate::error::{
-    CastManagerSnafu, CreateRecordBatchSnafu, GetViewCacheSnafu, InternalSnafu, Result,
+    CastManagerSnafu, CreateRecordBatchSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu, ViewInfoNotFoundSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::loaders;
 use crate::system_schema::information_schema::{
     InformationSchemaTableScope, InformationTable, Predicates, VIEWS,
 };
@@ -207,7 +206,7 @@ impl InformationSchemaViewsBuilder {
                         Ok((info.table_type == TableType::View).then_some(info))
                     });
                 let batches = BatchScanner::METADATA.scan(views, |tables| {
-                    Self::load_view_definitions(&view_info_cache, tables)
+                    loaders::load_view_definitions(&view_info_cache, tables)
                 });
                 let mut batches = std::pin::pin!(batches);
                 while let Some(batch) = batches.try_next().await? {
@@ -226,18 +225,6 @@ impl InformationSchemaViewsBuilder {
                 }
             }
         })
-    }
-
-    async fn load_view_definitions(
-        cache: &ViewInfoCache,
-        tables: Vec<TableInfoRef>,
-    ) -> Result<impl Iterator<Item = (TableInfoRef, Option<Arc<ViewInfoValue>>)> + use<>> {
-        let ids = tables
-            .iter()
-            .map(|info| info.table_id())
-            .collect::<Vec<_>>();
-        let definitions = cache.get_many(&ids).await.context(GetViewCacheSnafu)?;
-        Ok(tables.into_iter().zip(definitions))
     }
 
     fn add_view(

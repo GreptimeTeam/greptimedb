@@ -12,16 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
-use common_meta::cache::FlowInfoCache;
 use common_meta::ddl::create_flow::{FlowType, effective_eval_schedule_from_flow_info};
 use common_meta::key::FlowId;
 use common_meta::key::flow::FlowMetadataManager;
-use common_meta::key::flow::flow_info::{FlowInfoManager, FlowInfoValue};
+use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
@@ -48,12 +46,13 @@ use store_api::storage::{ScanRequest, TableId};
 use crate::CatalogManager;
 use crate::batch_scan::BatchScanner;
 use crate::error::{
-    CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu,
-    Result, UpgradeWeakCatalogManagerRefSnafu,
+    CreateRecordBatchSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu, Result,
+    UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::{FLOWS, Predicates};
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::loaders::{self, FlowInfoLoader};
 use crate::system_schema::information_schema::{InformationSchemaTableScope, InformationTable};
 use crate::system_schema::utils;
 
@@ -323,14 +322,12 @@ impl InformationSchemaFlowsBuilder {
                         catalog: &catalog_name,
                     })
                 });
-            let batches = BatchScanner::METADATA.scan(names, |entries| {
-                Self::load_flow_infos(
-                    entries,
-                    cache.as_deref(),
-                    flow_info_manager.flow_info_manager(),
-                    &catalog_name,
-                )
-            });
+            let loader = FlowInfoLoader::new(
+                cache.as_deref(),
+                flow_info_manager.flow_info_manager(),
+                &catalog_name,
+            );
+            let batches = BatchScanner::METADATA.scan(names, |entries| loader.load(entries));
             let mut batches = std::pin::pin!(batches);
             while let Some(batch) = batches.try_next().await? {
                 let flows: Vec<_> = batch
@@ -343,7 +340,8 @@ impl InformationSchemaFlowsBuilder {
                         ])
                     })
                     .collect();
-                let names = Self::load_source_table_names(catalog_manager.as_ref(), &flows).await?;
+                let names =
+                    loaders::load_source_table_names(catalog_manager.as_ref(), &flows).await?;
                 for (id, info) in flows {
                     let source_names = info
                         .source_table_ids()
@@ -356,59 +354,6 @@ impl InformationSchemaFlowsBuilder {
                 yield self.finish()?;
             }
         })
-    }
-
-    async fn load_flow_infos(
-        entries: Vec<(String, FlowId)>,
-        cache: Option<&FlowInfoCache>,
-        manager: &FlowInfoManager,
-        catalog: &str,
-    ) -> Result<Vec<(FlowId, Arc<FlowInfoValue>)>> {
-        let ids: Vec<_> = entries.iter().map(|(_, id)| *id).collect();
-        let values = if let Some(cache) = cache {
-            cache.get_many(&ids).await
-        } else {
-            manager.batch_get(&ids).await.map(|values| {
-                ids.iter()
-                    .map(|id| values.get(id).cloned().map(Arc::new))
-                    .collect()
-            })
-        }
-        .map_err(BoxedError::new)
-        .context(InternalSnafu)?;
-        entries
-            .into_iter()
-            .zip(values)
-            .map(|((name, id), value)| {
-                let info = value.context(FlowInfoNotFoundSnafu {
-                    catalog_name: catalog,
-                    flow_name: name,
-                })?;
-                Ok((id, info))
-            })
-            .collect::<Result<Vec<_>>>()
-    }
-
-    async fn load_source_table_names(
-        catalog_manager: &dyn CatalogManager,
-        flows: &[(FlowId, Arc<FlowInfoValue>)],
-    ) -> Result<HashMap<TableId, String>> {
-        let source_ids: BTreeSet<_> = flows
-            .iter()
-            .flat_map(|(_, info)| info.source_table_ids().iter().copied())
-            .collect();
-        let source_ids: Vec<_> = source_ids.into_iter().collect();
-        let mut names = HashMap::new();
-        for ids in source_ids.chunks(128) {
-            let infos = catalog_manager.table_infos_by_ids(ids).await?;
-            names.extend(
-                ids.iter()
-                    .copied()
-                    .zip(infos)
-                    .filter_map(|(id, info)| Some((id, info?.full_table_name()))),
-            );
-        }
-        Ok(names)
     }
 
     async fn add_flow(
@@ -598,6 +543,12 @@ mod tests {
         let mut info = flow_info_for_show_create("SELECT 1", None, 0, HashMap::new());
         info.source_table_ids = vec![1025, 9999, 1024, 1025];
         flows.create_flow_metadata(1, info, vec![]).await.unwrap();
+
+        let loader = FlowInfoLoader::new(None, flows.flow_info_manager(), "greptime");
+        let entries = vec![("my_flow".into(), 1), ("my_flow".into(), 1)];
+        let loaded = loader.load(entries).await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(Arc::ptr_eq(&loaded[0].1, &loaded[1].1));
 
         let table = catalog
             .table("greptime", "information_schema", FLOWS, None)

@@ -13,14 +13,12 @@
 // limitations under the License.
 
 use core::pin::pin;
-use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
-use common_catalog::consts::{INFORMATION_SCHEMA_TABLES_TABLE_ID, MITO_ENGINE};
+use common_catalog::consts::INFORMATION_SCHEMA_TABLES_TABLE_ID;
 use common_error::ext::BoxedError;
 use common_meta::datanode::RegionStat;
-use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::rpc::router::RegionRoute;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
@@ -43,11 +41,11 @@ use table::metadata::{TableInfo, TableType};
 
 use crate::CatalogManager;
 use crate::error::{
-    CreateRecordBatchSnafu, FindRegionRoutesSnafu, InternalSnafu, Result,
-    UpgradeWeakCatalogManagerRefSnafu,
+    CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::loaders;
 use crate::system_schema::information_schema::{
     InformationSchemaTableScope, InformationTable, Predicates, TABLES,
 };
@@ -326,7 +324,7 @@ impl InformationSchemaTablesBuilder {
         if tables.is_empty() {
             return Ok(None);
         }
-        let routes = Self::load_table_routes(partition_manager, &tables).await?;
+        let routes = loaders::load_table_routes(partition_manager, &tables).await?;
         for table in tables {
             let info = table.table_info();
             let routes = routes
@@ -337,25 +335,6 @@ impl InformationSchemaTablesBuilder {
             self.add_table(catalog_name, schema_name, info, table.table_type(), &stats);
         }
         self.finish().map(Some)
-    }
-
-    async fn load_table_routes(
-        manager: Option<&PartitionRuleManager>,
-        tables: &[TableRef],
-    ) -> Result<HashMap<TableId, Arc<PhysicalTableRouteValue>>> {
-        let Some(manager) = manager else {
-            return Ok(HashMap::new());
-        };
-        let ids = tables
-            .iter()
-            .map(|table| table.table_info())
-            .filter(|info| info.meta.engine == MITO_ENGINE || info.is_physical_table())
-            .map(|info| info.table_id())
-            .collect::<Vec<_>>();
-        manager
-            .batch_cached_physical_table_routes(&ids)
-            .await
-            .context(FindRegionRoutesSnafu)
     }
 
     fn stats_for_routes<'a>(

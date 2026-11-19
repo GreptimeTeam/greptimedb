@@ -17,6 +17,7 @@ pub use table_flownode::{
     TableFlownodeSetCache, TableFlownodeSetCacheRef, new_table_flownode_set_cache,
 };
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use moka::future::Cache;
@@ -27,9 +28,11 @@ use crate::key::FlowId;
 use crate::key::flow::flow_info::{FlowInfoManager, FlowInfoValue};
 use crate::kv_backend::KvBackendRef;
 
+/// Caches flow definitions by flow ID.
 pub type FlowInfoCache = CacheContainer<FlowId, Arc<FlowInfoValue>, CacheIdent>;
 pub type FlowInfoCacheRef = Arc<FlowInfoCache>;
 
+/// Builds a coordinated cache for individual and batched flow lookups.
 pub fn new_flow_info_cache(
     name: String,
     cache: Cache<(usize, FlowId), Arc<FlowInfoValue>>,
@@ -48,11 +51,17 @@ pub fn new_flow_info_cache(
     )
     .with_batch_initializer(Arc::new(move |ids| {
         let manager = manager.clone();
-        Box::pin(async move {
-            manager
-                .batch_get(&ids)
-                .await
-                .map(crate::cache::share_batch_values)
-        })
+        Box::pin(async move { load_shared_flow_infos(&manager, &ids).await })
     }))
+}
+
+/// Loads each returned definition into an Arc shared by duplicate IDs in a scan.
+pub async fn load_shared_flow_infos(
+    manager: &FlowInfoManager,
+    ids: &[FlowId],
+) -> crate::error::Result<HashMap<FlowId, Arc<FlowInfoValue>>> {
+    manager
+        .batch_get(ids)
+        .await
+        .map(crate::cache::share_batch_values)
 }

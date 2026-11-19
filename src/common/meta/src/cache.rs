@@ -24,7 +24,7 @@ use std::sync::Arc;
 pub use container::{BatchInitializer, CacheContainer, Initializer, Invalidator, TokenFilter};
 pub use flow::{
     FlowInfoCache, FlowInfoCacheRef, TableFlownodeSetCache, TableFlownodeSetCacheRef,
-    new_flow_info_cache, new_table_flownode_set_cache,
+    load_shared_flow_infos, new_flow_info_cache, new_table_flownode_set_cache,
 };
 pub use registry::{
     CacheRegistry, CacheRegistryBuilder, CacheRegistryRef, LayeredCacheRegistry,
