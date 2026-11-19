@@ -361,6 +361,7 @@ impl LocalGcWorker {
             let RegionGcOutcome {
                 removed_files,
                 needs_retry,
+                completed,
             } = outcome;
             let index_files = removed_files
                 .iter()
@@ -380,7 +381,9 @@ impl LocalGcWorker {
             } else {
                 deleted_files.insert(*region_id, data_files);
                 deleted_indexes.insert(*region_id, index_files);
-                processed_regions.insert(*region_id);
+                if completed {
+                    processed_regions.insert(*region_id);
+                }
             }
             debug!(
                 "GC for region {} took {} secs.",
@@ -404,12 +407,14 @@ impl LocalGcWorker {
 
 /// Per-region outcome of [`LocalGcWorker::do_region_gc`].
 ///
-/// Unfinished deletion or extension cleanup keeps the region in the retry set.
+/// An entry safety skip is neither completed nor retried; other unfinished work is retried.
 pub(crate) struct RegionGcOutcome {
     /// Files physically deleted this pass.
     pub removed_files: Vec<RemovedFile>,
-    /// The snapshot changed while the protection lookup ran, or extension cleanup failed.
+    /// The snapshot changed while the protection lookup ran, or cleanup was deferred or failed.
     pub needs_retry: bool,
+    /// Whether GC proceeded past the entry safety checks.
+    pub completed: bool,
 }
 
 impl LocalGcWorker {
@@ -439,12 +444,6 @@ impl LocalGcWorker {
         region: Option<MitoRegionRef>,
         tmp_ref_files: &HashSet<FileRef>,
     ) -> Result<RegionGcOutcome> {
-        let mode = if self.full_file_listing {
-            "full_listing"
-        } else {
-            "fast"
-        };
-        GC_RUNS_TOTAL.with_label_values(&[mode]).inc();
         debug!(
             "Doing gc for region {}, {}",
             region_id,
@@ -486,25 +485,37 @@ impl LocalGcWorker {
                 return Ok(RegionGcOutcome {
                     removed_files: vec![],
                     needs_retry: false,
+                    completed: false,
                 });
             }
             // SSTs written for pending tails but not committed yet, and SSTs of a newer
             // manifest, are not in this snapshot, so a full listing would take them for orphans.
-            if self.full_file_listing
-                && (!manifest.pending_tails.is_empty()
-                    || manager.has_update().await.unwrap_or_else(|e| {
-                        warn!(e; "Failed to check manifest updates of region {}", region_id);
-                        true
-                    }))
-            {
-                info!(
-                    "Skip full listing GC for region {}: it has pending WAL tails or a newer manifest may exist",
-                    region_id
-                );
-                return Ok(RegionGcOutcome {
-                    removed_files: vec![],
-                    needs_retry: false,
-                });
+            if self.full_file_listing {
+                let skip_reason = if !manifest.pending_tails.is_empty() {
+                    Some("pending_tails")
+                } else {
+                    match manager.has_update().await {
+                        Ok(true) => Some("newer_manifest"),
+                        Ok(false) => None,
+                        Err(e) => {
+                            warn!(e; "Failed to check manifest updates of region {}", region_id);
+                            Some("list_failed")
+                        }
+                    }
+                };
+                if let Some(reason) = skip_reason {
+                    info!("Skip full listing GC for region {}: {}", region_id, reason);
+                    GC_ERRORS_TOTAL.with_label_values(&[reason]).inc();
+                    // Leaving full listing unacknowledged keeps its previous timestamp,
+                    // so the next selected GC retries without using needs_retry. The latter
+                    // is consumed by repartition cleanup and can create a tombstone for
+                    // an active region that has never been repartitioned.
+                    return Ok(RegionGcOutcome {
+                        removed_files: vec![],
+                        needs_retry: false,
+                        completed: false,
+                    });
+                }
             }
             Some(manifest)
         } else {
@@ -527,6 +538,12 @@ impl LocalGcWorker {
         } else {
             vec![]
         };
+        let mode = if self.full_file_listing {
+            "full_listing"
+        } else {
+            "fast"
+        };
+        GC_RUNS_TOTAL.with_label_values(&[mode]).inc();
 
         let recently_removed_files = if let Some(manifest) = &manifest {
             self.get_removed_files_expel_times(manifest).await?
@@ -694,6 +711,7 @@ impl LocalGcWorker {
         Ok(RegionGcOutcome {
             removed_files: deletable_files,
             needs_retry: extension_cleanup_failed || publication_changed || dropped_files_deferred,
+            completed: true,
         })
     }
 

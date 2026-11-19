@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -52,6 +52,7 @@ async fn test_full_gc_workflow() {
         region_id,
         GcReport {
             deleted_files: HashMap::from([(region_id, vec![FileId::random(), FileId::random()])]),
+            processed_regions: HashSet::from([region_id]),
             ..Default::default()
         },
     );

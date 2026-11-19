@@ -26,7 +26,7 @@ use crate::gc::scheduler::GcScheduler;
 pub(crate) struct RegionGcInfo {
     /// Last time a regular GC was performed on this region.
     pub(crate) last_gc_time: Instant,
-    /// Last time a full file listing GC was performed on this region.
+    /// Last successful full listing, or the initial fast-GC baseline for a new region.
     pub(crate) last_full_listing_time: Option<Instant>,
 }
 
@@ -101,8 +101,7 @@ impl GcScheduler {
             })
             .or_insert_with(|| RegionGcInfo {
                 last_gc_time: now,
-                // prevent need to full listing on the first GC
-                last_full_listing_time: Some(now),
+                last_full_listing_time: did_full_listing.then_some(now),
             });
     }
 }

@@ -40,6 +40,7 @@ async fn test_full_file_listing_first_time_gc() {
 
     let gc_report = GcReport {
         deleted_files: HashMap::from([(region_id, vec![FileId::random(), FileId::random()])]),
+        processed_regions: HashSet::from([region_id]),
         ..Default::default()
     };
 
@@ -114,6 +115,7 @@ async fn test_full_file_listing_interval_enforcement() {
 
     let gc_report = GcReport {
         deleted_files: HashMap::from([(region_id, vec![FileId::random(), FileId::random()])]),
+        processed_regions: HashSet::from([region_id]),
         ..Default::default()
     };
 
@@ -217,6 +219,7 @@ async fn test_full_file_listing_no_interval_passed() {
 
     let gc_report = GcReport {
         deleted_files: HashMap::from([(region_id, vec![FileId::random(), FileId::random()])]),
+        processed_regions: HashSet::from([region_id]),
         ..Default::default()
     };
 
