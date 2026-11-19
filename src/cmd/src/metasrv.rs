@@ -324,7 +324,8 @@ impl StartCommand {
             &opts.component.tracing,
             None,
             None,
-        );
+        )
+        .context(crate::error::InitLoggingSnafu)?;
 
         common_runtime::init_global_runtimes(&opts.runtime);
 

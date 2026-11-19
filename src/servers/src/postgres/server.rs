@@ -27,11 +27,15 @@ use futures::StreamExt;
 use pgwire::tokio::process_socket;
 use tokio_rustls::TlsAcceptor;
 
+use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::Result;
 use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
+use crate::prom_remote_write::validation::PromValidationMode;
 use crate::query_handler::CopyInHandlerRef;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+use crate::query_handler::PipelineHandlerRef;
+use crate::query_handler::PromStoreProtocolHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
@@ -47,6 +51,7 @@ pub struct PostgresServer {
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     otlp_with_metric_engine: bool,
     memory_limiter: ServerMemoryLimiter,
+    prom_write_state: Option<crate::http::prom_store::PromStoreState>,
     bind_addr: Option<SocketAddr>,
     process_manager: Option<ProcessManagerRef>,
 }
@@ -88,6 +93,7 @@ impl PostgresServer {
             otlp_handler: None,
             otlp_with_metric_engine: false,
             memory_limiter: ServerMemoryLimiter::default(),
+            prom_write_state: None,
             bind_addr: None,
             process_manager,
         }
@@ -114,8 +120,8 @@ impl PostgresServer {
         self
     }
 
-    /// Wires the OTLP handler used by table-less
-    /// `COPY FROM STDIN WITH (FORMAT otlp)` — the same handler the
+    /// Wires the OTLP handler used by
+    /// `COPY [table] FROM STDIN WITH (FORMAT otlp)` — the same handler the
     /// OTLP/HTTP endpoints use, so the payload runs through the
     /// identical pipeline. `with_metric_engine` carries the same flag
     /// the HTTP wiring passes from its options.
@@ -126,6 +132,32 @@ impl PostgresServer {
     ) -> Self {
         self.otlp_handler = Some(handler);
         self.otlp_with_metric_engine = with_metric_engine;
+        self
+    }
+
+    /// Wires the Prometheus Remote Write ingestion used by table-less
+    /// `COPY FROM STDIN WITH (FORMAT promwrite)` — the same handler,
+    /// metric-engine flag, validation mode and optional shared logical-table
+    /// batcher the HTTP endpoint's state carries.
+    pub fn with_prom_remote_write(
+        mut self,
+        handler: PromStoreProtocolHandlerRef,
+        pipeline_handler: Option<PipelineHandlerRef>,
+        with_metric_engine: bool,
+        validation_mode: PromValidationMode,
+        pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
+    ) -> Self {
+        self.prom_write_state = Some(crate::http::prom_store::PromStoreState {
+            prom_store_handler: handler,
+            pipeline_handler,
+            prom_store_with_metric_engine: with_metric_engine,
+            prom_validation_mode: validation_mode,
+            pending_rows_batcher,
+            // Placeholder; `accept` injects the server's shared limiter
+            // (see below) so the receive-stage charging and the
+            // ingestion core enforce ONE budget.
+            memory_limiter: ServerMemoryLimiter::default(),
+        });
         self
     }
 
@@ -140,6 +172,14 @@ impl PostgresServer {
         // going through the builder — keeps this infallible: no
         // `.build().unwrap()` on the hot accept path.
         let make_handler = &self.make_handler;
+        // The ingestion state enforces the same shared request-memory
+        // budget (`max_in_flight_write_bytes`) as the HTTP endpoints:
+        // receive-stage COPY buffering and decode/conversion memory are
+        // charged against one limiter.
+        let prom_write_state = self.prom_write_state.clone().map(|mut state| {
+            state.memory_limiter = self.memory_limiter.clone();
+            state
+        });
         let handler_maker = Arc::new(MakePostgresServerHandler {
             query_handler: make_handler.query_handler.clone(),
             copy_in_handler: make_handler.copy_in_handler.clone(),
@@ -147,6 +187,7 @@ impl PostgresServer {
             otlp_handler: self.otlp_handler.clone(),
             otlp_with_metric_engine: self.otlp_with_metric_engine,
             memory_limiter: self.memory_limiter.clone(),
+            prom_write_state,
             user_provider: make_handler.user_provider.clone(),
             param_provider: make_handler.param_provider.clone(),
             force_tls: make_handler.force_tls,

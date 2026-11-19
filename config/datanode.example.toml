@@ -2,7 +2,7 @@
 ## @toml2docs:none-default
 node_id = 42
 
-## The default column prefix for auto-created time index, value, and native histogram columns.
+## The default column prefix for auto-created time index, value, native histogram, and exemplar-label columns.
 ## Legacy OTLP summary columns keep their historical `greptime_` prefix.
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
@@ -227,6 +227,8 @@ overwrite_entry_start_id = false
 #+ storage_provider = ""
 
 ## The path prefix of the WAL objects inside the storage provider.
+## In distributed mode, metasrv and all datanodes must use the same public root prefix and shared object storage.
+## A mismatched prefix prevents regions from opening; do not configure per-node root prefixes.
 ## The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.
 ## **It's only used when the provider is `experimental_object_store`**.
 #+ prefix = "wal"
@@ -333,6 +335,7 @@ overwrite_entry_start_id = false
 
 ## The query engine options.
 [query]
+
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
@@ -556,6 +559,9 @@ compress_manifest = false
 ## Under development; do not enable. Whether to enable series indexes.
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
+
+## Under development. Select legacy Parquet indexes or paired columnar series and samples.
+#+ experimental_series_index_format = "legacy"
 
 ## Approximate series and range index size limit in open regions, shared across workers.
 ## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation
@@ -906,6 +912,8 @@ max_log_files = 720
 
 ## The maximum total size of managed log files in `dir`.
 ## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+## Requires symbolic links in the log directory; initialization fails if they cannot be created.
+## On Windows, enable Developer Mode or leave this at `0B`.
 max_log_dir_size = "0B"
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.

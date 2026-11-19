@@ -41,7 +41,7 @@ use tokio::sync::watch;
 
 use crate::error::{
     BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, ReadNodeWalSnafu,
-    RemoteWalUnsupportedSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu,
+    RemoteWalUnsupportedSnafu, ResolveWalProviderSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu,
 };
 use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader, decode_raw_entry};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
@@ -116,6 +116,18 @@ impl<S> Clone for Wal<S> {
 }
 
 impl<S: LogStore> Wal<S> {
+    /// Resolves persisted WAL options to this node's runtime namespace.
+    pub(crate) fn resolve_provider(
+        &self,
+        region_id: RegionId,
+        provider: Provider,
+    ) -> Result<Provider> {
+        self.store
+            .resolve_provider(provider)
+            .map_err(BoxedError::new)
+            .context(ResolveWalProviderSnafu { region_id })
+    }
+
     /// Subscribes to shared WAL pressure snapshots. Notifications only advise
     /// workers to check their current region state, and never wait for flush.
     pub(crate) fn subscribe_flush_candidates(&self) -> watch::Receiver<Arc<[RegionId]>> {
@@ -319,6 +331,24 @@ impl<S: LogStore> Wal<S> {
         }
         self.store
             .release_region(provider, region_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
+    }
+
+    /// Queues a persistent release through the region's safe recovery watermark.
+    /// Success acknowledges admission, not persistence; see [LogStore::release_entries].
+    pub async fn release_entries(
+        &self,
+        region_id: RegionId,
+        entry_id: EntryId,
+        provider: &Provider,
+    ) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .release_entries(provider, region_id, entry_id)
             .await
             .map_err(BoxedError::new)
             .context(DeleteWalSnafu { region_id })

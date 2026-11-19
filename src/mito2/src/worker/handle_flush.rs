@@ -27,7 +27,7 @@ use store_api::storage::RegionId;
 
 use crate::config::{IndexBuildMode, MitoConfig};
 use crate::error::{FlushRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
-use crate::flush::{FlushReason, RegionFlushTask};
+use crate::flush::{FlushReason, MemtableSstWriter, RegionFlushTask};
 use crate::manifest::action::cap_wal_release;
 use crate::region::version::VersionRef;
 use crate::region::{MitoRegion, MitoRegionRef};
@@ -281,17 +281,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             reason,
             senders: Vec::new(),
             request_sender: self.sender.clone(),
-            access_layer: region.access_layer.clone(),
             listener: self.listener.clone(),
-            engine_config,
-            // The request-provided size (e.g. manual flush) takes precedence over the
-            // region option.
-            row_group_size: row_group_size.or(region.version().options.max_row_group_row_count),
-            cache_manager: self.cache_manager.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
-            index_options: region.version().options.index_options.clone(),
-            flush_semaphore: self.flush_semaphore.clone(),
-            partition_expr: region.metadata().partition_expr.clone(),
+            sst_writer: MemtableSstWriter::new_flush(
+                region,
+                reason,
+                row_group_size,
+                engine_config,
+                self.cache_manager.clone(),
+                self.flush_semaphore.clone(),
+            ),
             durability_barrier: self
                 .wal
                 .durability_barrier(region.region_id, &region.provider),
@@ -573,7 +572,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if flush_on_close {
-            self.remove_region(region_id).await;
+            self.close_region(region_id).await;
             info!("Region {} closed after flush", region_id);
             request.on_success();
             self.listener.on_flush_success(region_id);

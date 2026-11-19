@@ -33,6 +33,7 @@ use crate::series_index::version::{
 pub(crate) use crate::sst::range_index::range_index_path;
 
 const SERIES_DIR: &str = "series";
+const SAMPLES_CATALOG: &str = "samples.json";
 const RANGE_CATALOG: &str = "range-index.json";
 const SERIES_CATALOG: &str = "series-index.json";
 const SERIES_METADATA_KEY: &str = "greptime.series_index";
@@ -57,9 +58,12 @@ pub(crate) struct WindowSequence {
 ///
 /// A published entry must include every series from every SST in the region
 /// contained by its bucket and inclusive file-sequence interval. Query planning
-/// relies on this complete-coverage contract, not on `source_file_ids`.
+/// relies on this complete-coverage contract. Manual builds additionally use exact
+/// `source_file_ids` membership for SSTs without a file sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SeriesIndexEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) artifact: Option<crate::series_index::artifact::ArtifactMetadata>,
     /// Completed size in the catalog; zero in the footer written before completion.
     pub(crate) file_size: u64,
     pub(crate) index_uuid: FileId,
@@ -67,8 +71,8 @@ pub(crate) struct SeriesIndexEntry {
     pub(crate) bucket_start: Timestamp,
     /// Exclusive bucket end.
     pub(crate) bucket_end: Timestamp,
-    /// Source SST IDs retained for debugging only. Compaction can replace these
-    /// files without changing indexed data, so IDs must not determine index reuse.
+    /// Source SST IDs retained for diagnostics and exact coverage of unknown-sequence files. Compaction can replace these
+    /// files without changing indexed data, so known-sequence reuse does not depend on IDs.
     pub(crate) source_file_ids: Vec<FileId>,
     pub(crate) min_file_sequence: u64,
     pub(crate) max_file_sequence: u64,
@@ -83,6 +87,14 @@ pub(crate) struct SeriesIndexEntry {
 }
 
 impl SeriesIndexEntry {
+    /// Entries written before pluggable formats describe the original Parquet layout.
+    pub(crate) fn format(&self) -> crate::series_index::artifact::ArtifactFormat {
+        self.artifact.as_ref().map_or(
+            crate::series_index::artifact::ArtifactFormat::Parquet,
+            |artifact| artifact.format,
+        )
+    }
+
     /// Whether this index completely covers an SST in the query's sequence domain.
     pub(crate) fn covers_file(
         &self,
@@ -93,9 +105,15 @@ impl SeriesIndexEntry {
             && file.time_range.0 <= file.time_range.1
             && self.bucket_start <= file.time_range.0
             && file.time_range.1 < self.bucket_end
-            && file.sequence.is_some_and(|sequence| {
-                self.min_file_sequence <= sequence.get() && sequence.get() <= self.max_file_sequence
-            })
+            && match file.sequence {
+                Some(sequence) => {
+                    self.min_file_sequence <= sequence.get()
+                        && sequence.get() <= self.max_file_sequence
+                }
+                // Manual builds can cover immutable files without sequence metadata.
+                // This is exact membership, never a claim about replacement SSTs.
+                None => self.min_file_sequence == 0 && self.source_file_ids.contains(&file.file_id),
+            }
     }
 }
 
@@ -114,6 +132,18 @@ pub(crate) struct SeriesIndexCatalog {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct RangeIndexCatalog {
     pub(crate) indexes: Vec<RangeIndexEntry>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct SamplesCatalog {
+    pub(crate) entries: Vec<crate::series_index::artifact::SamplesEntry>,
+    /// Once samples are enabled this single catalog commits all artifact references together.
+    pub(crate) series: Vec<SeriesIndexEntry>,
+    pub(crate) ranges: Vec<RangeIndexEntry>,
+}
+
+pub(crate) fn samples_catalog_path(region_id: RegionId) -> String {
+    format!("{}/{SAMPLES_CATALOG}", region_id.as_u64())
 }
 
 pub(crate) fn range_catalog_path(region_id: RegionId) -> String {
@@ -172,6 +202,7 @@ where
 pub(crate) async fn delete_catalogs(store: &ObjectStore, region_id: RegionId) {
     for path in [
         series_catalog_path(region_id),
+        samples_catalog_path(region_id),
         range_catalog_path(region_id),
     ] {
         if let Err(error) = store.delete(&path).await
@@ -194,14 +225,17 @@ pub(crate) async fn load_version_control(
     let series = load_catalog::<SeriesIndexCatalog>(store, &series_catalog_path(region_id))
         .await
         .unwrap_or_default();
-    let version = SeriesIndexVersion::new(
-        range
-            .indexes
+    let samples = load_catalog::<SamplesCatalog>(store, &samples_catalog_path(region_id)).await;
+    let (ranges, indexes, sample_entries) = match samples {
+        Some(catalog) => (catalog.ranges, catalog.series, catalog.entries),
+        None => (range.indexes, series.indexes, Vec::new()),
+    };
+    let mut version = SeriesIndexVersion::new(
+        ranges
             .into_iter()
             .map(|entry| (entry.file_id, entry))
             .collect(),
-        series
-            .indexes
+        indexes
             .into_iter()
             .map(|entry| {
                 (
@@ -211,6 +245,17 @@ pub(crate) async fn load_version_control(
             })
             .collect(),
     );
+    for entry in sample_entries {
+        let id = entry.file_id;
+        version.samples.insert(
+            id,
+            crate::series_index::artifact::SamplesFileHandle::new(
+                crate::sst::file::RegionFileId::new(region_id, id),
+                entry,
+                purger.clone(),
+            ),
+        );
+    }
     let control = SeriesIndexVersionControl::default();
     control.publish(std::sync::Arc::new(version));
     control
@@ -259,9 +304,38 @@ mod tests {
     }
 
     #[test]
+    fn legacy_series_catalog_fixture() {
+        use crate::series_index::artifact::ArtifactFormat;
+        let json = include_str!(
+            "../../../../tests/compatibility/fixtures/series_index/legacy_catalog.json"
+        );
+        let catalog: SeriesIndexCatalog = serde_json::from_str(json).unwrap();
+        assert_eq!(1, catalog.indexes.len());
+        let entry = &catalog.indexes[0];
+        assert!(entry.artifact.is_none());
+        assert_eq!(ArtifactFormat::Parquet, entry.format());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(json).unwrap(),
+            serde_json::to_value(&catalog).unwrap()
+        );
+        for (format, name) in [
+            (ArtifactFormat::Parquet, "parquet"),
+            (ArtifactFormat::ColumnarSeries, "columnar-series"),
+            (ArtifactFormat::ColumnarSamples, "columnar-samples"),
+            (ArtifactFormat::FakeSamples, "fake-samples"),
+            (ArtifactFormat::FakeIndex, "fake-index"),
+        ] {
+            let encoded = serde_json::to_value(format).unwrap();
+            assert_eq!(name, encoded.as_str().unwrap());
+            assert_eq!(format, serde_json::from_value(encoded).unwrap());
+        }
+    }
+
+    #[test]
     fn coverage_uses_exclusive_time_end_and_inclusive_file_sequences() {
         let region_id = RegionId::new(1, 1);
         let entry = SeriesIndexEntry {
+            artifact: None,
             file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_second(1),
@@ -359,6 +433,7 @@ mod tests {
         let store = ObjectStore::new(Memory::default()).unwrap();
         let region_id = RegionId::new(1, 1);
         let entry = SeriesIndexEntry {
+            artifact: None,
             file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_second(0),

@@ -384,7 +384,8 @@ impl StartCommand {
             &opts.component.tracing,
             opts.component.node_id.clone(),
             Some(&opts.component.slow_query),
-        );
+        )
+        .context(crate::error::InitLoggingSnafu)?;
 
         common_runtime::init_global_runtimes(&opts.runtime);
 
@@ -464,7 +465,9 @@ impl StartCommand {
         )
         .context(error::BuildCacheRegistrySnafu)?;
 
-        if let Some(plugin_cache_builder) = plugins::frontend::configure_cache_registry(&plugins) {
+        if let Some(plugin_cache_builder) =
+            plugins::frontend::configure_cache_registry(&plugins, cached_meta_backend.clone())
+        {
             layered_cache_builder =
                 layered_cache_builder.add_cache_registry(plugin_cache_builder.build());
         }

@@ -41,7 +41,9 @@ use common_stat::ResourceStatImpl;
 use common_telemetry::{error, info, warn};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
-use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+use common_wal::config::object_store::{
+    EnableObjectStoreWal, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig,
+};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
 use futures::future::join_all;
@@ -162,15 +164,6 @@ impl Datanode {
         );
 
         let _ = self.greptimedb_telemetry_task.stop().await;
-        if let Some(heartbeat_task) = &self.heartbeat_task {
-            record_shutdown_error(
-                &mut first_error,
-                heartbeat_task
-                    .close()
-                    .map_err(BoxedError::new)
-                    .context(ShutdownInstanceSnafu),
-            );
-        }
         // The object store WAL stops before the regions close: its stop
         // uploads the backlog or drops it, and answers every wait for its
         // entries, so a flush that waits for the WAL, queued or run by the
@@ -181,6 +174,16 @@ impl Datanode {
                 log_store
                     .stop()
                     .await
+                    .map_err(BoxedError::new)
+                    .context(ShutdownInstanceSnafu),
+            );
+        }
+        // WAL draining still needs heartbeat renewal; stop it before the heartbeat.
+        if let Some(heartbeat_task) = &self.heartbeat_task {
+            record_shutdown_error(
+                &mut first_error,
+                heartbeat_task
+                    .close()
                     .map_err(BoxedError::new)
                     .context(ShutdownInstanceSnafu),
             );
@@ -358,7 +361,10 @@ impl DatanodeBuilder {
         // writable upon open.
         let controlled_by_metasrv = meta_client.is_some();
         if let DatanodeWalConfig::ObjectStore(config) = &self.opts.wal {
-            ensure!(!controlled_by_metasrv, ObjectStoreWalNotStandaloneSnafu);
+            ensure!(
+                !controlled_by_metasrv || self.plugins.get::<EnableObjectStoreWal>().is_some(),
+                ObjectStoreWalNotStandaloneSnafu
+            );
             validate_object_store_wal_config(config)?;
         }
 
@@ -405,6 +411,12 @@ impl DatanodeBuilder {
         // the metasrv.
         if controlled_by_metasrv && let Some(mito) = region_server.mito_engine() {
             mito.require_write_lease();
+            if let Some(log_store) = &self.object_store_log_store {
+                log_store
+                    .set_io_permit(mito.object_store_wal_io_permit())
+                    .map_err(Box::new)
+                    .context(OpenLogStoreSnafu)?;
+            }
         }
 
         // TODO(weny): Considering introducing a readonly kv_backend trait.
@@ -887,7 +899,7 @@ impl DatanodeBuilder {
     }
 
     /// Builds [ObjectStoreLogStore] under the node prefix of `node_id` in the
-    /// standalone generation, the prefix the regions persist in their WAL options.
+    /// fixed directory generation, the prefix the regions persist in their WAL options.
     async fn build_object_store_log_store(
         object_store: ObjectStore,
         config: &ObjectStoreWalConfig,
@@ -897,7 +909,7 @@ impl DatanodeBuilder {
             "Creating object store logstore with config: {:?}, node id: {}",
             config, node_id
         );
-        ObjectStoreLogStore::try_new(object_store, config, node_id, STANDALONE_GENERATION)
+        ObjectStoreLogStore::try_new(object_store, config, node_id, FIXED_DIRECTORY_GENERATION)
             .await
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)
@@ -1019,33 +1031,14 @@ fn validate_region_engine_config(configs: &[RegionEngineConfig]) -> Result<()> {
 
 /// Rejects an object store WAL config the log store cannot run on.
 fn validate_object_store_wal_config(config: &ObjectStoreWalConfig) -> Result<()> {
-    let prefix = config.prefix.trim();
-    ensure!(
-        !prefix.is_empty(),
+    config.validate_prefix().map_err(|reason| {
         InvalidObjectStoreWalConfigSnafu {
             field: "prefix",
             value: &config.prefix,
-            reason: "must not be empty",
+            reason,
         }
-    );
-    ensure!(
-        !prefix.starts_with('/'),
-        InvalidObjectStoreWalConfigSnafu {
-            field: "prefix",
-            value: &config.prefix,
-            reason: "must be a relative path",
-        }
-    );
-    ensure!(
-        !prefix
-            .split('/')
-            .any(|component| component.is_empty() || component == ".."),
-        InvalidObjectStoreWalConfigSnafu {
-            field: "prefix",
-            value: &config.prefix,
-            reason: "must not contain empty or `..` components",
-        }
-    );
+        .build()
+    })?;
     ensure!(
         config.flush_interval >= Duration::from_millis(10),
         InvalidObjectStoreWalConfigSnafu {
@@ -1207,7 +1200,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use api::v1::{ColumnSchema, Rows};
     use cache::build_datanode_layered_cache_registry;
@@ -1226,7 +1219,9 @@ mod tests {
     use common_meta::node_manager::NodeManagerRef;
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
-    use common_wal::config::object_store::{AckMode, ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use common_wal::config::object_store::{
+        AckMode, EnableObjectStoreWal, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig,
+    };
     use common_wal::config::raft_engine::RaftEngineConfig;
     use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
     use log_store::ObjectStoreLogStore;
@@ -1486,6 +1481,13 @@ mod tests {
             ),
             (
                 ObjectStoreWalConfig {
+                    prefix: "wal/./objects".to_string(),
+                    ..Default::default()
+                },
+                "prefix",
+            ),
+            (
+                ObjectStoreWalConfig {
                     flush_interval: Duration::from_millis(9),
                     ..Default::default()
                 },
@@ -1553,6 +1555,99 @@ mod tests {
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
         // The builder stops before it creates any storage or log store.
         assert!(is_empty_dir(data_home.path()));
+    }
+
+    #[tokio::test]
+    async fn test_cluster_object_store_wal_builder_installs_node_lease() {
+        let data_home = create_temp_dir("cluster-wal-node-lease");
+        let config = ObjectStoreWalConfig {
+            prefix: "cluster-a/wal".to_string(),
+            ..enqueued_wal_config(Duration::from_secs(3600))
+        };
+        let mut builder =
+            object_store_wal_builder(data_home.path().to_str().unwrap(), config.clone());
+        builder.opts.node_id = Some(7);
+        builder.plugins.insert(EnableObjectStoreWal);
+        builder.with_meta_client(Arc::new(
+            MetaClientBuilder::datanode_default_options(7).build(),
+        ));
+        let mut datanode = builder.build().await.unwrap();
+        assert!(datanode.heartbeat_task.is_some());
+        let log_store = datanode.object_store_log_store().unwrap();
+        let engine = datanode.region_server.mito_engine().unwrap();
+        let prefix = config.node_prefix(7, FIXED_DIRECTORY_GENERATION);
+        assert_eq!("cluster-a/wal/datanodes/7/epochs/0", prefix);
+        let provider = Provider::object_store_provider(REGION, prefix);
+        let entry = log_store.entry(vec![1], 0, REGION, &provider).unwrap();
+        let response = log_store.append_batch(vec![entry]).await.unwrap();
+        let entry_id = response.last_entry_ids[&REGION];
+
+        // The builder installs the permit: no test-side set_io_permit call.
+        assert_matches!(
+            log_store.seal_open_batch().await.unwrap_err(),
+            LogStoreError::ObjectStoreWalLeaseExpired { .. }
+        );
+        assert_eq!(0, log_store.latest_entry_id(&provider).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(60);
+        engine.renew_node_lease(deadline);
+        log_store.seal_open_batch().await.unwrap();
+        assert_eq!(entry_id, log_store.latest_entry_id(&provider).unwrap());
+        engine.freeze_lease_clock(deadline);
+        assert_matches!(
+            log_store.seal_open_batch().await.unwrap_err(),
+            LogStoreError::ObjectStoreWalLeaseExpired { .. }
+        );
+        engine.renew_node_lease(deadline + Duration::from_secs(60));
+        log_store.seal_open_batch().await.unwrap();
+        datanode.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cluster_object_store_wal_shutdown_keeps_heartbeat_until_drained() {
+        let data_home = create_temp_dir("cluster-wal-shutdown");
+        let config = enqueued_wal_config(Duration::from_secs(3600));
+        let mut builder =
+            object_store_wal_builder(data_home.path().to_str().unwrap(), config.clone());
+        builder.plugins.insert(EnableObjectStoreWal);
+        builder.with_meta_client(Arc::new(
+            MetaClientBuilder::datanode_default_options(0).build(),
+        ));
+        let mut datanode = builder.build().await.unwrap();
+        let log_store = datanode.object_store_log_store().unwrap();
+        let engine = datanode.region_server.mito_engine().unwrap();
+        engine.renew_node_lease(Instant::now() + WAIT);
+        // Observe the real close flag without starting network heartbeats.
+        let heartbeat_running = datanode
+            .heartbeat_task
+            .as_ref()
+            .unwrap()
+            .running_flag_for_test();
+        heartbeat_running.store(true, Ordering::Release);
+        let provider = Provider::object_store_provider(
+            REGION,
+            config.node_prefix(0, FIXED_DIRECTORY_GENERATION),
+        );
+        let entry = log_store.entry(vec![1], 0, REGION, &provider).unwrap();
+        let response = log_store.append_batch(vec![entry]).await.unwrap();
+        log_store.hold_creates();
+        let shutdown = tokio::spawn(async move { datanode.shutdown().await });
+        tokio::time::timeout(WAIT, log_store.wait_for_parked_creates(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!shutdown.is_finished());
+        assert!(heartbeat_running.load(Ordering::Acquire));
+        log_store.release_creates();
+        tokio::time::timeout(WAIT, shutdown)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!heartbeat_running.load(Ordering::Acquire));
+        assert_eq!(
+            response.last_entry_ids[&REGION],
+            log_store.latest_entry_id(&provider).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1913,7 +2008,7 @@ mod tests {
 
     /// The options that put a region on the WAL of a datanode with `config`.
     fn region_wal_options(config: &ObjectStoreWalConfig) -> HashMap<String, String> {
-        let prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        let prefix = config.node_prefix(0, FIXED_DIRECTORY_GENERATION);
         let wal_options =
             serde_json::to_string(&WalOptions::ObjectStore(ObjectStoreWalOptions::new(prefix)))
                 .unwrap();
@@ -1961,7 +2056,7 @@ mod tests {
         skipped_rows: usize,
     ) -> (Datanode, Arc<ObjectStoreLogStore>) {
         let config = enqueued_wal_config(flush_interval);
-        let prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        let prefix = config.node_prefix(0, FIXED_DIRECTORY_GENERATION);
         let mut request = CreateRequestBuilder::new().build();
         request.options.extend(region_wal_options(&config));
         let datanode = object_store_wal_builder(data_home, config)
@@ -2162,7 +2257,7 @@ mod tests {
     fn test_node_prefix_passes_validation() {
         let config = ObjectStoreWalConfig::default();
         let derived = ObjectStoreWalConfig {
-            prefix: config.node_prefix(0, STANDALONE_GENERATION),
+            prefix: config.node_prefix(0, FIXED_DIRECTORY_GENERATION),
             ..config
         };
         validate_object_store_wal_config(&derived).unwrap();

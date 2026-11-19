@@ -330,9 +330,11 @@ pub struct VolatileContext {
     /// `opening_region_guard` will be set after the
     /// [OpenCandidateRegion](crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion) step.
     ///
-    /// `opening_region_guards` should be consumed after
-    /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
-    /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue).
+    /// On success, `opening_region_guards` is consumed after the
+    /// [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region is written into
+    /// the [TableRouteValue](common_meta::key::table_route::TableRouteValue). On a rollback it is
+    /// consumed before the route is restored, so the target leaves the candidate registration
+    /// before the source can lead again.
     opening_region_guards: Vec<OperatingRegionGuard>,
     /// The deadline of leader region lease.
     leader_region_lease_deadline: Option<Instant>,
@@ -812,6 +814,9 @@ pub struct RegionMigrationData<'a> {
 
 pub(crate) struct RegionMigrationProcedure {
     state: Box<dyn State>,
+    /// Declared before `_guards`: a procedure that ends without a rollback (e.g. it fails to
+    /// record the rollback, or the manager stops) drops the candidate registration in `context`
+    /// before the region leaves the tracker, so another migration cannot start meanwhile.
     context: Context,
     _guards: Vec<RegionMigrationProcedureGuard>,
 }
@@ -877,6 +882,8 @@ impl RegionMigrationProcedure {
         let _timer = METRIC_META_REGION_MIGRATION_EXECUTE
             .with_label_values(&["rollback"])
             .start_timer();
+        // Before the source can lead again, the target leaves the candidate registration.
+        self.context.volatile_ctx.opening_region_guards.clear();
         let ctx = &self.context;
         let to_peer_id = ctx.persistent_ctx.to_peer.id;
         let table_regions = ctx.persistent_ctx.table_regions();
@@ -1117,6 +1124,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(table_route.region_routes().unwrap()[0].leader_state, None);
+    }
+
+    #[tokio::test]
+    async fn test_rollback_drops_candidate_registration_before_route_write() {
+        let env = TestingEnv::new();
+        let persistent_ctx = new_persistent_context();
+        let rollback = CandidateRollback::new(&env, &persistent_ctx).await;
+        let mut procedure =
+            RegionMigrationProcedure::new(persistent_ctx, rollback.context_factory, vec![]);
+        procedure
+            .context
+            .volatile_ctx
+            .opening_region_guards
+            .push(rollback.guard);
+
+        procedure
+            .rollback_inner(&new_procedure_context())
+            .await
+            .unwrap();
+
+        assert_registration_dropped_before_route_write(&rollback.keeper_empty_at_txn);
     }
 
     #[test]

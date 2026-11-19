@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Reloading a region that a manifest version conflict fenced.
+//! Reloading a region fenced by a manifest version conflict, or by a failed tail replay round
+//! that found a newer manifest.
 
 use std::sync::Arc;
 
@@ -28,7 +29,8 @@ use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Starts reloading the region from its manifest and this node's WAL if a manifest version
-    /// conflict fenced it and no catchup or reload of it runs.
+    /// conflict or a failed tail replay round that found a newer manifest fenced it, and no
+    /// catchup or reload of it runs.
     pub(crate) fn maybe_reload_region(&mut self, region_id: RegionId) {
         let Some(region) = self.regions.get_region(region_id) else {
             return;
@@ -66,6 +68,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let result = async {
+                // The fenced instance is stopped, but its last checkpoint may still be writing
+                // the manifest that the reload reads.
+                region.manifest_ctx.wait_for_checkpoint_after_stop().await;
                 // The replay reads only what the log store has made durable.
                 durability_barrier.wait(last_entry_id).await?;
                 opener.open(&config, &wal).await

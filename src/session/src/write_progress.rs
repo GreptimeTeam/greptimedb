@@ -25,7 +25,7 @@ pub struct WriteProgress {
     written: AtomicU64,
     accepted: AtomicBool,
     // A queued write must keep its decoder's memory reservation alive.
-    _reservation: Option<Arc<dyn Send + Sync>>,
+    reservation: Option<(u64, Arc<dyn Send + Sync>)>,
     on_write: Option<Box<dyn Fn(u64) + Send + Sync>>,
     pending: AtomicUsize,
     completed: Notify,
@@ -70,11 +70,17 @@ impl WriteProgress {
         }
     }
 
-    pub fn with_reservation(reservation: Arc<dyn Send + Sync>) -> Self {
+    /// Retains a fixed-size reservation and its granted bytes for later memory admission.
+    pub fn with_reservation(reserved_bytes: u64, reservation: Arc<dyn Send + Sync>) -> Self {
         Self {
-            _reservation: Some(reservation),
+            reservation: Some((reserved_bytes, reservation)),
             ..Self::default()
         }
+    }
+
+    /// Returns the quota retained by this request's decoder or exemplar rows.
+    pub fn reserved_bytes(&self) -> u64 {
+        self.reservation.as_ref().map_or(0, |(bytes, _)| *bytes)
     }
 
     pub fn add_written(&self, rows: usize) {
@@ -125,16 +131,27 @@ mod tests {
     fn confirmations_do_not_double_count_and_contexts_keep_local_ownership() {
         let observed = Arc::new(AtomicUsize::new(0));
         let counter = observed.clone();
-        let progress = Arc::new(WriteProgress::default().with_observer(move |rows| {
-            counter.fetch_add(rows as usize, Ordering::Relaxed);
-        }));
+        let progress = Arc::new(
+            WriteProgress::with_reservation(2048, Arc::new(())).with_observer(move |rows| {
+                counter.fetch_add(rows as usize, Ordering::Relaxed);
+            }),
+        );
         let mut context = crate::context::QueryContext::with("greptime", "public");
+        let body_bytes = Arc::new(AtomicU64::new(0));
+        context.set_body_memory_bytes(Arc::downgrade(&body_bytes));
         context.set_write_progress(progress.clone());
         let fork = context.with_write_admission();
         assert!(Arc::ptr_eq(fork.write_progress().unwrap(), &progress));
+        assert_eq!(fork.held_memory_bytes(), 2048);
+        body_bytes.store(1024, Ordering::Release);
+        assert_eq!(context.held_memory_bytes(), 3072);
+        assert_eq!(fork.held_memory_bytes(), 3072);
         let wire = api::v1::QueryContext::from(context);
         let received = crate::context::QueryContext::try_from(wire).unwrap();
         assert!(received.write_progress().is_none());
+        assert_eq!(received.held_memory_bytes(), 0);
+        drop(body_bytes);
+        assert_eq!(fork.held_memory_bytes(), 2048);
         progress.add_written(2);
         progress.confirm(3);
         progress.confirm(3);

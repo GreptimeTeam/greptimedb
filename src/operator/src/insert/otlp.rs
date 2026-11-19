@@ -118,12 +118,9 @@ impl Inserter {
                 tables.insert(backing.clone(), table);
             }
             physical_columns.entry(backing.as_str()).or_insert_with(|| {
-                PhysicalColumns::new(
-                    tables[backing]
-                        .as_ref()
-                        .map(table_columns)
-                        .unwrap_or_else(default_physical_columns),
-                )
+                PhysicalColumns::new(tables[backing].as_ref().map(table_columns).unwrap_or_else(
+                    || default_physical_columns(self.auto_create_physical_table_timestamp_unit),
+                ))
             });
         }
         // Match ordinary insertion: impure defaults are evaluated once per table
@@ -176,7 +173,9 @@ impl Inserter {
                 let unit = target
                     .and_then(table_time_index_unit)
                     .or_else(|| physical.and_then(table_time_index_unit))
-                    .unwrap_or(TimeUnit::Millisecond);
+                    // The physical table will be auto-created in the configured
+                    // unit, so validate its rows in that unit as well.
+                    .unwrap_or(self.auto_create_physical_table_timestamp_unit);
                 if let Some(rows) = &mut request.rows {
                     convert_rows_time_unit(rows, unit)?;
                 }
@@ -378,13 +377,13 @@ fn table_columns(table: &TableRef) -> Vec<(DataColumn, SemanticType)> {
         .collect()
 }
 
-fn default_physical_columns() -> Vec<(DataColumn, SemanticType)> {
+fn default_physical_columns(unit: TimeUnit) -> Vec<(DataColumn, SemanticType)> {
     use datatypes::prelude::ConcreteDataType;
     vec![
         (
             DataColumn::new(
                 greptime_timestamp(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_datatype(unit),
                 false,
             )
             .with_time_index(true),
@@ -698,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_preflight_omissions_defaults_and_explicit_nulls() {
-        let mut columns = default_physical_columns();
+        let mut columns = default_physical_columns(TimeUnit::Millisecond);
         columns.push((
             DataColumn::new("host", ConcreteDataType::string_datatype(), false)
                 .with_default_constraint(Some(ColumnDefaultConstraint::Value(DataValue::String(
@@ -739,7 +738,7 @@ mod tests {
 
     #[test]
     fn test_preflight_existing_columns_and_physical_definitions() {
-        let columns = default_physical_columns();
+        let columns = default_physical_columns(TimeUnit::Millisecond);
         let mut rows = Rows {
             schema: vec![ColumnSchema {
                 column_name: greptime_timestamp().into(),
@@ -805,7 +804,7 @@ mod tests {
             (defaulted, None),
             (impure, Some("impure default for physical field `impure`")),
         ] {
-            let mut columns = default_physical_columns();
+            let mut columns = default_physical_columns(TimeUnit::Millisecond);
             columns.extend((0..1024).map(|index| {
                 (
                     DataColumn::new(

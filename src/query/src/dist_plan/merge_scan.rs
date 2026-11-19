@@ -48,10 +48,12 @@ use datafusion_common::{DFSchemaRef, DataFusionError, Result, Statistics};
 use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datatypes::extension::json::is_any_json_extension_type;
+use datatypes::series::frame::SeriesFrameDeclaration;
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
+use promql::extension_plan::RawSeriesSource;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContextRef,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
@@ -76,7 +78,7 @@ use crate::dist_plan::{
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::options::{FlowQueryExtensions, remote_dyn_filter_pushdown_enabled_from_extensions};
 use crate::query_engine::QueryEngineState;
-use crate::region_query::RegionQueryHandlerRef;
+use crate::region_query::{RegionQueryHandlerRef, RegionReadLimiter};
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
     context.session_config().get_extension()
@@ -240,21 +242,53 @@ fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool 
 
 /// Validates the remote schema before positional column handling.
 ///
-/// Field metadata (indexing/encoding/compression hints) is non-semantic at
-/// this boundary and is ignored: two fields are equal when their name and
-/// data type match and their nullability is compatible (see
-/// [`fields_semantically_equal`]). A timestamp timezone difference is the only
-/// intentional exception, accepted when the fields share the same timestamp
-/// unit, distinct timezones, equal name, and compatible nullability.
-/// Top-level Arrow schema metadata is non-semantic at this boundary as well.
-/// JSON columns are compared semantically (see [`json_fields_compatible`])
-/// because their wire and decoded representations use different physical
-/// arrow types.
+/// Two invariants apply, and the series-frame one is decided first:
+///
+/// * A schema carrying any `greptime.series.*` top-level marker on either side
+///   is a series frame and is checked for exact identity: every reserved
+///   top-level `greptime.series.*` marker must match in both directions and
+///   every field must be equal, nested field metadata included. This compares
+///   identity, not frame validity.
+/// * Every other schema is an ordinary SQL schema and takes the lenient
+///   comparison below. Field metadata (indexing/encoding/compression hints) is
+///   non-semantic at this boundary and is ignored: two fields are equal when
+///   their name and data type match and their nullability is compatible (see
+///   [`fields_semantically_equal`]). A timestamp timezone difference is the only
+///   intentional exception, accepted when the fields share the same timestamp
+///   unit, distinct timezones, equal name, and compatible nullability.
+///   Top-level Arrow schema metadata is non-semantic at this boundary as well.
+///   JSON columns are compared semantically (see [`json_fields_compatible`])
+///   because their wire and decoded representations use different physical
+///   arrow types.
 fn validate_remote_schema(
     expected: &ArrowSchema,
     actual: &ArrowSchema,
     source: &str,
 ) -> Result<()> {
+    let has_series_frame_metadata = expected
+        .metadata()
+        .keys()
+        .chain(actual.metadata().keys())
+        .any(|key| key.starts_with("greptime.series."));
+    if has_series_frame_metadata {
+        let reserved_metadata_matches = expected
+            .metadata()
+            .iter()
+            .filter(|(key, _)| key.starts_with("greptime.series."))
+            .all(|(key, value)| actual.metadata().get(key) == Some(value))
+            && actual
+                .metadata()
+                .iter()
+                .filter(|(key, _)| key.starts_with("greptime.series."))
+                .all(|(key, value)| expected.metadata().get(key) == Some(value));
+        if !reserved_metadata_matches || expected.fields() != actual.fields() {
+            return Err(remote_schema_mismatch(format!(
+                "MergeScan {source} series frame schema mismatch"
+            )));
+        }
+        return Ok(());
+    }
+
     if expected.fields().len() != actual.fields().len() {
         return Err(remote_schema_mismatch(format!(
             "MergeScan {source} schema field count mismatch: expected {}, actual {}",
@@ -490,6 +524,7 @@ pub struct MergeScanExec {
     regions: Vec<RegionId>,
     plan: LogicalPlan,
     arrow_schema: ArrowSchemaRef,
+    remote_schema: ArrowSchemaRef,
     region_query_handler: RegionQueryHandlerRef,
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
@@ -532,6 +567,7 @@ impl MergeScanExec {
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
+        let remote_schema = Arc::new(arrow_schema.clone());
         let arrow_schema = Arc::new(arrow_schema.clone());
         let output_partition_count = Self::output_partition_count(regions.len(), target_partition);
 
@@ -579,6 +615,7 @@ impl MergeScanExec {
             regions,
             plan,
             arrow_schema,
+            remote_schema,
             region_query_handler,
             metric: ExecutionPlanMetricsSet::new(),
             sub_stage_metrics: Arc::default(),
@@ -590,6 +627,35 @@ impl MergeScanExec {
             target_partition,
             enable_per_region_metrics,
         })
+    }
+
+    /// Redeclares only a direct raw source when its selected regions may split a key.
+    pub(crate) fn with_raw_series_disjoint(mut self, disjoint: bool) -> Result<Self> {
+        if !disjoint
+            && matches!(&self.plan, LogicalPlan::Extension(extension)
+            if extension.node.as_any().is::<RawSeriesSource>())
+        {
+            SeriesFrameDeclaration::parse(self.remote_schema.as_ref())
+                .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+            let mut metadata = self.arrow_schema.metadata().clone();
+            metadata.insert("greptime.series.ordering".into(), "interleaved".into());
+            self.arrow_schema = Arc::new(arrow_schema::Schema::new_with_metadata(
+                self.arrow_schema.fields().clone(),
+                metadata,
+            ));
+            let equivalence = self
+                .properties
+                .equivalence_properties()
+                .clone()
+                .with_new_schema(self.arrow_schema.clone())?;
+            self.properties = Arc::new(
+                self.properties
+                    .as_ref()
+                    .clone()
+                    .with_eq_properties(equivalence),
+            );
+        }
+        Ok(self)
     }
 
     /// Conservative row-count upper bound for all selected regions.
@@ -624,6 +690,7 @@ impl MergeScanExec {
         let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
         let arrow_schema = self.arrow_schema.clone();
+        let remote_schema = self.remote_schema.clone();
         let query_ctx = self.query_ctx.clone();
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let partition_metrics_moved = self.partition_metrics.clone();
@@ -648,6 +715,10 @@ impl MergeScanExec {
             &query_ctx,
             &captured_remote_dyn_filters,
         );
+        // The query's own bound on region reads in flight; see [`RegionReadLimiter`].
+        let region_read_limiter = context
+            .session_config()
+            .get_extension::<RegionReadLimiter>();
 
         let stream = Box::pin(stream!({
             let remote_dyn_filter_registry_lease = remote_dyn_filter_registry_lease;
@@ -735,6 +806,12 @@ impl MergeScanExec {
                     );
                 }
 
+                // Hold the permit until this region's body is drained or dropped: the bound
+                // counts reads in flight, whichever scan or partition started them.
+                let _region_read_permit = match region_read_limiter.as_ref() {
+                    Some(limiter) => Some(limiter.acquire().await),
+                    None => None,
+                };
                 let do_get_start = Instant::now();
                 let do_get_result = region_query_handler
                     .do_get(&target, request)
@@ -753,7 +830,7 @@ impl MergeScanExec {
                 }
                 let mut advertised_schema = stream.schema().arrow_schema().clone();
                 validate_remote_schema(
-                    arrow_schema.as_ref(),
+                    remote_schema.as_ref(),
                     advertised_schema.as_ref(),
                     "advertised remote stream",
                 )
@@ -819,7 +896,7 @@ impl MergeScanExec {
                     let df_batch = batch.into_df_record_batch();
                     if !Arc::ptr_eq(&advertised_schema, df_batch.schema_ref()) {
                         validate_remote_schema(
-                            arrow_schema.as_ref(),
+                            remote_schema.as_ref(),
                             df_batch.schema_ref().as_ref(),
                             "remote record batch",
                         )
@@ -1340,7 +1417,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
-    use arrow::array::{Int64Array, TimestampMillisecondArray};
+    use arrow::array::{Array, Float64Array, Int64Array, TimestampMillisecondArray};
+    use arrow::buffer::{Buffer, ScalarBuffer};
     use arrow_schema::{DataType as TestArrowDataType, Field, TimeUnit};
     use async_trait::async_trait;
     use common_base::Plugins;
@@ -1367,6 +1445,12 @@ mod tests {
     };
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::frame::{self, FrameLabelMode};
+    use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+    use datatypes::series::samples::{
+        DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema,
+    };
     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
     use futures_util::{Stream, TryStreamExt};
     use session::ReadPreference;
@@ -1688,6 +1772,7 @@ mod tests {
                 plan_name: "higher region".to_string(),
                 level: 0,
                 metrics: Vec::new(),
+                native: None,
             }],
             ..Default::default()
         };
@@ -1697,6 +1782,7 @@ mod tests {
                 plan_name: "lower region".to_string(),
                 level: 0,
                 metrics: Vec::new(),
+                native: None,
             }],
             ..Default::default()
         };
@@ -2077,6 +2163,9 @@ mod tests {
     #[derive(Default)]
     struct TestRegionQueryHandler {
         responses: HashMap<RegionId, TestRegionResponse>,
+        select_target_calls: AtomicUsize,
+        read_preferences: Mutex<Vec<ReadPreference>>,
+        do_get_targets: Mutex<Vec<u64>>,
     }
 
     impl TestRegionQueryHandler {
@@ -2093,7 +2182,10 @@ mod tests {
                     )
                 })
                 .collect();
-            Self { responses }
+            Self {
+                responses,
+                ..Default::default()
+            }
         }
 
         fn with_responses(
@@ -2117,7 +2209,10 @@ mod tests {
                     )
                 })
                 .collect();
-            Self { responses }
+            Self {
+                responses,
+                ..Default::default()
+            }
         }
     }
 
@@ -2501,17 +2596,20 @@ mod tests {
     impl RegionQueryHandler for TestRegionQueryHandler {
         async fn select_target(
             &self,
-            _read_preference: ReadPreference,
+            read_preference: ReadPreference,
             _region_id: RegionId,
         ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            self.select_target_calls.fetch_add(1, Ordering::SeqCst);
+            self.read_preferences.lock().unwrap().push(read_preference);
             Ok(test_target(1))
         }
 
         async fn do_get(
             &self,
-            _target: &crate::region_query::RegionQueryTarget,
+            target: &crate::region_query::RegionQueryTarget,
             request: common_query::request::QueryRequest,
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            self.do_get_targets.lock().unwrap().push(target.peer().id);
             let response = self
                 .responses
                 .get(&request.region_id)
@@ -3112,6 +3210,735 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merge_scan_remote_schema_identity_rejects_empty_raw_frame_metadata_mismatch() {
+        let region_id = RegionId::new(1024, 1);
+        let raw = raw_test_series_schema();
+        let decode = raw_test_label_decode();
+        let frame = frame::series_frame_schema(&raw, FrameLabelMode::Key, Some(&decode)).unwrap();
+        let metadata = frame.metadata().clone();
+        let mut cases = Vec::new();
+        for (key, value) in [
+            ("greptime.series.layout", "v0"),
+            ("greptime.series.content", "other"),
+            ("greptime.series.labels", "explicit"),
+            ("greptime.series.time", "other"),
+        ] {
+            let mut changed = metadata.clone();
+            changed.insert(key.to_string(), value.to_string());
+            cases.push((metadata.clone(), changed));
+        }
+        let mut extra = metadata.clone();
+        extra.insert("greptime.series.grid.future".to_string(), "v1".to_string());
+        cases.push((metadata.clone(), extra));
+        let mut removed = metadata.clone();
+        removed.remove("greptime.series.layout");
+        cases.push((metadata.clone(), removed));
+        cases.push((metadata.clone(), StdHashMap::new()));
+        let mut actual_only = StdHashMap::new();
+        actual_only.insert("greptime.series.content".to_string(), "raw".to_string());
+        cases.push((StdHashMap::new(), actual_only));
+        let mut expected_unknown = metadata.clone();
+        expected_unknown.insert("greptime.series.future".to_string(), "v1".to_string());
+        cases.push((expected_unknown, metadata.clone()));
+
+        for (case_index, (expected_metadata, actual_metadata)) in cases.into_iter().enumerate() {
+            let expected =
+                ArrowSchema::new_with_metadata(frame.fields().clone(), expected_metadata);
+            let advertised = Arc::new(
+                Schema::try_from(Arc::new(ArrowSchema::new_with_metadata(
+                    frame.fields().clone(),
+                    actual_metadata,
+                )))
+                .unwrap(),
+            );
+            let errors_before = merge_scan_schema_error_count_for_test();
+            let result = collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected,
+                Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                    region_id,
+                    advertised,
+                    vec![],
+                )])),
+                1,
+            ))
+            .await;
+            assert!(result.is_err(), "metadata case {case_index} must fail");
+            assert_eq!(
+                merge_scan_schema_error_count_for_test(),
+                errors_before + 1,
+                "metadata case {case_index}"
+            );
+        }
+    }
+
+    /// The frame's label decode description is compared as an exact string, so two sides that
+    /// derive it from equal bindings must produce byte-identical text, and any textual difference
+    /// must be a mismatch rather than a silent re-decode under one side.
+    #[test]
+    fn merge_scan_compares_label_decode_metadata_as_exact_text() {
+        use common_query::series_frame::{
+            label_decode_spec, raw_series_frame_schema_with_ordering,
+        };
+        use datatypes::series::SeriesOrdering;
+        use datatypes::series::frame::series_frame_label_decode;
+
+        let raw = raw_test_series_schema();
+        // Two bindings that are equal but not the same allocation: the expectation and the
+        // advertised schema are built independently, as on a frontend and a datanode.
+        let binding = || {
+            let mut builder =
+                store_api::metadata::RegionMetadataBuilder::new(RegionId::new(1024, 1));
+            builder
+                .push_column_metadata(store_api::metadata::ColumnMetadata {
+                    column_schema: datatypes::schema::ColumnSchema::new(
+                        "host",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: api::v1::SemanticType::Tag,
+                    column_id: 7,
+                })
+                .push_column_metadata(store_api::metadata::ColumnMetadata {
+                    column_schema: datatypes::schema::ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: api::v1::SemanticType::Timestamp,
+                    column_id: 8,
+                })
+                .primary_key(vec![7]);
+            store_api::region_engine::RawLabelSource::PrimaryKey {
+                metric_name: "cpu_usage".into(),
+                physical_metadata: Arc::new(builder.build().unwrap()),
+                logical_tags: Arc::from([store_api::region_engine::BoundTag {
+                    column_id: 7,
+                    name: "host".into(),
+                }]),
+            }
+        };
+        let expected_binding = binding();
+        let actual_binding = binding();
+        assert_eq!(
+            label_decode_spec(&expected_binding),
+            label_decode_spec(&actual_binding)
+        );
+        let expected = raw_series_frame_schema_with_ordering(
+            &raw,
+            &expected_binding,
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let actual = raw_series_frame_schema_with_ordering(
+            &raw,
+            &actual_binding,
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let key = "greptime.series.label_decode";
+        assert_eq!(expected.metadata().get(key), actual.metadata().get(key));
+        assert!(
+            expected.metadata()[key].contains("\"encoding\":\"dense\""),
+            "the description is plain compact JSON: {}",
+            expected.metadata()[key]
+        );
+        assert!(
+            validate_remote_schema(&expected, &actual, "test").is_ok(),
+            "equal bindings must compare equal"
+        );
+
+        // Semantically equal but textually different descriptions are rejected: the reserved
+        // metadata is compared as exact text, not parsed and compared structurally.
+        let mut spaced_metadata = expected.metadata().clone();
+        let spaced_text = spaced_metadata[key].replacen(':', ": ", 1);
+        assert_ne!(spaced_text, spaced_metadata[key]);
+        spaced_metadata.insert(key.to_string(), spaced_text);
+        let spaced = ArrowSchema::new_with_metadata(expected.fields().clone(), spaced_metadata);
+        assert_eq!(
+            series_frame_label_decode(&spaced)
+                .unwrap()
+                .map(|decode| decode.version),
+            Some(1),
+            "the spaced text is still a valid description"
+        );
+        assert!(validate_remote_schema(&expected, &spaced, "test").is_err());
+    }
+
+    /// The key layout a key frame over [`raw_test_series_schema`] declares.
+    ///
+    /// A key-encoded frame cannot be declared without the description that decodes its key, and the
+    /// merge-scan tests never decode a key with it, so it only has to be self-consistent.
+    fn raw_test_label_decode() -> frame::LabelDecodeSpec {
+        frame::LabelDecodeSpec {
+            version: frame::LABEL_DECODE_VERSION,
+            metric_name: "cpu_usage".to_string(),
+            encoding: frame::LabelDecodeEncoding::Dense,
+            primary_key: vec![frame::LabelDecodeColumn {
+                column_id: 1,
+                name: "host".to_string(),
+                physical_type: ConcreteDataType::string_datatype(),
+            }],
+            logical_tags: vec![frame::LabelDecodeTag {
+                column_id: 1,
+                name: "host".to_string(),
+            }],
+        }
+    }
+
+    fn raw_test_series_schema() -> SeriesSchema {
+        SeriesSchema {
+            fields: vec![
+                FieldSpec {
+                    name: Arc::from("value"),
+                },
+                FieldSpec {
+                    name: Arc::from("other"),
+                },
+            ]
+            .into(),
+            eval_grid: None,
+        }
+    }
+
+    /// Exercise the distributed analyzer's real recovery projection with the pinned physical
+    /// planner. This documents the declaration that the query planner must repair at Fused input.
+    #[tokio::test]
+    async fn analyzer_recovery_projection_stamps_logical_raw_ordering() {
+        use crate::dist_plan::DistPlannerAnalyzer;
+        use crate::optimizer::test_util::mock_table_provider;
+        use common_query::series_frame::series_frame_ordering;
+        use datafusion::catalog::Session;
+        use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
+        use datafusion::physical_planner::{
+            DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner,
+        };
+        use datafusion_expr::{Extension, UserDefinedLogicalNode};
+        use datafusion_optimizer::analyzer::AnalyzerRule;
+
+        struct RawMergePlanner;
+        #[async_trait]
+        impl ExtensionPlanner for RawMergePlanner {
+            async fn plan_extension(
+                &self,
+                _planner: &dyn PhysicalPlanner,
+                node: &dyn UserDefinedLogicalNode,
+                _logical_inputs: &[&LogicalPlan],
+                _physical_inputs: &[Arc<dyn ExecutionPlan>],
+                session: &dyn Session,
+                _planning_ctx: &PhysicalPlanningContext,
+            ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+                let Some(scan) = node.as_any().downcast_ref::<MergeScanLogicalPlan>() else {
+                    return Ok(None);
+                };
+                let session = session.as_any().downcast_ref::<SessionState>().unwrap();
+                let exec = MergeScanExec::new(
+                    session,
+                    TableName::new("c", "s", "t"),
+                    vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+                    scan.input().clone(),
+                    UserDefinedLogicalNode::schema(scan).as_arrow(),
+                    Arc::new(TestRegionQueryHandler::default()),
+                    QueryContext::arc(),
+                    2,
+                    None,
+                    false,
+                )?
+                .with_raw_series_disjoint(false)?;
+                Ok(Some(Arc::new(exec)))
+            }
+        }
+        let table = LogicalPlanBuilder::scan(
+            "metric",
+            Arc::new(datafusion::datasource::DefaultTableSource::new(Arc::new(
+                mock_table_provider(RegionId::new(1024, 1)),
+            ))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let raw = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                RawSeriesSource::try_new(
+                    Arc::from("metric"),
+                    vec!["host".into()],
+                    vec!["v0".into()],
+                    table,
+                )
+                .unwrap(),
+            ),
+        });
+        // The analyzer expands a raw source into a merge scan. The recovery projection the Fused
+        // planner repairs is the one the physical planner derives from the source's own frame
+        // schema, not an extra analyzer node.
+        let analyzed = DistPlannerAnalyzer::default()
+            .analyze(raw, &ConfigOptions::default())
+            .unwrap();
+        assert_eq!(
+            series_frame_ordering(analyzed.schema().as_arrow()).unwrap(),
+            SeriesOrdering::Contiguous
+        );
+        let state = SessionStateBuilder::new()
+            .with_default_features()
+            .with_physical_optimizer_rules(vec![])
+            .build();
+        let planner =
+            DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(RawMergePlanner)]);
+        let physical = planner
+            .create_physical_plan(&analyzed, &state)
+            .await
+            .unwrap();
+        // The analyzer hands the raw frame boundary to the physical planner unchanged: no recovery
+        // projection is inserted, so the merge scan's own declaration is what a fused consumer
+        // sees.
+        let merge = physical
+            .downcast_ref::<MergeScanExec>()
+            .expect("the analyzed raw source plans as the merge scan itself");
+        assert_eq!(
+            series_frame_ordering(merge.schema().as_ref()).unwrap(),
+            SeriesOrdering::Interleaved
+        );
+        assert_eq!(
+            series_frame_ordering(physical.schema().as_ref()).unwrap(),
+            SeriesOrdering::Interleaved
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_region_root_series_frame_output_preserves_chains() {
+        use crate::optimizer::series_frame_output::SeriesFrameOutput;
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::datasource::source::DataSourceExec;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datatypes::series::SeriesLabels;
+        use promql::extension_plan::{IdentityCompletion, SeriesRepartitionExec};
+
+        let logical = RawSeriesSource::try_new(
+            Arc::from("metric"),
+            vec![],
+            vec!["value".into(), "other".into()],
+            LogicalPlanBuilder::empty(false).build().unwrap(),
+        )
+        .unwrap();
+        let remote_schema = Arc::new(
+            UserDefinedLogicalNodeCore::schema(&logical)
+                .as_arrow()
+                .clone(),
+        );
+        let raw = raw_test_series_schema();
+        let batch = |time, value| {
+            let chunk = RawSeriesChunk::try_new(
+                &raw,
+                Buffer::from(vec![1u8]),
+                Some(SeriesLabels::try_new(Some(Arc::from("metric")), vec![]).unwrap()),
+                RawTimestamps::try_new(ScalarBuffer::from(vec![time])).unwrap(),
+                SeriesFields::try_from_vec(vec![
+                    Samples::from_float(Float64Array::from(vec![value])),
+                    Samples::from_float(Float64Array::from(vec![value])),
+                ])
+                .unwrap(),
+                true,
+            )
+            .unwrap();
+            let packed = frame::pack_raw_series_chunk(&raw, FrameLabelMode::Explicit, None, &chunk)
+                .unwrap()
+                .remove(0);
+            DfRecordBatch::try_new(remote_schema.clone(), packed.columns().to_vec()).unwrap()
+        };
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(
+                &[vec![batch(10, 1.0)], vec![batch(20, 2.0)]],
+                remote_schema.clone(),
+                None,
+            )
+            .unwrap(),
+        ))) as Arc<dyn ExecutionPlan>;
+        let root = logical.to_per_series_execution_plan(input).unwrap();
+        let output = SeriesFrameOutput
+            .optimize(root, &ConfigOptions::default())
+            .unwrap();
+        let router = output.downcast_ref::<SeriesRepartitionExec>().unwrap();
+        assert_eq!(
+            router.identity_completion(),
+            IdentityCompletion::MergeInputs
+        );
+        assert_eq!(output.schema(), remote_schema);
+        let batches = datafusion::physical_plan::collect(output, Arc::new(TaskContext::default()))
+            .await
+            .unwrap();
+        let chunks = batches
+            .iter()
+            .flat_map(|batch| {
+                frame::unpack_raw_series_frame(&raw, FrameLabelMode::Explicit, None, batch).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let times = chunks
+            .iter()
+            .flat_map(|chunk| (0..chunk.time.len()).map(|i| chunk.time.timestamp(i).unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(times, vec![10, 20]);
+        assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_raw_merge_validates_remote_then_exposes_fragmented_batches() {
+        use common_query::series_frame::series_frame_ordering;
+        use datafusion_expr::Extension;
+        use datatypes::series::SeriesLabels;
+
+        let source = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                RawSeriesSource::try_new(
+                    Arc::from("metric"),
+                    vec![],
+                    vec!["value".into(), "other".into()],
+                    LogicalPlanBuilder::empty(false).build().unwrap(),
+                )
+                .unwrap(),
+            ),
+        });
+        let mut metadata = source.schema().as_arrow().metadata().clone();
+        metadata.insert("test.frame.producer".into(), "preserve-me".into());
+        let remote = Arc::new(ArrowSchema::new_with_metadata(
+            source.schema().as_arrow().fields().clone(),
+            metadata,
+        ));
+        let advertised = Arc::new(Schema::try_from(remote.clone()).unwrap());
+        let raw = raw_test_series_schema();
+        let chunk = RawSeriesChunk::try_new(
+            &raw,
+            Buffer::from(vec![1u8]),
+            Some(SeriesLabels::try_new(Some(Arc::from("metric")), vec![]).unwrap()),
+            RawTimestamps::try_new(ScalarBuffer::from(vec![10, 20])).unwrap(),
+            SeriesFields::try_from_vec(vec![
+                Samples::from_float(Float64Array::from(vec![1.0, 2.0])),
+                Samples::from_float(Float64Array::from(vec![3.0, 4.0])),
+            ])
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        let packed = frame::pack_raw_series_chunk(&raw, FrameLabelMode::Explicit, None, &chunk)
+            .unwrap()
+            .remove(0);
+        let packed = DfRecordBatch::try_new(remote.clone(), packed.columns().to_vec()).unwrap();
+        let region = RegionId::new(1024, 1);
+        for disjoint in [true, false] {
+            let batch = RecordBatch::from_df_record_batch(advertised.clone(), packed.clone());
+            let exec = MergeScanExec::new(
+                &SessionStateBuilder::new().build(),
+                TableName::new("c", "s", "t"),
+                vec![region, RegionId::new(1024, 2)],
+                source.clone(),
+                &remote,
+                Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                    region,
+                    advertised.clone(),
+                    vec![Ok(batch)],
+                )])),
+                QueryContext::arc(),
+                2,
+                None,
+                false,
+            )
+            .unwrap()
+            .with_raw_series_disjoint(disjoint)
+            .unwrap();
+            assert_eq!(exec.region_count(), 2);
+            assert_eq!(exec.partition_count(), 2);
+            assert_eq!(exec.remote_schema.as_ref(), remote.as_ref());
+            assert_eq!(
+                exec.schema().metadata().get("test.frame.producer"),
+                Some(&"preserve-me".to_string())
+            );
+            let expected = if disjoint {
+                SeriesOrdering::Contiguous
+            } else {
+                SeriesOrdering::Interleaved
+            };
+            assert_eq!(
+                series_frame_ordering(exec.schema().as_ref()).unwrap(),
+                expected
+            );
+            let schema = exec.schema();
+            let batches = collect_merge_scan(exec).await.unwrap();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].schema(), schema);
+            assert!(Arc::ptr_eq(&packed.columns()[0], &batches[0].columns()[0]));
+        }
+        let mut wrong_metadata = remote.metadata().clone();
+        wrong_metadata.insert(
+            "greptime.series.ordering".into(),
+            "read_key_then_time".into(),
+        );
+        let wrong = Arc::new(
+            Schema::try_from(Arc::new(ArrowSchema::new_with_metadata(
+                remote.fields().clone(),
+                wrong_metadata,
+            )))
+            .unwrap(),
+        );
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("c", "s", "t"),
+            vec![region],
+            source,
+            &remote,
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region,
+                wrong,
+                vec![],
+            )])),
+            QueryContext::arc(),
+            1,
+            None,
+            false,
+        )
+        .unwrap()
+        .with_raw_series_disjoint(false)
+        .unwrap();
+        assert!(
+            collect_merge_scan(exec).await.is_err(),
+            "the exposed schema must not weaken remote validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_rejects_later_raw_frame_inner_metadata_mismatch() {
+        let region_id = RegionId::new(1024, 1);
+        let raw = raw_test_series_schema();
+        let mode = FrameLabelMode::Key;
+        let decode = raw_test_label_decode();
+        let frame = frame::series_frame_schema(&raw, mode, Some(&decode)).unwrap();
+        let mut changed_metadata = frame.metadata().clone();
+        changed_metadata.insert("greptime.series.marker".to_string(), "changed".to_string());
+        let changed_schema = Arc::new(ArrowSchema::new_with_metadata(
+            frame.fields().clone(),
+            changed_metadata,
+        ));
+        let chunk = |values: [f64; 2], times: [i64; 2], last| {
+            RawSeriesChunk::try_new(
+                &raw,
+                Buffer::from(vec![1u8, 2, 3]),
+                None,
+                RawTimestamps::try_new(ScalarBuffer::from(times.to_vec())).unwrap(),
+                SeriesFields::try_from_vec(vec![
+                    Samples::from_float(Float64Array::from(values.to_vec())),
+                    Samples::from_float(Float64Array::from(vec![4.0, 5.0])),
+                ])
+                .unwrap(),
+                last,
+            )
+            .unwrap()
+        };
+        let first = frame::pack_raw_series_chunk(
+            &raw,
+            mode,
+            Some(&decode),
+            &chunk([1.0, 2.0], [10, 20], false),
+        )
+        .unwrap()
+        .remove(0);
+        let mut second = frame::pack_raw_series_chunk(
+            &raw,
+            mode,
+            Some(&decode),
+            &chunk([3.0, 4.0], [30, 40], true),
+        )
+        .unwrap()
+        .remove(0);
+        second = DfRecordBatch::try_new(changed_schema, second.columns().to_vec()).unwrap();
+        let advertised = Arc::new(Schema::try_from(frame.clone()).unwrap());
+        let first = RecordBatch::from_df_record_batch(advertised.clone(), first);
+        let second = RecordBatch::from_df_record_batch(advertised.clone(), second);
+        let errors_before = merge_scan_schema_error_count_for_test();
+        let exec = merge_scan_exec_with_handler(
+            vec![region_id],
+            frame.as_ref().clone(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                advertised,
+                vec![Ok(first), Ok(second)],
+            )])),
+            1,
+        );
+        let mut stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
+        let emitted = stream.next().await.unwrap().unwrap();
+        let decoded = frame::unpack_raw_series_frame(&raw, mode, Some(&decode), &emitted).unwrap();
+        assert_eq!(decoded[0].time.timestamp(0), Some(10));
+        assert!(matches!(
+            decoded[0].fields.get(0).unwrap().sample(0),
+            SampleRef::Float(1.0)
+        ));
+        assert!(stream.next().await.unwrap().is_err());
+        assert!(stream.next().await.is_none());
+        assert_eq!(merge_scan_schema_error_count_for_test(), errors_before + 1);
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_rejects_raw_frame_field_metadata_mismatch() {
+        let region_id = RegionId::new(1024, 1);
+        let raw = raw_test_series_schema();
+        let expected =
+            frame::series_frame_schema(&raw, FrameLabelMode::Key, Some(&raw_test_label_decode()))
+                .unwrap();
+        let frame_metadata = expected.metadata().clone();
+        let fields = expected.fields().to_vec();
+        let mut field_cases = Vec::new();
+        let mut direct_metadata = fields.clone();
+        direct_metadata[0] = Arc::new(fields[0].as_ref().clone().with_metadata(StdHashMap::from(
+            [("semantic".to_string(), "changed".to_string())],
+        )));
+        field_cases.push(direct_metadata);
+
+        let mut nested_metadata = fields.clone();
+        let TestArrowDataType::Struct(children) = fields[2].data_type() else {
+            panic!("raw frame time field must be a struct");
+        };
+        let mut children = children.to_vec();
+        children[0] = children[0]
+            .as_ref()
+            .clone()
+            .with_metadata(StdHashMap::from([(
+                "semantic".to_string(),
+                "changed".to_string(),
+            )]))
+            .into();
+        nested_metadata[2] = fields[2]
+            .as_ref()
+            .clone()
+            .with_data_type(TestArrowDataType::Struct(children.into()))
+            .into();
+        field_cases.push(nested_metadata);
+
+        let mut changed_name = fields.clone();
+        changed_name[0] = fields[0]
+            .as_ref()
+            .clone()
+            .with_name("other".to_string())
+            .into();
+        field_cases.push(changed_name);
+        let mut changed_type = fields.clone();
+        changed_type[0] = fields[0]
+            .as_ref()
+            .clone()
+            .with_data_type(TestArrowDataType::LargeBinary)
+            .into();
+        field_cases.push(changed_type);
+        let mut changed_nullability = fields;
+        changed_nullability[0] = changed_nullability[0]
+            .as_ref()
+            .clone()
+            .with_nullable(true)
+            .into();
+        field_cases.push(changed_nullability);
+
+        for (case_index, actual_fields) in field_cases.into_iter().enumerate() {
+            let advertised = Arc::new(
+                Schema::try_from(Arc::new(ArrowSchema::new_with_metadata(
+                    actual_fields,
+                    frame_metadata.clone(),
+                )))
+                .unwrap(),
+            );
+            let errors_before = merge_scan_schema_error_count_for_test();
+            let result = collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected.as_ref().clone(),
+                Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                    region_id,
+                    advertised,
+                    vec![],
+                )])),
+                1,
+            ))
+            .await;
+            assert!(result.is_err(), "field schema case {case_index} must fail");
+            assert_eq!(
+                merge_scan_schema_error_count_for_test(),
+                errors_before + 1,
+                "field schema case {case_index}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_preserves_valid_raw_frame_payload() {
+        let region_id = RegionId::new(1024, 1);
+        let raw = raw_test_series_schema();
+        let decode = raw_test_label_decode();
+        let expected_frame =
+            frame::series_frame_schema(&raw, FrameLabelMode::Key, Some(&decode)).unwrap();
+        let mut expected_metadata = expected_frame.metadata().clone();
+        expected_metadata.insert("application.note".to_string(), "expected".to_string());
+        let expected = Arc::new(ArrowSchema::new_with_metadata(
+            expected_frame.fields().clone(),
+            expected_metadata,
+        ));
+        let remote_schema = Arc::new(Schema::try_from(expected_frame.clone()).unwrap());
+        let chunk = RawSeriesChunk::try_new(
+            &raw,
+            Buffer::from(vec![1u8, 2, 3]),
+            None,
+            RawTimestamps::try_new(ScalarBuffer::from(vec![10, 20])).unwrap(),
+            SeriesFields::try_from_vec(vec![
+                Samples::from_float(Float64Array::from(vec![Some(-0.0), None])),
+                Samples::from_float(Float64Array::from(vec![
+                    Some(f64::from_bits(0x7ff8_0000_0000_0042)),
+                    Some(3.5),
+                ])),
+            ])
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        let packed =
+            frame::pack_raw_series_chunk(&raw, FrameLabelMode::Key, Some(&decode), &chunk).unwrap();
+        let inner = packed.into_iter().next().unwrap();
+        let original_columns = inner.columns().to_vec();
+        let batch = RecordBatch::from_df_record_batch(remote_schema.clone(), inner);
+        let result = collect_merge_scan(merge_scan_exec_with_handler(
+            vec![region_id],
+            expected.as_ref().clone(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                remote_schema,
+                vec![Ok(batch)],
+            )])),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        for (original, returned) in original_columns.iter().zip(result[0].columns()) {
+            assert!(Arc::ptr_eq(original, returned));
+        }
+        let decoded =
+            frame::unpack_raw_series_frame(&raw, FrameLabelMode::Key, Some(&decode), &result[0]);
+        let decoded = decoded.unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].primary_key.as_slice(), &[1, 2, 3]);
+        assert!(decoded[0].is_last);
+        assert_eq!(decoded[0].time.timestamp(0), Some(10));
+        assert_eq!(decoded[0].time.timestamp(1), Some(20));
+        match decoded[0].fields.get(0).unwrap().dense().unwrap() {
+            DenseSamplesRef::Float(values) => {
+                assert_eq!(values.value(0).to_bits(), (-0.0f64).to_bits());
+                assert!(values.is_null(1));
+            }
+            _ => panic!("expected float samples"),
+        }
+        match decoded[0].fields.get(1).unwrap().dense().unwrap() {
+            DenseSamplesRef::Float(values) => {
+                assert_eq!(values.value(0).to_bits(), 0x7ff8_0000_0000_0042);
+                assert_eq!(values.value(1), 3.5);
+            }
+            _ => panic!("expected float samples"),
+        }
+    }
+
+    #[tokio::test]
     async fn merge_scan_remote_schema_identity_allows_top_level_metadata_version_mismatch() {
         let fields = expected_int64_schema().fields().clone();
         let expected = ArrowSchema::new_with_metadata(
@@ -3330,6 +4157,7 @@ mod tests {
                 plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 42)],
+                native: None,
             }],
             ..Default::default()
         };
@@ -3345,6 +4173,7 @@ mod tests {
                 plan_name: "ProjectionExec".to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 42)],
+                native: None,
             }],
             ..Default::default()
         };
@@ -3361,12 +4190,14 @@ mod tests {
                     plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                     level: 0,
                     metrics: vec![("output_bytes".to_string(), 42)],
+                    native: None,
                 },
                 PlanMetrics {
                     plan: "RegionScanExec: region=2".to_string(),
                     plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                     level: 0,
                     metrics: vec![("output_bytes".to_string(), 18)],
+                    native: None,
                 },
             ],
             ..Default::default()
@@ -3412,6 +4243,7 @@ mod tests {
                 plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 24)],
+                native: None,
             }],
             ..Default::default()
         };
@@ -3481,6 +4313,7 @@ mod tests {
                 plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 24)],
+                native: None,
             }],
             ..Default::default()
         };

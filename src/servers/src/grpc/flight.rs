@@ -346,7 +346,7 @@ impl PutRecordBatchRequest {
 }
 
 pub struct PutRecordBatchRequestStream {
-    flight_data_stream: Streaming<FlightData>,
+    flight_data_stream: TonicStream<FlightData>,
     catalog: String,
     schema_name: String,
     limiter: Option<ServerMemoryLimiter>,
@@ -369,13 +369,13 @@ impl PutRecordBatchRequestStream {
     /// Creates a new `PutRecordBatchRequestStream` in Init state.
     /// The stream will transition to Ready state when it receives the schema message.
     pub async fn new(
-        flight_data_stream: Streaming<FlightData>,
+        flight_data_stream: impl Stream<Item = TonicResult<FlightData>> + Send + 'static,
         catalog: String,
         schema: String,
         limiter: Option<ServerMemoryLimiter>,
     ) -> TonicResult<Self> {
         Ok(Self {
-            flight_data_stream,
+            flight_data_stream: Box::pin(flight_data_stream),
             catalog,
             schema_name: schema,
             limiter,

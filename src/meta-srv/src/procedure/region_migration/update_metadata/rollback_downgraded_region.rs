@@ -85,7 +85,9 @@ mod tests {
 
     use crate::error::Error;
     use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
-    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
+    use crate::procedure::region_migration::test_util::{
+        self, CandidateRollback, TestingEnv, new_procedure_context,
+    };
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
 
@@ -172,5 +174,21 @@ mod tests {
             &expected_region_routes,
             table_route.region_routes().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_next_drops_candidate_registration_before_route_write() {
+        let env = TestingEnv::new();
+        let persistent_context = new_persistent_context();
+        let rollback = CandidateRollback::new(&env, &persistent_context).await;
+        let mut ctx = rollback.context_factory.new_context(persistent_context);
+        ctx.volatile_ctx.opening_region_guards.push(rollback.guard);
+
+        UpdateMetadata::Rollback
+            .next(&mut ctx, &new_procedure_context())
+            .await
+            .unwrap();
+
+        test_util::assert_registration_dropped_before_route_write(&rollback.keeper_empty_at_txn);
     }
 }

@@ -71,14 +71,14 @@ use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
-use crate::lease::NodeLease;
+use crate::lease::{GrantedLeases, NodeLease};
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
-    CatchupRegions, CatchupRegionsRef, MitoRegion, MitoRegionRef, OpeningRegions,
-    OpeningRegionsRef, RegionMap, RegionMapRef,
+    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
+    RegionMapRef,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
@@ -92,8 +92,11 @@ use crate::series_index::{
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
+use crate::sst::index::handler::IndexKindProviderRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
+use crate::tail_replay::TailReplayLimits;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -166,6 +169,7 @@ pub(crate) struct WorkerGroup {
     /// Gc limiter to limit concurrent gc jobs.
     gc_limiter: GcLimiterRef,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
     /// Puffin manager factory.
@@ -217,6 +221,7 @@ impl WorkerGroup {
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
+        let tail_replay_limits = TailReplayLimits::new(&config);
         // We use another scheduler to avoid purge jobs blocking other jobs.
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
         let upload_store_wrapper = plugins.get::<WriteCacheUploadStoreWrapperRef>();
@@ -230,6 +235,10 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .enable_columnar_meta_cache(
+                    config.experimental_series_index_format
+                        == crate::config::SeriesIndexFormat::Columnar,
+                )
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
@@ -264,6 +273,7 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let granted_leases = Arc::new(GrantedLeases::default());
         let staging_regions = StagingRegionsRef::default();
         let wal = Wal::new(log_store);
 
@@ -295,9 +305,11 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    tail_replay_limits: tail_replay_limits.clone(),
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    granted_leases: granted_leases.clone(),
                     staging_regions: staging_regions.clone(),
                 }
                 .start()
@@ -314,6 +326,7 @@ impl WorkerGroup {
             file_ref_manager,
             gc_limiter,
             node_lease,
+            granted_leases,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -422,9 +435,23 @@ impl WorkerGroup {
         &self.node_lease
     }
 
+    /// Returns the latest lease each region of this group received.
+    pub(crate) fn granted_leases(&self) -> &GrantedLeases {
+        &self.granted_leases
+    }
+
     /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
-    pub(crate) fn notify_writable(&self, region: &MitoRegion) {
+    pub(crate) fn notify_writable(&self, region: &MitoRegionRef) {
         handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
+    }
+
+    pub(crate) fn node_lease_permit(&self) -> Arc<NodeLease> {
+        self.node_lease.clone()
+    }
+
+    /// Asks the worker of `region` to cancel its tail replay, if one runs, without waiting.
+    pub(crate) fn notify_cannot_replay(&self, region: &MitoRegionRef) {
+        handle_tail_replay::notify_cannot_replay(&self.worker(region.region_id).sender, region);
     }
 
     /// Get worker for specific `region_id`.
@@ -494,6 +521,7 @@ impl WorkerGroup {
             config.max_background_compactions,
         ));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
+        let tail_replay_limits = TailReplayLimits::new(&config);
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
@@ -515,6 +543,10 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .enable_columnar_meta_cache(
+                    config.experimental_series_index_format
+                        == crate::config::SeriesIndexFormat::Columnar,
+                )
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
@@ -543,6 +575,7 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let granted_leases = Arc::new(GrantedLeases::default());
         let staging_regions = StagingRegionsRef::default();
         let wal = Wal::new(log_store);
         let workers = (0..config.num_workers)
@@ -573,9 +606,11 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    tail_replay_limits: tail_replay_limits.clone(),
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    granted_leases: granted_leases.clone(),
                     staging_regions: staging_regions.clone(),
                 }
                 .start()
@@ -592,6 +627,7 @@ impl WorkerGroup {
             file_ref_manager,
             gc_limiter,
             node_lease,
+            granted_leases,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -620,7 +656,50 @@ async fn series_index_store_from_config(
     }
 
     let root = Path::new(data_home).join("series_index");
-    new_fs_cache_store(&root.to_string_lossy()).await.map(Some)
+    let store = new_fs_cache_store(&root.to_string_lossy()).await?;
+    initialize_series_index_cache(&store).await?;
+    Ok(Some(store))
+}
+
+/// Marks the rebuildable local index layout, and resets the store when it changes.
+///
+/// This branch is experimental and has no deployments, so it pins the token at `1`: a
+/// cache written by any other build is discarded on startup and rebuilt from the SSTs.
+/// Artifacts are additionally rejected on open when they lack the mandatory
+/// `identity_encoding` discriminator, so a stale artifact is never served even if the
+/// reset did not happen (a read that precedes it, or an artifact outside this cache).
+const SERIES_INDEX_CACHE_VERSION: &str = "1";
+
+/// Resets incompatible caches before any worker or reader can use their catalogs.
+async fn initialize_series_index_cache(store: &ObjectStore) -> Result<()> {
+    let version = match store.read("version").await {
+        Ok(bytes) => Some(bytes.to_bytes()),
+        Err(error) if error.kind() == object_store::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context(crate::error::OpenDalSnafu),
+    };
+    if version.as_deref() == Some(SERIES_INDEX_CACHE_VERSION.as_bytes()) {
+        return Ok(());
+    }
+    common_telemetry::info!("Resetting series-index cache: missing or incompatible layout version");
+    // Preserve the cache root, which may be a mount point.
+    let entries = store.list("/").await.context(crate::error::OpenDalSnafu)?;
+    for entry in entries {
+        // Listings can include the directory itself.
+        if entry.path() == "/" {
+            continue;
+        }
+        store
+            .delete_with(entry.path())
+            .recursive(true)
+            .await
+            .context(crate::error::OpenDalSnafu)?;
+    }
+    store
+        .write("version", SERIES_INDEX_CACHE_VERSION)
+        .await
+        .context(crate::error::OpenDalSnafu)?;
+    common_telemetry::info!("Series-index cache reset complete");
+    Ok(())
 }
 
 pub async fn write_cache_from_config(
@@ -660,6 +739,14 @@ pub(crate) fn worker_init_check_delay() -> Duration {
     Duration::from_secs(init_check_delay)
 }
 
+/// Constructs the shared registry for region creation and index maintenance.
+fn index_registry(
+    config: &MitoConfig,
+    provider: Option<IndexKindProviderRef>,
+) -> Result<IndexRegistryRef> {
+    IndexRegistry::from_config(config, provider).map(Arc::new)
+}
+
 /// Worker start config.
 struct WorkerStarter<S> {
     id: WorkerId,
@@ -689,11 +776,14 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    /// Limits of the node's tail replays.
+    tail_replay_limits: TailReplayLimits,
     #[cfg(feature = "hdfs-object-store")]
     /// Limiter for the temporary file sweeps, or `None` if the datanode allows
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     staging_regions: StagingRegionsRef,
 }
 
@@ -797,10 +887,12 @@ impl<S: LogStore> WorkerStarter<S> {
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
+            tail_replay_limits: self.tail_replay_limits,
             plugins: self.plugins,
             #[cfg(feature = "hdfs-object-store")]
             sweep_limiter: self.sweep_limiter,
             node_lease: self.node_lease,
+            granted_leases: self.granted_leases,
             staging_regions: self.staging_regions,
             tail_replays: HashMap::new(),
         };
@@ -1255,6 +1347,8 @@ struct RegionWorkerLoop<S> {
     partition_expr_fetcher: PartitionExprFetcherRef,
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
+    /// Limits of the node's tail replays.
+    tail_replay_limits: TailReplayLimits,
     /// Plugins for flush hooks.
     plugins: Plugins,
     #[cfg(feature = "hdfs-object-store")]
@@ -1262,6 +1356,7 @@ struct RegionWorkerLoop<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     /// Staging regions of this node that have received writes.
     staging_regions: StagingRegionsRef,
     /// Running tail replays, which stay here until they report their end.
@@ -1725,7 +1820,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_index_build_stopped(region_id, req).await
             }
             BackgroundNotify::IndexBuildRetry(req) => {
-                self.handle_rebuild_index(req, OptionOutputTx::new(None))
+                self.handle_rebuild_index_inner(req, OptionOutputTx::new(None), true)
                     .await
             }
             BackgroundNotify::CompactionFinished(req) => {
@@ -1754,6 +1849,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_region_reloaded(region_id, old, result).await
             }
             BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::RegionCannotReplay { region } => {
+                self.handle_region_cannot_replay(region_id, region)
+            }
             BackgroundNotify::TailReplayCommitted {
                 region,
                 edit,
@@ -1769,7 +1867,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if should_dispatch_pending {
             self.dispatch_pending_region_requests(region_id).await;
         }
-        // A commit that found a newer manifest fenced the region before its job reported here.
+        // A commit or a tail replay that found a newer manifest fenced the region before its job
+        // reported here.
         if !is_reload_result {
             self.maybe_reload_region(region_id);
         }
@@ -1847,12 +1946,24 @@ impl<S> RegionWorkerLoop<S> {
         }
         // Closes remaining regions.
         let regions = self.regions.list_regions();
-        for region in regions {
+        for region in &regions {
             region.deactivate_region_manifest_size_metric();
             region.stop().await;
         }
+        // Another engine may open these regions from the same storage after the stop. Regions
+        // closed earlier are not waited for; a datanode or standalone shutdown closes every region
+        // first, so there this only covers regions whose close failed.
+        join_all(
+            regions
+                .iter()
+                .map(|region| region.manifest_ctx.wait_for_checkpoint_after_stop()),
+        )
+        .await;
 
         self.regions.clear();
+        for region in regions {
+            self.granted_leases.remove(region.region_id);
+        }
     }
 
     /// Notifies the whole group that a flush job is finished so other
@@ -1917,6 +2028,14 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_tail_lease_check(_region_id);
+        }
+    }
+
+    /// A tail replay that found a newer manifest is about to wait to fence the region.
+    pub(crate) fn on_tail_fence_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_fence_begin(_region_id);
         }
     }
 
@@ -2131,6 +2250,13 @@ impl WorkerListener {
         }
     }
 
+    pub(crate) async fn on_index_build_stopped(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_stopped(_region_file_id).await;
+        }
+    }
+
     pub(crate) async fn on_index_build_before_manifest_commit(
         &self,
         _region_file_id: RegionFileId,
@@ -2157,6 +2283,70 @@ impl WorkerListener {
 mod tests {
     use super::*;
     use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_series_index_cache_layout_reset() {
+        let parent = common_test_util::temp_dir::create_temp_dir("series-cache-version");
+        let root = parent.path().join("series_index");
+        let sentinel = parent.path().join("sst");
+        tokio::fs::write(&sentinel, b"source data").await.unwrap();
+        let store = crate::access_layer::new_fs_cache_store(&root.to_string_lossy())
+            .await
+            .unwrap();
+        // Keep the original directory alive so its inode cannot be reused after deletion.
+        #[cfg(unix)]
+        let root_handle = tokio::fs::File::open(&root).await.unwrap();
+        for version in [None, Some("0"), Some("invalid")] {
+            if let Some(version) = version {
+                store.write("version", version).await.unwrap();
+            }
+            store.write("stale", "old").await.unwrap();
+            store
+                .write("42/samples/old/source/part-0.samples", "old")
+                .await
+                .unwrap();
+            store
+                .write("42/samples.json", "stale references")
+                .await
+                .unwrap();
+            super::initialize_series_index_cache(&store).await.unwrap();
+            assert!(!store.exists("stale").await.unwrap());
+            assert_eq!(
+                store.read("version").await.unwrap().to_bytes().as_ref(),
+                SERIES_INDEX_CACHE_VERSION.as_bytes()
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+
+                let original = root_handle.metadata().await.unwrap();
+                let current = tokio::fs::metadata(&root).await.unwrap();
+                assert_eq!(
+                    (original.dev(), original.ino()),
+                    (current.dev(), current.ino())
+                );
+            }
+            assert!(!store.exists("42/samples.json").await.unwrap());
+            assert!(
+                !store
+                    .exists("42/samples/old/source/part-0.samples")
+                    .await
+                    .unwrap()
+            );
+            store
+                .write("42/series/current/manifest.json", "current")
+                .await
+                .unwrap();
+            super::initialize_series_index_cache(&store).await.unwrap();
+            assert!(
+                store
+                    .exists("42/series/current/manifest.json")
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(tokio::fs::read(&sentinel).await.unwrap(), b"source data");
+        }
+    }
 
     #[test]
     fn test_region_id_to_index() {

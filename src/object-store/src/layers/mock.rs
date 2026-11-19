@@ -13,19 +13,28 @@
 // limitations under the License.
 
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use derive_builder::Builder;
 pub use oio::*;
 pub use opendal::raw::{
-    Layer, OpCopy, OpDelete, OpList, OpRead, OpWrite, RpRead, Service, Servicer, oio,
+    Layer, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat, OpWrite,
+    RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service, Servicer, Timestamp, oio,
 };
-pub use opendal::{Buffer, BytesRange, Error, ErrorKind, Metadata, OperationContext, Result};
+pub use opendal::{
+    Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, MetadataBuilder, OperationContext,
+    Result,
+};
 
 pub type MockWriterFactory = Arc<dyn Fn(&str, OpWrite, oio::Writer) -> oio::Writer + Send + Sync>;
 pub type MockReaderFactory = Arc<dyn Fn(&str, OpRead, oio::Reader) -> oio::Reader + Send + Sync>;
 pub type MockListerFactory = Arc<dyn Fn(&str, OpList, oio::Lister) -> oio::Lister + Send + Sync>;
 pub type MockDeleterFactory = Arc<dyn Fn(oio::Deleter) -> oio::Deleter + Send + Sync>;
+pub type StatInterceptor =
+    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 pub type CopyInterceptor = Arc<dyn Fn(&str, &str, OpCopy) -> Option<Result<()>> + Send + Sync>;
 
 #[derive(Builder)]
@@ -40,6 +49,8 @@ pub struct MockLayer {
     deleter_factory: Option<MockDeleterFactory>,
     #[builder(setter(strip_option), default)]
     copy_interceptor: Option<CopyInterceptor>,
+    #[builder(setter(strip_option), default)]
+    stat_interceptor: Option<StatInterceptor>,
 }
 
 impl Clone for MockLayer {
@@ -50,6 +61,7 @@ impl Clone for MockLayer {
             lister_factory: self.lister_factory.clone(),
             deleter_factory: self.deleter_factory.clone(),
             copy_interceptor: self.copy_interceptor.clone(),
+            stat_interceptor: self.stat_interceptor.clone(),
         }
     }
 }
@@ -69,6 +81,7 @@ impl Layer for MockLayer {
             lister_factory: self.lister_factory.clone(),
             deleter_factory: self.deleter_factory.clone(),
             copy_interceptor: self.copy_interceptor.clone(),
+            stat_interceptor: self.stat_interceptor.clone(),
         })
     }
 }
@@ -80,6 +93,7 @@ struct MockService {
     lister_factory: Option<MockListerFactory>,
     deleter_factory: Option<MockDeleterFactory>,
     copy_interceptor: Option<CopyInterceptor>,
+    stat_interceptor: Option<StatInterceptor>,
 }
 
 impl Debug for MockService {
@@ -121,6 +135,9 @@ impl Service for MockService {
         path: &str,
         args: opendal::raw::OpStat,
     ) -> Result<opendal::raw::RpStat> {
+        if let Some(interceptor) = &self.stat_interceptor {
+            interceptor(path).await;
+        }
         self.inner.stat(ctx, path, args).await
     }
 

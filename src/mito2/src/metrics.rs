@@ -15,7 +15,7 @@
 pub(crate) mod file_metadata;
 pub(crate) mod manifest_size;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lazy_static::lazy_static;
 use prometheus::*;
@@ -68,6 +68,12 @@ lazy_static! {
             exponential_buckets(0.01, 10.0, 7).unwrap(),
         )
         .unwrap();
+
+    /// Close-time WAL releases that the log store failed to admit.
+    pub static ref WAL_RELEASE_ADMISSION_FAILURE_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_wal_release_admission_failure_total",
+        "Close-time WAL release admission failures"
+    ).unwrap();
 
     // ------ Flush related metrics
     /// Counter of scheduled flush requests.
@@ -248,6 +254,14 @@ lazy_static! {
     )
     .unwrap();
     pub static ref READ_STAGE_FETCH_PAGES: Histogram = READ_STAGE_ELAPSED.with_label_values(&["fetch_pages"]);
+    /// Aggregated columnar reader work, published once per stream.
+    pub static ref COLUMNAR_READ_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_columnar_read_count", "Columnar read operations by kind", &[TYPE_LABEL]
+    ).unwrap();
+    /// Payload bytes requested and fetched, excluding metadata.
+    pub static ref COLUMNAR_READ_BYTES: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_columnar_read_bytes", "Columnar payload bytes by kind", &[TYPE_LABEL]
+    ).unwrap();
     /// Number of in-progress scan per partition.
     pub static ref IN_PROGRESS_SCAN: IntGaugeVec = register_int_gauge_vec!(
         "greptime_mito_in_progress_scan",
@@ -374,6 +388,11 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
+    // TODO(narthex-merge): overlaps main's cache_loading_metrics(); pick one once the loader accounting is unified
+    /// Counts cache loaders that actually ran.
+    pub static ref CACHE_LOAD: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_load", "Cache loaders that actually ran", &["type"]
+    ).unwrap();
     /// Cache miss counter.
     pub static ref CACHE_MISS: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_miss",
@@ -716,6 +735,35 @@ lazy_static! {
     /// Counter of flush files.
     pub static ref FLUSH_FILE_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_flush_file_total", "mito flushed file count").unwrap();
+
+    /// Elapsed time of the SST writes of tail replays, by stage.
+    pub static ref TAIL_REPLAY_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_mito_tail_replay_elapsed",
+        "mito tail replay elapsed",
+        &[TYPE_LABEL],
+        // 1 ~ 3125
+        exponential_buckets(1.0, 5.0, 6).unwrap(),
+    )
+    .unwrap();
+    /// Bytes of SSTs from completed chunk writes of tail replays, including chunks of rounds
+    /// that fail later.
+    pub static ref TAIL_REPLAY_BYTES_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_tail_replay_bytes_total",
+        "mito tail replay bytes total"
+    )
+    .unwrap();
+    /// Count of SSTs written by tail replays, including SSTs of failed rounds that were deleted.
+    pub static ref TAIL_REPLAY_FILE_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_tail_replay_file_total",
+        "mito tail replay file count"
+    )
+    .unwrap();
+    /// Count of failed tail replay rounds.
+    pub static ref TAIL_REPLAY_FAILURE_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_tail_replay_failure_total",
+        "mito tail replay failure total"
+    )
+    .unwrap();
 }
 
 #[cfg(feature = "hdfs-object-store")]
@@ -804,6 +852,69 @@ impl StagerNotifier for StagerMetrics {
     }
 }
 
+/// Stream-local counters avoid contended metric updates for every tiny sample block.
+/// Stage durations sum elapsed work within a stream, not CPU time or query wall latency.
+/// Stages ending in `_wall` include awaits; concurrent streams can overlap.
+/// Preparation components partition the work inside `columnar_prepare_wall`; reader
+/// stages (`columnar_series_*`) are nested within preparation's discovery stage.
+/// `columnar_prepare_acquire_wall` is per caller and includes waiting for shared
+/// preparation, so overlapping caller times must not be summed as execution time.
+/// Series decode includes decompression and integrity validation; materialization
+/// includes dictionary expansion into projected Arrow arrays. Counters are aggregated
+/// per stream/preparation, never labeled by query, file, column name, or series ID.
+#[derive(Default)]
+pub(crate) struct ColumnarReadMetrics {
+    pub(crate) counts: std::collections::BTreeMap<&'static str, u64>,
+    pub(crate) bytes: std::collections::BTreeMap<&'static str, u64>,
+    elapsed: std::collections::BTreeMap<&'static str, Duration>,
+}
+
+/// Records a stage's elapsed time even when an awaited operation fails or is cancelled.
+/// The borrowed accumulator outlives this guard and flushes once with its owner.
+pub(crate) struct ColumnarStageTimer<'a> {
+    elapsed: &'a mut Duration,
+    started: Instant,
+}
+
+impl Drop for ColumnarStageTimer<'_> {
+    fn drop(&mut self) {
+        *self.elapsed += self.started.elapsed();
+    }
+}
+
+impl ColumnarReadMetrics {
+    pub(crate) fn timer(&mut self, stage: &'static str) -> ColumnarStageTimer<'_> {
+        ColumnarStageTimer {
+            elapsed: self.elapsed.entry(stage).or_default(),
+            started: Instant::now(),
+        }
+    }
+
+    pub(crate) fn add_elapsed(&mut self, stage: &'static str, elapsed: Duration) {
+        *self.elapsed.entry(stage).or_default() += elapsed;
+    }
+}
+
+impl Drop for ColumnarReadMetrics {
+    fn drop(&mut self) {
+        for (stage, elapsed) in &self.elapsed {
+            READ_STAGE_ELAPSED
+                .with_label_values(&[stage])
+                .observe(elapsed.as_secs_f64());
+        }
+        for (kind, count) in &self.counts {
+            COLUMNAR_READ_COUNT
+                .with_label_values(&[kind])
+                .inc_by(*count);
+        }
+        for (kind, bytes) in &self.bytes {
+            COLUMNAR_READ_BYTES
+                .with_label_values(&[kind])
+                .inc_by(*bytes);
+        }
+    }
+}
+
 lazy_static! {
     pub static ref CACHE_PAGE_LOADED_BYTES: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_page_loaded_bytes_total",
@@ -881,9 +992,34 @@ pub(crate) fn cache_page_fetch_metrics(
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use common_cache::paged::{PageEvent, PageFetchStats};
+
+    #[tokio::test]
+    async fn stage_timer_retains_failed_and_cancelled_waits() {
+        let mut metrics = ColumnarReadMetrics::default();
+        let result = async {
+            let mut timer = metrics.timer("columnar_series_fetch_wall");
+            // Backdate the clock to keep the lifetime test deterministic without sleeping.
+            timer.started -= Duration::from_secs(1);
+            std::future::ready(Err::<(), ()>(())).await?;
+            Ok::<(), ()>(())
+        }
+        .await;
+        assert!(result.is_err());
+        let failed = metrics.elapsed["columnar_series_fetch_wall"];
+        assert!(failed >= Duration::from_secs(1));
+
+        let mut wait = Box::pin(async {
+            let mut timer = metrics.timer("columnar_series_fetch_wall");
+            timer.started -= Duration::from_secs(1);
+            std::future::pending::<()>().await;
+        });
+        assert!(futures::poll!(&mut wait).is_pending());
+        drop(wait);
+        // Dropping the suspended future must add to, rather than replace, earlier work.
+        assert!(metrics.elapsed["columnar_series_fetch_wall"] >= failed + Duration::from_secs(1));
+    }
 
     #[test]
     fn page_cache_capacity_sums_live_instances_by_category() {

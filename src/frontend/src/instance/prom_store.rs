@@ -39,7 +39,8 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::Schema;
 use operator::insert::{
     AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
-    build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
+    apply_retention_ttl_hint, build_create_table_expr, fill_table_options_for_create,
+    parse_per_table_semantic_index,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -788,7 +789,9 @@ impl Instance {
         let default_schema = vec![
             api::v1::ColumnSchema {
                 column_name: common_query::prelude::greptime_timestamp().to_string(),
-                datatype: api::v1::ColumnDataType::TimestampMillisecond as i32,
+                datatype: api::helper::timestamp_datatype(
+                    self.auto_create_physical_table_timestamp_unit,
+                ) as i32,
                 semantic_type: api::v1::SemanticType::Timestamp as i32,
                 datatype_extension: None,
                 options: None,
@@ -809,6 +812,7 @@ impl Instance {
         .map_err(BoxedError::new)
         .context(error::ExecuteGrpcQuerySnafu)?;
         create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
+        apply_retention_ttl_hint(&mut create_table_expr.table_options, &ctx);
         fill_metric_physical_table_options(&mut create_table_expr.table_options);
 
         self.statement_executor

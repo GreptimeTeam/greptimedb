@@ -137,10 +137,10 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Current count of remote dynamic filter registry entries.
+    /// Current count of live remote dynamic filter registrations.
     pub static ref REMOTE_DYN_FILTER_REGISTRY_ENTRIES: IntGauge = register_int_gauge!(
         "greptime_datanode_remote_dyn_filter_registry_entries",
-        "current remote dynamic filter registry entry count",
+        "live remote dynamic filter registrations",
     )
     .unwrap();
 

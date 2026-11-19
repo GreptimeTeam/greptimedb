@@ -13,11 +13,12 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
-| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, and native histogram columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
+| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, native histogram, and exemplar-label columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
 | `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
+| `auto_create_physical_table_timestamp_unit` | String | Unset | Time index unit for physical metric tables created by auto table creation<br/>(Prometheus remote write, OTLP metrics, and other metric-engine ingestion).<br/>New logical tables created under such a physical table inherit its unit.<br/>Options: "Second", "Millisecond" (default), "Microsecond", "Nanosecond". |
 | `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but such users cannot log in over MySQL:<br/>`static_user_provider` and `watch_file_user_provider` only negotiate `mysql_native_password`, which cannot verify these formats.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
-| `max_in_flight_write_bytes` | String | 0 | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
-| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
+| `max_in_flight_write_bytes` | String | 0 | Shared quota for concurrent write request bodies and messages (HTTP, gRPC, Flight)<br/>plus retained decoder memory and estimated PB-to-Arrow conversion memory for ordinary-table batching.<br/>A batch must fit together with its request's existing reservations; only additional memory is acquired.<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
+| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"<br/>Table-batch conversion never waits for additional memory. Under a wait policy,<br/>temporary contention returns a retryable error; requests that cannot fit are rejected. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
 | `max_concurrent_queries` | Integer | `0` | The maximum concurrent region-read streams. Zero means unlimited.<br/>A single query can consume multiple permits. |
@@ -143,6 +144,7 @@
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
 | `procedure.max_running_procedures` | Integer | `128` | Max running procedures.<br/>The maximum number of procedures that can be running at the same time.<br/>If the number of running procedures exceeds this limit, the procedure will be rejected. |
 | `query` | -- | -- | The query engine options. |
+| `query.experimental_native_promql` | Bool | `false` | Enable experimental native PromQL execution for compatible queries.<br/>This is the engine-wide default: a session<br/>SET query.experimental_native_promql = true or a per-request<br/>query.experimental_native_promql option overrides it, in that order.<br/>Default: false |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join,<br/>and internal series merges during table scans).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>Projected Parquet row groups and streamed scan batches use scan_memory_limit separately. |
 | `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
@@ -185,6 +187,7 @@
 | `region_engine.mito.manifest_checkpoint_distance` | Integer | `10` | Number of meta action updated to trigger a new checkpoint for the manifest. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_series_index_format` | String | `legacy` | Under development. Select legacy Parquet indexes or paired columnar series and samples. |
 | `region_engine.mito.experimental_series_index_max_size` | String | `5GiB` | Approximate series and range index size limit in open regions, shared across workers.<br/>Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation<br/>can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots<br/>retained by readers are not counted.<br/>Minimum: 1KiB. Takes effect on restart. |
 | `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
@@ -259,7 +262,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
@@ -291,11 +294,12 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
-| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, and native histogram columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
+| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, native histogram, and exemplar-label columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
 | `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
+| `auto_create_physical_table_timestamp_unit` | String | Unset | Time index unit for physical metric tables created by auto table creation<br/>(Prometheus remote write, OTLP metrics, and other metric-engine ingestion).<br/>New logical tables created under such a physical table inherit its unit.<br/>Options: "Second", "Millisecond" (default), "Microsecond", "Nanosecond". |
 | `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but such users cannot log in over MySQL:<br/>`static_user_provider` and `watch_file_user_provider` only negotiate `mysql_native_password`, which cannot verify these formats.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
-| `max_in_flight_write_bytes` | String | 0 | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
-| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
+| `max_in_flight_write_bytes` | String | 0 | Shared quota for concurrent write request bodies and messages (HTTP, gRPC, Flight)<br/>plus retained decoder memory and estimated PB-to-Arrow conversion memory for ordinary-table batching.<br/>A batch must fit together with its request's existing reservations; only additional memory is acquired.<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
+| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"<br/>Table-batch conversion never waits for additional memory. Under a wait policy,<br/>temporary contention returns a retryable error; requests that cannot fit are rejected. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | Auto | The number of threads to execute the runtime for global read operations.<br/>Defaults to max(num_cpus, 2). |
 | `runtime.compact_rt_size` | Integer | Auto | The number of threads to execute compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
@@ -392,6 +396,7 @@
 | `meta_client.metadata_cache_ttl` | String | `10m` | TTL of the metadata cache. |
 | `meta_client.metadata_cache_tti` | String | `5m` | -- |
 | `query` | -- | -- | The query engine options. |
+| `query.experimental_native_promql` | Bool | `false` | Enable experimental native PromQL execution for compatible standalone queries.<br/>Requires in-process region transport. This is the engine-wide default: a<br/>session SET query.experimental_native_promql = true or a per-request<br/>query.experimental_native_promql option overrides it, in that order.<br/>Default: false |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.allow_query_fallback` | Bool | `false` | Whether to allow query fallback when push down optimize fails.<br/>Default to false, meaning when push down optimize failed, return error msg |
 | `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>This pool applies to operators on this frontend. Datanodes use their own query<br/>pools for local operators and internal series merges during table scans. |
@@ -420,7 +425,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
@@ -507,6 +512,7 @@
 | `datanode.client.max_send_message_size` | String | `512MB` | The maximum send message size for the gRPC client. |
 | `wal` | -- | -- | -- |
 | `wal.provider` | String | `raft_engine` | -- |
+| `wal.prefix` | String | `wal` | Public root prefix for `experimental_object_store` WAL (enterprise builds only).<br/>The distributed WAL enablement plugin is also required. Metasrv only reads<br/>this prefix; it can use the same WAL configuration as the datanodes.<br/>All datanodes must configure the same prefix and shared object storage. |
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster.<br/><br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
@@ -539,7 +545,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
@@ -555,7 +561,7 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `node_id` | Integer | Unset | The datanode identifier and should be unique in the cluster. |
-| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, and native histogram columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
+| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, native histogram, and exemplar-label columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
@@ -617,7 +623,7 @@
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.overwrite_entry_start_id` | Bool | `false` | Ignore missing entries during read WAL.<br/>**It's only used when the provider is `kafka`**.<br/><br/>This option ensures that when Kafka messages are deleted, the system<br/>can still successfully replay memtable data without throwing an<br/>out-of-range error.<br/>However, enabling this option might lead to unexpected data loss,<br/>as the system will skip over missing entries instead of treating<br/>them as critical errors. |
 | `wal.storage_provider` | String | `""` | The name of the storage provider that holds the WAL objects, an empty name selects the default object store.<br/>**It's only used when the provider is `experimental_object_store`**. |
-| `wal.prefix` | String | `wal` | The path prefix of the WAL objects inside the storage provider.<br/>The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.prefix` | String | `wal` | The path prefix of the WAL objects inside the storage provider.<br/>In distributed mode, metasrv and all datanodes must use the same public root prefix and shared object storage.<br/>A mismatched prefix prevents regions from opening; do not configure per-node root prefixes.<br/>The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `wal.flush_interval` | String | `100ms` | The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.<br/>Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so the batch seals on size only when the admitted bytes reach `max_batch_bytes` before the next timer tick; otherwise it seals on the timer, whatever the load.<br/>When writes are sparse, a shorter interval lowers the acknowledgement latency of `durable` appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node, and in `enqueued` mode the backlog thresholds can seal earlier. An `enqueued` append does not wait for its batch to seal once it is admitted, but the backlog thresholds can delay admission.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `wal.ack_mode` | String | `durable` | When an append to the object store WAL returns.<br/>- `durable`: an append returns after the object holding its entries is durable (the default).<br/>- `enqueued`: an append returns once its entries are admitted and their ids are assigned, and the object is created in the background. A crash loses the unpersisted backlog.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `wal.max_unpersisted_bytes` | String | `64MB` | The size of the unpersisted backlog at which new appends stall until an upload completes, in `enqueued` mode.<br/>Nothing is dropped and nothing is rejected; the threshold does not bound what a crash during an outage can lose.<br/>**It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**. |
@@ -668,6 +674,7 @@
 | `region_engine.mito.experimental_manifest_keep_removed_file_ttl` | String | `1h` | How long to keep removed files in the `removed_files` field of manifest<br/>after they are removed from manifest.<br/>files will only be removed from `removed_files` field<br/>if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_series_index_format` | String | `legacy` | Under development. Select legacy Parquet indexes or paired columnar series and samples. |
 | `region_engine.mito.experimental_series_index_max_size` | String | `5GiB` | Approximate series and range index size limit in open regions, shared across workers.<br/>Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation<br/>can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots<br/>retained by readers are not counted.<br/>Minimum: 1KiB. Takes effect on restart. |
 | `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
@@ -746,7 +753,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
@@ -807,7 +814,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
-| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.<br/>Requires symbolic links in the log directory; initialization fails if they cannot be created.<br/>On Windows, enable Developer Mode or leave this at `0B`. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |

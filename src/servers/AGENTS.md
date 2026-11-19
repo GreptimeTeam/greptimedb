@@ -39,6 +39,9 @@ provided through handler traits, mostly implemented by `frontend`.
   `QueryContext` state; never accept it from headers or serialized contexts.
 - New protocols or externally visible routes also require frontend service and
   configuration wiring.
+- PostgreSQL Arrow COPY (`postgres/copy_in/arrow.rs`) adapts IPC framing to the
+  shared Flight `PutRecordBatchRequestStream`; preserve raw buffers for bulk
+  routing and keep ingestion behavior in the existing frontend Flight handler.
 
 ## Testing
 

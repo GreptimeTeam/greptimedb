@@ -78,8 +78,11 @@ use crate::sst::FormatType;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::index::IndexBuildType;
+use crate::sst::index::handler::PlanContext;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::IndexRegistryRef;
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
@@ -149,6 +152,7 @@ pub type PartitionExprFetcherRef = Arc<dyn PartitionExprFetcher + Send + Sync>;
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
+    index_registry: Option<IndexRegistryRef>,
     region_id: RegionId,
     metadata_builder: Option<RegionMetadataBuilder>,
     memtable_builder_provider: MemtableBuilderProvider,
@@ -192,6 +196,7 @@ impl RegionOpener {
         partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> RegionOpener {
         RegionOpener {
+            index_registry: None,
             region_id,
             metadata_builder: None,
             memtable_builder_provider,
@@ -215,6 +220,12 @@ impl RegionOpener {
             series_index_store: None,
             series_index_purger: None,
         }
+    }
+
+    /// Sets the registry used to validate new-region index options.
+    pub(crate) fn with_index_registry(mut self, registry: IndexRegistryRef) -> Self {
+        self.index_registry = Some(registry);
+        self
     }
 
     /// Sets the store for companion range indexes.
@@ -369,7 +380,7 @@ impl RegionOpener {
         // Safety: must be set before calling this method.
         let mut options = self.options.take().unwrap();
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
-        let provider = self.provider::<S>(&options.wal_options)?;
+        let provider = self.provider(wal, &options.wal_options)?;
         let metadata = Arc::new(metadata);
         // Sets the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
@@ -384,6 +395,24 @@ impl RegionOpener {
         };
         ensure_json2_uses_flat_format(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
+        // Validate explicit new-region configuration before creating its manifest.
+        // Opening an existing manifest above does not require its optional providers.
+        if let Some(registry) = &self.index_registry {
+            registry
+                .validate(&PlanContext {
+                    metadata: &metadata,
+                    index_options: &options.index_options,
+                    // Validate initial options without building indexes; extensions skip flush work.
+                    build_type: IndexBuildType::Flush,
+                    existing_indexes: &[],
+                })
+                .map_err(|err| {
+                    InvalidRegionOptionsSnafu {
+                        reason: err.to_string(),
+                    }
+                    .build()
+                })?;
+        }
         // The region's WAL history starts in this log store, so reopening
         // the region on it passes the history check without any entry. It is
         // recorded before the manifest exists: a log store that gave up its
@@ -452,7 +481,8 @@ impl RegionOpener {
             region_id,
             compaction_state: Default::default(),
             version_control,
-            series_index_version_control: Default::default(),
+            series_index_version_control: crate::series_index::SeriesIndexVersionControl::default()
+                .with_format(config.experimental_series_index_format),
             series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is writable after it is created.
@@ -514,8 +544,9 @@ impl RegionOpener {
         Ok(region)
     }
 
-    fn provider<S: LogStore>(&self, wal_options: &WalOptions) -> Result<Provider> {
-        provider_from_wal_options::<S>(self.region_id, wal_options)
+    fn provider<S: LogStore>(&self, wal: &Wal<S>, wal_options: &WalOptions) -> Result<Provider> {
+        let provider = provider_from_wal_options::<S>(self.region_id, wal_options)?;
+        wal.resolve_provider(self.region_id, provider)
     }
 
     /// Tries to open the region and returns `None` if the region directory is empty.
@@ -569,7 +600,7 @@ impl RegionOpener {
         region_options.validate_column_compression(&metadata)?;
 
         let region_id = self.region_id;
-        let provider = self.provider::<S>(&region_options.wal_options)?;
+        let provider = self.provider(wal, &region_options.wal_options)?;
         let wal_entry_reader = self
             .wal_entry_reader
             .take()
@@ -715,7 +746,8 @@ impl RegionOpener {
             region_id: self.region_id,
             compaction_state: Default::default(),
             version_control: version_control.clone(),
-            series_index_version_control,
+            series_index_version_control: series_index_version_control
+                .with_format(config.experimental_series_index_format),
             series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.

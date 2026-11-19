@@ -30,10 +30,12 @@ use auth::{PermissionTableTarget, PermissionTableTargets, UserProviderRef};
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form};
 use catalog::CatalogManagerRef;
+use common_catalog::consts;
 use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::native_histogram::is_native_histogram_value_type;
+use common_query::promql_annotations::promql_annotation_collector;
 use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{debug, tracing};
@@ -48,7 +50,7 @@ use futures::future::join_all;
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
-use promql_parser::parser::token::TokenType;
+use promql_parser::parser::token::{self, TokenType};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinModifier, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier,
@@ -592,10 +594,11 @@ async fn do_instant_query(
     query_ctx: QueryContextRef,
 ) -> PrometheusJsonResponse {
     let (metric_name, result_type) = retrieve_metric_name_and_result_type(prom_query.expr());
-    let query_id = query_ctx.remote_query_id().map(str::to_string);
+    // Create the collector here so one strong reference spans planning, execution and the response;
+    // the planner and executor find it by query id through the registry.
+    let collector = query_ctx.remote_query_id().map(promql_annotation_collector);
     let result = handler.do_query_parsed(prom_query, query_ctx).await;
-    PrometheusJsonResponse::from_query_result(result, metric_name, result_type, query_id.as_deref())
-        .await
+    PrometheusJsonResponse::from_query_result(result, metric_name, result_type, collector).await
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -734,19 +737,16 @@ async fn do_range_query(
     query_ctx: QueryContextRef,
 ) -> PrometheusJsonResponse {
     let (metric_name, _) = retrieve_metric_name_and_result_type(prom_query.expr());
-    let query_id = query_ctx.remote_query_id().map(str::to_string);
+    // Create the collector here so one strong reference spans planning, execution and the response;
+    // the planner and executor find it by query id through the registry.
+    let collector = query_ctx.remote_query_id().map(promql_annotation_collector);
     // Matrix serialization sorts samples and series, so execution order never
     // reaches the response.
     let result = handler
         .do_query_parsed(prom_query.with_unordered_output(), query_ctx)
         .await;
-    PrometheusJsonResponse::from_query_result(
-        result,
-        metric_name,
-        ValueType::Matrix,
-        query_id.as_deref(),
-    )
-    .await
+    PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix, collector)
+        .await
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -965,7 +965,7 @@ async fn get_all_column_names(
     let mut table_names = Vec::new();
     let mut tables = manager.tables(catalog, schema, None);
     while let Some(table) = tables.try_next().await? {
-        if is_internal_physical_metric_table(&table) {
+        if is_internal_metric_table(&table) {
             continue;
         }
         table_names.push(table.table_info().name.clone());
@@ -990,7 +990,7 @@ async fn get_target_column_names(
                 Some(query_ctx),
             )
             .await?
-            && !is_internal_physical_metric_table(&table)
+            && !is_internal_metric_table(&table)
         {
             extend_tag_column_names(&mut labels, &table);
         }
@@ -1458,8 +1458,9 @@ fn current_schema_metric_targets(
     )
 }
 
-fn is_internal_physical_metric_table(table: &TableRef) -> bool {
-    table.table_info().is_physical_table()
+fn is_internal_metric_table(table: &TableRef) -> bool {
+    let info = table.table_info();
+    info.is_physical_table() || info.name == consts::METRICS_EXEMPLARS_TABLE
 }
 
 fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
@@ -1543,21 +1544,19 @@ fn binary_metric_name_side<'a>(
 /// Recursively collect all metric names from a PromQL expression
 fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
     match expr {
-        PromqlExpr::Aggregate(AggregateExpr { modifier, expr, .. }) => {
-            match modifier {
+        PromqlExpr::Aggregate(AggregateExpr {
+            op, modifier, expr, ..
+        }) => {
+            if !matches!(
+                op.id(),
+                token::T_TOPK | token::T_BOTTOMK | token::T_LIMITK | token::T_LIMIT_RATIO
+            ) && !matches!(
+                modifier,
                 Some(LabelModifier::Include(labels))
-                    if !labels.labels.contains(&METRIC_NAME.to_string()) =>
-                {
-                    metric_names.clear();
-                    return;
-                }
-                Some(LabelModifier::Exclude(labels))
-                    if labels.labels.contains(&METRIC_NAME.to_string()) =>
-                {
-                    metric_names.clear();
-                    return;
-                }
-                _ => {}
+                    if labels.labels.contains(&METRIC_NAME.to_string())
+            ) {
+                metric_names.clear();
+                return;
             }
             collect_metric_names(expr, metric_names)
         }
@@ -2225,7 +2224,7 @@ async fn retrieve_table_names(
             .options
             .extra_options
             .contains_key(LOGICAL_TABLE_METADATA_KEY)
-            || is_internal_physical_metric_table(&table)
+            || is_internal_metric_table(&table)
         {
             // skip non-prometheus (non-metricengine) tables for __name__ query
             continue;
@@ -2416,7 +2415,7 @@ async fn readable_metadata_tables(
         }
     }
     candidates.retain(|table| {
-        !is_internal_physical_metric_table(table)
+        !is_internal_metric_table(table)
             && (selectors.is_empty()
                 || selectors
                     .iter()
@@ -3582,9 +3581,121 @@ mod tests {
             },
             // Aggregation and function cases
             TestCase {
-                name: "metric with aggregation",
-                promql: "sum(cpu_usage)",
+                name: "topk preserves metric name",
+                promql: "topk(1, cpu_usage)",
                 expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "bottomk preserves metric name",
+                promql: "bottomk(1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk without preserves metric name",
+                promql: "topk without(host) (1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk by preserves metric name",
+                promql: "topk by(job) (1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "limitk preserves metric name",
+                promql: "limitk(1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk does not restore folded metric name",
+                promql: "topk(1, sum(cpu_usage))",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "outer aggregate drops topk metric name",
+                promql: "sum(topk(1, cpu_usage))",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "ungrouped aggregate drops metric name",
+                promql: "sum(cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate by non-name label drops metric name",
+                promql: "sum by (job) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without non-name label drops metric name",
+                promql: "sum without (host) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without empty label list drops metric name",
+                promql: "sum without () (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without nonexistent label drops metric name",
+                promql: "sum without (nonexistent) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate by name and job keeps metric name",
+                promql: "sum by (__name__, job) (cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "minimum without host drops metric name",
+                promql: "min without (host) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without name drops metric name",
+                promql: "sum without (__name__) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "ungrouped average drops metric name",
+                promql: "avg(cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "nested ungrouped aggregate drops metric name",
+                promql: "sum(sum by (job) (cpu_usage))",
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -3603,9 +3714,16 @@ mod tests {
                 should_error: false,
             },
             TestCase {
-                name: "complex aggregation",
+                name: "grouping by name preserves equality metric name",
+                promql: r#"sum by (__name__) ({__name__="alpha_total"})"#,
+                expected_metric: Some("alpha_total"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without instance drops metric name",
                 promql: r#"sum without (instance) (cpu_usage{job="node"})"#,
-                expected_metric: Some("cpu_usage"),
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -4039,6 +4157,126 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fields, HashSet::from(["value".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_exemplar_table_is_hidden_from_metadata() {
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use common_query::prelude::{EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels};
+        use datatypes::types::json_type::JsonNativeType;
+
+        let manager = MemoryCatalogManager::with_default_setup();
+        for (id, name, tag, field, data_type) in [
+            (
+                1024,
+                "cpu_usage",
+                "host",
+                "value",
+                ConcreteDataType::float64_datatype(),
+            ),
+            (
+                1025,
+                METRICS_EXEMPLARS_TABLE,
+                EXEMPLAR_METRIC_COLUMN,
+                greptime_exemplar_labels(),
+                ConcreteDataType::json2(JsonNativeType::Null),
+            ),
+        ] {
+            let mut info = test_table_info(
+                id,
+                name,
+                DEFAULT_SCHEMA_NAME,
+                DEFAULT_CATALOG_NAME,
+                Arc::new(Schema::new(vec![
+                    ColumnSchema::new(tag, ConcreteDataType::string_datatype(), true),
+                    ColumnSchema::new(field, data_type, true),
+                ])),
+            );
+            info.meta.primary_key_indices = vec![0];
+            manager
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: name.to_string(),
+                    table_id: id,
+                    table: EmptyTable::from_table_info(&info),
+                })
+                .unwrap();
+        }
+        let manager: CatalogManagerRef = manager;
+        let handler: PrometheusHandlerRef = Arc::new(TestPrometheusHandler {
+            catalog_manager: manager.clone(),
+            deny_operation: false,
+            denied_table: Some(METRICS_EXEMPLARS_TABLE),
+            metric_names: Vec::new(),
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
+            queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
+        });
+        let ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let response = labels_query(
+            None,
+            State(handler.clone()),
+            Query(LabelsQuery::default()),
+            Extension(ctx.fork()),
+            Form(LabelsQuery::default()),
+        )
+        .await;
+        assert_eq!(None, response.status_code, "{:?}", response.error);
+        assert_eq!(
+            response.data,
+            PrometheusResponse::Labels(vec![METRIC_NAME_LABEL.into(), "host".into()])
+        );
+
+        let targets = ["cpu_usage", METRICS_EXEMPLARS_TABLE].map(|name| {
+            PermissionTableTarget::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, name)
+        });
+        assert_eq!(
+            get_target_column_names(&targets, &manager, &ctx)
+                .await
+                .unwrap(),
+            HashSet::from(["host".to_string()])
+        );
+
+        let exemplar_selector = format!(r#"{{__name__=~"{METRICS_EXEMPLARS_TABLE}"}}"#);
+        let mixed_selector = format!(r#"{{__name__=~"cpu_usage|{METRICS_EXEMPLARS_TABLE}"}}"#);
+        for (label, selectors, expected) in [
+            (FIELD_NAME_LABEL, vec![], vec!["value"]),
+            (FIELD_NAME_LABEL, vec!["cpu_usage"], vec!["value"]),
+            (
+                FIELD_NAME_LABEL,
+                vec![mixed_selector.as_str()],
+                vec!["value"],
+            ),
+            (FIELD_NAME_LABEL, vec![METRICS_EXEMPLARS_TABLE], vec![]),
+            (FIELD_NAME_LABEL, vec![exemplar_selector.as_str()], vec![]),
+            ("__schema__", vec![METRICS_EXEMPLARS_TABLE], vec![]),
+            ("__schema__", vec![exemplar_selector.as_str()], vec![]),
+            (
+                "__schema__",
+                vec![mixed_selector.as_str()],
+                vec![DEFAULT_SCHEMA_NAME],
+            ),
+        ] {
+            let response = label_values_query(
+                None,
+                State(handler.clone()),
+                Path(label.to_string()),
+                Extension(ctx.fork()),
+                Query(LabelValueQuery {
+                    matches: Matches(selectors.iter().map(|value| value.to_string()).collect()),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            assert_eq!(None, response.status_code, "{:?}", response.error);
+            assert_eq!(
+                response.data,
+                PrometheusResponse::LabelValues(expected.into_iter().map(String::from).collect()),
+                "label={label}, selectors={selectors:?}",
+            );
+        }
     }
 
     #[tokio::test]

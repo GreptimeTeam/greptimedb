@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::region::RegionResponse;
@@ -135,6 +135,8 @@ pub struct MockRegionEngine {
     pub(crate) handle_sync_region_mock_fn: Option<MockSyncRegionHandler>,
     pub(crate) handle_stop_mock_fn: Option<MockStopHandler>,
     pub(crate) mock_role: Option<Option<RegionRole>>,
+    /// The candidate lease ids of the leases the engine received.
+    pub(crate) candidate_lease_ids: Mutex<Vec<Option<u64>>>,
     engine: String,
 }
 
@@ -152,6 +154,7 @@ impl MockRegionEngine {
                 handle_sync_region_mock_fn: None,
                 handle_stop_mock_fn: None,
                 mock_role: None,
+                candidate_lease_ids: Mutex::default(),
                 engine: engine.to_string(),
             }),
             rx,
@@ -174,6 +177,7 @@ impl MockRegionEngine {
                 handle_sync_region_mock_fn: None,
                 handle_stop_mock_fn: None,
                 mock_role: None,
+                candidate_lease_ids: Mutex::default(),
                 engine: engine.to_string(),
             }),
             rx,
@@ -196,6 +200,7 @@ impl MockRegionEngine {
                 handle_sync_region_mock_fn: None,
                 handle_stop_mock_fn: None,
                 mock_role: None,
+                candidate_lease_ids: Mutex::default(),
                 engine: engine.to_string(),
             }),
             rx,
@@ -219,6 +224,7 @@ impl MockRegionEngine {
             handle_sync_region_mock_fn: None,
             handle_stop_mock_fn: None,
             mock_role: None,
+            candidate_lease_ids: Mutex::default(),
             engine: engine.to_string(),
         };
 
@@ -295,7 +301,12 @@ impl RegionEngine for MockRegionEngine {
         role: RegionRole,
         _sent_at: std::time::Instant,
         _deadline: std::time::Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
+        self.candidate_lease_ids
+            .lock()
+            .unwrap()
+            .push(candidate_lease_id);
         // A mocked role stays, so a grant of another role is not applied.
         Ok(self.mock_role.flatten().is_none_or(|mocked| mocked == role))
     }

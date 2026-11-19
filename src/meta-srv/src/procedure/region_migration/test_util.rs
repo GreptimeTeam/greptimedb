@@ -14,20 +14,22 @@
 
 use std::assert_matches;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::DatanodeId;
 use common_meta::ddl::NoopRegionFailureDetectorControl;
 use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::test_utils::new_test_table_info;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::test_util::TxnObservingKvBackend;
 use common_meta::peer::Peer;
-use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
-use common_meta::rpc::router::RegionRoute;
+use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef, OperatingRegionGuard};
+use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -591,4 +593,75 @@ pub fn new_procedure_context() -> ProcedureContext {
         provider: Arc::new(MockContextProvider::default()),
         event_context: None,
     }
+}
+
+/// A migration about to roll back: its region is led by the source peer in the downgrading state,
+/// and registered on the target peer as the migration's candidate.
+pub(crate) struct CandidateRollback {
+    /// Creates contexts on the table metadata whose transactions are observed.
+    pub(crate) context_factory: DefaultContextFactory,
+    /// The candidate registration of the region on the target peer.
+    pub(crate) guard: OperatingRegionGuard,
+    /// Whether the keeper held no registration before each transaction since the setup.
+    pub(crate) keeper_empty_at_txn: Arc<Mutex<Vec<bool>>>,
+}
+
+impl CandidateRollback {
+    /// Creates the table of `persistent_ctx` and the candidate registration of its region.
+    pub(crate) async fn new(env: &TestingEnv, persistent_ctx: &PersistentContext) -> Self {
+        let (table_metadata_manager, keeper_empty_at_txn) =
+            table_metadata_manager_observing_keeper(env.opening_region_keeper().clone());
+        let region_id = persistent_ctx.region_ids[0];
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(persistent_ctx.from_peer.clone()),
+            leader_state: Some(LeaderState::Downgrading),
+            ..Default::default()
+        }];
+        table_metadata_manager
+            .create_table_metadata(
+                new_test_table_info(region_id.table_id()),
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+        keeper_empty_at_txn.lock().unwrap().clear();
+        let guard = env
+            .opening_region_keeper()
+            .register_candidate_region(persistent_ctx.to_peer.id, region_id)
+            .unwrap();
+        Self {
+            context_factory: env.context_factory_with_metadata(table_metadata_manager),
+            guard,
+            keeper_empty_at_txn,
+        }
+    }
+}
+
+/// Asserts that the table metadata was written at least once after the setup, and that the
+/// candidate registration was gone before every such write.
+pub(crate) fn assert_registration_dropped_before_route_write(
+    keeper_empty_at_txn: &Mutex<Vec<bool>>,
+) {
+    let keeper_empty_at_txn = keeper_empty_at_txn.lock().unwrap();
+    assert!(!keeper_empty_at_txn.is_empty());
+    assert!(keeper_empty_at_txn.iter().all(|empty| *empty));
+}
+
+/// Returns a table metadata manager that records, before each of its transactions, whether
+/// `keeper` holds no registration.
+fn table_metadata_manager_observing_keeper(
+    keeper: MemoryRegionKeeperRef,
+) -> (TableMetadataManagerRef, Arc<Mutex<Vec<bool>>>) {
+    let keeper_empty_at_txn = Arc::new(Mutex::new(Vec::new()));
+    let recorded = keeper_empty_at_txn.clone();
+    let kv_backend = Arc::new(TxnObservingKvBackend {
+        inner: Arc::new(MemoryKvBackend::new()),
+        before_txn: Box::new(move || recorded.lock().unwrap().push(keeper.is_empty())),
+    });
+    (
+        Arc::new(TableMetadataManager::new(kv_backend)),
+        keeper_empty_at_txn,
+    )
 }
