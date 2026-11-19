@@ -248,8 +248,14 @@ where
 /// The caller must supply a projection of one non-null raw timestamp per relevant
 /// source row, ensure that all sources support sequence-range reads, and provide
 /// nonempty lower bounds for exactly the regions to be scanned. Any filtering or
-/// retention policy belongs in `timestamp_plan`. The engine is supplied by the
-/// caller that planned the projection; it is not used when the plan is already built.
+/// retention policy belongs in `timestamp_plan`. The projection cannot account for
+/// rows erased after `lower`, so the caller must exclude that possibility or fail
+/// closed. The engine is supplied by the caller that planned the projection; it is
+/// not used when the plan is already built.
+///
+/// The frontend client executes with a fresh internal query context, not the
+/// originating caller's user, permissions, extensions, or snapshot bounds. The
+/// caller must ensure this is suitable for its use.
 ///
 /// Each timestamp is passed to `on_timestamp` as the query is consumed, retaining
 /// its original unit and query order. Callback observations are **tentative**: the

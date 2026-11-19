@@ -1887,6 +1887,11 @@ async fn test_capture_sequence_range_timestamps_returns_raw_values_and_proven_hi
     .unwrap();
 
     assert_eq!(high, BTreeMap::from([(1, 12), (2, 20)]));
+    assert!(
+        timestamps
+            .iter()
+            .all(|timestamp| { timestamp.unit() == common_time::timestamp::TimeUnit::Millisecond })
+    );
     // RecoveryMetricsStream pops batches, so the second batch is returned first.
     assert_eq!(
         timestamps,
