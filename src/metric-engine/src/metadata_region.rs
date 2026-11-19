@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod copy;
+
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, Weak};
@@ -25,7 +27,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
-use common_telemetry::{debug, info, warn};
 use datafusion::prelude::{col, lit};
 use futures_util::TryStreamExt;
 use futures_util::stream::BoxStream;
@@ -321,12 +322,11 @@ impl MetadataRegion {
 
     /// Column name will be encoded by base64([STANDARD_NO_PAD])
     pub fn concat_column_key(region_id: RegionId, column_name: &str) -> String {
-        let encoded_column_name = STANDARD_NO_PAD.encode(column_name);
-        format!(
-            "{COLUMN_PREFIX}{}_{}",
-            region_id.as_u64(),
-            encoded_column_name
-        )
+        Self::encoded_column_key(region_id, &STANDARD_NO_PAD.encode(column_name))
+    }
+
+    fn encoded_column_key(region_id: RegionId, encoded_name: &str) -> String {
+        format!("{COLUMN_PREFIX}{}_{encoded_name}", region_id.as_u64())
     }
 
     /// Concat a column key prefix without column name
@@ -338,26 +338,40 @@ impl MetadataRegion {
         key.strip_prefix(REGION_PREFIX)
     }
 
-    /// Parse column key to (logical_region_id, column_name)
+    fn split_column_key(key: &str) -> Option<(&str, &str)> {
+        let mut parts = key.strip_prefix(COLUMN_PREFIX)?.split('_');
+        Some((parts.next()?, parts.next()?))
+    }
+
+    /// Parses a column key into its logical region ID and decoded column name.
     pub fn parse_column_key(key: &str) -> Result<Option<(RegionId, String)>> {
-        if let Some(stripped) = key.strip_prefix(COLUMN_PREFIX) {
-            let mut iter = stripped.split('_');
+        let Some((raw, encoded)) = Self::split_column_key(key) else {
+            return Ok(None);
+        };
+        let region_id = RegionId::from(
+            raw.parse::<u64>()
+                .with_context(|_| ParseRegionIdSnafu { raw })?,
+        );
+        let name = Self::decode_column_name(region_id, encoded, Vec::new())?;
+        Ok(Some((region_id, name)))
+    }
 
-            let region_id_raw = iter.next().unwrap();
-            let region_id = region_id_raw
-                .parse::<u64>()
-                .with_context(|_| ParseRegionIdSnafu { raw: region_id_raw })?
-                .into();
-
-            let encoded_column_name = iter.next().unwrap();
-            let column_name = STANDARD_NO_PAD
-                .decode(encoded_column_name)
-                .context(DecodeColumnValueSnafu)?;
-
-            Ok(Some((region_id, String::from_utf8(column_name).unwrap())))
-        } else {
-            Ok(None)
-        }
+    fn decode_column_name(
+        region_id: RegionId,
+        encoded: &str,
+        mut buffer: Vec<u8>,
+    ) -> Result<String> {
+        buffer.clear();
+        STANDARD_NO_PAD
+            .decode_vec(encoded, &mut buffer)
+            .context(DecodeColumnValueSnafu)?;
+        String::from_utf8(buffer).map_err(|err| {
+            crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: format!("Invalid UTF-8 column name: {err}"),
+            }
+            .build()
+        })
     }
 
     pub fn serialize_column_metadata(column_metadata: &ColumnMetadata) -> String {
@@ -437,15 +451,25 @@ impl MetadataRegion {
         }
     }
 
-    async fn load_all(&self, metadata_region_id: RegionId) -> Result<RegionMetadataCacheEntry> {
-        let scan_req = MetadataRegion::build_read_request();
-        let record_batch_stream = self
+    async fn scan_entries(
+        &self,
+        metadata_region_id: RegionId,
+    ) -> Result<BoxStream<'static, Result<(String, String)>>> {
+        let stream = self
             .mito
-            .scan_to_stream(metadata_region_id, scan_req)
+            .scan_to_stream(metadata_region_id, Self::build_read_request())
             .await
             .context(MitoReadOperationSnafu)?;
+        Ok(decode_batch_stream(
+            stream,
+            decode_record_batch_to_key_and_value,
+        ))
+    }
 
-        let kv = decode_batch_stream(record_batch_stream, decode_record_batch_to_key_and_value)
+    async fn load_all(&self, metadata_region_id: RegionId) -> Result<RegionMetadataCacheEntry> {
+        let kv = self
+            .scan_entries(metadata_region_id)
+            .await?
             .try_collect::<BTreeMap<_, _>>()
             .await?;
         let mut size = 0;
@@ -661,91 +685,12 @@ impl MetadataRegion {
             })
             .collect::<Vec<_>>();
 
-        let put_request = MetadataRegion::build_put_request_from_iter(iter.into_iter());
-        self.write_metadata(metadata_region_id, RegionRequest::Put(put_request))
-            .await
+        self.put_entries(metadata_region_id, iter).await
     }
 
-    /// Updates logical region metadata so that any entries previously referencing
-    /// `source_region_id` are modified to reference the data region of `physical_region_id`.
-    ///
-    /// This method should be called after copying files from `source_region_id`
-    /// into the target region. It scans the metadata for the target physical
-    /// region, finds logical regions with the same region number as the source,
-    /// and reinserts region and column entries updated to use the target's
-    /// region number.
-    pub async fn transform_logical_region_metadata(
-        &self,
-        physical_region_id: RegionId,
-        source_region_id: RegionId,
-    ) -> Result<()> {
-        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
-        let data_region_id = utils::to_data_region_id(physical_region_id);
-        let logical_regions = self
-            .logical_regions(data_region_id)
-            .await?
-            .into_iter()
-            .filter(|r| r.region_number() == source_region_id.region_number())
-            .collect::<Vec<_>>();
-        if logical_regions.is_empty() {
-            info!(
-                "No logical regions found from source region {}, physical region id: {}",
-                source_region_id, physical_region_id,
-            );
-            return Ok(());
-        }
-
-        let metadata = self.load_all(metadata_region_id).await?;
-        let mut output = Vec::new();
-        for logical_region_id in &logical_regions {
-            let prefix = MetadataRegion::concat_column_key_prefix(*logical_region_id);
-            get_all_with_prefix(&metadata, &prefix, |k, v| {
-                // Safety: we have checked the prefix
-                let (src_logical_region_id, column_name) = Self::parse_column_key(k)?.unwrap();
-                // Change the region number to the data region number.
-                let new_key = MetadataRegion::concat_column_key(
-                    RegionId::new(
-                        src_logical_region_id.table_id(),
-                        data_region_id.region_number(),
-                    ),
-                    &column_name,
-                );
-                output.push((new_key, v.to_string()));
-                Ok(())
-            })?;
-
-            let new_key = MetadataRegion::concat_region_key(RegionId::new(
-                logical_region_id.table_id(),
-                data_region_id.region_number(),
-            ));
-            output.push((new_key, String::new()));
-        }
-
-        if output.is_empty() {
-            warn!(
-                "No logical regions metadata found from source region {}, physical region id: {}",
-                source_region_id, physical_region_id
-            );
-            return Ok(());
-        }
-
-        debug!(
-            "Transform logical regions metadata to physical region {}, source region: {}, transformed metadata: {}",
-            data_region_id,
-            source_region_id,
-            output.len(),
-        );
-
-        let put_request = MetadataRegion::build_put_request_from_iter(output.into_iter());
-        self.write_metadata(metadata_region_id, RegionRequest::Put(put_request))
-            .await?;
-        info!(
-            "Transformed {} logical regions metadata to physical region {}, source region: {}",
-            logical_regions.len(),
-            data_region_id,
-            source_region_id
-        );
-        Ok(())
+    async fn put_entries(&self, target: RegionId, entries: Vec<(String, String)>) -> Result<()> {
+        let put = Self::build_put_request_from_iter(entries.into_iter());
+        self.write_metadata(target, RegionRequest::Put(put)).await
     }
 }
 

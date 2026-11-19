@@ -338,6 +338,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sync_replays_partial_column_batch_after_restart() {
+        use store_api::region_engine::{MitoCopyRegionFromRequest, RegionRole};
+
+        let mut env = TestEnv::new().await;
+        let source = env.default_physical_region_id();
+        let logical = env.default_logical_region_id();
+        let target = RegionId::new(source.table_id(), source.region_number() + 1);
+        let target_logical = RegionId::new(logical.table_id(), target.region_number());
+        let dir = TestEnv::default_table_dir();
+        env.init_metric_region().await;
+        env.create_physical_region(target, &dir, vec![]).await;
+        let engine = env.metric();
+        engine.inner.flush_task.stop().await.unwrap();
+        engine
+            .handle_request(source, RegionRequest::Flush(Default::default()))
+            .await
+            .unwrap();
+
+        // Model a crash after the input SSTs are installed and one column put
+        // has reached the WAL, before the new region marker has been written.
+        let target_metadata = crate::utils::to_metadata_region_id(target);
+        env.mito()
+            .copy_region_from(
+                target_metadata,
+                MitoCopyRegionFromRequest {
+                    source_region_id: crate::utils::to_metadata_region_id(source),
+                    parallelism: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let (name, column) = env
+            .metadata_region()
+            .logical_columns(source, logical)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let put = MetadataRegion::build_put_request_from_iter(std::iter::once((
+            MetadataRegion::concat_column_key(target_logical, &name),
+            MetadataRegion::serialize_column_metadata(&column),
+        )));
+        env.mito()
+            .handle_request(target_metadata, RegionRequest::Put(put))
+            .await
+            .unwrap();
+        env.reopen_engine(Default::default()).await;
+        let engine = env.metric();
+        engine
+            .handle_request(
+                target,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: METRIC_ENGINE_NAME.to_string(),
+                    table_dir: dir,
+                    path_type: PathType::Bare,
+                    options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+                        .into_iter()
+                        .collect(),
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        // The heartbeat sync handler only sends FromRegion to a writable leader.
+        engine.set_region_role(target, RegionRole::Leader).unwrap();
+        let result = engine
+            .sync_region(
+                target,
+                SyncRegionFromRequest::FromRegion {
+                    source_region_id: source,
+                    parallelism: 1,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.new_opened_logical_region_ids().unwrap(),
+            vec![target_logical]
+        );
+        assert_eq!(
+            engine.logical_regions(target).await.unwrap(),
+            vec![target_logical]
+        );
+        assert_logical_table_columns(
+            &env.metadata_region(),
+            target,
+            target_logical,
+            &["greptime_timestamp", "greptime_value", "job"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_sync_region_from_region_with_no_files() {
         common_telemetry::init_default_ut_logging();
         let env = TestEnv::new().await;
