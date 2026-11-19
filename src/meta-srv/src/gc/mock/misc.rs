@@ -19,9 +19,9 @@ use std::time::Instant;
 use common_meta::peer::Peer;
 use common_procedure::ProcedureContext;
 use common_telemetry::init_default_ut_logging;
-use store_api::storage::{FileRefsManifest, GcReport, RegionId};
+use store_api::storage::{FileRefsManifest, RegionId};
 
-use crate::gc::mock::{MockSchedulerCtx, new_candidate};
+use crate::gc::mock::{MockSchedulerCtx, new_candidate, new_empty_report_with};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 /// Edge Case Tests
@@ -115,9 +115,9 @@ async fn test_multiple_regions_per_table() {
     )]);
 
     let mut gc_reports = HashMap::new();
-    gc_reports.insert(region1, GcReport::default());
-    gc_reports.insert(region2, GcReport::default());
-    gc_reports.insert(region3, GcReport::default());
+    gc_reports.insert(region1, new_empty_report_with([region1]));
+    gc_reports.insert(region2, new_empty_report_with([region2]));
+    gc_reports.insert(region3, new_empty_report_with([region3]));
 
     let file_refs = FileRefsManifest {
         manifest_version: HashMap::from([(region1, 1), (region2, 1), (region3, 1)]),

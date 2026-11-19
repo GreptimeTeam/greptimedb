@@ -43,7 +43,7 @@ use crate::error::UnexpectedSnafu;
 use crate::gc::{GcConfig, LocalGcWorker, should_delete_file};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList, RemovedFile};
 use crate::manifest::storage::{delta_file, gen_path};
-use crate::metrics::GC_SKIPPED_UNPARSABLE_FILES;
+use crate::metrics::{GC_ERRORS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES};
 use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, IndexType, RegionIndexId};
 use crate::sst::location;
@@ -1809,6 +1809,7 @@ impl oio::List for FailingLister {
 #[case::pending_tails("pending_tails")]
 #[case::newer_manifest("newer_manifest")]
 #[case::manifest_list_failure("manifest_list_failure")]
+#[case::manifest_mismatch("manifest_mismatch")]
 #[tokio::test]
 async fn test_full_listing_gc_skips_region(#[case] cause: &str) {
     let fail_manifest_lists = Arc::new(AtomicBool::new(false));
@@ -1844,17 +1845,27 @@ async fn test_full_listing_gc_skips_region(#[case] cause: &str) {
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    let run_gc = async || {
-        let file_ref_manifest = FileRefsManifest {
+    let run_gc = async |full_file_listing, mismatch| {
+        let mut file_ref_manifest = FileRefsManifest {
             file_refs: Default::default(),
             manifest_version: [(region_id, region.manifest_ctx.manifest_version().await)].into(),
             cross_region_refs: HashMap::new(),
         };
+        if mismatch {
+            file_ref_manifest.manifest_version.remove(&region_id);
+        }
         let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
-        let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
-        gc_worker.run().await.unwrap();
+        let gc_worker =
+            create_gc_worker(&engine, regions, &file_ref_manifest, full_file_listing).await;
+        gc_worker.run().await.unwrap()
     };
-    run_gc().await;
+    let report = run_gc(true, false).await;
+    assert!(report.processed_regions.contains(&region_id));
+    let fast_report = run_gc(false, false).await;
+    assert!(
+        fast_report.processed_regions.contains(&region_id),
+        "a successful fast GC must still acknowledge the region as processed"
+    );
     assert_eq!(1, hook.gc_calls.load(Ordering::Relaxed));
 
     match cause {
@@ -1870,11 +1881,33 @@ async fn test_full_listing_gc_skips_region(#[case] cause: &str) {
             let object_store = region.access_layer.object_store();
             object_store.write(&path, b"".as_slice()).await.unwrap();
         }
-        _ => fail_manifest_lists.store(true, Ordering::Relaxed),
+        "manifest_list_failure" => fail_manifest_lists.store(true, Ordering::Relaxed),
+        "manifest_mismatch" => {}
+        _ => unreachable!(),
     }
-    run_gc().await;
+    let error_label = match cause {
+        "pending_tails" => "pending_tails",
+        "newer_manifest" => "newer_manifest",
+        "manifest_list_failure" => "list_failed",
+        "manifest_mismatch" => "manifest_mismatch",
+        _ => unreachable!(),
+    };
+    let errors = GC_ERRORS_TOTAL.with_label_values(&[error_label]).get();
+    let report = run_gc(true, cause == "manifest_mismatch").await;
 
     assert_eq!(1, hook.gc_calls.load(Ordering::Relaxed));
+    assert!(
+        !report.processed_regions.contains(&region_id),
+        "an incomplete GC must not acknowledge the region as processed"
+    );
+    assert!(
+        !report.need_retry_regions.contains(&region_id),
+        "entry checks must not send a region through repartition retry"
+    );
+    assert!(
+        GC_ERRORS_TOTAL.with_label_values(&[error_label]).get() > errors,
+        "the matching error counter must increment"
+    );
 }
 
 #[tokio::test]

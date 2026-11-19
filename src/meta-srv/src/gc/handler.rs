@@ -395,7 +395,10 @@ impl GcScheduler {
             }
             let fully_listed_regions = need_full_list_regions
                 .into_iter()
-                .filter(|r| !combined_report.need_retry_regions.contains(r))
+                .filter(|r| {
+                    combined_report.processed_regions.contains(r)
+                        && !combined_report.need_retry_regions.contains(r)
+                })
                 .collect::<HashSet<_>>();
 
             (combined_report, fully_listed_regions)
@@ -428,13 +431,10 @@ impl GcScheduler {
             if force_full_listing.contains(&region_id) {
                 gc_tracker
                     .entry(region_id)
-                    .and_modify(|info| {
-                        info.last_full_listing_time = Some(now);
-                        info.last_gc_time = now;
-                    })
+                    .and_modify(|info| info.last_gc_time = now)
                     .or_insert_with(|| RegionGcInfo {
                         last_gc_time: now,
-                        last_full_listing_time: Some(now),
+                        last_full_listing_time: None,
                     });
                 result.insert(region_id, true);
                 continue;
@@ -503,5 +503,182 @@ fn dropped_region_stat(region_id: RegionId) -> RegionStat {
         min_timestamp: None,
         max_timestamp: None,
         has_pending_tails: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::gc::mock::{TestEnv, new_empty_report_with};
+
+    async fn process_regions(
+        env: &TestEnv,
+        regions: &[RegionId],
+        force_full_listing: HashSet<RegionId>,
+    ) -> GcReport {
+        env.scheduler
+            .process_datanode_gc(
+                Peer::new(1, ""),
+                regions
+                    .iter()
+                    .map(|&region| (region.table_id(), dropped_candidate(region)))
+                    .collect(),
+                force_full_listing,
+                HashMap::new(),
+                ProcedureContext::default(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_gc_skipped_full_listing_does_not_reset_timer() {
+        let mut env = TestEnv::new();
+        env.scheduler.config.full_file_listing_interval = Duration::ZERO;
+        let region = RegionId::new(1, 1);
+        let old = Instant::now();
+        env.scheduler.region_gc_tracker.lock().await.insert(
+            region,
+            RegionGcInfo {
+                last_gc_time: old,
+                last_full_listing_time: Some(old),
+            },
+        );
+        // A skipped region can still have an empty deleted-files entry, but is not processed.
+        env.ctx.gc_reports.lock().unwrap().insert(
+            region,
+            GcReport {
+                deleted_files: HashMap::from([(region, vec![])]),
+                ..Default::default()
+            },
+        );
+
+        let report = process_regions(&env, &[region], HashSet::new()).await;
+        assert!(!report.processed_regions.contains(&region));
+        assert!(!report.need_retry_regions.contains(&region));
+        let tracker = env.scheduler.region_gc_tracker.lock().await;
+        assert_eq!(tracker[&region].last_full_listing_time, Some(old));
+        assert!(tracker[&region].last_gc_time > old);
+    }
+
+    #[tokio::test]
+    async fn test_gc_processed_full_listing_needing_retry_does_not_reset_timer() {
+        let mut env = TestEnv::new();
+        env.scheduler.config.full_file_listing_interval = Duration::ZERO;
+        let region = RegionId::new(1, 1);
+        let old = Instant::now();
+        env.scheduler.region_gc_tracker.lock().await.insert(
+            region,
+            RegionGcInfo {
+                last_gc_time: old,
+                last_full_listing_time: Some(old),
+            },
+        );
+        env.ctx.gc_reports.lock().unwrap().insert(
+            region,
+            GcReport {
+                processed_regions: HashSet::from([region]),
+                need_retry_regions: HashSet::from([region]),
+                ..Default::default()
+            },
+        );
+
+        let report = process_regions(&env, &[region], HashSet::new()).await;
+        assert!(report.processed_regions.contains(&region));
+        assert!(report.need_retry_regions.contains(&region));
+        let tracker = env.scheduler.region_gc_tracker.lock().await;
+        assert_eq!(tracker[&region].last_full_listing_time, Some(old));
+    }
+
+    #[tokio::test]
+    async fn test_gc_force_failure_preserves_full_listing_time() {
+        for existing in [false, true] {
+            let env = TestEnv::new();
+            let region = RegionId::new(1, 1);
+            let old = Instant::now();
+            if existing {
+                env.scheduler.region_gc_tracker.lock().await.insert(
+                    region,
+                    RegionGcInfo {
+                        last_gc_time: old,
+                        last_full_listing_time: Some(old),
+                    },
+                );
+            }
+            *env.ctx.gc_regions_error.lock().unwrap() = Some(
+                crate::error::UnexpectedSnafu {
+                    violated: "simulated datanode GC failure".to_string(),
+                }
+                .build(),
+            );
+
+            let report = process_regions(&env, &[region], HashSet::from([region])).await;
+            assert!(report.need_retry_regions.contains(&region));
+            let tracker = env.scheduler.region_gc_tracker.lock().await;
+            assert_eq!(
+                tracker[&region].last_full_listing_time,
+                existing.then_some(old)
+            );
+            assert!(tracker[&region].last_gc_time > old);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gc_force_success_sets_full_listing_time() {
+        let env = TestEnv::new();
+        let region = RegionId::new(1, 1);
+        env.ctx
+            .gc_reports
+            .lock()
+            .unwrap()
+            .insert(region, new_empty_report_with([region]));
+        let before = Instant::now();
+
+        let report = process_regions(&env, &[region], HashSet::from([region])).await;
+        assert!(report.processed_regions.contains(&region));
+        assert!(report.need_retry_regions.is_empty());
+        let tracker = env.scheduler.region_gc_tracker.lock().await;
+        assert!(tracker[&region].last_full_listing_time.unwrap() >= before);
+    }
+
+    #[tokio::test]
+    async fn test_gc_full_listing_updates_timer_fast_does_not() {
+        let env = TestEnv::new();
+        let full = RegionId::new(1, 1);
+        let fast = RegionId::new(1, 2);
+        let old = Instant::now();
+        let recent = Instant::now();
+        {
+            let mut tracker = env.scheduler.region_gc_tracker.lock().await;
+            tracker.insert(
+                full,
+                RegionGcInfo {
+                    last_gc_time: old,
+                    last_full_listing_time: Some(old),
+                },
+            );
+            tracker.insert(
+                fast,
+                RegionGcInfo {
+                    last_gc_time: recent,
+                    last_full_listing_time: Some(recent),
+                },
+            );
+        }
+        {
+            let mut reports = env.ctx.gc_reports.lock().unwrap();
+            reports.insert(full, new_empty_report_with([full]));
+            reports.insert(fast, new_empty_report_with([fast]));
+        }
+
+        let report = process_regions(&env, &[full, fast], HashSet::from([full])).await;
+        assert!(report.processed_regions.contains(&full));
+        assert!(report.processed_regions.contains(&fast));
+        assert_eq!(*env.ctx.gc_regions_calls.lock().unwrap(), 2);
+        let tracker = env.scheduler.region_gc_tracker.lock().await;
+        assert!(tracker[&full].last_full_listing_time.unwrap() > old);
+        assert_eq!(tracker[&fast].last_full_listing_time, Some(recent));
     }
 }

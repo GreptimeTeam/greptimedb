@@ -361,6 +361,7 @@ impl LocalGcWorker {
             let RegionGcOutcome {
                 removed_files,
                 needs_retry,
+                completed,
             } = outcome;
             let index_files = removed_files
                 .iter()
@@ -380,7 +381,9 @@ impl LocalGcWorker {
             } else {
                 deleted_files.insert(*region_id, data_files);
                 deleted_indexes.insert(*region_id, index_files);
-                processed_regions.insert(*region_id);
+                if completed {
+                    processed_regions.insert(*region_id);
+                }
             }
             debug!(
                 "GC for region {} took {} secs.",
@@ -402,14 +405,36 @@ impl LocalGcWorker {
     }
 }
 
+/// Reasons an entry safety check prevents a GC pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionGcEntryReason {
+    ManifestMismatch,
+    PendingTails,
+    NewerManifest,
+    ManifestListFailed,
+}
+
+impl RegionGcEntryReason {
+    fn error_label(self) -> &'static str {
+        match self {
+            Self::ManifestMismatch => "manifest_mismatch",
+            Self::PendingTails => "pending_tails",
+            Self::NewerManifest => "newer_manifest",
+            Self::ManifestListFailed => "list_failed",
+        }
+    }
+}
+
 /// Per-region outcome of [`LocalGcWorker::do_region_gc`].
 ///
-/// Unfinished deletion or extension cleanup keeps the region in the retry set.
+/// An entry safety skip is neither completed nor retried; other unfinished work is retried.
 pub(crate) struct RegionGcOutcome {
     /// Files physically deleted this pass.
     pub removed_files: Vec<RemovedFile>,
-    /// The snapshot changed while the protection lookup ran, or extension cleanup failed.
+    /// The snapshot changed while the protection lookup ran, or cleanup was deferred or failed.
     pub needs_retry: bool,
+    /// Whether GC proceeded past the entry safety checks.
+    pub completed: bool,
 }
 
 impl LocalGcWorker {
@@ -439,12 +464,6 @@ impl LocalGcWorker {
         region: Option<MitoRegionRef>,
         tmp_ref_files: &HashSet<FileRef>,
     ) -> Result<RegionGcOutcome> {
-        let mode = if self.full_file_listing {
-            "full_listing"
-        } else {
-            "fast"
-        };
-        GC_RUNS_TOTAL.with_label_values(&[mode]).inc();
         debug!(
             "Doing gc for region {}, {}",
             region_id,
@@ -481,30 +500,48 @@ impl LocalGcWorker {
                     manifest.manifest_version
                 );
                 GC_ERRORS_TOTAL
-                    .with_label_values(&["manifest_mismatch"])
+                    .with_label_values(&[RegionGcEntryReason::ManifestMismatch.error_label()])
                     .inc();
                 return Ok(RegionGcOutcome {
                     removed_files: vec![],
                     needs_retry: false,
+                    completed: false,
                 });
             }
             // SSTs written for pending tails but not committed yet, and SSTs of a newer
             // manifest, are not in this snapshot, so a full listing would take them for orphans.
-            if self.full_file_listing
-                && (!manifest.pending_tails.is_empty()
-                    || manager.has_update().await.unwrap_or_else(|e| {
-                        warn!(e; "Failed to check manifest updates of region {}", region_id);
-                        true
-                    }))
-            {
-                info!(
-                    "Skip full listing GC for region {}: it has pending WAL tails or a newer manifest may exist",
-                    region_id
-                );
-                return Ok(RegionGcOutcome {
-                    removed_files: vec![],
-                    needs_retry: false,
-                });
+            if self.full_file_listing {
+                let skip_reason = if !manifest.pending_tails.is_empty() {
+                    Some(RegionGcEntryReason::PendingTails)
+                } else {
+                    match manager.has_update().await {
+                        Ok(true) => Some(RegionGcEntryReason::NewerManifest),
+                        Ok(false) => None,
+                        Err(e) => {
+                            warn!(e; "Failed to check manifest updates of region {}", region_id);
+                            Some(RegionGcEntryReason::ManifestListFailed)
+                        }
+                    }
+                };
+                if let Some(reason) = skip_reason {
+                    info!(
+                        "Skip full listing GC for region {}: {}",
+                        region_id,
+                        reason.error_label()
+                    );
+                    GC_ERRORS_TOTAL
+                        .with_label_values(&[reason.error_label()])
+                        .inc();
+                    // Leaving full listing unacknowledged keeps its previous timestamp,
+                    // so the next selected GC retries without using needs_retry. The latter
+                    // is consumed by repartition cleanup and can create a tombstone for
+                    // an active region that has never been repartitioned.
+                    return Ok(RegionGcOutcome {
+                        removed_files: vec![],
+                        needs_retry: false,
+                        completed: false,
+                    });
+                }
             }
             Some(manifest)
         } else {
@@ -527,6 +564,12 @@ impl LocalGcWorker {
         } else {
             vec![]
         };
+        let mode = if self.full_file_listing {
+            "full_listing"
+        } else {
+            "fast"
+        };
+        GC_RUNS_TOTAL.with_label_values(&[mode]).inc();
 
         let recently_removed_files = if let Some(manifest) = &manifest {
             self.get_removed_files_expel_times(manifest).await?
@@ -694,6 +737,7 @@ impl LocalGcWorker {
         Ok(RegionGcOutcome {
             removed_files: deletable_files,
             needs_retry: extension_cleanup_failed || publication_changed || dropped_files_deferred,
+            completed: true,
         })
     }
 
@@ -1334,6 +1378,25 @@ fn gen_partition_from_concurrency(concurrency: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_gc_entry_reason_error_labels() {
+        let cases = [
+            (RegionGcEntryReason::ManifestMismatch, "manifest_mismatch"),
+            (RegionGcEntryReason::PendingTails, "pending_tails"),
+            (RegionGcEntryReason::NewerManifest, "newer_manifest"),
+            (RegionGcEntryReason::ManifestListFailed, "list_failed"),
+        ];
+        let labels: HashSet<_> = cases
+            .iter()
+            .map(|(reason, expected)| {
+                let actual = reason.error_label();
+                assert_eq!(actual, *expected);
+                actual
+            })
+            .collect();
+        assert_eq!(labels.len(), cases.len());
+    }
 
     #[test]
     fn test_gen_partition_from_concurrency() {
