@@ -65,6 +65,7 @@ use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
+    large_value_fields, skip_statistics,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -253,6 +254,8 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     write_guard: Option<Arc<dyn SstWriteGuard>>,
     cancellation: Option<CancellationToken>,
     memory: WriteMemory,
+    /// Field columns of the current file that skip min/max statistics, picked from its first batch.
+    large_value_columns: Vec<String>,
 }
 
 /// Registers output ownership before either an SST or its index is created in storage.
@@ -451,6 +454,7 @@ where
             metrics,
             write_guard: None,
             cancellation: None,
+            large_value_columns: Vec::new(),
         }
     }
 
@@ -754,6 +758,9 @@ where
             let arrow_batch = converter.convert_batch(batch)?;
             self.check_cancelled()?;
             let start = Instant::now();
+            if self.writer.is_none() {
+                self.large_value_columns = large_value_fields(&self.metadata, &arrow_batch);
+            }
             self.maybe_init_writer(arrow_batch.schema_ref(), opts)
                 .await?
                 .write(&arrow_batch)
@@ -831,6 +838,8 @@ where
                 .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
                 .set_statistics_truncate_length(None);
             let props_builder = apply_internal_column_encoding(props_builder, &self.metadata);
+            let props_builder =
+                skip_statistics(props_builder, &mem::take(&mut self.large_value_columns));
             let props_builder = apply_float_field_encoding(
                 props_builder,
                 &self.metadata,

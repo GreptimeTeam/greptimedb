@@ -75,7 +75,8 @@ use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, apply_column_compression,
-    apply_float_field_encoding, apply_internal_column_encoding,
+    apply_float_field_encoding, apply_internal_column_encoding, large_value_fields,
+    skip_statistics,
 };
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -1450,26 +1451,51 @@ impl BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
+    /// Returns writer properties for a part whose first batch is `batch`.
+    fn writer_props_for(&self, batch: &RecordBatch) -> Option<WriterProperties> {
+        let large_value_columns = large_value_fields(&self.metadata, batch);
+        if large_value_columns.is_empty() {
+            return self.writer_props.clone();
+        }
+        self.writer_props
+            .clone()
+            .map(|props| skip_statistics(props.into_builder(), &large_value_columns).build())
+    }
+
     /// Encodes [BoxedRecordBatchIterator] into [EncodedBulkPart] with min/max timestamps.
     pub fn encode_record_batch_iter(
         &self,
-        iter: BoxedRecordBatchIterator,
+        mut iter: BoxedRecordBatchIterator,
         arrow_schema: SchemaRef,
         min_timestamp: i64,
         max_timestamp: i64,
         sequence_bounds: RangeInclusive<SequenceNumber>,
         metrics: &mut BulkPartEncodeMetrics,
     ) -> Result<Option<EncodedBulkPart>> {
+        let mut iter_start = Instant::now();
+        // The first non-empty batch decides which columns skip statistics.
+        let first = loop {
+            match iter.next() {
+                None => return Ok(None),
+                Some(batch) => {
+                    let batch = batch?;
+                    if batch.num_rows() > 0 {
+                        break batch;
+                    }
+                }
+            }
+        };
         let mut buf = Vec::with_capacity(4096);
-        let mut writer =
-            ArrowWriter::try_new(&mut buf, arrow_schema.clone(), self.writer_props.clone())
-                .context(EncodeMemtableSnafu)?;
+        let mut writer = ArrowWriter::try_new(
+            &mut buf,
+            arrow_schema.clone(),
+            self.writer_props_for(&first),
+        )
+        .context(EncodeMemtableSnafu)?;
         let mut total_rows = 0;
         let mut series_estimator = SeriesEstimator::default();
 
-        // Process each batch from the iterator
-        let mut iter_start = Instant::now();
-        for batch_result in iter {
+        for batch_result in std::iter::once(Ok(first)).chain(iter) {
             metrics.iter_cost += iter_start.elapsed();
             let batch = batch_result?;
             if batch.num_rows() == 0 {
@@ -1485,10 +1511,6 @@ impl BulkPartEncoder {
             iter_start = Instant::now();
         }
         metrics.iter_cost += iter_start.elapsed();
-
-        if total_rows == 0 {
-            return Ok(None);
-        }
 
         let close_start = Instant::now();
         let file_metadata = writer.close().context(EncodeMemtableSnafu)?;
@@ -1526,9 +1548,12 @@ impl BulkPartEncoder {
         let arrow_schema = part.batch.schema();
 
         let file_metadata = {
-            let mut writer =
-                ArrowWriter::try_new(&mut buf, arrow_schema.clone(), self.writer_props.clone())
-                    .context(EncodeMemtableSnafu)?;
+            let mut writer = ArrowWriter::try_new(
+                &mut buf,
+                arrow_schema.clone(),
+                self.writer_props_for(&part.batch),
+            )
+            .context(EncodeMemtableSnafu)?;
             writer.write(&part.batch).context(EncodeMemtableSnafu)?;
             writer.finish().context(EncodeMemtableSnafu)?
         };

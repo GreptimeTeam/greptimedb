@@ -143,11 +143,13 @@ impl<'a> TargetWriter<'a> {
             max_file_size: Some(self.max_file_size),
             // Capped so each admitted encoder stays within the task budget; see
             // [memory::MAX_ROW_GROUP_SIZE].
-            row_group_size: self
-                .target
-                .options
-                .row_group_size()
-                .min(memory::MAX_ROW_GROUP_SIZE),
+            row_group_size: crate::compaction::compactor::row_group_size_for_inputs(
+                self.target.inputs.values(),
+                self.target
+                    .options
+                    .row_group_size()
+                    .min(memory::MAX_ROW_GROUP_SIZE),
+            ),
             float_field_encoding: self.target.options.float_field_encoding,
             // Every resident encoder and its finish workspace are admitted together.
             encode_parallelism: 1,
