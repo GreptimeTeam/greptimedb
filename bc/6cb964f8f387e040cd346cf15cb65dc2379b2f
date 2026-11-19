@@ -1,0 +1,31 @@
+src/metric-engine/src/metadata_region.rs
+  s_c311425adc0214::t_e114b7964314b0 355,359,364-370,373-374
+src/metric-engine/AGENTS.md
+  s_3932d98fb366cd::t_b3ee6ecdfb02a7 85-86
+src/metric-engine/src/metadata_region/copy.rs
+  s_3932d98fb366cd::t_de486302a32cc2 27-29,137,192-234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bc6cb964f8f387e040cd346cf15cb65dc2379b2f",
+  "prompts": {},
+  "sessions": {
+    "s_3932d98fb366cd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f362-2530-7942-9568-40d62eb2d05a",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
