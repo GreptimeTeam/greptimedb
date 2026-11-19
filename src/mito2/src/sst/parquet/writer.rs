@@ -65,7 +65,7 @@ use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
-    large_value_fields, skip_statistics,
+    large_value_fields, max_row_group_decoded_size, skip_statistics, var_len_value_bytes,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -572,17 +572,8 @@ where
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            let max_row_group_uncompressed_size: u64 = parquet_metadata
-                .row_groups()
-                .iter()
-                .map(|rg| {
-                    rg.columns()
-                        .iter()
-                        .map(|c| c.uncompressed_size() as u64)
-                        .sum::<u64>()
-                })
-                .max()
-                .unwrap_or(0);
+            let max_row_group_uncompressed_size =
+                max_row_group_decoded_size(&parquet_metadata, stats.var_len_bytes);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
@@ -941,6 +932,8 @@ struct SourceStats {
     last_primary_key: Option<Bytes>,
     /// Series estimator for computing num_series.
     series_estimator: SeriesEstimator,
+    /// Decoded bytes of string and binary values.
+    var_len_bytes: u64,
 }
 
 impl SourceStats {
@@ -950,6 +943,7 @@ impl SourceStats {
         }
 
         self.num_rows += record_batch.num_rows();
+        self.var_len_bytes += var_len_value_bytes(record_batch);
         self.series_estimator.update_flat(record_batch);
         let (keys, values) = encoded_primary_keys(record_batch)?;
         let key = keys.value(record_batch.num_rows() - 1);

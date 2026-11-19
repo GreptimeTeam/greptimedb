@@ -138,6 +138,63 @@ pub(crate) fn row_group_size_for(rows: u64, bytes: u64, configured: usize) -> us
     (TARGET_ROW_GROUP_BYTES / row_width).clamp(1, configured as u64) as usize
 }
 
+/// Returns the bytes of string and binary values in `batch` once decoded.
+///
+/// Encoded parquet sizes undercount these values when dictionary encoding stores repeated
+/// values once. Dictionary-typed arrays are skipped: readers decode them as dictionaries too.
+pub(crate) fn var_len_value_bytes(batch: &RecordBatch) -> u64 {
+    fn span<O: OffsetSizeTrait>(offsets: &[O]) -> u64 {
+        match (offsets.first(), offsets.last()) {
+            (Some(first), Some(last)) => (last.as_usize() - first.as_usize()) as u64,
+            _ => 0,
+        }
+    }
+
+    batch
+        .columns()
+        .iter()
+        .map(|array| match array.data_type() {
+            DataType::Binary => span(array.as_binary::<i32>().value_offsets()),
+            DataType::LargeBinary => span(array.as_binary::<i64>().value_offsets()),
+            DataType::Utf8 => span(array.as_string::<i32>().value_offsets()),
+            DataType::LargeUtf8 => span(array.as_string::<i64>().value_offsets()),
+            DataType::BinaryView => array
+                .as_binary_view()
+                .views()
+                .iter()
+                .map(|view| *view as u32 as u64)
+                .sum(),
+            DataType::Utf8View => array
+                .as_string_view()
+                .views()
+                .iter()
+                .map(|view| *view as u32 as u64)
+                .sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Returns the size of the largest row group of `metadata`, counting string and binary values
+/// at their decoded size. `var_len_bytes` is the decoded size of those values in the whole
+/// file, spread over row groups by row count.
+pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData, var_len_bytes: u64) -> u64 {
+    let total_rows = metadata.file_metadata().num_rows().max(1) as u64;
+    metadata
+        .row_groups()
+        .iter()
+        .map(|row_group| {
+            let encoded: u64 = row_group
+                .columns()
+                .iter()
+                .map(|column| column.uncompressed_size() as u64)
+                .sum();
+            encoded.max(var_len_bytes * row_group.num_rows() as u64 / total_rows)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// Values at least this long make min/max statistics of a field column useless for pruning,
 /// while untruncated statistics copy two whole values per row group into the footer.
 const LARGE_VALUE_STATS_THRESHOLD: usize = 64 * 1024;
@@ -1383,6 +1440,46 @@ mod tests {
             pk_stats.max_bytes_opt().unwrap(),
             new_primary_key(&[&tag]).as_slice()
         );
+    }
+
+    #[tokio::test]
+    async fn test_row_group_size_counts_dictionary_encoded_values_decoded() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = FixedPathProvider {
+            region_file_id: handle.file_id(),
+        };
+        let metadata = build_test_binary_test_region_metadata();
+        // 2048 copies of one 64 KiB value decode to 128 MiB but dictionary-encode to one value.
+        let values = vec![vec![7u8; 64 * 1024]; 2048];
+        let batch = new_record_batch_with_binary_values("a", &values);
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            file_path,
+            &mut metrics,
+        )
+        .await;
+        let info = writer
+            .write_all_flat_as_primary_key(
+                new_flat_source_from_record_batches(vec![batch]),
+                None,
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        let parquet_meta = info.file_metadata.as_ref().unwrap();
+        let schema = parquet_meta.file_metadata().schema_descr();
+        let field = (0..schema.num_columns())
+            .find(|i| schema.column(*i).name() == "field_0")
+            .unwrap();
+        assert!(parquet_meta.row_group(0).column(field).uncompressed_size() < 1024 * 1024);
+        assert!(info.max_row_group_uncompressed_size >= 2048 * 64 * 1024);
     }
 
     #[rstest::rstest]

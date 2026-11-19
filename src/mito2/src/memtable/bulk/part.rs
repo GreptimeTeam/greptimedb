@@ -76,7 +76,7 @@ use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, apply_column_compression,
     apply_float_field_encoding, apply_internal_column_encoding, large_value_fields,
-    skip_statistics,
+    max_row_group_decoded_size, skip_statistics, var_len_value_bytes,
 };
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -1316,19 +1316,10 @@ impl EncodedBulkPart {
     /// Returns a `SstInfo` instance with information derived from this bulk part's metadata
     pub(crate) fn to_sst_info(&self, file_id: FileId) -> SstInfo {
         let unit = self.metadata.region_metadata.time_index_type().unit();
-        let max_row_group_uncompressed_size: u64 = self
-            .metadata
-            .parquet_metadata
-            .row_groups()
-            .iter()
-            .map(|rg| {
-                rg.columns()
-                    .iter()
-                    .map(|c| c.uncompressed_size() as u64)
-                    .sum::<u64>()
-            })
-            .max()
-            .unwrap_or(0);
+        let max_row_group_uncompressed_size = max_row_group_decoded_size(
+            &self.metadata.parquet_metadata,
+            self.metadata.var_len_bytes,
+        );
         SstInfo {
             file_id,
             time_range: (
@@ -1394,6 +1385,8 @@ pub struct BulkPartMeta {
     pub min_sequence: SequenceNumber,
     /// Maximum sequence number in part.
     pub max_sequence: u64,
+    /// Decoded bytes of string and binary values.
+    pub var_len_bytes: u64,
 }
 
 /// Metrics for encoding a part.
@@ -1493,6 +1486,7 @@ impl BulkPartEncoder {
         )
         .context(EncodeMemtableSnafu)?;
         let mut total_rows = 0;
+        let mut var_len_bytes = 0;
         let mut series_estimator = SeriesEstimator::default();
 
         for batch_result in std::iter::once(Ok(first)).chain(iter) {
@@ -1503,6 +1497,7 @@ impl BulkPartEncoder {
             }
 
             series_estimator.update_flat(&batch);
+            var_len_bytes += var_len_value_bytes(&batch);
             metrics.raw_size += record_batch_estimated_size(&batch);
             let write_start = Instant::now();
             writer.write(&batch).context(EncodeMemtableSnafu)?;
@@ -1533,6 +1528,7 @@ impl BulkPartEncoder {
                 num_series,
                 min_sequence: *sequence_bounds.start(),
                 max_sequence: *sequence_bounds.end(),
+                var_len_bytes,
             },
             schema: arrow_schema,
         }))
@@ -1572,6 +1568,7 @@ impl BulkPartEncoder {
                 num_series: part.estimated_series_count() as u64,
                 max_sequence: part.sequence,
                 min_sequence: part.min_sequence,
+                var_len_bytes: var_len_value_bytes(&part.batch),
             },
             schema: arrow_schema,
         }))

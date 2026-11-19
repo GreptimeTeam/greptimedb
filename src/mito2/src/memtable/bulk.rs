@@ -1151,14 +1151,17 @@ impl PartToMerge {
         match self {
             PartToMerge::Bulk { part, .. } => part.estimated_size() as u64,
             PartToMerge::Multi { part, .. } => part.estimated_size() as u64,
-            PartToMerge::Encoded { part, .. } => part
-                .metadata()
-                .parquet_metadata
-                .row_groups()
-                .iter()
-                .flat_map(|row_group| row_group.columns())
-                .map(|column| column.uncompressed_size() as u64)
-                .sum(),
+            PartToMerge::Encoded { part, .. } => {
+                let metadata = part.metadata();
+                let encoded: u64 = metadata
+                    .parquet_metadata
+                    .row_groups()
+                    .iter()
+                    .flat_map(|row_group| row_group.columns())
+                    .map(|column| column.uncompressed_size() as u64)
+                    .sum();
+                encoded.max(metadata.var_len_bytes)
+            }
         }
     }
 
@@ -2102,6 +2105,62 @@ mod tests {
         for row_group in part.metadata().parquet_metadata.row_groups() {
             assert!(row_group.column(field_index).statistics().is_none());
         }
+    }
+
+    #[test]
+    fn test_merge_sizes_row_groups_of_repeated_values() {
+        let metadata = crate::test_util::sst_util::build_test_binary_test_region_metadata();
+        // Each part holds 2048 copies of one 64 KiB value: 128 MiB decoded, one value encoded.
+        let part = || {
+            let values = vec![vec![7u8; 64 * 1024]; 2048];
+            let batch =
+                crate::test_util::sst_util::new_record_batch_with_binary_values("a", &values);
+            let part = BulkPart {
+                max_timestamp: batch.num_rows() as i64 - 1,
+                min_timestamp: 0,
+                sequence: 1000,
+                min_sequence: 1000,
+                timestamp_index: 2,
+                raw_data: None,
+                batch,
+            };
+            PartToMerge::Encoded {
+                part: BulkPartEncoder::new(metadata.clone(), DEFAULT_ROW_GROUP_SIZE)
+                    .unwrap()
+                    .encode_part(&part)
+                    .unwrap()
+                    .unwrap(),
+                file_id: FileId::random(),
+            }
+        };
+
+        let merged = MemtableCompactor::merge_parts_group(
+            vec![part(), part()],
+            &metadata,
+            false,
+            MergeMode::LastRow,
+            1,
+            1,
+            DEFAULT_ROW_GROUP_SIZE,
+            FloatFieldEncoding::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let MergedPart::Encoded(part) = merged else {
+            unreachable!()
+        };
+        let row_counts: Vec<_> = part
+            .metadata()
+            .parquet_metadata
+            .row_groups()
+            .iter()
+            .map(|rg| rg.num_rows())
+            .collect();
+        // A 128 MiB row group holds at most 2048 rows of 64 KiB.
+        assert!(
+            row_counts.iter().all(|rows| *rows <= 2048),
+            "{row_counts:?}"
+        );
     }
 
     #[test]
