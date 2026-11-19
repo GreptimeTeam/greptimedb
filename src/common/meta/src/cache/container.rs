@@ -13,13 +13,15 @@
 // limitations under the License.
 
 use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
-use futures::future::BoxFuture;
+use futures::FutureExt;
+use futures::future::{BoxFuture, try_join_all};
 use moka::future::Cache;
 use snafu::{OptionExt, ResultExt};
 use tokio::time::sleep;
@@ -39,6 +41,10 @@ pub type Invalidator<K, V, CacheToken> = Box<
 
 /// Initializes value (i.e., fetches from remote).
 pub type Initializer<K, V> = Arc<dyn Fn(&'_ K) -> BoxFuture<'_, Result<Option<V>>> + Send + Sync>;
+
+/// Loads missing keys in one backend request. Absent keys are omitted from the result.
+pub type BatchInitializer<K, V> =
+    Arc<dyn Fn(Vec<K>) -> BoxFuture<'static, Result<HashMap<K, V>>> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy)]
 /// Initialization strategy for cache-miss loading.
@@ -64,6 +70,7 @@ pub struct CacheContainer<K, V, CacheToken> {
     cache: Cache<K, V>,
     invalidator: Invalidator<K, V, CacheToken>,
     initializer: Initializer<K, V>,
+    batch_initializer: Option<BatchInitializer<K, V>>,
     token_filter: fn(&CacheToken) -> bool,
     version: Arc<AtomicUsize>,
     init_strategy: InitStrategy,
@@ -120,10 +127,17 @@ where
             cache,
             invalidator,
             initializer,
+            batch_initializer: None,
             token_filter,
             version: Arc::new(AtomicUsize::new(0)),
             init_strategy,
         }
+    }
+
+    /// Uses the supplied loader for explicit batch reads.
+    pub fn with_batch_initializer(mut self, initializer: BatchInitializer<K, V>) -> Self {
+        self.batch_initializer = Some(initializer);
+        self
     }
 
     /// Returns the `name`.
@@ -304,16 +318,21 @@ where
         K: Borrow<Q>,
         Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
     {
+        self.get_by_ref_with(key, self.initializer.clone()).await
+    }
+
+    async fn get_by_ref_with<Q>(&self, key: &Q, initializer: Initializer<K, V>) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
+    {
         metrics::CACHE_CONTAINER_CACHE_GET
             .with_label_values(&[&self.name])
             .inc();
         let result = match self.init_strategy {
             InitStrategy::Unchecked => {
                 self.cache
-                    .try_get_with_by_ref(
-                        key,
-                        init(self.initializer.clone(), key.to_owned(), &self.name),
-                    )
+                    .try_get_with_by_ref(key, init(initializer.clone(), key.to_owned(), &self.name))
                     .await
             }
             InitStrategy::VersionChecked => {
@@ -321,7 +340,7 @@ where
                     .try_get_with_by_ref(
                         key,
                         init_with_retry(
-                            self.initializer.clone(),
+                            initializer.clone(),
                             key.to_owned(),
                             latest_get_backoff(),
                             self.version.clone(),
@@ -342,6 +361,76 @@ where
     }
 }
 
+impl<K, V, CacheToken> CacheContainer<K, V, CacheToken>
+where
+    K: Clone + Hash + Eq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    CacheToken: Send + Sync,
+{
+    /// Returns values in input order, preserving duplicates and missing keys.
+    ///
+    /// Cache hits do not reach the batch loader. Misses use the same Moka
+    /// initialization entries as single-key reads. Invalidation during a batch
+    /// load falls back to the normal initializer for affected pending reads.
+    pub async fn get_many(&self, keys: &[K]) -> Result<Vec<Option<V>>> {
+        let Some(batch_initializer) = &self.batch_initializer else {
+            return try_join_all(keys.iter().map(|key| self.get_by_ref(key))).await;
+        };
+        let mut values = Vec::with_capacity(keys.len());
+        let mut misses = HashMap::new();
+        for key in keys {
+            let value = self.cache.get(key).await;
+            if value.is_none() {
+                misses.entry(key.clone()).or_insert(());
+            }
+            values.push(value);
+        }
+        if misses.is_empty() {
+            metrics::CACHE_CONTAINER_CACHE_GET
+                .with_label_values(&[&self.name])
+                .inc_by(keys.len() as u64);
+            return Ok(values);
+        }
+        let batch_initializer = batch_initializer.clone();
+        let version = self.version.clone();
+        let batch = async move {
+            let generation = version.load(Ordering::Relaxed);
+            let values = batch_initializer(misses.into_keys().collect()).await;
+            (generation, values.map(Arc::new).map_err(Arc::new))
+        }
+        .boxed()
+        .shared();
+        let version = self.version.clone();
+        let fallback = self.initializer.clone();
+        let initializer: Initializer<K, V> = Arc::new(move |key| {
+            let batch = batch.clone();
+            let version = version.clone();
+            let fallback = fallback.clone();
+            Box::pin(async move {
+                let (generation, values) = batch.await;
+                if generation != version.load(Ordering::Relaxed) {
+                    return fallback(key).await;
+                }
+                Ok(values.context(error::GetCacheSnafu)?.get(key).cloned())
+            })
+        });
+        try_join_all(keys.iter().zip(values).map(|(key, value)| {
+            let initializer = initializer.clone();
+            async move {
+                if value.is_some() {
+                    metrics::CACHE_CONTAINER_CACHE_GET
+                        .with_label_values(&[&self.name])
+                        .inc();
+                    Ok(value)
+                } else {
+                    self.get_by_ref_with(key, initializer).await
+                }
+            }
+        }))
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -350,6 +439,198 @@ mod tests {
     use moka::future::{Cache, CacheBuilder};
 
     use super::*;
+
+    fn batch_test_cache(
+        initializer: Initializer<u32, u32>,
+    ) -> CacheContainer<u32, u32, CacheIdent> {
+        CacheContainer::with_strategy(
+            "batch_test".to_string(),
+            Cache::new(64),
+            Box::new(|cache, tokens| {
+                Box::pin(async move {
+                    for token in tokens {
+                        if let CacheIdent::TableId(id) = token {
+                            cache.invalidate(id).await;
+                        }
+                    }
+                    Ok(())
+                })
+            }),
+            initializer,
+            |token| matches!(token, CacheIdent::TableId(_)),
+            InitStrategy::VersionChecked,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_get_many_hits_missing_duplicates_and_invalidation() {
+        let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = batches.clone();
+        let cache = batch_test_cache(Arc::new(|_| {
+            Box::pin(async { panic!("unexpected single load") })
+        }))
+        .with_batch_initializer(Arc::new(move |mut keys| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                keys.sort_unstable();
+                observed.lock().unwrap().push(keys.clone());
+                Ok(keys
+                    .into_iter()
+                    .filter(|&k| k != 3)
+                    .map(|k| (k, k * 10))
+                    .collect())
+            })
+        }));
+        cache.cache.insert(1, 10).await;
+        assert_eq!(
+            cache.get_many(&[2, 1, 2, 3]).await.unwrap(),
+            vec![Some(20), Some(10), Some(20), None]
+        );
+        assert_eq!(*batches.lock().unwrap(), vec![vec![2, 3]]);
+        assert_eq!(
+            cache.get_many(&[2, 1]).await.unwrap(),
+            vec![Some(20), Some(10)]
+        );
+        assert!(cache.get_many(&[]).await.unwrap().is_empty());
+        assert_eq!(batches.lock().unwrap().len(), 1);
+        cache.invalidate(&[CacheIdent::TableId(1)]).await.unwrap();
+        assert_eq!(
+            cache.get_many(&[1, 2]).await.unwrap(),
+            vec![Some(10), Some(20)]
+        );
+        assert_eq!(*batches.lock().unwrap(), vec![vec![2, 3], vec![1]]);
+        // Missing values are batch-local, so a subsequent request loads them again.
+        assert_eq!(cache.get_many(&[3]).await.unwrap(), vec![None]);
+        assert_eq!(batches.lock().unwrap().last().unwrap(), &vec![3]);
+    }
+
+    #[tokio::test]
+    async fn test_get_many_invalidated_load_uses_current_value() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let value = Arc::new(AtomicUsize::new(10));
+        let current = value.clone();
+        let cache = batch_test_cache(Arc::new(move |_| {
+            let current = current.clone();
+            Box::pin(async move { Ok(Some(current.load(Ordering::SeqCst) as u32)) })
+        }))
+        .with_batch_initializer(Arc::new({
+            let started = started.clone();
+            let resume = resume.clone();
+            move |_| {
+                let started = started.clone();
+                let resume = resume.clone();
+                Box::pin(async move {
+                    started.notify_one();
+                    resume.notified().await;
+                    Ok(HashMap::from([(1, 10)]))
+                })
+            }
+        }));
+        let read = cache.get_many(&[1]);
+        let invalidate = async {
+            started.notified().await;
+            value.store(20, Ordering::SeqCst);
+            cache.invalidate(&[CacheIdent::TableId(1)]).await.unwrap();
+            resume.notify_one();
+        };
+        let (result, ()) = tokio::join!(read, invalidate);
+        assert_eq!(result.unwrap(), vec![Some(20)]);
+        assert_eq!(cache.get(1).await.unwrap(), Some(20));
+    }
+
+    #[tokio::test]
+    async fn test_get_many_coalesces_with_single_key_load() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let cache = Arc::new(
+            batch_test_cache(Arc::new({
+                let started = started.clone();
+                let resume = resume.clone();
+                move |_| {
+                    let started = started.clone();
+                    let resume = resume.clone();
+                    Box::pin(async move {
+                        started.notify_one();
+                        resume.notified().await;
+                        Ok(Some(10))
+                    })
+                }
+            }))
+            .with_batch_initializer(Arc::new(|_| {
+                Box::pin(async { panic!("single-key load owns this miss") })
+            })),
+        );
+        let single = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.get(1).await }
+        });
+        started.notified().await;
+        let mut batch = Box::pin(cache.get_many(&[1]));
+        assert!(futures::poll!(&mut batch).is_pending());
+        resume.notify_one();
+        assert_eq!(batch.await.unwrap(), vec![Some(10)]);
+        assert_eq!(single.await.unwrap().unwrap(), Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_get_many_retries_after_backend_error() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let loads = attempts.clone();
+        let cache = batch_test_cache(Arc::new(|_| {
+            Box::pin(async { panic!("unexpected single load") })
+        }))
+        .with_batch_initializer(Arc::new(move |keys| {
+            let loads = loads.clone();
+            Box::pin(async move {
+                if loads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return error::GetLatestCacheRetryExceededSnafu { attempts: 1usize }.fail();
+                }
+                Ok(keys.into_iter().map(|k| (k, k * 10)).collect())
+            })
+        }));
+        assert!(cache.get_many(&[1, 2]).await.is_err());
+        assert!(!cache.contains_key(&1));
+        assert_eq!(
+            cache.get_many(&[1, 2]).await.unwrap(),
+            vec![Some(10), Some(20)]
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_batch_releases_single_key_waiter() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cache = Arc::new(
+            batch_test_cache(Arc::new(|_| Box::pin(async { Ok(Some(20)) })))
+                .with_batch_initializer(Arc::new({
+                    let started = started.clone();
+                    move |_| {
+                        let started = started.clone();
+                        Box::pin(async move {
+                            started.notify_one();
+                            std::future::pending().await
+                        })
+                    }
+                })),
+        );
+        let batch = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.get_many(&[1, 2]).await }
+        });
+        started.notified().await;
+        let mut single = Box::pin(cache.get(1));
+        assert!(futures::poll!(&mut single).is_pending());
+        batch.abort();
+        assert!(batch.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), single)
+                .await
+                .unwrap()
+                .unwrap(),
+            Some(20)
+        );
+    }
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
     struct NameKey<'a> {

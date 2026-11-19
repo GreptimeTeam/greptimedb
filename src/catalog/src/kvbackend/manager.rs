@@ -417,6 +417,42 @@ impl CatalogManager for KvBackendCatalogManager {
         Ok(None)
     }
 
+    async fn table_ids(&self, names: &[TableName]) -> Result<Vec<Option<TableId>>> {
+        let cache: TableNameCacheRef = self.cache_registry.get().context(CacheNotFoundSnafu {
+            name: "table_name_cache",
+        })?;
+        let mut results = vec![None; names.len()];
+        let mut missing = Vec::new();
+        let mut positions = Vec::new();
+        for (index, name) in names.iter().enumerate() {
+            if let Some(table) = self.system_catalog.table(
+                &name.catalog_name,
+                &name.schema_name,
+                &name.table_name,
+                None,
+            ) {
+                results[index] = Some(table.table_info().table_id());
+            } else {
+                missing.push(name.clone());
+                positions.push(index);
+            }
+        }
+        for (index, value) in positions
+            .into_iter()
+            .zip(cache.get_many(&missing).await.context(GetTableCacheSnafu)?)
+        {
+            results[index] = value;
+        }
+        Ok(results)
+    }
+
+    async fn table_infos_by_ids(&self, ids: &[TableId]) -> Result<Vec<Option<TableInfoRef>>> {
+        let cache: TableInfoCacheRef = self.cache_registry.get().context(CacheNotFoundSnafu {
+            name: "table_info_cache",
+        })?;
+        cache.get_many(ids).await.context(GetTableCacheSnafu)
+    }
+
     async fn table_info_by_id(&self, table_id: TableId) -> Result<Option<TableInfoRef>> {
         let table_info_cache: TableInfoCacheRef =
             self.cache_registry.get().context(CacheNotFoundSnafu {

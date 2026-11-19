@@ -39,9 +39,27 @@ pub fn new_table_name_cache(
     kv_backend: KvBackendRef,
 ) -> TableNameCache {
     let table_name_manager = Arc::new(TableNameManager::new(kv_backend));
-    let init = init_factory(table_name_manager);
+    let init = init_factory(table_name_manager.clone());
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
+    CacheContainer::new(name, cache, Box::new(invalidator), init, filter).with_batch_initializer(
+        Arc::new(move |names| {
+            let manager = table_name_manager.clone();
+            Box::pin(async move {
+                let keys = names
+                    .iter()
+                    .map(|name| {
+                        TableNameKey::new(&name.catalog_name, &name.schema_name, &name.table_name)
+                    })
+                    .collect();
+                let ids = manager.batch_get(keys).await?;
+                Ok(names
+                    .into_iter()
+                    .zip(ids)
+                    .filter_map(|(name, id)| id.map(|id| (name, id.table_id())))
+                    .collect())
+            })
+        }),
+    )
 }
 
 fn init_factory(table_name_manager: TableNameManagerRef) -> Initializer<TableName, TableId> {
