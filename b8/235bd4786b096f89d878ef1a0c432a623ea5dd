@@ -1,6 +1,7 @@
 src/common/meta/src/cache/table/table_route.rs
   s_c311425adc0214::t_ee5b69ee125f0a 37-45,103
   s_c311425adc0214::t_0c1969a8149281 72-73
+  s_c311425adc0214::t_3a3930c877b830 76-87
 src/partition/src/manager.rs
   s_c311425adc0214::t_1b52e005f69552 20,144-174,212
 src/common/meta/src/key/table_route.rs
