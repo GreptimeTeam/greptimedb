@@ -687,6 +687,8 @@ pub enum Insert {
 pub struct FillCursor {
     cursor: u64,
     epoch: u64,
+    /// The source-table generation validated for the query that owns this fill.
+    source_epoch: u64,
     captured_at: SystemTime,
 }
 
@@ -702,6 +704,12 @@ impl FillCursor {
     /// that an invalidation has since overtaken.
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Pins the source-table generation that was validated for this fill.
+    pub(crate) fn with_source_epoch(mut self, source_epoch: u64) -> Self {
+        self.source_epoch = source_epoch;
+        self
     }
 
     /// When the fill was planned, before it read storage.
@@ -986,6 +994,10 @@ pub struct RollupCache {
     /// It is advanced by every invalidation method and never read as a clock: only
     /// the ordering between the epoch a fill captured and the current one matters.
     invalidation_epoch: AtomicU64,
+    /// The source-table generation a query was validated against. Every rename,
+    /// repartition, or incarnation transition advances it; a fill planned under an
+    /// older generation is rejected even if its ordinary invalidation epoch is new.
+    source_epoch: AtomicU64,
     /// Whether callers validate the source sequence before serving an entry.
     ///
     /// Off by default so an embedder that has no sequence authority (a test, or a
@@ -1018,6 +1030,7 @@ impl RollupCache {
             authority,
             entries,
             invalidation_epoch: AtomicU64::new(0),
+            source_epoch: AtomicU64::new(0),
             source_probe: false,
             invalidation_lock: Mutex::new(()),
         }
@@ -1050,6 +1063,20 @@ impl RollupCache {
     /// the value current at insertion time; nothing else reads it.
     pub fn invalidation_epoch(&self) -> u64 {
         self.invalidation_epoch.load(Ordering::SeqCst)
+    }
+
+    /// The source-table generation currently validated.
+    pub fn source_epoch(&self) -> u64 {
+        self.source_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Advances the source-table generation and returns the new value.
+    ///
+    /// A query captures the returned generation before executing; a fill carrying
+    /// an older generation is dropped because its source identity or route may no
+    /// longer be the one it read.
+    pub fn advance_source_epoch(&self) -> u64 {
+        self.source_epoch.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// How many entries the cache holds once pending maintenance has run.
@@ -1137,6 +1164,7 @@ impl RollupCache {
         self.authorized_cursor(now).map(|cursor| FillCursor {
             cursor,
             epoch,
+            source_epoch: self.source_epoch(),
             captured_at: now,
         })
     }
@@ -1207,7 +1235,7 @@ impl RollupCache {
         let _guard = self.invalidation_lock.lock().unwrap();
         // An invalidation ran after this fill captured its epoch, so the data the
         // fill read may be the data the invalidation removed. The fill loses.
-        if self.invalidation_epoch() > fill.epoch() {
+        if self.invalidation_epoch() > fill.epoch() || self.source_epoch() != fill.source_epoch {
             return Insert::Rejected;
         }
         let candidate = Entry {
@@ -2571,6 +2599,18 @@ mod tests {
                 .with_source_probe()
                 .source_probe_enabled()
         );
+    }
+
+    #[test]
+    fn a_source_epoch_change_rejects_a_fill_planned_before_it() {
+        let cache = cache();
+        let now = at(LATER_MS);
+        let fill = cache.fill_cursor(now).unwrap();
+        assert_eq!(fill.source_epoch, cache.source_epoch());
+
+        let next = cache.advance_source_epoch();
+        assert_eq!(next, fill.source_epoch + 1);
+        assert_eq!(cache.insert(chunk_key(), fill, payload()), Insert::Rejected);
     }
 
     #[test]

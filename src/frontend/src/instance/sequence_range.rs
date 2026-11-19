@@ -166,16 +166,16 @@ impl Instance {
     /// advanced the sequence without leaving a timestamp to invalidate by. A put
     /// that replaces a row at the same timestamp is covered by the hull; an
     /// explicit DELETE whose timestamp the ordinary scan hides is not, which is
-    /// why a DELETE-only advance evicts the whole table. `false` means the caller
+    /// why a DELETE-only advance evicts the whole table. `None` means the caller
     /// must bypass the cache, and no cursor has advanced.
     pub(crate) async fn refresh_cache_source(
         &self,
         table: &TableName,
         source_table: &str,
         query_ctx: &QueryContextRef,
-    ) -> Result<bool> {
+    ) -> Result<Option<u64>> {
         let Some(cache) = self.rollup_cache.as_ref() else {
-            return Ok(false);
+            return Ok(None);
         };
         let resolved = self
             .catalog_manager
@@ -204,6 +204,7 @@ impl Instance {
                 .insert(table.to_string(), table_id)
                 .is_some_and(|previous| previous != table_id)
             {
+                cache.advance_source_epoch();
                 cache.invalidate_table(source_table);
             }
         }
@@ -222,11 +223,11 @@ impl Instance {
             .map(|route| RegionId::new(table_id, route.region.id.region_number()).as_u64())
             .collect::<Vec<_>>();
         if regions.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
 
         let qualified_name = table.to_string();
-        let (lower, generation) = {
+        let (lower, generation, source_epoch) = {
             let mut state = self.source_probe_cursors.lock().unwrap();
             // Cursors are per logical table: metric-engine logical tables share a
             // physical region sequence, and one logical table's scan must not
@@ -242,6 +243,7 @@ impl Instance {
                     let route_changed = stored.route_version != version;
                     if renamed_from.is_some() || route_changed {
                         stored.generation = stored.generation.saturating_add(1);
+                        cache.advance_source_epoch();
                     }
                     if route_changed {
                         stored.route_version = version;
@@ -261,18 +263,18 @@ impl Instance {
                     if route_changed {
                         cache.invalidate_table(source_table);
                     }
-                    (lower, generation)
+                    (lower, generation, cache.source_epoch())
                 }
                 None => {
                     let lower = regions.iter().map(|region| (*region, 0)).collect();
-                    (lower, 0)
+                    (lower, 0, cache.source_epoch())
                 }
             }
         };
 
         let (high, min, max) = match self.probe_sequence_range(table, &lower, query_ctx).await {
             Ok(probe) => probe,
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(None),
         };
         if high.len() != regions.len()
             || high.keys().any(|region| !lower.contains_key(region))
@@ -280,16 +282,16 @@ impl Instance {
                 .iter()
                 .any(|(region, watermark)| watermark < &lower[region])
         {
-            return Ok(false);
+            return Ok(None);
         }
         let changed = high != lower;
         match (min, max) {
             (Some(min), Some(max)) => {
                 let Some(min_ms) = min.convert_to(TimeUnit::Millisecond) else {
-                    return Ok(false);
+                    return Ok(None);
                 };
                 let Some(max_ms) = max.convert_to(TimeUnit::Millisecond) else {
-                    return Ok(false);
+                    return Ok(None);
                 };
                 // Round outward: a sub-millisecond timestamp still lies inside the
                 // span, and an extra millisecond only costs a later miss. A put that
@@ -335,7 +337,9 @@ impl Instance {
             Some(_) => {
                 // A concurrent rename or repartition superseded this probe. Its
                 // invalidation was conservative, but its cursor observation is
-                // from an older generation and must not advance the state.
+                // from an older generation: do not advance the state and do not
+                // let this request fill from an unvalidated source identity.
+                return Ok(None);
             }
             _ => {
                 state.insert(
@@ -350,7 +354,7 @@ impl Instance {
                 );
             }
         }
-        Ok(true)
+        Ok(Some(source_epoch))
     }
 }
 

@@ -1664,7 +1664,7 @@ impl Instance {
         ) else {
             return Ok(None);
         };
-        if cache.source_probe_enabled() {
+        let source_epoch = if cache.source_probe_enabled() {
             // A sequence-validated cache may not answer until this table's changes
             // have been invalidated and its cursor advanced. A probe that cannot
             // prove the whole table bypasses the cache instead of serving stale
@@ -1674,14 +1674,17 @@ impl Instance {
                 query_ctx.current_schema(),
                 identity.source_table.clone(),
             );
-            if !self
+            let Some(source_epoch) = self
                 .refresh_cache_source(&table, &identity.source_table, query_ctx)
                 .await
-                .unwrap_or(false)
-            {
+                .unwrap_or(None)
+            else {
                 return Ok(None);
-            }
-        }
+            };
+            source_epoch
+        } else {
+            cache.source_epoch()
+        };
         let executor = StatementWindowExecutor {
             instance: self,
             query_ctx: query_ctx.clone(),
@@ -1689,7 +1692,16 @@ impl Instance {
             ordered: requires_output_ordering,
             cancellation_handle,
         };
-        match execute_range(&executor, cache, identity, eval_stmt, SystemTime::now()).await? {
+        match execute_range(
+            &executor,
+            cache,
+            identity,
+            eval_stmt,
+            SystemTime::now(),
+            source_epoch,
+        )
+        .await?
+        {
             RangeOutcome::Merged { rows, annotations } => {
                 Self::record_annotations(query_ctx, &annotations);
                 Ok(Some(rows))

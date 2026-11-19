@@ -125,6 +125,7 @@ pub(crate) async fn execute_range<E>(
     identity: QueryIdentity,
     stmt: &EvalStmt,
     now: SystemTime,
+    source_epoch: u64,
 ) -> server_error::Result<RangeOutcome>
 where
     E: WindowExecutor + ?Sized,
@@ -167,6 +168,7 @@ where
                     &grid,
                     now,
                     dependency_history_ms,
+                    source_epoch,
                 )
                 .await?
             }
@@ -184,6 +186,7 @@ where
 /// The fill cursor is captured before the read it describes, so the entry's age is
 /// counted from the read that produced it and a fill that raced a newer one cannot
 /// overwrite it.
+#[allow(clippy::too_many_arguments)]
 async fn chunk_rows<E>(
     executor: &E,
     cache: &RollupCache,
@@ -192,10 +195,17 @@ async fn chunk_rows<E>(
     grid: &EvalGrid,
     now: SystemTime,
     dependency_history_ms: i64,
+    source_epoch: u64,
 ) -> server_error::Result<WindowOutput>
 where
     E: WindowExecutor + ?Sized,
 {
+    // A transition after validation makes both the cached payload and any new
+    // fill unvalidated. Execute this chunk without touching the cache rather than
+    // risk a hit under the old identity; its fill would be rejected anyway.
+    if cache.source_epoch() != source_epoch {
+        return execute_span(executor, stmt, grid, key.chunk()).await;
+    }
     let fill: FillCursor = match cache.lookup(key, now) {
         Lookup::Hit {
             payload,
@@ -210,7 +220,7 @@ where
             });
         }
         Lookup::Bypass(_) | Lookup::Miss(_) => match cache.fill_cursor(now) {
-            Ok(fill) => fill,
+            Ok(fill) => fill.with_source_epoch(source_epoch),
             // No fill may be validated right now (an unhealthy or stale authority):
             // read the chunk without keeping it rather than failing a query the
             // original path answers.
@@ -556,7 +566,15 @@ mod tests {
         stmt: &EvalStmt,
         query: &str,
     ) -> server_error::Result<RangeOutcome> {
-        execute_range(executor, cache, identity(query), stmt, at(NOW_MS)).await
+        execute_range(
+            executor,
+            cache,
+            identity(query),
+            stmt,
+            at(NOW_MS),
+            cache.source_epoch(),
+        )
+        .await
     }
 
     fn merged(outcome: RangeOutcome) -> RecordBatches {
@@ -629,6 +647,7 @@ mod tests {
                 identity.clone(),
                 &stmt,
                 at(NOW_MS),
+                cache.source_epoch(),
             )
             .await
             .unwrap();
@@ -683,6 +702,7 @@ mod tests {
             identity.clone(),
             &stmt,
             at(NOW_MS),
+            cache.source_epoch(),
         )
         .await
         .unwrap();
