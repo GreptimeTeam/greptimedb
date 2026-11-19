@@ -36,7 +36,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
-use crate::rpc::store::RangeRequest;
+use crate::rpc::store::{BatchGetRequest, RangeRequest};
 
 pub const FLOW_INFO_KEY_PREFIX: &str = "info";
 
@@ -383,6 +383,23 @@ impl FlowInfoManager {
             .await?
             .map(|x| FlowInfoValue::try_from_raw_value(&x.value))
             .transpose()
+    }
+
+    pub async fn batch_get(
+        &self,
+        ids: &[FlowId],
+    ) -> Result<std::collections::HashMap<FlowId, FlowInfoValue>> {
+        let keys = ids
+            .iter()
+            .map(|id| FlowInfoKey::new(*id).to_bytes())
+            .collect();
+        self.kv_backend
+            .batch_get(BatchGetRequest { keys })
+            .await?
+            .kvs
+            .into_iter()
+            .map(|kv| flow_info_decoder(kv).map(|(key, info)| (key.flow_id(), info)))
+            .collect()
     }
 
     /// Returns the [FlowInfoValue] with original bytes of specified `flow_id`.

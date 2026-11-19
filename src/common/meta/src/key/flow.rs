@@ -568,6 +568,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_batch_flow_info_invalidation() {
+        use crate::cache::new_flow_info_cache;
+        use crate::instruction::CacheIdent;
+        let backend = Arc::new(MemoryKvBackend::default());
+        let manager = FlowMetadataManager::new(backend.clone());
+        let cache = new_flow_info_cache("flows".into(), moka::future::Cache::new(8), backend);
+        let info = test_flow_info_value("flow", Default::default(), vec![]);
+        assert!(cache.get(10).await.unwrap().is_none());
+        manager
+            .create_flow_metadata(10, info.clone(), vec![])
+            .await
+            .unwrap();
+        let values = cache.get_many(&[10, 11, 10]).await.unwrap();
+        assert_eq!(
+            values,
+            vec![
+                Some(Arc::new(info.clone())),
+                None,
+                Some(Arc::new(info.clone()))
+            ]
+        );
+        let previous = manager
+            .flow_info_manager()
+            .get_raw(10)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut updated = info;
+        updated.comment = "updated".into();
+        manager
+            .update_flow_metadata(10, &previous, &updated, vec![])
+            .await
+            .unwrap();
+        cache.invalidate(&[CacheIdent::FlowId(10)]).await.unwrap();
+        assert_eq!(
+            cache.get_many(&[10]).await.unwrap()[0].as_deref(),
+            Some(&updated)
+        );
+        manager.destroy_flow_metadata(10, &updated).await.unwrap();
+        cache.invalidate(&[CacheIdent::FlowId(10)]).await.unwrap();
+        assert_eq!(cache.get_many(&[10]).await.unwrap(), vec![None]);
+    }
+
+    #[tokio::test]
     async fn test_create_flow_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());

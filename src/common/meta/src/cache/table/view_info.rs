@@ -38,9 +38,21 @@ pub fn new_view_info_cache(
     kv_backend: KvBackendRef,
 ) -> ViewInfoCache {
     let view_info_manager = Arc::new(ViewInfoManager::new(kv_backend));
-    let init = init_factory(view_info_manager);
+    let init = init_factory(view_info_manager.clone());
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
+    CacheContainer::new(name, cache, Box::new(invalidator), init, filter).with_batch_initializer(
+        Arc::new(move |ids| {
+            let manager = view_info_manager.clone();
+            Box::pin(async move {
+                Ok(manager
+                    .batch_get(&ids)
+                    .await?
+                    .into_iter()
+                    .map(|(id, info)| (id, Arc::new(info)))
+                    .collect())
+            })
+        }),
+    )
 }
 
 fn init_factory(view_info_manager: ViewInfoManagerRef) -> Initializer<TableId, Arc<ViewInfoValue>> {
@@ -128,7 +140,10 @@ mod tests {
             .await
             .unwrap();
 
-        let view_info = cache.get(1024).await.unwrap().unwrap();
+        let values = cache.get_many(&[1024, 99, 1024]).await.unwrap();
+        assert!(values[1].is_none());
+        assert_eq!(values[0], values[2]);
+        let view_info = values[0].as_ref().unwrap();
         assert_eq!(view_info.view_info, task.create_view.logical_plan);
         assert_eq!(
             view_info.table_names,

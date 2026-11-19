@@ -16,3 +16,48 @@ mod table_flownode;
 pub use table_flownode::{
     TableFlownodeSetCache, TableFlownodeSetCacheRef, new_table_flownode_set_cache,
 };
+
+use std::sync::Arc;
+
+use moka::future::Cache;
+
+use crate::cache::CacheContainer;
+use crate::instruction::CacheIdent;
+use crate::key::FlowId;
+use crate::key::flow::flow_info::{FlowInfoManager, FlowInfoValue};
+use crate::kv_backend::KvBackendRef;
+
+pub type FlowInfoCache = CacheContainer<FlowId, Arc<FlowInfoValue>, CacheIdent>;
+pub type FlowInfoCacheRef = Arc<FlowInfoCache>;
+
+pub fn new_flow_info_cache(
+    name: String,
+    cache: Cache<(usize, FlowId), Arc<FlowInfoValue>>,
+    backend: KvBackendRef,
+) -> FlowInfoCache {
+    let manager = Arc::new(FlowInfoManager::new(backend));
+    let single = manager.clone();
+    CacheContainer::new_coordinated(
+        name,
+        cache,
+        Arc::new(move |id| {
+            let manager = single.clone();
+            Box::pin(async move { Ok(manager.get(*id).await?.map(Arc::new)) })
+        }),
+        |token| match token {
+            CacheIdent::FlowId(id) => Some(id),
+            _ => None,
+        },
+    )
+    .with_batch_initializer(Arc::new(move |ids| {
+        let manager = manager.clone();
+        Box::pin(async move {
+            Ok(manager
+                .batch_get(&ids)
+                .await?
+                .into_iter()
+                .map(|(id, info)| (id, Arc::new(info)))
+                .collect())
+        })
+    }))
+}

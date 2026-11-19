@@ -18,7 +18,10 @@ mod registry;
 mod table;
 
 pub use container::{BatchInitializer, CacheContainer, Initializer, Invalidator, TokenFilter};
-pub use flow::{TableFlownodeSetCache, TableFlownodeSetCacheRef, new_table_flownode_set_cache};
+pub use flow::{
+    FlowInfoCache, FlowInfoCacheRef, TableFlownodeSetCache, TableFlownodeSetCacheRef,
+    new_flow_info_cache, new_table_flownode_set_cache,
+};
 pub use registry::{
     CacheRegistry, CacheRegistryBuilder, CacheRegistryRef, LayeredCacheRegistry,
     LayeredCacheRegistryBuilder, LayeredCacheRegistryRef,
