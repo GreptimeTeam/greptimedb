@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Predicate recognition, execution, and precompiled regular expressions.
+//! Predicate recognition, execution, and lazily compiled regular expressions.
 
 use std::fmt;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, OnceLock};
 
 use datafusion::logical_expr::{Expr, Operator};
 use datafusion_common::ScalarValue;
@@ -34,6 +34,7 @@ use datatypes::arrow::error::ArrowError;
 use datatypes::compute::or_kleene;
 use regex_automata::Input;
 use regex_automata::meta;
+use regex_automata::util::pool::{Pool, PoolGuard};
 use snafu::ResultExt;
 
 use crate::error::{ArrowComputeSnafu, Result, UnsupportedOperationSnafu};
@@ -219,15 +220,13 @@ impl SimplePredicate {
     ///
     /// Returns `Err` if
     /// - the value is not a string
-    /// - the regex pattern is invalid
     ///
     /// The regex is `None` if
     /// - the operator is not a regex operator
     /// - the pattern is empty
     ///
-    /// The pattern is compiled once here, together with the [`meta::Cache`] every search needs:
-    /// evaluating an array of rows then only borrows that cache, instead of taking one from
-    /// `regex`'s cache pool per row.
+    /// A non-empty pattern is stored without compiling. The first evaluation compiles it and
+    /// initializes its cache pool; pruning can construct the evaluator without paying that cost.
     fn maybe_build_regex(
         operator: Operator,
         value: &ScalarValue,
@@ -287,96 +286,121 @@ impl SimplePredicate {
     }
 }
 
-/// A regular expression compiled once, holding the scratch space every search needs.
+/// A regular expression compiled on first use with a pool of per-array scratch spaces.
 ///
-/// [`regex::Regex`] keeps a pool of [`meta::Cache`]s and borrows one for the duration of a single
-/// `is_match`: a profile of a scan is dominated by that round trip (`Cache::get_slow`,
-/// `put_value`) rather than by the search itself, because the scan matches one value per row.
-/// This type owns the cache next to the compiled program instead, so
-/// [`regexp_is_match_scalar`] acquires it once for a whole array and a row costs one
-/// `search_half`.
-///
-/// The pattern is compiled with the configuration [`regex::Regex`] uses for the same pattern
-/// (`MatchKind::LeftmostFirst`, UTF-8 only, a 10 MiB NFA limit and a 2 MiB hybrid cache, which are
-/// the [`meta::Config`] defaults), so the answers are identical to `Regex::is_match`.
+/// `search_half_with` bypasses the regex's internal per-search cache pool. Each array borrows one
+/// cache from our pool and uses it for all its rows; different arrays can search concurrently.
+/// The compilation uses the same `meta::Regex` defaults as [`regex::Regex`].
 pub struct CompiledRegex {
-    /// The compiled program.
-    regex: meta::Regex,
-    /// The pattern text, kept for diagnostics.
     pattern: String,
-    /// The scratch space the program searches with. Serialized because the evaluator owning this
-    /// regex is shared between threads (`PhysicalExpr` is `Send + Sync`).
-    cache: Mutex<meta::Cache>,
-    /// How many times [`Self::cache`] was acquired. A scan searches one array under one
-    /// acquisition, so a test can prove the row loop does not pay for the lock per row.
+    // Cache compilation errors as well: a malformed pattern must not be rebuilt per batch.
+    compiled: OnceLock<std::result::Result<RegexProgram, String>>,
+    #[cfg(test)]
+    compilations: AtomicUsize,
     #[cfg(test)]
     cache_acquisitions: AtomicUsize,
+    // The hook runs after checkout and before entering the array loop, without holding a pool lock.
+    #[cfg(test)]
+    after_cache_acquired: OnceLock<Arc<dyn Fn() + Send + Sync>>,
+}
+
+type CacheFactory = Box<dyn Fn() -> meta::Cache + Send + Sync>;
+type CachePool = Pool<meta::Cache, CacheFactory>;
+
+struct RegexProgram {
+    regex: Arc<meta::Regex>,
+    caches: CachePool,
 }
 
 impl CompiledRegex {
-    /// Compiles `pattern`.
+    /// Stores `pattern`. Compilation and syntax errors are deferred until first evaluation.
+    ///
+    /// Returns `Ok` for compatibility with the prior eager constructor.
     pub fn new(pattern: &str) -> Result<Self, ArrowError> {
-        let regex = meta::Regex::new(pattern).map_err(|e| {
-            ArrowError::ComputeError(format!("Regular expression did not compile: {e:?}"))
-        })?;
-        // The one and only cache this pattern searches with.
-        let cache = Mutex::new(regex.create_cache());
-
         Ok(Self {
-            regex,
             pattern: pattern.to_string(),
-            cache,
+            compiled: OnceLock::new(),
+            #[cfg(test)]
+            compilations: AtomicUsize::new(0),
             #[cfg(test)]
             cache_acquisitions: AtomicUsize::new(0),
+            #[cfg(test)]
+            after_cache_acquired: OnceLock::new(),
         })
     }
 
-    /// Returns whether `value` matches.
-    pub fn is_match(&self, value: &str) -> bool {
-        let mut cache = self.lock_cache();
-        self.is_match_with(&mut cache, value)
+    /// Compiles the pattern at most once, even if several arrays first evaluate it concurrently.
+    fn program(&self) -> Result<&RegexProgram, ArrowError> {
+        self.compiled
+            .get_or_init(|| {
+                #[cfg(test)]
+                self.compilations.fetch_add(1, Ordering::Relaxed);
+                let regex = Arc::new(
+                    meta::Regex::new(&self.pattern)
+                        .map_err(|e| format!("Regular expression did not compile: {e:?}"))?,
+                );
+                let pooled_regex = Arc::clone(&regex);
+                let factory: CacheFactory = Box::new(move || pooled_regex.create_cache());
+                Ok(RegexProgram {
+                    regex,
+                    caches: Pool::new(factory),
+                })
+            })
+            .as_ref()
+            .map_err(|message| ArrowError::ComputeError(message.clone()))
     }
 
-    /// Returns whether `value` matches, searching with the caller's cache.
-    fn is_match_with(&self, cache: &mut meta::Cache, value: &str) -> bool {
-        // The input `Regex::is_match` builds for the same value: `earliest` asks for the first
-        // match to end, not for the leftmost one, which is all an existence check needs.
-        self.regex
-            .search_half_with(cache, &Input::new(value).earliest(true))
-            .is_some()
+    /// Returns whether `value` matches, or a compilation error for an invalid pattern.
+    pub fn is_match(&self, value: &str) -> Result<bool, ArrowError> {
+        let program = self.program()?;
+        let mut cache = self.get_cache(program);
+        Ok(program.is_match_with(&mut cache, value))
     }
 
-    /// Acquires the one cache this pattern owns.
-    fn lock_cache(&self) -> MutexGuard<'_, meta::Cache> {
+    /// Checks out one cache; its guard returns it to the pool when the array loop exits.
+    fn get_cache<'a>(&self, program: &'a RegexProgram) -> PoolGuard<'a, meta::Cache, CacheFactory> {
+        let cache = program.caches.get();
         #[cfg(test)]
-        self.cache_acquisitions.fetch_add(1, Ordering::Relaxed);
-
-        // A panic while searching leaves scratch space behind, which is exactly what the regex
-        // crate itself does when it returns a cache to its pool on unwind, so a poisoned cache is
-        // still usable.
-        self.cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            self.cache_acquisitions.fetch_add(1, Ordering::Relaxed);
+            if let Some(hook) = self.after_cache_acquired.get() {
+                hook();
+            }
+        }
+        cache
     }
 
-    /// Returns how many times this pattern acquired its cache.
     #[cfg(test)]
     fn cache_acquisitions(&self) -> usize {
         self.cache_acquisitions.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn compilations(&self) -> usize {
+        self.compilations.load(Ordering::Relaxed)
+    }
+}
+
+impl RegexProgram {
+    fn is_match_with(&self, cache: &mut meta::Cache, value: &str) -> bool {
+        self.regex
+            .search_half_with(cache, &Input::new(value).earliest(true))
+            .is_some()
     }
 }
 
 impl fmt::Debug for CompiledRegex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The compiled program and its cache are huge; the pattern identifies them.
+        // Expose initialization state, not the (potentially large) program or cache pool.
         f.debug_struct("CompiledRegex")
             .field("pattern", &self.pattern)
+            .field("initialized", &self.compiled.get().is_some())
             .finish_non_exhaustive()
     }
 }
 
 /// The same as arrow [regexp_is_match_scalar()](datatypes::compute::kernels::regexp::regexp_is_match_scalar())
-/// with pre-compiled regex.
+/// with a reusable, lazily compiled regex.
 /// See <https://github.com/apache/arrow-rs/blob/54.2.0/arrow-string/src/regexp.rs#L204-L246> for the implementation details.
 pub fn regexp_is_match_scalar<'a, S>(
     array: &'a S,
@@ -389,11 +413,11 @@ where
     let mut result = BooleanBufferBuilder::new(array.len());
 
     if let Some(re) = regex {
-        // One cache acquisition for the whole array: the loop below must not pay for the mutex
-        // per value.
-        let mut cache = re.lock_cache();
+        let program = re.program()?;
+        // One checkout for the entire array. The guard returns the cache on drop.
+        let mut cache = re.get_cache(program);
         for i in 0..array.len() {
-            result.append(re.is_match_with(&mut cache, array.value(i)));
+            result.append(program.is_match_with(&mut cache, array.value(i)));
         }
     } else {
         result.append_n(array.len(), true);
@@ -436,8 +460,9 @@ pub fn regexp_is_match_dictionary(
     let mut result = BooleanBufferBuilder::new(dict_array.len());
 
     if let Some(re) = regex {
-        // One cache acquisition for the whole array, as in `regexp_is_match_scalar`.
-        let mut cache = re.lock_cache();
+        let program = re.program()?;
+        // One checkout for the entire array, as in `regexp_is_match_scalar`.
+        let mut cache = re.get_cache(program);
         let keys = dict_array.keys().values();
         for i in 0..dict_array.len() {
             if logical_nulls.as_ref().is_some_and(|nulls| nulls.is_null(i)) {
@@ -445,7 +470,7 @@ pub fn regexp_is_match_dictionary(
             } else {
                 let key = keys[i] as usize;
                 let string_value = string_values.value(key);
-                result.append(re.is_match_with(&mut cache, string_value));
+                result.append(program.is_match_with(&mut cache, string_value));
             }
         }
     } else {
@@ -956,7 +981,7 @@ mod tests {
         .unwrap();
         assert!(regex.is_some());
         assert!(!negative);
-        assert!(regex.unwrap().is_match("axxb"));
+        assert!(regex.unwrap().is_match("axxb").unwrap());
 
         // Test case for RegexIMatch (case insensitive, non-negative)
         let (regex, negative) = SimplePredicate::maybe_build_regex(
@@ -966,7 +991,7 @@ mod tests {
         .unwrap();
         assert!(regex.is_some());
         assert!(!negative);
-        assert!(regex.unwrap().is_match("AxxB"));
+        assert!(regex.unwrap().is_match("AxxB").unwrap());
 
         // Test case for RegexNotMatch (case sensitive, negative)
         let (regex, negative) = SimplePredicate::maybe_build_regex(
@@ -1004,12 +1029,20 @@ mod tests {
         assert!(regex.is_none());
         assert!(!negative);
 
-        // Test with invalid regex pattern
+        // Invalid regex patterns are rejected on first evaluation, not at construction.
         let result = SimplePredicate::maybe_build_regex(
             Operator::RegexMatch,
             &ScalarValue::Utf8(Some("a(b".to_string())),
         );
-        assert!(result.is_err());
+        let invalid = result.unwrap().0.unwrap();
+        assert_eq!(0, invalid.compilations());
+        assert!(invalid.is_match("anything").is_err());
+        assert!(invalid.is_match("anything").is_err());
+        assert_eq!(
+            1,
+            invalid.compilations(),
+            "invalid patterns are compiled only once"
+        );
 
         // Test with non-string value
         let result = SimplePredicate::maybe_build_regex(
@@ -1209,13 +1242,12 @@ mod tests {
         ];
 
         for pattern in patterns {
-            let compiled = CompiledRegex::new(pattern)
-                .unwrap_or_else(|e| panic!("{pattern:?} failed to compile: {e}"));
+            let compiled = CompiledRegex::new(pattern).unwrap();
             let reference = Regex::new(pattern).unwrap();
             for value in values {
                 assert_eq!(
                     reference.is_match(value),
-                    compiled.is_match(value),
+                    compiled.is_match(value).unwrap(),
                     "{pattern:?} on {value:?}"
                 );
             }
@@ -1349,6 +1381,7 @@ mod tests {
     /// A scan evaluates one expression per array, so the cache is acquired once per array and not
     /// once per row: 100 arrays of 3 rows cost 100 acquisitions, each searching 3 values.
     #[test]
+    #[allow(clippy::print_stdout)]
     fn test_evaluator_borrows_the_cache_once_per_array() {
         let evaluator = regex_column_evaluator("api|db", Operator::RegexMatch);
         let SimplePredicate::Comparison {
@@ -1356,26 +1389,177 @@ mod tests {
             ..
         } = &evaluator.predicate
         else {
-            panic!("the evaluator holds a compiled regex");
+            panic!("the evaluator holds a regex");
         };
         assert_eq!(0, compiled.cache_acquisitions());
+        assert_eq!(0, compiled.compilations());
 
         let array = Arc::new(StringArray::from(vec![Some("api"), None, Some("db")])) as ArrayRef;
+        let cloned = evaluator.clone();
         for arrays in 1..=100 {
+            let current = if arrays % 2 == 0 { &cloned } else { &evaluator };
             assert_eq!(
                 BooleanBuffer::from(vec![true, false, true]),
-                evaluator.evaluate_array(&array).unwrap()
+                current.evaluate_array(&array).unwrap()
             );
             assert_eq!(
                 arrays,
                 compiled.cache_acquisitions(),
                 "{arrays} arrays must cost {arrays} cache acquisitions, not one per row"
             );
+            assert_eq!(1, compiled.compilations());
+        }
+        println!(
+            "arrays: 100; cache acquisitions: {}; compilations: {}",
+            compiled.cache_acquisitions(),
+            compiled.compilations()
+        );
+    }
+
+    /// Invalid patterns are errors at evaluation, not silently rejected during construction.
+    #[test]
+    fn test_invalid_regex_is_reported_on_first_evaluation() {
+        let evaluator = regex_column_evaluator("a(b", Operator::RegexMatch);
+        let SimplePredicate::Comparison {
+            regex: Some(compiled),
+            ..
+        } = &evaluator.predicate
+        else {
+            panic!("missing regex");
+        };
+        let array = Arc::new(StringArray::from(vec!["abc"])) as ArrayRef;
+        assert_eq!(0, compiled.compilations());
+        for _ in 0..2 {
+            assert!(evaluator.evaluate_array(&array).is_err());
+        }
+        assert_eq!(1, compiled.compilations());
+        assert_eq!(0, compiled.cache_acquisitions());
+    }
+
+    /// Empty patterns use the match-all branch without compiling or checking out a cache.
+    #[test]
+    fn test_empty_regex_does_not_initialize_a_cache() {
+        let evaluator = regex_column_evaluator("", Operator::RegexMatch);
+        let SimplePredicate::Comparison { regex, .. } = &evaluator.predicate else {
+            panic!("missing comparison");
+        };
+        assert!(regex.is_none());
+        let array = Arc::new(StringArray::from(vec![Some(""), None, Some("日本")])) as ArrayRef;
+        for _ in 0..100 {
+            assert_eq!(
+                BooleanBuffer::from(vec![true, false, true]),
+                evaluator.evaluate_array(&array).unwrap()
+            );
         }
     }
 
-    /// One evaluator is evaluated by several threads at once during a scan, each taking the one
-    /// cache in turn.
+    /// Dictionary arrays also check out exactly one cache, including for null keys and values.
+    #[test]
+    #[allow(clippy::print_stdout)]
+    fn test_dictionary_evaluator_borrows_cache_once_per_array() {
+        let evaluator = regex_column_evaluator("api|db", Operator::RegexNotMatch);
+        let SimplePredicate::Comparison {
+            regex: Some(compiled),
+            ..
+        } = &evaluator.predicate
+        else {
+            panic!("missing regex");
+        };
+        let array = Arc::new(DictionaryArray::new(
+            UInt32Array::from(vec![Some(0), None, Some(1), Some(2)]),
+            Arc::new(StringArray::from(vec![Some("api"), None, Some("other")])),
+        )) as ArrayRef;
+        for _ in 0..100 {
+            assert_eq!(
+                BooleanBuffer::from(vec![false, false, false, true]),
+                evaluator.evaluate_array(&array).unwrap()
+            );
+        }
+        assert_eq!(1, compiled.compilations());
+        assert_eq!(100, compiled.cache_acquisitions());
+        println!(
+            "dictionary arrays: 100; cache acquisitions: {}; compilations: {}",
+            compiled.cache_acquisitions(),
+            compiled.compilations()
+        );
+    }
+
+    /// Prove eight evaluations reach the array kernel with their own checked-out cache at the
+    /// same time. A shared mutex held over the loop cannot pass the barrier and times out.
+    #[test]
+    #[allow(clippy::print_stdout)]
+    fn test_evaluator_cache_pool_allows_parallel_arrays() {
+        use std::sync::{Condvar, Mutex};
+        use std::time::Duration;
+
+        const THREADS: usize = 8;
+        const ARRAYS_PER_THREAD: usize = 5;
+        let evaluator = Arc::new(regex_column_evaluator("^api$", Operator::RegexMatch));
+        let SimplePredicate::Comparison {
+            regex: Some(compiled),
+            ..
+        } = &evaluator.predicate
+        else {
+            panic!("missing regex");
+        };
+        let rendezvous = Arc::new((Mutex::new((0usize, 0usize, false)), Condvar::new()));
+        let in_kernel = Arc::clone(&rendezvous);
+        assert!(
+            compiled
+                .after_cache_acquired
+                .set(Arc::new(move || {
+                    let (lock, wake) = &*in_kernel;
+                    let mut state = lock.lock().unwrap();
+                    if state.2 {
+                        return;
+                    }
+                    state.0 += 1;
+                    state.1 = state.1.max(state.0);
+                    if state.0 == THREADS {
+                        state.2 = true;
+                        wake.notify_all();
+                    } else {
+                        let (guard, _) = wake
+                            .wait_timeout_while(state, Duration::from_secs(5), |state| !state.2)
+                            .unwrap();
+                        state = guard;
+                    }
+                    state.0 -= 1;
+                }))
+                .is_ok()
+        );
+        let array = Arc::new(StringArray::from(vec![Some("api"), None, Some("db")])) as ArrayRef;
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let evaluator = Arc::clone(&evaluator);
+                let array = Arc::clone(&array);
+                scope.spawn(move || {
+                    for _ in 0..ARRAYS_PER_THREAD {
+                        assert_eq!(
+                            BooleanBuffer::from(vec![true, false, false]),
+                            evaluator.evaluate_array(&array).unwrap()
+                        );
+                    }
+                });
+            }
+        });
+        let state = rendezvous.0.lock().unwrap();
+        assert_eq!(
+            THREADS, state.1,
+            "all threads must hold a cache concurrently"
+        );
+        assert_eq!(1, compiled.compilations());
+        assert_eq!(THREADS * ARRAYS_PER_THREAD, compiled.cache_acquisitions());
+        println!(
+            "peak concurrent kernels: {}; compilations: {}; cache acquisitions: {}",
+            state.1,
+            compiled.compilations(),
+            compiled.cache_acquisitions()
+        );
+    }
+
+    /// One evaluator is evaluated by several threads at once during a scan, each borrowing its own
+    /// cache.
     #[test]
     fn test_evaluator_matches_from_several_threads() {
         let evaluator = Arc::new(regex_column_evaluator("^api$", Operator::RegexMatch));

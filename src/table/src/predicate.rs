@@ -15,8 +15,6 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arc_swap::ArcSwap;
 use common_recordbatch::DfRecordBatch;
@@ -262,8 +260,6 @@ impl Predicate {
         };
         let pattern = literal.try_as_str()?.map(str::to_string)?;
         let column = compile(&binary.left)?;
-        #[cfg(test)]
-        REGEX_PRECOMPILATIONS.fetch_add(1, Ordering::Relaxed);
 
         Some(Arc::new(PrecompiledRegexExpr {
             column,
@@ -329,12 +325,6 @@ impl Predicate {
     }
 }
 
-/// Number of regex patterns compiled by [`Predicate::to_physical_expr`], i.e. once per scan
-/// predicate that took the precompiled path. Evaluations do not compile, so a scan that evaluates
-/// many batches over one predicate compiles exactly one pattern.
-#[cfg(test)]
-static REGEX_PRECOMPILATIONS: AtomicUsize = AtomicUsize::new(0);
-
 /// Returns whether `data_type` is a string layout [`SimpleFilterEvaluator`] can evaluate.
 ///
 /// Its regex kernels accept `Utf8` and `Dictionary(UInt32, Utf8)` only; `LargeUtf8`, `Utf8View`
@@ -366,14 +356,13 @@ fn regex_column_type(expr: &Expr, schema: &arrow::datatypes::SchemaRef) -> Optio
     }
 }
 
-/// A regex comparison (`col =~ 'pattern'` / `col !~ 'pattern'`) whose pattern is compiled once.
+/// A regex comparison (`col =~ 'pattern'` / `col !~ 'pattern'`) compiled on first evaluation.
 ///
 /// `create_physical_expr` turns the comparison into a binary expression that recompiles the pattern
 /// on every evaluation, because arrow's `regexp_is_match_scalar` compiles the pattern it is given.
 /// A scan evaluates its physical expr once per batch, so that costs one `Regex::new` per batch, and
-/// a series scan evaluates one batch per series. [`SimpleFilterEvaluator`] already holds a compiled
-/// `CompiledRegex`; this expression wraps it so a scan pays one compilation, and the evaluator
-/// then searches a whole batch under one cache acquisition instead of one per row.
+/// a series scan evaluates one batch per series. [`SimpleFilterEvaluator`] lazily compiles its
+/// pattern once on first evaluation, then borrows one cache per batch rather than one per row.
 ///
 /// The result is bit-identical to the arrow expression it replaces: `evaluate_array` folds SQL
 /// `NULL` into `false`, so the column's logical nulls are restored afterwards — exactly the validity
@@ -382,7 +371,7 @@ fn regex_column_type(expr: &Expr, schema: &arrow::datatypes::SchemaRef) -> Optio
 struct PrecompiledRegexExpr {
     /// The column the pattern is matched against.
     column: Arc<dyn PhysicalExpr>,
-    /// The pattern, compiled once and reused by every evaluation.
+    /// The pattern, compiled on first evaluation and reused thereafter.
     filter: SimpleFilterEvaluator,
     /// The pattern text, kept for display and equality.
     pattern: String,
@@ -1672,19 +1661,6 @@ mod tests {
         assert!(physical_expr.is_ok());
     }
 
-    /// The compile counter is process-wide, so tests that read it must not interleave.
-    static REGEX_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn regex_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        REGEX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn regex_precompilations() -> usize {
-        REGEX_PRECOMPILATIONS.load(Ordering::Relaxed)
-    }
-
     fn regex_expr(column: &str, op: Operator, pattern: &str) -> Expr {
         Expr::BinaryExpr(BinaryExpr {
             left: Box::new(col(column)),
@@ -1751,16 +1727,22 @@ mod tests {
     /// kernel produces, for every string layout, with and without `NULL`s, for `=~` and `!~`.
     #[test]
     fn test_precompiled_regex_matches_arrow() {
-        let _guard = regex_test_guard();
-
-        let plain_nulls = vec![Some("host-a"), None, Some(""), Some("db"), Some("host-b")];
+        let plain_nulls = vec![
+            Some("host-a"),
+            None,
+            Some(""),
+            Some("db"),
+            Some("日本語"),
+            Some("HOST-B"),
+        ];
         // A dictionary with a `NULL` key and a `NULL` dictionary value: both are SQL `NULL`, and
         // the dictionary value's `NULL` is what a naive kernel loses.
         let dict_values = Arc::new(StringArray::from(vec![
             Some("host-a"),
-            Some("host-b"),
+            Some("HOST-B"),
             Some(""),
             None,
+            Some("日本語"),
         ])) as ArrayRef;
         let cases: Vec<(&str, DataType, ArrayRef, bool, bool)> = vec![
             (
@@ -1781,7 +1763,7 @@ mod tests {
                 "dictionary(UInt32, utf8) with nulls",
                 DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
                 Arc::new(DictionaryArray::new(
-                    UInt32Array::from(vec![Some(0), Some(1), Some(2), None, Some(3)]),
+                    UInt32Array::from(vec![Some(0), Some(1), Some(2), None, Some(3), Some(4)]),
                     dict_values.clone(),
                 )) as ArrayRef,
                 true,
@@ -1805,7 +1787,7 @@ mod tests {
                 "dictionary(UInt8, utf8) with nulls",
                 DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Utf8)),
                 Arc::new(DictionaryArray::new(
-                    UInt8Array::from(vec![Some(0u8), Some(1), Some(2), None, Some(3)]),
+                    UInt8Array::from(vec![Some(0u8), Some(1), Some(2), None, Some(3), Some(4)]),
                     dict_values.clone(),
                 )) as ArrayRef,
                 true,
@@ -1816,16 +1798,19 @@ mod tests {
         for (name, data_type, array, nullable, expect_precompiled) in cases {
             let (schema, batch) = regex_batch(data_type.clone(), array, nullable);
             for op in [Operator::RegexMatch, Operator::RegexNotMatch] {
-                for pattern in ["host.*", "^host-a$", "^(?:.*)$", ""] {
+                for pattern in [
+                    "host.*", "^host-a$", "^(?:.*)$", "", "(?i)host", "日本", "^$",
+                ] {
                     let expr = regex_expr("host", op, pattern);
-                    let before = regex_precompilations();
-                    assert_same_regex_result(&expr, &schema, &batch);
-                    let compiled = regex_precompilations() - before;
+                    let physical = Predicate::to_physical_expr(&expr, &schema).unwrap();
                     assert_eq!(
-                        usize::from(expect_precompiled),
-                        compiled,
-                        "{name}: {op:?} {pattern:?} compiled {compiled} patterns"
+                        expect_precompiled,
+                        physical.downcast_ref::<PrecompiledRegexExpr>().is_some(),
+                        "{name}: {op:?} {pattern:?}"
                     );
+                    assert_same_regex_result(&expr, &schema, &batch);
+                    let slice = batch.slice(1, batch.num_rows() - 1);
+                    assert_same_regex_result(&expr, &schema, &slice);
                 }
             }
         }
@@ -1835,7 +1820,7 @@ mod tests {
         let (schema, batch) = regex_batch(
             DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
             Arc::new(DictionaryArray::new(
-                UInt32Array::from(vec![Some(0), Some(1), Some(2), None, Some(3)]),
+                UInt32Array::from(vec![Some(0), Some(1), Some(2), None, Some(3), Some(4)]),
                 dict_values.clone(),
             )) as ArrayRef,
             true,
@@ -1849,21 +1834,107 @@ mod tests {
             op: Operator::RegexMatch,
             right: Box::new(lit("host.*")),
         });
-        let before = regex_precompilations();
+        let physical = Predicate::to_physical_expr(&expr, &schema).unwrap();
+        assert!(physical.downcast_ref::<PrecompiledRegexExpr>().is_some());
         assert_same_regex_result(&expr, &schema, &batch);
+    }
+
+    /// Pruning constructs the same physical expression but must not initialize its regex. The
+    /// per-regex compile counter is tested in common-recordbatch; here we verify the real pruning
+    /// entry point leaves that same OnceLock uninitialized until evaluation.
+    #[test]
+    #[allow(clippy::print_stdout)]
+    fn test_pruning_defers_regex_compilation_until_evaluation() {
+        let (schema, batch) = regex_batch(
+            DataType::Utf8,
+            Arc::new(StringArray::from(vec![Some("host-a"), None, Some("db")])) as ArrayRef,
+            true,
+        );
+        let predicate = Predicate::new(vec![regex_expr("host", Operator::RegexMatch, "host.*")]);
+        let physical_exprs = predicate.to_physical_exprs(&schema).unwrap();
+        assert_eq!(1, physical_exprs.len());
+        let physical = &physical_exprs[0];
+        let regex = physical.downcast_ref::<PrecompiledRegexExpr>().unwrap();
+        let initialized = || format!("{:?}", regex.filter);
+        assert!(
+            initialized().contains("initialized: false"),
+            "{}",
+            initialized()
+        );
+        println!("after to_physical_exprs: regex initializations = 0");
+
+        assert_eq!(
+            vec![Some(true), None, Some(false)],
+            evaluate_rows(physical, &batch)
+        );
+        assert!(
+            initialized().contains("initialized: true"),
+            "{}",
+            initialized()
+        );
+        println!("after first evaluate: regex initialized = true");
+        for _ in 0..100 {
+            assert_eq!(
+                vec![Some(true), None, Some(false)],
+                evaluate_rows(physical, &batch)
+            );
+        }
+        assert!(
+            initialized().contains("initialized: true"),
+            "{}",
+            initialized()
+        );
+        println!("after 100 further evaluations: same OnceLock remains initialized");
+    }
+
+    /// A malformed regex must be deferred too, but row evaluation still reports an error instead
+    /// of silently accepting the predicate as an exact match.
+    #[test]
+    #[allow(clippy::print_stdout)]
+    fn test_invalid_regex_fails_at_evaluation_not_construction() {
+        let (schema, batch) = regex_batch(
+            DataType::Utf8,
+            Arc::new(StringArray::from(vec![Some("host-a")])) as ArrayRef,
+            true,
+        );
+        let expr = regex_expr("host", Operator::RegexMatch, "host(");
+        // The old rewrite fell back to DataFusion on eager compilation failure. That physical
+        // planner does not compile the pattern, so it too reports this error on evaluation.
+        let old_fallback = arrow_regex_expr(&expr, &schema);
+        assert!(old_fallback.evaluate(&batch).is_err());
+        let predicate = Predicate::new(vec![expr]);
+        let physical_exprs = predicate.to_physical_exprs(&schema).unwrap();
         assert_eq!(
             1,
-            regex_precompilations() - before,
-            "a cast of a dictionary column is precompilable"
+            physical_exprs.len(),
+            "construction must retain the invalid regex"
+        );
+        let physical = &physical_exprs[0];
+        let regex = physical.downcast_ref::<PrecompiledRegexExpr>().unwrap();
+        assert!(format!("{:?}", regex.filter).contains("initialized: false"));
+        let error = physical
+            .evaluate(&batch)
+            .expect_err("invalid regex must fail on evaluate, not construction");
+        let DataFusionError::External(source) = &error else {
+            panic!("expected a common-recordbatch error, got: {error}");
+        };
+        assert!(
+            matches!(
+                source.downcast_ref::<common_recordbatch::error::Error>(),
+                Some(common_recordbatch::error::Error::ArrowCompute { .. })
+            ),
+            "expected ArrowCompute, got: {error}"
+        );
+        assert!(physical.evaluate(&batch).is_err());
+        assert!(format!("{:?}", regex.filter).contains("initialized: true"));
+        println!(
+            "invalid regex: 0 initializations after to_physical_exprs; first evaluate returned an error"
         );
     }
 
-    /// A scan compiles its patterns once and evaluates one expression per batch: the compilation
-    /// count must track scans, not batches.
+    /// A scan can repeatedly evaluate the same regex expression without changing its results.
     #[test]
-    fn test_regex_pattern_compiles_once_per_scan() {
-        let _guard = regex_test_guard();
-
+    fn test_regex_pattern_reused_across_batches() {
         let (schema, batch) = regex_batch(
             DataType::Utf8,
             Arc::new(StringArray::from(vec![
@@ -1877,16 +1948,10 @@ mod tests {
         );
         let expr = regex_expr("host", Operator::RegexMatch, "host.*");
 
-        let before = regex_precompilations();
         let physical = Predicate::to_physical_expr(&expr, &schema).unwrap();
         assert!(
             physical.downcast_ref::<PrecompiledRegexExpr>().is_some(),
-            "the scan-side predicate holds the compiled pattern: {physical}"
-        );
-        assert_eq!(
-            1,
-            regex_precompilations() - before,
-            "one scan compiles one pattern"
+            "the scan-side predicate holds the lazy pattern: {physical}"
         );
         assert_eq!("host@0 =~ 'host.*'", physical.to_string());
 
@@ -1896,19 +1961,6 @@ mod tests {
                 evaluate_rows(&physical, &batch)
             );
         }
-        assert_eq!(
-            1,
-            regex_precompilations() - before,
-            "evaluating 100 batches must not compile the pattern again"
-        );
-
-        // The pattern belongs to the scan, not to the process: a second scan compiles its own.
-        let _second = Predicate::to_physical_expr(&expr, &schema).unwrap();
-        assert_eq!(
-            2,
-            regex_precompilations() - before,
-            "each scan compiles its own pattern"
-        );
     }
 
     /// The predicate a native `rate(x{host=~'host.*'}[1m])` builds when the label column is
@@ -1919,8 +1971,6 @@ mod tests {
     /// touched by the precompiled path, and the rows are unchanged.
     #[test]
     fn test_nullable_label_matcher_keeps_shape_and_rows() {
-        let _guard = regex_test_guard();
-
         let (schema, batch) = regex_batch(
             DataType::Utf8,
             Arc::new(StringArray::from(vec![
@@ -1937,7 +1987,6 @@ mod tests {
                 .is_null()
                 .or(regex_expr("host", Operator::RegexMatch, "^(?:host.*)$"));
 
-        let before = regex_precompilations();
         let physical = Predicate::to_physical_expr(&expr, &schema).unwrap();
         // Shape: the `OR` survives, its null test is untouched, and only the comparison below it
         // is replaced by the precompiled form.
@@ -1957,13 +2006,8 @@ mod tests {
             "the regex below the OR is precompiled: {}",
             or.right()
         );
-        assert_eq!(
-            1,
-            regex_precompilations() - before,
-            "the nullable label matcher compiles its pattern once per scan"
-        );
 
-        // A missing label reads as the empty string in PromQL, so `NULL` must match `host.*`.
+        // The explicit OR makes a missing label match independently of the regex result.
         assert_eq!(
             vec![Some(true), Some(true), Some(false), Some(false), Some(true)],
             evaluate_rows(&physical, &batch)
@@ -1972,12 +2016,10 @@ mod tests {
     }
 
     /// A scan hands one physical expr to every thread that evaluates it, and the precompiled
-    /// expression owns the one cache those threads search with. Sharing it must neither panic nor
-    /// change an answer.
+    /// expression provides separate caches to concurrent searches. Sharing it must neither panic
+    /// nor change an answer.
     #[test]
     fn test_precompiled_regex_is_shared_between_threads() {
-        let _guard = regex_test_guard();
-
         let (schema, batch) = regex_batch(
             DataType::Utf8,
             Arc::new(StringArray::from(vec![
