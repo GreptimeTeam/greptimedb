@@ -39,7 +39,9 @@ use std::task::{Context, Poll};
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_query::series_frame::{pack_evaluated_series, unpack_evaluated_series};
-use common_recordbatch::adapter::{NATIVE_TREE_METRIC, format_metric};
+use common_recordbatch::adapter::{
+    NATIVE_TREE_METRIC, NativeTreeMetric, NativeTreeMetrics, format_metric,
+};
 use common_recordbatch::{
     EmptyRecordBatchStream, SendableRecordBatchStream as CommonSendableRecordBatchStream,
 };
@@ -103,7 +105,7 @@ use crate::histogram_eval::HistogramFunction;
 use crate::info::InfoSelector;
 use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
-use crate::native::metrics::{NodeMetric, NodeMetricsSnapshot};
+use crate::native::metrics::{NodeMetric, NodeMetricsSnapshot, is_node_metric};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr,
@@ -3623,6 +3625,26 @@ impl Display for Explain<'_> {
     }
 }
 
+/// The live tree registered in a physical operator's own metrics.
+fn native_tree(metrics: &MetricsSet) -> &NativeTreeMetric {
+    metrics
+        .iter()
+        .find_map(|metric| match metric.value() {
+            MetricValue::Custom { name, value } if name.as_ref() == NATIVE_TREE_METRIC => {
+                value.as_any().downcast_ref::<NativeTreeMetric>()
+            }
+            _ => None,
+        })
+        .expect("the operator reports its native tree")
+}
+
+fn tree_output_values(tree: &NativeTreeMetrics) -> usize {
+    tree.metrics
+        .iter()
+        .find_map(|(name, value)| (name == "output_values").then_some(*value))
+        .unwrap_or(0)
+}
+
 /// The logical node prints the compiled tree without metrics.
 #[test]
 fn fmt_for_explain_prints_the_native_tree() {
@@ -3761,6 +3783,133 @@ async fn metrics_reports_no_figure_of_the_tree_it_runs() {
         count(&registered, "native.root.output_values") > 0,
         "the run recorded no output for the window"
     );
+}
+
+/// Caching membership preserves the old filtering rule and the live tree's changing values.
+#[tokio::test]
+async fn metrics_membership_is_fixed_while_native_tree_values_change() {
+    let exec = plan(rate_tree(), memory_exec(two_series_frames())).unwrap();
+    let before = exec.metrics().unwrap();
+    let names = |metrics: &MetricsSet| {
+        metrics
+            .iter()
+            .map(|metric| metric.value().name().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(vec![NATIVE_TREE_METRIC.to_string()], names(&before));
+    assert_eq!(0, tree_output_values(&native_tree(&before).report()));
+
+    let batches = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let output_values = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    assert!(output_values > 0);
+
+    let after = exec.metrics().unwrap();
+    assert_eq!(before.iter().count(), after.iter().count());
+    assert_eq!(names(&before), names(&after));
+    for (initial, current) in before.iter().zip(after.iter()) {
+        assert!(Arc::ptr_eq(initial, current));
+    }
+    // The handle captured before execution must observe values registered afterwards, too.
+    assert_eq!(
+        output_values,
+        tree_output_values(&native_tree(&before).report())
+    );
+    assert_eq!(
+        output_values,
+        tree_output_values(&native_tree(&after).report())
+    );
+
+    // Compare the cached membership against the complete set using the pre-cache filtering rule.
+    // This also catches a future operator metric registered during execute but omitted by the cache.
+    let registered = node_metric_set(&exec);
+    let formerly_reported = registered
+        .iter()
+        .filter(|metric| {
+            matches!(metric.value(), MetricValue::Custom { .. })
+                || !is_node_metric(metric.value().name())
+        })
+        .map(|metric| metric.value().name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(formerly_reported, names(&after));
+}
+
+/// The complete registration and the ANALYZE tree retain figures from every execution partition.
+#[tokio::test]
+async fn native_tree_metrics_preserve_all_partitions() {
+    let partitions = [1.0, 2.0, 3.0]
+        .into_iter()
+        .enumerate()
+        .map(|(partition, scale)| {
+            vec![frame(&series_chunk(
+                &format!("web-{partition}"),
+                &series_samples(scale),
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let exec = plan(rate_tree(), memory_exec_partitioned(partitions)).unwrap();
+    let own = exec.metrics().unwrap();
+    assert_eq!(0, tree_output_values(&native_tree(&own).report()));
+    let context = SessionContext::default().task_ctx();
+
+    // Read the same cached handle after each partition; it must see later registrations as well.
+    for partition in 0..3 {
+        let batches = exec
+            .execute(partition, Arc::clone(&context))
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            GRID_LEN as usize,
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>()
+        );
+
+        let registered = node_metric_set(&exec);
+        for completed in 0..=partition {
+            let metric = registered
+                .iter()
+                .find(|metric| {
+                    metric.value().name() == "native.root.output_values"
+                        && metric.partition() == Some(completed)
+                })
+                .expect("the complete set retains each partition's output counter");
+            assert_eq!(GRID_LEN as usize, metric.value().as_usize());
+            assert!(registered.iter().any(|metric| {
+                metric.value().name() == "native.root.input.input_batches"
+                    && metric.partition() == Some(completed)
+                    && metric.value().as_usize() > 0
+            }));
+            assert!(registered.iter().any(|metric| {
+                metric.value().name() == format!("native.p{completed}.root.peak_reserved_bytes")
+                    && metric.partition() == Some(completed)
+            }));
+        }
+        let output_values = (partition + 1) * GRID_LEN as usize;
+        assert_eq!(
+            output_values,
+            count(&registered, "native.root.output_values")
+        );
+        let report = native_tree(&own).report();
+        assert_eq!(output_values, tree_output_values(&report));
+        // ANALYZE first aggregates operator metrics by name before reading the Custom tree.
+        let analyzed = native_tree(&own.aggregate_by_name()).report();
+        assert_eq!(output_values, tree_output_values(&analyzed));
+        assert!(
+            report.children[0]
+                .metrics
+                .iter()
+                .any(|(name, value)| { name == "input_batches" && *value == partition + 1 })
+        );
+
+        let text = displayable(exec.as_ref()).indent(false).to_string();
+        assert!(
+            tree_line(&text, "Window: rate").contains(&format!("output_values: {output_values}")),
+            "{text}"
+        );
+    }
 }
 
 /// Whether `name` is one of the figures a node of a tree registered, `native.<path>.<metric>`.
