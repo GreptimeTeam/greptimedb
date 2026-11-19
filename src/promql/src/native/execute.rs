@@ -561,6 +561,11 @@ impl NodeBuffer {
 
     /// Reserves `bytes` beside what this node already holds.
     pub(super) fn grow(&mut self, bytes: usize) -> Result<()> {
+        // A figure that does not move reserves nothing, so it is not a request the pool can refuse
+        // and not a figure worth recording.
+        if bytes == 0 {
+            return Ok(());
+        }
         self.reservation.try_grow(bytes)?;
         self.record();
         Ok(())
@@ -569,13 +574,37 @@ impl NodeBuffer {
     /// Reserves exactly `bytes`, which is what this node holds from now on: a node that consumes its
     /// input chunk by chunk is set from the state that is left, not grown per chunk.
     pub(super) fn resize(&mut self, bytes: usize) -> Result<()> {
+        // The node already holds this figure: there is nothing to move and nothing to record.
+        if bytes == self.reservation.size() {
+            return Ok(());
+        }
         self.reservation.try_resize(bytes)?;
         self.record();
         Ok(())
     }
 
+    /// Reserves `held` and the `beside` its work needs as one request.
+    ///
+    /// Both are held at the same time and both are admitted before that work starts. One request
+    /// instead of two leaves no moment in which the pool has admitted only half of what the node is
+    /// charged for, and no separate admission for a total the pool has to see as one figure.
+    pub(super) fn grow_held(&mut self, held: usize, beside: usize) -> Result<()> {
+        let bytes = held.checked_add(beside).ok_or_else(|| {
+            DataFusionError::Execution(
+                "one chunk and its workspace do not fit one address space: the bytes they would \
+                 reserve overflow"
+                    .to_string(),
+            )
+        })?;
+        self.grow(bytes)
+    }
+
     /// Gives `bytes` of what this node holds back to the pool.
     fn shrink(&mut self, bytes: usize) -> Result<()> {
+        // Giving back nothing leaves the figure where it is.
+        if bytes == 0 {
+            return Ok(());
+        }
         self.reservation.try_shrink(bytes)?;
         self.record();
         Ok(())
@@ -5124,8 +5153,7 @@ impl NodeState {
         // The chunk is held for as long as this node works on it, beside the series its
         // operations write.
         let workspace = map_workspace_bytes(&map.ops, &chunk.series)?;
-        self.buffer.grow(evaluated_bytes(&chunk))?;
-        self.buffer.grow(workspace)?;
+        self.buffer.grow_held(evaluated_bytes(&chunk), workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             // The timer covers this node's own work only: it is dropped before the driver polls
@@ -5173,8 +5201,7 @@ impl NodeState {
     ) -> Result<Option<EvaluatedChunk>> {
         let (positions, closing) = (chunk.series.time.len(), chunk.is_last);
         let workspace = built_series_workspace_bytes(&chunk.series)?;
-        self.buffer.grow(evaluated_bytes(&chunk))?;
-        self.buffer.grow(workspace)?;
+        self.buffer.grow_held(evaluated_bytes(&chunk), workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             let _timer = metrics.timer();
@@ -5236,8 +5263,7 @@ impl NodeState {
                     "the workspace of timestamp does not fit one address space".to_string(),
                 )
             })?;
-        self.buffer.grow(evaluated_bytes(&chunk))?;
-        self.buffer.grow(scratch)?;
+        self.buffer.grow_held(evaluated_bytes(&chunk), scratch)?;
         let labels = drop_metric_name(&chunk.series.metric)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let result = {
@@ -5294,8 +5320,7 @@ impl NodeState {
             }
             _ => built_series_workspace_bytes(&chunk.series)?,
         };
-        self.buffer.grow(evaluated_bytes(&chunk))?;
-        self.buffer.grow(workspace)?;
+        self.buffer.grow_held(evaluated_bytes(&chunk), workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             // The timer covers this node's own work only: it is dropped before the driver polls
@@ -5431,8 +5456,7 @@ impl NodeState {
             // The evaluator refuses a raw chunk without labels before it writes a row.
             None => 0,
         };
-        self.buffer.grow(chunk.bytes())?;
-        self.buffer.grow(workspace)?;
+        self.buffer.grow_held(chunk.bytes(), workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             let _timer = metrics.timer();
@@ -5766,9 +5790,6 @@ impl NodeState {
             ));
         };
         let (positions, closing) = (chunk.time.len(), chunk.is_last);
-        // The chunk is held from here on: a selection keeps every chunk of a series until the one
-        // that closes it, so what this node reserves for is the series it has buffered.
-        self.buffer.grow(raw_bytes(&chunk))?;
         // The chunk that closes the series gathers it in one go, and the gather allocates a workspace of
         // its own beside the buffered chunks: the axis it concatenates, the descriptors that read it, the
         // two arrays the selection returns and the rows the builder keeps. It is reserved here, before it
@@ -5778,7 +5799,10 @@ impl NodeState {
         } else {
             0
         };
-        self.buffer.grow(scratch)?;
+        // The chunk is held from here on -- a selection keeps every chunk of a series until the one
+        // that closes it, so what this node reserves for is the series it has buffered -- and the
+        // gather's workspace is admitted with it, in one request.
+        self.buffer.grow_held(raw_bytes(&chunk), scratch)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             // The timer covers this node's own work only: it is dropped before the driver polls

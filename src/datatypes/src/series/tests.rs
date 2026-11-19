@@ -14,12 +14,44 @@
 
 use std::sync::Arc;
 
-use super::{Label, SeriesLabels};
+use super::{Label, LabelStorage, SeriesLabels};
 
 fn label(name: &str, value: &str) -> Label {
     Label {
         name: Arc::from(name),
         value: Arc::from(value),
+    }
+}
+
+/// The unconditionally rebuilding `keep_only` the early return replaces, as an oracle.
+fn keep_only_oracle(metric: &mut SeriesLabels, labels: &[&str]) {
+    if !labels.contains(&"__name__") {
+        metric.name = None;
+    }
+    let kept: Vec<_> = metric
+        .tags()
+        .iter()
+        .filter(|tag| labels.contains(&tag.name.as_ref()))
+        .cloned()
+        .collect();
+    if kept.len() != metric.tags().len() {
+        metric.tags = LabelStorage::Owned(kept.into());
+    }
+}
+
+/// The unconditionally rebuilding `remove_all` the early return replaces, as an oracle.
+fn remove_all_oracle(metric: &mut SeriesLabels, labels: &[&str]) {
+    if labels.contains(&"__name__") {
+        metric.name = None;
+    }
+    let kept: Vec<_> = metric
+        .tags()
+        .iter()
+        .filter(|tag| !labels.contains(&tag.name.as_ref()))
+        .cloned()
+        .collect();
+    if kept.len() != metric.tags().len() {
+        metric.tags = LabelStorage::Owned(kept.into());
     }
 }
 
@@ -107,6 +139,109 @@ fn keep_only_and_remove_all_handle_metric_name_and_ordinary_labels() {
     assert_eq!(metric.get("zone"), Some("west"));
     metric.remove_all(&["zone"]);
     assert!(metric.tags().is_empty());
+}
+
+/// Ordinary labels as `(name, value)` pairs.
+type Tags<'a> = &'a [(&'a str, &'a str)];
+
+/// The labels an operation names.
+type Names<'a> = &'a [&'a str];
+
+/// `(metric name, ordinary labels, labels the operation names)`.
+type LabelCase = (Option<&'static str>, Tags<'static>, Names<'static>);
+
+const LABEL_CASES: &[LabelCase] = &[
+    // Nothing to drop: the existing label array already is the answer.
+    (
+        Some("cpu"),
+        &[("host", "a"), ("zone", "west")],
+        &["__name__", "host", "zone"],
+    ),
+    // No ordinary labels at all.
+    (Some("cpu"), &[], &["__name__", "host"]),
+    (None, &[], &[]),
+    // Only the metric name changes; the label array stays shared.
+    (
+        Some("cpu"),
+        &[("host", "a"), ("zone", "west")],
+        &["host", "zone"],
+    ),
+    // Partial removal, with the metric name kept or dropped.
+    (
+        Some("cpu"),
+        &[("host", "a"), ("zone", "west")],
+        &["__name__", "host"],
+    ),
+    (Some("cpu"), &[("host", "a"), ("zone", "west")], &["host"]),
+    // Every label removed or kept, and a selection the labels do not intersect.
+    (Some("cpu"), &[("host", "a"), ("zone", "west")], &[]),
+    (None, &[("host", "a")], &["host", "other"]),
+];
+
+/// Differentially checks one operation against its unconditionally rebuilding oracle.
+fn assert_operation(
+    apply: fn(&mut SeriesLabels, &[&str]),
+    oracle: fn(&mut SeriesLabels, &[&str]),
+    drops_tag: fn(Tags<'_>, Names<'_>) -> bool,
+) {
+    for &(name, tags, selection) in LABEL_CASES {
+        let case = format!("name={name:?} tags={tags:?} selection={selection:?}");
+        let input = SeriesLabels::try_new(
+            name.map(Arc::from),
+            tags.iter()
+                .map(|&(name, value)| label(name, value))
+                .collect(),
+        )
+        .unwrap();
+
+        let mut actual = input.clone();
+        apply(&mut actual, selection);
+        let mut expected = input.clone();
+        oracle(&mut expected, selection);
+
+        assert_eq!(actual.name(), expected.name(), "{case}");
+        assert_eq!(actual.tags().len(), expected.tags().len(), "{case}");
+        for (got, want) in actual.tags().iter().zip(expected.tags()) {
+            assert_eq!(
+                (got.name.as_ref(), got.value.as_ref()),
+                (want.name.as_ref(), want.value.as_ref()),
+                "{case}"
+            );
+            // Kept labels keep sharing the strings they shared before.
+            assert!(Arc::ptr_eq(&got.name, &want.name), "{case}");
+            assert!(Arc::ptr_eq(&got.value, &want.value), "{case}");
+        }
+        assert_eq!(actual, expected, "{case}");
+
+        if !drops_tag(tags, selection) {
+            assert!(
+                std::ptr::eq(actual.tags(), input.tags()),
+                "unchanged labels must stay shared instead of being rebuilt: {case}"
+            );
+            // Nothing was dropped and the metric name did not change: the result is the input.
+            if actual.name() == input.name() {
+                assert_eq!(actual, input, "{case}");
+            }
+        }
+    }
+}
+
+#[test]
+fn keep_only_leaves_unchanged_labels_shared() {
+    assert_operation(
+        SeriesLabels::keep_only,
+        keep_only_oracle,
+        |tags, selection| tags.iter().any(|(name, _)| !selection.contains(name)),
+    );
+}
+
+#[test]
+fn remove_all_leaves_unchanged_labels_shared() {
+    assert_operation(
+        SeriesLabels::remove_all,
+        remove_all_oracle,
+        |tags, selection| tags.iter().any(|(name, _)| selection.contains(name)),
+    );
 }
 
 #[test]

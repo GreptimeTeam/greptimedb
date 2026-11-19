@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -738,6 +739,9 @@ impl DfQueryPlanner {
 #[derive(Debug)]
 pub(super) struct MetricsMemoryPool {
     inner: Arc<dyn MemoryPool>,
+    /// The figure [`QUERY_MEMORY_POOL_USAGE_BYTES`] was last set to from this pool, so a pool
+    /// operation that leaves the reservation where it was does not rewrite the gauge.
+    recorded_usage: AtomicI64,
 }
 
 impl MetricsMemoryPool {
@@ -756,12 +760,25 @@ impl MetricsMemoryPool {
                 Arc::new(TrackConsumersPool::new(FairSpillPool::new(limit), top_n))
             }
         };
-        Self { inner }
+        Self {
+            inner,
+            recorded_usage: AtomicI64::new(0),
+        }
     }
 
+    /// Records what the pool holds in the gauge when that figure moved, and says whether it did.
+    ///
+    /// A node grows and shrinks the pool many times inside one chunk while the figure itself moves
+    /// far less often; the gauge mirrors the figure, it is not a log of the calls.
     #[inline]
-    fn update_metrics(&self) {
-        QUERY_MEMORY_POOL_USAGE_BYTES.set(self.inner.reserved() as i64);
+    fn update_metrics(&self) -> bool {
+        let reserved = self.inner.reserved() as i64;
+        if self.recorded_usage.load(Ordering::Relaxed) == reserved {
+            return false;
+        }
+        self.recorded_usage.store(reserved, Ordering::Relaxed);
+        QUERY_MEMORY_POOL_USAGE_BYTES.set(reserved);
+        true
     }
 }
 
@@ -784,12 +801,22 @@ impl MemoryPool for MetricsMemoryPool {
         self.inner.unregister(consumer);
     }
 
+    // A request for no bytes asks the pool for nothing: it is not a reservation, so it is not
+    // admitted, refused or recorded. Passing it on is what turns "the pool is oversubscribed"
+    // into a refusal of a call that would not have changed the figure.
+
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        if additional == 0 {
+            return;
+        }
         self.inner.grow(reservation, additional);
         self.update_metrics();
     }
 
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        if shrink == 0 {
+            return;
+        }
         self.inner.shrink(reservation, shrink);
         self.update_metrics();
     }
@@ -799,6 +826,9 @@ impl MemoryPool for MetricsMemoryPool {
         reservation: &MemoryReservation,
         additional: usize,
     ) -> datafusion_common::Result<()> {
+        if additional == 0 {
+            return Ok(());
+        }
         let result = self.inner.try_grow(reservation, additional);
         if result.is_err() {
             QUERY_MEMORY_POOL_REJECTED_TOTAL.inc();
@@ -1288,6 +1318,76 @@ mod tests {
         if let Err(error) = result {
             assert!(format!("{error}").contains("DiskManager is disabled"));
         }
+    }
+
+    #[test]
+    fn test_metrics_memory_pool_does_not_refuse_or_record_zero_bytes() {
+        let metrics_pool = Arc::new(MetricsMemoryPool::new(100, QueryMemoryPoolPolicy::Greedy));
+        let pool: Arc<dyn MemoryPool> = metrics_pool.clone();
+        let reservation = MemoryConsumer::new("zero").register(&pool);
+        // `MemoryPool::grow` is the infallible path and always grants, so a pool can hold more than
+        // its limit. A request for nothing must not turn that into a refusal.
+        reservation.grow(120);
+        assert_eq!(pool.reserved(), 120);
+        assert!(
+            !metrics_pool.update_metrics(),
+            "the call that moved the figure has already recorded it"
+        );
+
+        reservation.try_grow(0).expect("a no-op reserves nothing");
+        reservation
+            .try_shrink(0)
+            .expect("a no-op gives back nothing");
+        reservation
+            .try_resize(120)
+            .expect("the figure does not move");
+        assert_eq!(pool.reserved(), 120);
+        assert!(!metrics_pool.update_metrics());
+
+        // The pool still refuses what would not fit, and still counts the refusal.
+        let rejected = QUERY_MEMORY_POOL_REJECTED_TOTAL.get();
+        let error = reservation
+            .try_grow(1)
+            .expect_err("a real request is still refused");
+        assert!(
+            matches!(error, DataFusionError::ResourcesExhausted(_)),
+            "{error:?}"
+        );
+        assert!(QUERY_MEMORY_POOL_REJECTED_TOTAL.get() > rejected);
+        assert_eq!(pool.reserved(), 120);
+    }
+
+    #[test]
+    fn test_metrics_memory_pool_records_a_figure_only_when_it_moves() {
+        let metrics_pool = Arc::new(MetricsMemoryPool::new(1000, QueryMemoryPoolPolicy::Greedy));
+        let pool: Arc<dyn MemoryPool> = metrics_pool.clone();
+        let reservation = MemoryConsumer::new("gauge").register(&pool);
+        // Nothing is reserved yet, so there is nothing to record.
+        assert!(!metrics_pool.update_metrics());
+        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 0);
+
+        // A figure that moves through the pool is recorded by the call that moved it.
+        reservation.try_grow(300).unwrap();
+        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 300);
+        assert!(
+            !metrics_pool.update_metrics(),
+            "an unchanged figure is not rewritten"
+        );
+
+        // A figure that moves beside the wrapper is recorded when the figure is next read.
+        metrics_pool.inner.grow(&reservation, 200);
+        assert!(metrics_pool.update_metrics(), "a moved figure is recorded");
+        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 500);
+        assert!(!metrics_pool.update_metrics());
+
+        metrics_pool.inner.shrink(&reservation, 200);
+        assert_eq!(pool.reserved(), 300);
+        assert!(metrics_pool.update_metrics());
+        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 300);
+
+        reservation.try_shrink(300).unwrap();
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 0);
     }
 
     #[test]
