@@ -25,7 +25,7 @@ use store_api::storage::SequenceRange;
 
 use crate::error::{self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu};
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
-use crate::memtable::bulk::part::EncodedBulkPart;
+use crate::memtable::bulk::part::ParquetBulkPart;
 use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
 use crate::memtable::{MemScanMetrics, MemScanMetricsData};
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
@@ -36,7 +36,7 @@ use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, prefilter_flat_batc
 /// Iterator for reading an encoded Parquet bulk part.
 /// Narthex parts are dispatched by `EncodedBulkPart::read` through their sample
 /// decoder and [`BulkPartBatchIter`] instead.
-pub struct EncodedBulkPartIter {
+pub struct ParquetBulkPartIter {
     context: BulkIterContextRef,
     row_groups_to_read: VecDeque<usize>,
     current_reader: Option<ParquetRecordBatchReader>,
@@ -53,26 +53,18 @@ pub struct EncodedBulkPartIter {
     mem_scan_metrics: Option<MemScanMetrics>,
 }
 
-impl EncodedBulkPartIter {
+impl ParquetBulkPartIter {
     /// Creates an iterator for an encoded Parquet bulk part.
     pub fn try_new(
-        encoded_part: &EncodedBulkPart,
+        part: &ParquetBulkPart,
+        series_count: usize,
         context: BulkIterContextRef,
         mut row_groups_to_read: VecDeque<usize>,
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> error::Result<Self> {
-        let parquet_meta = encoded_part
-            .parquet_metadata()
-            .ok_or_else(|| {
-                crate::series_index::columnar::invalid("expected Parquet bulk metadata")
-            })?
-            .clone();
-        let data = encoded_part
-            .data()
-            .ok_or_else(|| crate::series_index::columnar::invalid("expected Parquet bulk bytes"))?
-            .clone();
-        let series_count = encoded_part.metadata().num_series as usize;
+        let parquet_meta = part.metadata.clone();
+        let data = part.data.clone();
 
         // TODO(fys): Nested projection pushdown to the memtable layer is not supported yet.
         let root_indices = context
@@ -182,7 +174,7 @@ impl EncodedBulkPartIter {
     }
 }
 
-impl Iterator for EncodedBulkPartIter {
+impl Iterator for ParquetBulkPartIter {
     type Item = error::Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -197,10 +189,10 @@ impl Iterator for EncodedBulkPartIter {
     }
 }
 
-impl Drop for EncodedBulkPartIter {
+impl Drop for ParquetBulkPartIter {
     fn drop(&mut self) {
         common_telemetry::debug!(
-            "EncodedBulkPartIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}, prefilter_cost={:?}, prefilter_rows_filtered={}",
+            "ParquetBulkPartIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}, prefilter_cost={:?}, prefilter_rows_filtered={}",
             self.context.region_id(),
             self.metrics.total_series,
             self.metrics.num_rows,

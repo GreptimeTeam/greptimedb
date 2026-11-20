@@ -66,7 +66,7 @@ use crate::error::{
     NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
-use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
+use crate::memtable::bulk::part_reader::ParquetBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
 use crate::sst::SeriesEstimator;
@@ -1263,17 +1263,29 @@ pub struct EncodedBulkPart {
 
 #[derive(Debug, Clone)]
 enum EncodedBulkPayload {
-    Parquet {
-        data: Bytes,
-        metadata: Arc<ParquetMetaData>,
-    },
+    Parquet(ParquetBulkPart),
     Narthex(crate::series_index::samples::bulk::NarthexBulkPart),
 }
 
+/// Encoded Parquet bytes and their corresponding file metadata.
+#[derive(Debug, Clone)]
+pub struct ParquetBulkPart {
+    pub(crate) data: Bytes,
+    pub(crate) metadata: Arc<ParquetMetaData>,
+}
+
 impl EncodedBulkPart {
+    /// Returns the Parquet payload, if this part uses Parquet encoding.
+    pub fn parquet_part(&self) -> Option<&ParquetBulkPart> {
+        match &self.payload {
+            EncodedBulkPayload::Parquet(part) => Some(part),
+            EncodedBulkPayload::Narthex(_) => None,
+        }
+    }
+
     pub fn parquet_metadata(&self) -> Option<&Arc<ParquetMetaData>> {
         match &self.payload {
-            EncodedBulkPayload::Parquet { metadata, .. } => Some(metadata),
+            EncodedBulkPayload::Parquet(part) => Some(&part.metadata),
             EncodedBulkPayload::Narthex(_) => None,
         }
     }
@@ -1289,7 +1301,7 @@ impl EncodedBulkPart {
     /// Returns the size of the encoded data in bytes
     pub(crate) fn size_bytes(&self) -> usize {
         match &self.payload {
-            EncodedBulkPayload::Parquet { data, .. } => data.len(),
+            EncodedBulkPayload::Parquet(part) => part.data.len(),
             EncodedBulkPayload::Narthex(part) => part.size_bytes(),
         }
     }
@@ -1297,7 +1309,7 @@ impl EncodedBulkPart {
     /// Only Parquet parts can use the existing direct-upload shortcut.
     pub fn data(&self) -> Option<&Bytes> {
         match &self.payload {
-            EncodedBulkPayload::Parquet { data, .. } => Some(data),
+            EncodedBulkPayload::Parquet(part) => Some(&part.data),
             EncodedBulkPayload::Narthex(_) => None,
         }
     }
@@ -1363,7 +1375,7 @@ impl EncodedBulkPart {
     pub(crate) fn primary_keys(&self) -> Option<crate::memtable::BoxedPrimaryKeyIterator> {
         match &self.payload {
             EncodedBulkPayload::Narthex(part) => Some(part.primary_keys()),
-            EncodedBulkPayload::Parquet { .. } => None,
+            EncodedBulkPayload::Parquet(_) => None,
         }
     }
 
@@ -1373,10 +1385,11 @@ impl EncodedBulkPart {
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
-        if let EncodedBulkPayload::Narthex(part) = &self.payload {
-            let iter =
-                part.read(self.schema.clone())
-                    .flat_map(move |batch| -> BoxedRecordBatchIterator {
+        let parquet_part = match &self.payload {
+            EncodedBulkPayload::Parquet(part) => part,
+            EncodedBulkPayload::Narthex(part) => {
+                let iter = part.read(self.schema.clone()).flat_map(
+                    move |batch| -> BoxedRecordBatchIterator {
                         match batch {
                             Ok(batch) => {
                                 Box::new(super::part_reader::BulkPartBatchIter::from_single(
@@ -1389,12 +1402,12 @@ impl EncodedBulkPart {
                             }
                             Err(error) => Box::new(std::iter::once(Err(error))),
                         }
-                    });
-            return Ok(Some(Box::new(iter)));
-        }
-        let parquet_metadata = self.parquet_metadata().ok_or_else(|| {
-            crate::series_index::columnar::invalid("missing Parquet bulk metadata")
-        })?;
+                    },
+                );
+                return Ok(Some(Box::new(iter)));
+            }
+        };
+        let parquet_metadata = &parquet_part.metadata;
         // Compute skip_fields for row group pruning from the configured pre-filter mode.
         let skip_fields_for_pruning = context.pre_filter_mode().skip_fields();
 
@@ -1407,8 +1420,9 @@ impl EncodedBulkPart {
             return Ok(None);
         }
 
-        let iter = EncodedBulkPartIter::try_new(
-            self,
+        let iter = ParquetBulkPartIter::try_new(
+            parquet_part,
+            self.metadata.num_series as usize,
             context,
             row_groups_to_read,
             sequence,
@@ -1585,10 +1599,10 @@ impl BulkPartEncoder {
         let num_series = series_estimator.finish();
 
         Ok(Some(EncodedBulkPart {
-            payload: EncodedBulkPayload::Parquet {
+            payload: EncodedBulkPayload::Parquet(ParquetBulkPart {
                 data: buf,
                 metadata: parquet_metadata,
-            },
+            }),
             metadata: BulkPartMeta {
                 num_rows: total_rows,
                 max_timestamp,
@@ -1633,10 +1647,10 @@ impl BulkPartEncoder {
         let parquet_metadata = Arc::new(file_metadata);
 
         Ok(Some(EncodedBulkPart {
-            payload: EncodedBulkPayload::Parquet {
+            payload: EncodedBulkPayload::Parquet(ParquetBulkPart {
                 data: buf,
                 metadata: parquet_metadata,
-            },
+            }),
             metadata: BulkPartMeta {
                 num_rows: part.batch.num_rows(),
                 max_timestamp: part.max_timestamp,
