@@ -1317,6 +1317,12 @@ async fn test_cancelled_queued_unit_releases_fenced_ddl(
     let pause_waiters = pause_first.then(|| {
         let first = pending_pause(&mut scheduler, region_id);
         let second = pending_pause(&mut scheduler, region_id);
+        let (active, _) =
+            CompactionState::current(&scheduler.region_status[&region_id].shared_state);
+        assert_eq!(
+            active.unwrap().snapshot(None).state.as_ref(),
+            compaction_task::STATE_CANCELLING
+        );
         [first, second]
     });
 
