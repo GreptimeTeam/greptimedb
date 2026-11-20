@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use futures_util::{Stream, TryStreamExt, future, pin_mut, stream};
 use store_api::storage::RegionId;
@@ -26,7 +27,7 @@ use crate::utils;
 
 // The row limit bounds per-row protobuf overhead. The byte limit counts key/value payload.
 const COPY_BATCH_ROWS: usize = 8 * 1024;
-const COPY_BATCH_BYTES: usize = 4 * 1024 * 1024;
+const COPY_BATCH_BYTES: ReadableSize = ReadableSize::mb(4);
 
 impl MetadataRegion {
     /// Updates logical region metadata so that any entries previously referencing
@@ -106,7 +107,8 @@ impl MetadataRegion {
         while let Some((key, value)) = entries.try_next().await? {
             let size = key.len() + value.len();
             if !batch.is_empty()
-                && (batch.len() == COPY_BATCH_ROWS || bytes + size > COPY_BATCH_BYTES)
+                && (batch.len() == COPY_BATCH_ROWS
+                    || bytes + size > COPY_BATCH_BYTES.as_bytes() as usize)
             {
                 self.put_entries(target, std::mem::take(&mut batch)).await?;
                 bytes = 0;
@@ -158,7 +160,10 @@ mod tests {
         // The oversized first entry is flushed alone. The second is still buffered
         // when the input fails, so a retry must be able to replay the first entry.
         let entries = [
-            ("large".to_string(), "x".repeat(COPY_BATCH_BYTES + 1)),
+            (
+                "large".to_string(),
+                "x".repeat(COPY_BATCH_BYTES.as_bytes() as usize + 1),
+            ),
             ("tail".to_string(), "value".to_string()),
         ];
         let failure = crate::error::InvalidRequestSnafu {
