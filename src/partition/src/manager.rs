@@ -28,7 +28,9 @@ use store_api::metric_engine_consts::{
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
-use crate::cache::{CachedPartitionInfo, PartitionInfoCacheRef, PhysicalPartitionInfo};
+use crate::cache::{
+    CachedPartitionInfo, PartitionInfoCacheRef, PartitionRoutingCache, PhysicalPartitionInfo,
+};
 use crate::error::{FindLeaderSnafu, Result};
 use crate::expr::PartitionExpr;
 use crate::multi_dim::MultiDimPartitionRule;
@@ -46,6 +48,7 @@ pub struct PartitionRuleManager {
     table_route_manager: TableRouteManager,
     table_route_cache: TableRouteCacheRef,
     partition_info_cache: PartitionInfoCacheRef,
+    routing_cache: PartitionRoutingCache,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +74,7 @@ impl PartitionRuleManager {
             table_route_manager: TableRouteManager::new(kv_backend),
             table_route_cache,
             partition_info_cache,
+            routing_cache: PartitionRoutingCache::new(64 * 1024 * 1024),
         }
     }
 
@@ -209,6 +213,16 @@ impl PartitionRuleManager {
                 Ok(info)
             }
         }
+    }
+
+    /// Builds a payload rule sharing completed routing results with other requests.
+    /// The supplied physical snapshot owns column ordering and fences stale results.
+    pub fn cached_physical_partition_rule(
+        &self,
+        table_id: TableId,
+        snapshot: Arc<PhysicalPartitionInfo>,
+    ) -> Result<PartitionRuleRef> {
+        self.routing_cache.rule(table_id, snapshot)
     }
 
     pub async fn batch_find_table_partitions(

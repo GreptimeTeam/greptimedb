@@ -10633,6 +10633,7 @@ version = "1.4.0-alpha.0"
 dependencies = [
  "api",
  "common-base",
+ "common-cache",
  "common-error",
  "common-macro",
  "common-meta",
