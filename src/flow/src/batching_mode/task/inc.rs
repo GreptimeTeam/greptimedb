@@ -290,11 +290,9 @@ impl BatchingTask {
                         .build()
                     })?)
                 } else {
-                    // The owner of the cursor proved its expression slices. Send them
-                    // instead of the region projection: a reader holding a file adopted
-                    // from another region can only filter its rows by the cursor of the
-                    // slice the file belongs to, and the projection would hand it the
-                    // least advanced slice of the whole region.
+                    // The owner of the cursor proved its expression slices: send them instead
+                    // of the region projection, so a reader of an adopted file can filter its
+                    // rows by the slice the file belongs to.
                     Some(
                         query::options::encode_incremental_after_seqs(shards).map_err(|err| {
                             UnexpectedSnafu {

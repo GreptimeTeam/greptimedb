@@ -439,19 +439,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
             return RegionEditDispatch::Rejected;
         }
-        // An edit re-homes files; it records no region-level sequence boundary. The
-        // numbers an imported file carries are its creator's, and a substitution is
-        // stated per file by `FileMeta::substituted_up_to`, which the holder-side
-        // re-mark keeps verbatim: the re-mark re-stamps `sequence` and clears
-        // `preserve_row_sequence` for the files that changed hands, but it never invents
-        // or clears a cut. That per-file record is the only statement of that kind the
-        // engine keeps.
-        //
-        // `prepare_region_edit` already assigned the destination sequence to the
-        // added files (keeping the source sequence of adopted shared files) and cleared
-        // `preserve_row_sequence` only for the files whose `region_id` is another
-        // region's; a file this region already owned keeps the marker it states, because
-        // its row numbers were allocated here.
+        // An edit re-homes files; it records no region-level sequence boundary. The re-mark
+        // re-stamps `sequence` and clears `preserve_row_sequence` only for the files that changed
+        // hands; `FileMeta::substituted_up_to` is kept verbatim.
         // Allow retrieving `is_staging` before spawn the edit region task.
         let is_staging = region.is_staging();
         let expect_state = if is_staging {

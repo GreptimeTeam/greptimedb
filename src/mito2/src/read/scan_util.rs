@@ -1533,13 +1533,10 @@ pub(crate) async fn scan_flat_file_ranges(
 /// (`__primary_key`, `__sequence`, `__op_type`), so it must be applied before any
 /// projection/compat conversion that drops internal columns.
 ///
-/// `file_sequence_trusted` is the per-file trust decision. Foreign reader
-/// batches have already been virtualized to the target-local file barrier, so
-/// they are filtered using the effective batch sequence. A local file whose marker is
-/// unset is left untouched only when it has no substituted cut: the exact-range
-/// capability excludes such a file from the region's range before row filtering. A
-/// local file that states a cut is filtered like a trusted one, because its cut already
-/// hid the rows a substitution produced.
+/// `file_sequence_trusted` is the per-file trust decision. Foreign batches have already been
+/// virtualized to the target-local file barrier, so they are filtered by the effective batch
+/// sequence. A local file whose marker is unset is filtered like a trusted one only when it
+/// states a substituted cut, which already hid the rows a substitution produced.
 pub(crate) fn filter_flat_batch_by_sequence(
     record_batch: RecordBatch,
     sequence_range: Option<SequenceRange>,
@@ -1625,30 +1622,16 @@ pub fn build_flat_file_range_scan_stream(
                     .substituted_sequence_cut(range.file_handle())
                     .map(|cut| (cut, windows))
             });
-            // Which rows of this file this round has already consumed, and which ones it
-            // may still report:
-            //
-            // * a local file's rows were admitted by this region, so the scan's own `(C, H]`
-            //   applies as it stands; the rows a substitution produced in it are taken out by
-            //   the cut above, which is why that cut is not "foreign files only";
-            // * a foreign file's rows were numbered in the creator's domain, which this
-            //   region's cursor does not bound. The creator's cursor slice the file belongs
-            //   to is the filter a physical-sequence read (`read_row_sequence`) asks for,
-            //   and it applies with or without a substituted cut: without it the file would
-            //   be read whole and every already consumed row delivered again. A foreign
-            //   file whose creator has no cursor slice fails closed.
+            // Which rows of this file this round has already consumed: a local file uses the
+            // scan's own `(C, H]` on top of the cut above, a foreign file uses the creator's
+            // cursor slice (with or without a cut) and fails closed when it has none.
             let (file_sequence_range, file_sequence_trusted) =
                 match stream_ctx.input.foreign_row_sequence_filter(range.file_handle())? {
                     Some(creator_range) => (Some(creator_range), true),
                     None => (
                         stream_ctx.input.sequence_range,
                         // A local file whose marker is unset is attributable above its
-                        // substituted cut: the cut was applied just above (it is only
-                        // computed when a physical-sequence read hides those rows and
-                        // reports their windows), and what is left carries this region's
-                        // own numbering. Skipping the row filter here would deliver rows
-                        // the caller already consumed, which is exactly the row the
-                        // exact-range capability promises not to do.
+                        // substituted cut, which was applied just above.
                         range
                             .file_handle()
                             .is_effective_target_sequence_trusted(
@@ -1658,19 +1641,9 @@ pub fn build_flat_file_range_scan_stream(
                     ),
                 };
 
-            // Which `(region, partition expression)` this read observed: the creator of
-            // the file and the expression the file states for its own rows. A cursor entry
-            // keyed by a region alone cannot say which part of that region's domain a
-            // round consumed, so the owner of the cursor learns the narrower key from the
-            // read itself. The expression travels as its own identity, never as an
-            // interval projected out of it: a projection would have to guess a comparison
-            // semantics for every operator it cannot express, and a file that states no
-            // expression at all is the only case that covers the complete domain.
-            //
-            // A local file is reported too: its numbers belong to this region's own
-            // domain, and a reader that reported only adopted files would leave a
-            // region's slices unobservable as soon as compaction rewrote them into local
-            // ones, which would stall the cursor instead of advancing it.
+            // Which `(region, partition expression)` this read observed. Local files are
+            // reported too, so a region's own slices stay observable after compaction rewrote
+            // adopted rows into local ones.
             if let Some(observed) = stream_ctx.input.observed_slices() {
                 let meta = range.file_handle().meta_ref();
                 observed.record(meta.region_id.as_u64(), meta.partition_expr.as_deref())?;
@@ -1681,11 +1654,8 @@ pub fn build_flat_file_range_scan_stream(
                 // occupy, so the caller recomputes exactly those windows.
                 let record_batch = match substituted_cut {
                     Some((cut, windows)) => {
-                        let Some(record_batch) = filter_flat_batch_by_substituted_sequence(
-                            record_batch,
-                            Some(cut),
-                            windows,
-                        )?
+                        let Some(record_batch) =
+                            filter_flat_batch_by_substituted_sequence(record_batch, Some(cut), windows)?
                         else {
                             continue;
                         };

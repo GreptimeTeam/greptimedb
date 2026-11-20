@@ -14,19 +14,12 @@
 
 //! Rows a substitution produced, which a scan drops instead of delivering.
 //!
-//! A region that adopted a file from another region cannot tell, row by row, which of
-//! the adopted rows its incremental consumers already saw: an assigned barrier makes
-//! all of them look published by the edit. A scan that asks for the physical sequence
-//! column (`ScanRequest::read_row_sequence`) therefore drops every row whose number
-//! is at or below the file's own substituted cut
-//! ([`FileMeta::substituted_up_to`](crate::sst::file::FileMeta::substituted_up_to)) and
-//! reports the timestamps of the dropped rows here. Flow recomputes exactly the windows
-//! that intersect them instead of double counting the rows it did see.
-//!
-//! The same read reports which `(region, partition expression)` pairs it read at all
-//! ([`ObservedPartitionExprs`], one [`ObservedPartitionExpr`] per pair): a cursor entry keyed
-//! by a region alone cannot say which part of the region's value domain a round consumed, so
-//! the owner of the cursor has to learn it from the read that consumed it.
+//! A physical-sequence read (`ScanRequest::read_row_sequence`) drops every row whose number is
+//! at or below the file's own substituted cut
+//! ([`FileMeta::substituted_up_to`](crate::sst::file::FileMeta::substituted_up_to)) and records
+//! the timestamps of the dropped rows here, so the caller recomputes those windows. The same
+//! read records which `(region, partition expression)` pairs it read
+//! ([`ObservedPartitionExprs`]).
 
 use std::collections::BTreeSet;
 use std::pin::Pin;
@@ -52,22 +45,10 @@ use crate::error::{ComputeArrowSnafu, Result, SerializePartitionExprSnafu};
 use crate::read::timestamp_array_to_i64_slice;
 use crate::sst::parquet::flat_format::{sequence_column_index, time_index_column_index};
 
-/// The substituted cut a file states for its own bytes.
-///
-/// Rows whose physical sequence is at or below `cut` carry a number a substitution
-/// produced, so a scan that reads physical sequences drops them and reports their
-/// timestamps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SubstitutedSequenceCut {
-    /// Inclusive upper bound of the substituted numbers.
-    pub(crate) cut: SequenceNumber,
-}
-
 /// Accumulates the timestamp ranges of the rows a scan substituted.
 ///
-/// Shared by every reader of one scan: the ranges are keyed in milliseconds since the
-/// Unix epoch and merged when read, so the caller sees a sorted, non-overlapping set of
-/// `[start, end]` ranges per region.
+/// Shared by every reader of one scan: ranges are merged when read, so the caller sees a sorted,
+/// non-overlapping set per region.
 #[derive(Debug, Default)]
 pub(crate) struct SubstitutedRowsAccumulator {
     /// Raw `(start_millis, end_millis)` ranges, both inclusive.
@@ -77,7 +58,6 @@ pub(crate) struct SubstitutedRowsAccumulator {
 pub(crate) type SubstitutedRowsAccumulatorRef = Arc<SubstitutedRowsAccumulator>;
 
 impl SubstitutedRowsAccumulator {
-    /// Creates an empty accumulator.
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -125,13 +105,10 @@ impl SubstitutedRowsAccumulator {
     }
 }
 
-/// Accumulates the partition expressions of the regions a physical-sequence read
-/// observed, i.e. one [`ObservedPartitionExpr`] per `(region, partition expression)` pair.
+/// Accumulates the partition expressions of the regions a physical-sequence read observed, one
+/// [`ObservedPartitionExpr`] per `(region, partition expression)` pair.
 ///
-/// Shared by every reader of one scan and deduplicated on insert, so the caller sees each
-/// pair once however many files (and partitions) stated it. A pair states the creator of
-/// the file that was read and the identity of the partition expression that file states
-/// for its own rows; a file that states none observed its region's complete value domain.
+/// Shared by every reader of one scan and deduplicated on insert.
 #[derive(Debug, Default)]
 pub(crate) struct ObservedPartitionExprs {
     slices: Mutex<BTreeSet<ObservedPartitionExpr>>,
@@ -140,19 +117,14 @@ pub(crate) struct ObservedPartitionExprs {
 pub(crate) type ObservedPartitionExprsRef = Arc<ObservedPartitionExprs>;
 
 impl ObservedPartitionExprs {
-    /// Creates an empty accumulator.
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Records that rows of `(region_id, partition_expr)` were read.
     ///
-    /// The expression is recorded as the identity the cursor format carries
-    /// (`PartitionExpr::as_json_str()`), canonicalized first because that is the form
-    /// `PartitionExpr::from_json_str` hands back: an identity recorded here then compares
-    /// equal to the cursor entry of the same expression instead of only to a byte-identical
-    /// rewrite of it. `None` is the region's complete value domain, which is what a file
-    /// stating no expression observed.
+    /// The expression is stored as its canonical identity (`PartitionExpr::as_json_str()`),
+    /// which is the form a cursor entry carries. `None` is the region's complete value domain.
     pub(crate) fn record(
         &self,
         region_id: u64,
@@ -190,10 +162,10 @@ impl ObservedPartitionExprs {
 /// which time windows it has to recompute.
 pub(crate) fn filter_flat_batch_by_substituted_sequence(
     record_batch: RecordBatch,
-    substituted: Option<SubstitutedSequenceCut>,
+    cut: Option<SequenceNumber>,
     ranges: &SubstitutedRowsAccumulator,
 ) -> Result<Option<RecordBatch>> {
-    let Some(SubstitutedSequenceCut { cut }) = substituted else {
+    let Some(cut) = cut else {
         return Ok(Some(record_batch));
     };
     if record_batch.num_rows() == 0 {
@@ -210,10 +182,8 @@ pub(crate) fn filter_flat_batch_by_substituted_sequence(
             }
             .build()
         })?;
-    // `Some(0)` is the file's own statement that its column carries no per-row numbering at
-    // all (a legacy import), not a bound it only partly reaches: every row is substituted, even
-    // when a producer left real numbers behind. Dropping all of them can only make the caller
-    // recompute the whole file.
+    // `Some(0)` says the column carries no per-row numbering at all (a legacy import): every row
+    // is substituted, even when a producer left real numbers behind.
     let substituted_all = cut == 0;
     // `true` keeps the row: its number is above every substituted number, so this region never
     // manufactured it from a substitution.
@@ -268,9 +238,8 @@ fn record_substituted_time_range(
         return Ok(());
     };
 
-    // Report in milliseconds so a consumer that owns time windows can align them without
-    // knowing this region's time unit. The start floors and the end ceils, which can only
-    // widen the range: a caller recomputes a superset, never misses a substituted row.
+    // Report in milliseconds so a consumer can align them without knowing this region's time
+    // unit. The start floors and the end ceils, so the range only widens.
     let start_millis = Timestamp::new(start, unit)
         .convert_to(TimeUnit::Millisecond)
         .map(|ts| ts.value())

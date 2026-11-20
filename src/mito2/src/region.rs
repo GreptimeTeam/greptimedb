@@ -556,18 +556,12 @@ impl MitoRegion {
     }
 
     /// Opens the `Editing` window a background publication holds while it allocates its
-    /// boundary, persists it and makes it visible.
+    /// boundary, persists it and makes it visible. While it is open the worker loop queues
+    /// writes and edits, so the boundary is allocated above every sequence already attributed
+    /// to a row.
     ///
-    /// While the window is open the worker loop queues write and bulk-write requests
-    /// instead of admitting them (see `worker::handle_write`), and region edits are
-    /// queued behind it as well. A publication that reassigns which rows the region
-    /// owns therefore allocates its boundary without any write being attributed a
-    /// sequence at or below it, and the queued writes are only admitted after the new
-    /// layout is visible, so they obtain a sequence strictly above the boundary.
-    ///
-    /// **Call this from the worker loop.** Only the loop can prove that no write
-    /// context is in flight when the window opens, which is what makes the boundary it
-    /// allocates afterwards strictly above every sequence already attributed to a row.
+    /// **Call this from the worker loop.** Only the loop can prove that no write context is in
+    /// flight when the window opens.
     pub(crate) fn begin_publish_window(&self, expect: RegionLeaderState) -> Result<()> {
         self.manifest_ctx
             .open_staging_window(self.region_id, expect, RegionLeaderState::Editing)
@@ -1377,18 +1371,13 @@ impl MitoRegion {
         self.publish_staged_manifests(manager).await
     }
 
-    /// Merges the staged actions and publishes the merged layout at the boundary `B`,
-    /// then releases the publish window.
+    /// Merges the staged actions and publishes the merged layout at the boundary `B`, then
+    /// releases the publish window.
     ///
-    /// A successful publish makes the layout visible, so the window is released to
-    /// `Writable` and the writes it queued are admitted afterwards: they allocate
-    /// `B + 1` or later. A failure publishes nothing: the region returns to `Staging`, which
-    /// keeps the staged edits — and, when its commit may have landed, the bytes to retry with
-    /// (see [`RegionManifestManager::commit_staged`]) — unless the failure ends its leadership.
-    /// A conflict with another writer, an expired Leader lease or a downgrade that began while
-    /// the window was open release the window to `Follower` or `Downgrading`, which is where an
-    /// end of staging that cannot retry has to land (see
-    /// [`ManifestContext::leave_ending_staging`]).
+    /// On success the window goes to `Writable` and the queued writes allocate `B + 1` or later.
+    /// On failure the region returns to `Staging` and keeps the staged edits, unless the failure
+    /// ends its leadership (conflict, expired lease, downgrade) — then the window goes to
+    /// `Follower` or `Downgrading` (see [`ManifestContext::leave_ending_staging`]).
     async fn publish_staged_manifests(
         &self,
         manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
@@ -1496,42 +1485,22 @@ impl MitoRegion {
             );
         }
 
-        // A region that still awaits its Leader lease may not own the region yet, so it
-        // allocates no boundary and persists nothing: this error returns it to `Staging`, which
-        // keeps the staged layout for a retry, unless a downgrade began meanwhile or its Leader
-        // deadline passed (see [`ManifestContext::leave_ending_staging`]). Nothing was sent to
-        // the manifest here, so the write gate stays as the previous attempt left it.
+        // A region that still awaits its Leader lease owns nothing yet: it allocates no
+        // boundary and persists nothing, and `leave_ending_staging` returns it to `Staging` for
+        // a retry unless a downgrade began or the deadline passed.
         self.manifest_ctx
             .ensure_leader_lease_or_downgrading(self.region_id)?;
 
-        // The staging exit may reassign which rows this region owns: rows moved
-        // between regions and, optionally, a new partition range. Allocate the holder's
-        // admission `B = last_sequence + 1` **before** persisting and write a committed
-        // watermark of at least `B` into the merged edit, so the manifest and the in-memory
-        // `Version` agree and a later full rebuild returns `H >= B`.
+        // Allocate the holder's admission `B = last_sequence + 1` before persisting, and write a
+        // committed watermark of at least `B` into the merged edit, so the manifest and the
+        // in-memory `Version` agree. The publish window, opened in the worker loop before `B` is
+        // allocated, is what makes `B` sit above every sequence already attributed to a row.
         //
-        // The publish window is what makes the re-mark valid: it is opened in the worker loop
-        // before `B` is allocated, so no write context is mid-flight and every ordinary write is
-        // queued until the layout is visible. `B` is therefore above every sequence already
-        // attributed to a row of this region, and every write admitted afterwards obtains
-        // `B + 1` or later.
-        //
-        // The staging exit publishes no sequence boundary: a repartition rewrites no bytes and
-        // substitutes no row number. What it does publish is the holder's re-mark on every file
-        // it makes visible (see below), which is exactly why an earlier substitution must survive
-        // it: `FileMeta::substituted_up_to` is copied verbatim and never cleared here. That per-file
-        // record is the only statement the engine keeps about substituted rows. The re-mark
-        // clears `preserve_row_sequence` only for the files that changed hands: a file this
-        // region already owned keeps it, because its numbers are still the ones this region
-        // allocated.
-        //
-        // The in-memory `last_sequence` is deliberately **not** advanced here: the edit
-        // raises it to `B` through `committed_sequence` when it is applied, so a failed
-        // manifest write cannot leave an advanced allocation behind.
-        //
-        // An attempt whose delta may have landed already froze this payload: it is re-sent as
-        // it is, so neither the merge nor the allocation of `B` nor the re-marking of the files
-        // runs again, and a retry cannot publish a second admission.
+        // The re-mark must keep `FileMeta::substituted_up_to` verbatim: a repartition rewrites no
+        // bytes. The in-memory `last_sequence` is deliberately **not** advanced here — the edit
+        // raises it to `B` when it is applied, so a failed write cannot leave an advanced
+        // allocation behind. A frozen payload is re-sent as it is, so a retry publishes no second
+        // admission.
         let retried = manager.staged_attempt_pending();
         if retried {
             info!(
@@ -1545,22 +1514,11 @@ impl MitoRegion {
                     .committed_sequence
                     .map_or(boundary, |committed| committed.max(boundary)),
             );
-            // Re-mark every file this publish makes visible at `B`: a stale barrier
-            // below `B` would let file-level pruning skip data that only becomes
-            // visible now. The re-mark is a statement about the *handle* in this
-            // region's domain; the bytes keep their numbering.
-            //
-            // `preserve_row_sequence` is judged by **ownership**, not by the publish.
-            // Only a file that changed hands is re-marked as untrusted: its `region_id`
-            // belongs to another region, so the rows carry numbers this region never
-            // allocated and are attributed by the creator's cursor and by the file's own
-            // `substituted_up_to` cut instead of by that marker. A file this region
-            // already owned (`region_id == self.region_id`) kept its bytes *and* its
-            // numbers: a repartition that leaves it here changes who publishes it, not
-            // what its rows say, so the marker is kept exactly as the payload states it.
-            // Clearing it would make every later exact `(C, H]` read of this region fail
-            // closed (`read/scan_region.rs::exact_sequence_range`) although the file
-            // never left, so its new rows could never be read again.
+            // Re-mark every file this publish makes visible at `B`: a stale barrier below `B`
+            // would let file-level pruning skip data that only becomes visible now.
+            // `preserve_row_sequence` is judged by **ownership**: only a file that changed hands
+            // is cleared, so a file that never left keeps serving the region's exact `(C, H]`
+            // read.
             for file in &mut merged_edit.files_to_add {
                 file.sequence = std::num::NonZeroU64::new(boundary);
                 if file.region_id != self.region_id {
@@ -4286,14 +4244,10 @@ mod tests {
         assert_eq!(Some(0), published.substituted_up_to);
     }
 
-    /// The staging exit re-marks the files it makes visible at the holder's admission, but
-    /// the `preserve_row_sequence` marker is judged by **ownership**: a repartition that
-    /// leaves a file in the region it already belonged to changes the partition expression
-    /// and who publishes the layout, not the numbers in the bytes. Clearing the marker of
-    /// such a file would deny every later exact `(C, H]` read of the region
-    /// (`read/scan_region.rs::exact_sequence_range` fails closed on a local file without it)
-    /// even though the file never left. A file adopted from another region still has its
-    /// marker cleared: its rows carry numbers this region never allocated.
+    /// The staging exit re-marks the files it makes visible at the holder's admission, but the
+    /// `preserve_row_sequence` marker is judged by **ownership**: a file that stayed in the
+    /// region it already belonged to keeps its marker, and a file adopted from another region
+    /// has it cleared.
     #[tokio::test]
     async fn test_end_staging_keeps_the_marker_of_a_file_it_already_owned() {
         let env = SchedulerEnv::new().await;

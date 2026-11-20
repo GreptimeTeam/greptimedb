@@ -694,7 +694,6 @@ async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
     );
 }
 
-/// Waits until `region` reaches `state`.
 async fn wait_until_region_state(region: &MitoRegionRef, state: RegionLeaderState) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while region.state() != RegionRoleState::Leader(state) {

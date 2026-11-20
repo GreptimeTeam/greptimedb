@@ -47,17 +47,12 @@ pub const FLOW_REPAIR_MODE: &str = "flow.repair_mode";
 pub const FLOW_REPAIR_MODE_DISCOVERY: &str = "discovery";
 /// `flow.repair_mode` value: fenced repair DML.
 pub const FLOW_REPAIR_MODE_FENCED: &str = "fenced";
-/// Reads the physical `__sequence` column of a file this region adopted from another
-/// region, instead of virtualizing every row at the handle's admission barrier.
+/// Reads the physical `__sequence` column of a file this region adopted from another region,
+/// instead of virtualizing every row at the handle's admission barrier. The scan then hides the
+/// rows whose number is at or below the file's own substituted cut
+/// (`FileMeta::substituted_up_to`) and reports their time ranges in `substituted_row_ranges`.
 ///
-/// Only Flow's `sequence_range` incremental delta sets it. The barrier makes an adopted
-/// row indistinguishable from one the import published, so the delta cannot tell which
-/// adopted rows its checkpoint already consumed. With this option the scan keeps the
-/// physical column, hides the rows whose number is at or below the file's own substituted
-/// cut (`FileMeta::substituted_up_to`), and reports the time ranges of those substituted
-/// rows in the terminal metrics (`substituted_row_ranges`) so Flow recomputes exactly
-/// those windows.
-/// Every other read leaves it off and keeps the substitution.
+/// Only Flow's `sequence_range` incremental delta sets it.
 pub const FLOW_READ_ROW_SEQUENCE: &str = "flow.read_row_sequence";
 pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
 /// Flow scheduler binding for the logical time of one scheduled attempt.
@@ -465,12 +460,8 @@ fn should_collect_region_watermark(
     return_region_seq || has_incremental_after_seqs
 }
 
-/// Version marker of the expression-keyed cursor form.
-///
-/// The key is explicit because an expression identity is *not* interchangeable with a
-/// projection of it: no reader can turn a projected interval back into the expression it
-/// came from. A producer that writes an expression identity therefore states the version it
-/// speaks, and a reader refuses a version it does not know instead of guessing.
+/// Version marker of the expression-keyed cursor form. A reader refuses a version it does not
+/// know.
 const CURSOR_SHARD_VERSION_KEY: &str = "version";
 /// The version this build writes and reads: one partition expression per slice.
 const CURSOR_SHARD_VERSION: u64 = 2;
@@ -615,11 +606,8 @@ fn parse_cursor_shard(region_id: u64, shard: &serde_json::Value) -> Result<Curso
 }
 
 /// Checks that `expr` is a partition expression this build can read back, and returns the
-/// identity to store.
-///
-/// The identity travels through `store-api`, which cannot depend on `partition`, so this
-/// is the last place a malformed expression could be rejected before a scan has to fall
-/// back to the whole domain for it.
+/// identity to store. `store-api` cannot depend on `partition`, so this is the last place a
+/// malformed expression is rejected.
 fn validate_partition_expr(region_id: u64, expr: &str) -> Result<String> {
     match partition::expr::PartitionExpr::from_json_str(expr) {
         Ok(Some(parsed)) => Ok(parsed.as_json_str().map_err(|e| {
@@ -663,12 +651,7 @@ fn parse_cursor_seq(region_id: u64, raw: &serde_json::Value) -> Result<u64> {
 
 /// Encodes slice cursors as the expression-keyed (version [`CURSOR_SHARD_VERSION`]) form
 /// of [`FLOW_INCREMENTAL_AFTER_SEQS`], which [`parse_incremental_after_seqs`] reads back.
-///
-/// This is the wire form the producer keeps: projecting the slices of a region onto the
-/// least advanced one would tell the reader to re-read the rows of every other slice, and
-/// writing the interval a slice was projected from would lose the expression identity the
-/// reader needs to decide which slice a file belongs to. A whole-domain slice is written
-/// as an explicit `"expr": null`.
+/// A whole-domain slice is written as an explicit `"expr": null`.
 pub fn encode_incremental_after_seqs(cursors: &BTreeMap<u64, Vec<CursorShard>>) -> Result<String> {
     let encoded = cursors
         .iter()
