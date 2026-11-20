@@ -338,6 +338,18 @@ impl MetadataRegion {
         key.strip_prefix(REGION_PREFIX)
     }
 
+    /// Extracts the logical region ID without decoding the column name.
+    fn logical_region_id_from_key(key: &str) -> Result<Option<RegionId>> {
+        let raw =
+            Self::parse_region_key(key).or_else(|| Self::split_column_key(key).map(|(id, _)| id));
+        raw.map(|id| {
+            id.parse::<u64>()
+                .map(RegionId::from)
+                .with_context(|_| ParseRegionIdSnafu { raw: id })
+        })
+        .transpose()
+    }
+
     fn split_column_key(key: &str) -> Option<(&str, &str)> {
         let mut parts = key.strip_prefix(COLUMN_PREFIX)?.split('_');
         Some((parts.next()?, parts.next()?))
@@ -697,6 +709,52 @@ impl MetadataRegion {
             .collect::<Vec<_>>();
 
         self.put_entries(metadata_region_id, iter).await
+    }
+
+    /// Deletes source marker and column keys left in the target by an interrupted sync.
+    /// Compaction between attempts can change the file IDs on either side of the copy.
+    pub(crate) async fn remove_copied_source_keys(
+        &self,
+        target: RegionId,
+        source: RegionId,
+    ) -> Result<()> {
+        let target_meta = utils::to_metadata_region_id(target);
+        // Source rows are imported as SSTs. On a fresh target removing the copied
+        // files suffices; the remaining memtable contains only transformed keys.
+        if self
+            .mito
+            .get_region_statistic(target_meta)
+            .is_some_and(|s| s.sst_num == 0)
+        {
+            return Ok(());
+        }
+        let request = ScanRequest {
+            projection: Some(vec![METADATA_SCHEMA_KEY_COLUMN_INDEX]),
+            ..Default::default()
+        };
+        let mut stream = self
+            .mito
+            .scan_to_stream(target_meta, request)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        while let Some(batch) = stream
+            .try_next()
+            .await
+            .context(CollectRecordBatchStreamSnafu)?
+        {
+            let mut keys = Vec::new();
+            for key in batch.iter_column_as_string(0).flatten() {
+                if Self::logical_region_id_from_key(&key)?
+                    .is_some_and(|id| id.region_number() == source.region_number())
+                {
+                    keys.push(key);
+                }
+            }
+            if !keys.is_empty() {
+                self.delete(target_meta, &keys).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn put_entries(&self, target: RegionId, entries: Vec<(String, String)>) -> Result<()> {
