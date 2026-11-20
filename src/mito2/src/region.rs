@@ -896,6 +896,7 @@ impl MitoRegion {
             query_scanned_bytes,
             min_timestamp: time_range.map(|(min, _)| min),
             max_timestamp: time_range.map(|(_, max)| max),
+            has_pending_tails: version.has_pending_tails(),
         }
     }
 

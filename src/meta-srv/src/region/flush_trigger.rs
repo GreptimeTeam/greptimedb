@@ -912,6 +912,7 @@ mod tests {
                 metadata_flushed_entry_id: metadata_replay_entry_id,
                 metadata_topic_latest_entry_id: 0,
             },
+            has_pending_tails: false,
         }
     }
 
@@ -923,6 +924,7 @@ mod tests {
                 flushed_entry_id: replay_entry_id,
                 topic_latest_entry_id: 0,
             },
+            has_pending_tails: false,
         }
     }
 
