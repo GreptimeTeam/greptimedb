@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -763,9 +762,6 @@ impl DfQueryPlanner {
 #[derive(Debug)]
 pub(super) struct MetricsMemoryPool {
     inner: Arc<dyn MemoryPool>,
-    /// The figure [`QUERY_MEMORY_POOL_USAGE_BYTES`] was last set to from this pool, so a pool
-    /// operation that leaves the reservation where it was does not rewrite the gauge.
-    recorded_usage: AtomicI64,
 }
 
 impl MetricsMemoryPool {
@@ -784,25 +780,7 @@ impl MetricsMemoryPool {
                 Arc::new(TrackConsumersPool::new(FairSpillPool::new(limit), top_n))
             }
         };
-        Self {
-            inner,
-            recorded_usage: AtomicI64::new(0),
-        }
-    }
-
-    /// Records what the pool holds in the gauge when that figure moved, and says whether it did.
-    ///
-    /// A node grows and shrinks the pool many times inside one chunk while the figure itself moves
-    /// far less often; the gauge mirrors the figure, it is not a log of the calls.
-    #[inline]
-    fn update_metrics(&self) -> bool {
-        let reserved = self.inner.reserved() as i64;
-        if self.recorded_usage.load(Ordering::Relaxed) == reserved {
-            return false;
-        }
-        self.recorded_usage.store(reserved, Ordering::Relaxed);
-        QUERY_MEMORY_POOL_USAGE_BYTES.set(reserved);
-        true
+        Self { inner }
     }
 }
 
@@ -834,7 +812,10 @@ impl MemoryPool for MetricsMemoryPool {
             return;
         }
         self.inner.grow(reservation, additional);
-        self.update_metrics();
+        // Move the gauge by the granted delta instead of setting it from `reserved()`: two
+        // threads that each read `reserved()` and then set the gauge can publish a stale figure
+        // after the other published the newer one, and no later read can tell that happened.
+        QUERY_MEMORY_POOL_USAGE_BYTES.add(additional as i64);
     }
 
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
@@ -842,7 +823,7 @@ impl MemoryPool for MetricsMemoryPool {
             return;
         }
         self.inner.shrink(reservation, shrink);
-        self.update_metrics();
+        QUERY_MEMORY_POOL_USAGE_BYTES.sub(shrink as i64);
     }
 
     fn try_grow(
@@ -854,10 +835,14 @@ impl MemoryPool for MetricsMemoryPool {
             return Ok(());
         }
         let result = self.inner.try_grow(reservation, additional);
-        if result.is_err() {
-            QUERY_MEMORY_POOL_REJECTED_TOTAL.inc();
+        match &result {
+            Ok(()) => {
+                if additional > 0 {
+                    QUERY_MEMORY_POOL_USAGE_BYTES.add(additional as i64);
+                }
+            }
+            Err(_) => QUERY_MEMORY_POOL_REJECTED_TOTAL.inc(),
         }
-        self.update_metrics();
         result
     }
 
@@ -873,6 +858,8 @@ impl MemoryPool for MetricsMemoryPool {
 #[cfg(test)]
 mod tests {
     mod factorized_join_agg_tests;
+
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use common_base::Plugins;
@@ -1345,8 +1332,17 @@ mod tests {
         }
     }
 
+    /// Serialises the tests that read the process-wide usage gauge, so a concurrent test that
+    /// happens to grow a pool cannot move the figure under the assertion.
+    fn gauge_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GAUGE: Mutex<()> = Mutex::new(());
+        GAUGE.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
     #[test]
     fn test_metrics_memory_pool_does_not_refuse_or_record_zero_bytes() {
+        let _gauge = gauge_guard();
+        let baseline = QUERY_MEMORY_POOL_USAGE_BYTES.get();
         let metrics_pool = Arc::new(MetricsMemoryPool::new(100, QueryMemoryPoolPolicy::Greedy));
         let pool: Arc<dyn MemoryPool> = metrics_pool.clone();
         let reservation = MemoryConsumer::new("zero").register(&pool);
@@ -1354,9 +1350,10 @@ mod tests {
         // its limit. A request for nothing must not turn that into a refusal.
         reservation.grow(120);
         assert_eq!(pool.reserved(), 120);
-        assert!(
-            !metrics_pool.update_metrics(),
-            "the call that moved the figure has already recorded it"
+        assert_eq!(
+            QUERY_MEMORY_POOL_USAGE_BYTES.get(),
+            baseline + 120,
+            "the granted 120 bytes are published"
         );
 
         reservation.try_grow(0).expect("a no-op reserves nothing");
@@ -1367,7 +1364,11 @@ mod tests {
             .try_resize(120)
             .expect("the figure does not move");
         assert_eq!(pool.reserved(), 120);
-        assert!(!metrics_pool.update_metrics());
+        assert_eq!(
+            QUERY_MEMORY_POOL_USAGE_BYTES.get(),
+            baseline + 120,
+            "a zero-byte call leaves the gauge where it was"
+        );
 
         // The pool still refuses what would not fit, and still counts the refusal.
         let rejected = QUERY_MEMORY_POOL_REJECTED_TOTAL.get();
@@ -1380,39 +1381,69 @@ mod tests {
         );
         assert!(QUERY_MEMORY_POOL_REJECTED_TOTAL.get() > rejected);
         assert_eq!(pool.reserved(), 120);
+        assert_eq!(
+            QUERY_MEMORY_POOL_USAGE_BYTES.get(),
+            baseline + 120,
+            "a refusal does not move the gauge"
+        );
+
+        drop(reservation);
+        assert_eq!(
+            QUERY_MEMORY_POOL_USAGE_BYTES.get(),
+            baseline,
+            "draining the reservation returns the gauge"
+        );
     }
 
     #[test]
-    fn test_metrics_memory_pool_records_a_figure_only_when_it_moves() {
+    fn test_metrics_memory_pool_moves_the_gauge_by_the_granted_delta() {
+        let _gauge = gauge_guard();
+        let baseline = QUERY_MEMORY_POOL_USAGE_BYTES.get();
         let metrics_pool = Arc::new(MetricsMemoryPool::new(1000, QueryMemoryPoolPolicy::Greedy));
         let pool: Arc<dyn MemoryPool> = metrics_pool.clone();
         let reservation = MemoryConsumer::new("gauge").register(&pool);
-        // Nothing is reserved yet, so there is nothing to record.
-        assert!(!metrics_pool.update_metrics());
-        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 0);
 
-        // A figure that moves through the pool is recorded by the call that moved it.
         reservation.try_grow(300).unwrap();
-        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 300);
-        assert!(
-            !metrics_pool.update_metrics(),
-            "an unchanged figure is not rewritten"
-        );
-
-        // A figure that moves beside the wrapper is recorded when the figure is next read.
-        metrics_pool.inner.grow(&reservation, 200);
-        assert!(metrics_pool.update_metrics(), "a moved figure is recorded");
-        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 500);
-        assert!(!metrics_pool.update_metrics());
-
-        metrics_pool.inner.shrink(&reservation, 200);
-        assert_eq!(pool.reserved(), 300);
-        assert!(metrics_pool.update_metrics());
-        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 300);
-
-        reservation.try_shrink(300).unwrap();
+        assert_eq!(QUERY_MEMORY_POOL_USAGE_BYTES.get(), baseline + 300);
+        reservation.grow(200);
+        assert_eq!(QUERY_MEMORY_POOL_USAGE_BYTES.get(), baseline + 500);
+        reservation.try_shrink(100).unwrap();
+        assert_eq!(QUERY_MEMORY_POOL_USAGE_BYTES.get(), baseline + 400);
+        reservation.try_shrink(400).unwrap();
         assert_eq!(pool.reserved(), 0);
-        assert_eq!(metrics_pool.recorded_usage.load(Ordering::Relaxed), 0);
+        assert_eq!(QUERY_MEMORY_POOL_USAGE_BYTES.get(), baseline);
+    }
+
+    #[test]
+    fn test_metrics_memory_pool_gauge_survives_concurrent_reservations() {
+        let _gauge = gauge_guard();
+        let baseline = QUERY_MEMORY_POOL_USAGE_BYTES.get();
+        let pool: Arc<dyn MemoryPool> = Arc::new(MetricsMemoryPool::new(
+            1 << 20,
+            QueryMemoryPoolPolicy::Greedy,
+        ));
+        let threads: Vec<_> = (0..4)
+            .map(|worker| {
+                let pool = Arc::clone(&pool);
+                std::thread::spawn(move || {
+                    let reservation =
+                        MemoryConsumer::new(format!("gauge-{worker}")).register(&pool);
+                    for _ in 0..50 {
+                        reservation.try_grow(64).unwrap();
+                        reservation.try_shrink(64).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(
+            QUERY_MEMORY_POOL_USAGE_BYTES.get(),
+            baseline,
+            "concurrent grow/shrink pairs cancel out in the gauge"
+        );
     }
 
     #[test]
