@@ -3446,16 +3446,23 @@ async fn native_fused_partitioned_table_label_rewrite_falls_back() {
 /// route, and dropping it from the predicate makes this test fail. (The `@` half of the same
 /// arithmetic is pinned one level down, in `native::plan::tests`, because a statement whose anchor
 /// and start are that far apart is refused by the planner's own at-modifier rewrite first.)
+///
+/// A platform whose `SystemTime` cannot represent the `5e18 ms` start skips the high-level
+/// shape; the platform-independent `native_tree_supported_declines_the_instants_that_overflow`
+/// still covers the admission predicate there.
 #[tokio::test]
 async fn native_fused_windows_whose_instants_overflow_fall_back() {
-    // The far end of the `i64` millisecond range, one step apart.
+    // The far end of the `i64` millisecond range, one step apart. Windows' `SystemTime` and
+    // 32-bit `time_t` targets cannot represent it, so they cannot build this statement.
+    let Some(far_start) = UNIX_EPOCH.checked_add(Duration::from_millis(5_000_000_000_000_000_000))
+    else {
+        return;
+    };
     let plan_for = |query: &str, native_fused| {
         let query = query.to_string();
         async move {
             let mut eval_stmt = build_eval_stmt(&query);
-            eval_stmt.start = UNIX_EPOCH
-                .checked_add(Duration::from_millis(5_000_000_000_000_000_000))
-                .unwrap();
+            eval_stmt.start = far_start;
             eval_stmt.end = eval_stmt
                 .start
                 .checked_add(Duration::from_millis(10_000))
