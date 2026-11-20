@@ -557,6 +557,41 @@ impl MetadataRegion {
             .await
     }
 
+    /// Removes source markers and columns left in the target by a previous metadata import.
+    pub(crate) async fn remove_imported_keys(
+        &self,
+        target_meta: RegionId,
+        source: RegionId,
+    ) -> Result<()> {
+        let request = ScanRequest {
+            projection: Some(vec![METADATA_SCHEMA_KEY_COLUMN_INDEX]),
+            ..Default::default()
+        };
+        let mut stream = self
+            .mito
+            .scan_to_stream(target_meta, request)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        while let Some(batch) = stream
+            .try_next()
+            .await
+            .context(CollectRecordBatchStreamSnafu)?
+        {
+            let mut keys = decode_record_batch_to_key(batch);
+            keys.retain(|key| {
+                let id = Self::parse_region_key(key)
+                    .or_else(|| Self::split_column_key(key).map(|(id, _)| id));
+                id.filter(|raw| matches!(raw.as_bytes(), [b'0'] | [b'1'..=b'9', ..]))
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .is_some_and(|id| RegionId::from(id).region_number() == source.region_number())
+            });
+            if !keys.is_empty() {
+                self.delete(target_meta, &keys).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Delete the given keys. For performance consideration, this method
     /// doesn't check if those keys exist or not.
     async fn delete(&self, metadata_region_id: RegionId, keys: &[String]) -> Result<()> {
