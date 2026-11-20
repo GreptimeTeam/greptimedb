@@ -1098,7 +1098,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let mut visible = planner.get_regions(&name, &plan).await.unwrap();
+        let (mut visible, _) = planner.get_regions(&name, &plan).await.unwrap();
         visible.sort_unstable();
         assert_eq!(
             visible,
