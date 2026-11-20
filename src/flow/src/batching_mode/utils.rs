@@ -1039,10 +1039,9 @@ pub async fn sql_to_df_plan(
         }
     );
     let stmt = stmts.remove(0);
-    let query_stmt = match &stmt {
+    let query_stmt = match stmt {
         Statement::Tql(tql) => match tql {
             Tql::Eval(eval) => {
-                let eval = eval.clone();
                 let promql = PromQuery {
                     start: eval.start,
                     end: eval.end,
@@ -1051,7 +1050,7 @@ pub async fn sql_to_df_plan(
                     lookback: eval
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
-                    alias: eval.alias.clone(),
+                    alias: eval.alias,
                 };
 
                 QueryLanguageParser::parse_promql(&promql, &query_ctx)
