@@ -1,0 +1,4 @@
+[
+  {"MetadataCompaction":{"Pause":{"attempt":{"region_id":4294967298,"attempt_id":"00112233-4455-6677-8899-aabbccddeeff"},"remaining":{"secs":19,"nanos":500000000}}}},
+  {"MetadataCompaction":{"Release":{"region_id":4294967298,"attempt_id":"00112233-4455-6677-8899-aabbccddeeff"}}}
+]

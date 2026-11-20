@@ -1022,6 +1022,24 @@ impl Display for ApplyStagingManifest {
     }
 }
 
+/// Identifies one attempt to sync a physical metric region's metadata.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct MetadataSyncAttempt {
+    pub region_id: RegionId,
+    pub attempt_id: uuid::Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MetadataCompaction {
+    /// Wait for compaction to drain, then hold the pause for the remaining sync budget.
+    Pause {
+        attempt: MetadataSyncAttempt,
+        remaining: Duration,
+    },
+    /// Drop only the pause acquired by this attempt.
+    Release(MetadataSyncAttempt),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens regions.
@@ -1055,6 +1073,8 @@ pub enum Instruction {
     Suspend,
     /// Makes regions enter staging state.
     EnterStagingRegions(Vec<EnterStagingRegion>),
+    /// Controls source metadata compaction during repartition.
+    MetadataCompaction(MetadataCompaction),
     /// Syncs regions.
     SyncRegions(Vec<SyncRegion>),
     /// Remaps manifests for a region.
@@ -1336,6 +1356,7 @@ pub enum InstructionReply {
     GetPackedFileRefs(GetPackedFileRefsReply),
     GcRegions(GcRegionsReply),
     EnterStagingRegions(EnterStagingRegionsReply),
+    MetadataCompaction(SimpleReply),
     SyncRegions(SyncRegionsReply),
     RemapManifest(RemapManifestReply),
     ApplyStagingManifests(ApplyStagingManifestsReply),
@@ -1364,6 +1385,9 @@ impl Display for InstructionReply {
                     "InstructionReply::EnterStagingRegions({:?})",
                     reply.replies
                 )
+            }
+            Self::MetadataCompaction(reply) => {
+                write!(f, "InstructionReply::MetadataCompaction({reply})")
             }
             Self::SyncRegions(reply) => {
                 write!(f, "InstructionReply::SyncRegions({:?})", reply.replies)
@@ -1454,6 +1478,30 @@ mod tests {
     use store_api::storage::{FileId, FileRef};
 
     use super::*;
+
+    #[test]
+    fn test_metadata_compaction_mailbox_wire() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/compatibility/wire/metadata_compaction/instructions.json"
+        ))
+        .unwrap();
+        let attempt = MetadataSyncAttempt {
+            region_id: RegionId::new(1, 2),
+            attempt_id: "00112233-4455-6677-8899-aabbccddeeff".parse().unwrap(),
+        };
+        let expected = vec![
+            Instruction::MetadataCompaction(MetadataCompaction::Pause {
+                attempt,
+                remaining: Duration::from_millis(19_500),
+            }),
+            Instruction::MetadataCompaction(MetadataCompaction::Release(attempt)),
+        ];
+        assert_eq!(
+            expected,
+            serde_json::from_value::<Vec<Instruction>>(wire.clone()).unwrap()
+        );
+        assert_eq!(wire, serde_json::to_value(expected).unwrap());
+    }
 
     #[test]
     fn test_instruction_error_serde() {
