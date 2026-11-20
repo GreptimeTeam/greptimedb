@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use futures_util::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use store_api::storage::TableId;
@@ -34,13 +33,14 @@ pub type TableSchemaCacheRef = Arc<TableSchemaCache>;
 /// Constructs a [TableSchemaCache].
 pub fn new_table_schema_cache(
     name: String,
-    cache: Cache<TableId, Arc<SchemaName>>,
+    cache: Cache<(usize, TableId), Arc<SchemaName>>,
     kv_backend: KvBackendRef,
 ) -> TableSchemaCache {
     let table_info_manager = TableInfoManager::new(kv_backend);
     let init = init_factory(table_info_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
+    // The table-to-schema mapping is retained across targeted invalidations.
+    CacheContainer::new_coordinated(name, cache, init, |_| None)
 }
 
 fn init_factory(table_info_manager: TableInfoManager) -> Initializer<TableId, Arc<SchemaName>> {
@@ -60,17 +60,4 @@ fn init_factory(table_info_manager: TableInfoManager) -> Initializer<TableId, Ar
             })))
         })
     })
-}
-
-/// Never invalidates table id schema cache.
-fn invalidator<'a>(
-    _cache: &'a Cache<TableId, Arc<SchemaName>>,
-    _idents: &'a [&CacheIdent],
-) -> BoxFuture<'a, error::Result<()>> {
-    Box::pin(std::future::ready(Ok(())))
-}
-
-/// Never invalidates table id schema cache.
-fn filter(_ident: &CacheIdent) -> bool {
-    false
 }

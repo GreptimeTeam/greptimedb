@@ -57,8 +57,47 @@ enum InitStrategy<K, V, T> {
     /// hit that value. Other keys keep their cached values.
     Coordinated {
         cache: Cache<(usize, K), V>,
-        key: fn(&T) -> Option<&K>,
+        invalidation: CoordinatedInvalidation<K, V, T>,
     },
+}
+
+pub(crate) enum CoordinatedInvalidation<K, V, T> {
+    Key(fn(&T) -> Option<&K>),
+    Events(EventHandler<K, V, T>),
+}
+
+type EventHandler<K, V, T> = for<'a> fn(CoordinatedEntries<'a, K, V>, &'a [T]) -> BoxFuture<'a, ()>;
+
+/// Event handlers use the same epoch and per-key compute lock as cache loads.
+pub(crate) struct CoordinatedEntries<'a, K, V> {
+    cache: &'a Cache<(usize, K), V>,
+    epoch: &'a AtomicUsize,
+}
+
+impl<K, V> CoordinatedEntries<'_, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    pub(crate) async fn compute(&self, key: &K, update: impl FnOnce(Option<V>) -> Op<V>) {
+        let key = (self.epoch.load(Ordering::Acquire), key.clone());
+        self.cache
+            .entry(key.clone())
+            .and_compute_with(|entry| async move {
+                match update(entry.map(|entry| entry.into_value())) {
+                    Op::Put(value) => self.cache.insert(key, value).await,
+                    Op::Remove => self.cache.invalidate(&key).await,
+                    Op::Nop => {}
+                }
+                Op::Nop
+            })
+            .await;
+    }
+
+    pub(crate) fn invalidate_all(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.cache.invalidate_all();
+    }
 }
 
 /// Caches metadata and coalesces backend reads for concurrent callers.
@@ -107,9 +146,26 @@ where
         initializer: Initializer<K, V>,
         key: fn(&CacheToken) -> Option<&K>,
     ) -> Self {
+        Self::with_coordinated_invalidation(
+            name,
+            cache,
+            initializer,
+            CoordinatedInvalidation::Key(key),
+        )
+    }
+
+    pub(crate) fn with_coordinated_invalidation(
+        name: String,
+        cache: Cache<(usize, K), V>,
+        initializer: Initializer<K, V>,
+        invalidation: CoordinatedInvalidation<K, V, CacheToken>,
+    ) -> Self {
         Self {
             name,
-            strategy: InitStrategy::Coordinated { cache, key },
+            strategy: InitStrategy::Coordinated {
+                cache,
+                invalidation,
+            },
             initializer,
             batch_initializer: None,
             version: Arc::default(),
@@ -156,10 +212,16 @@ where
     }
 
     fn invalidate_all(&self) -> Result<()> {
-        self.version.fetch_add(1, Ordering::AcqRel);
         match &self.strategy {
-            InitStrategy::Unchecked { cache, .. } => cache.invalidate_all(),
-            InitStrategy::Coordinated { cache, .. } => cache.invalidate_all(),
+            InitStrategy::Unchecked { cache, .. } => {
+                self.version.fetch_add(1, Ordering::AcqRel);
+                cache.invalidate_all();
+            }
+            InitStrategy::Coordinated { cache, .. } => CoordinatedEntries {
+                cache,
+                epoch: &self.version,
+            }
+            .invalidate_all(),
         }
         Ok(())
     }
@@ -185,17 +247,21 @@ where
                     invalidator(cache, &tokens).await?;
                 }
             }
-            InitStrategy::Coordinated { cache, key } => {
-                for k in tokens.iter().filter_map(key) {
-                    let epoch = self.version.load(Ordering::Acquire);
-                    let storage_key = (epoch, k.clone());
-                    cache
-                        .entry(storage_key.clone())
-                        .and_compute_with(|_| async {
-                            cache.invalidate(&storage_key).await;
-                            Op::Nop
-                        })
-                        .await;
+            InitStrategy::Coordinated {
+                cache,
+                invalidation,
+            } => {
+                let entries = CoordinatedEntries {
+                    cache,
+                    epoch: &self.version,
+                };
+                match invalidation {
+                    CoordinatedInvalidation::Key(key) => {
+                        for k in tokens.iter().filter_map(key) {
+                            entries.compute(k, |_| Op::Remove).await;
+                        }
+                    }
+                    CoordinatedInvalidation::Events(events) => events(entries, tokens).await,
                 }
             }
         }

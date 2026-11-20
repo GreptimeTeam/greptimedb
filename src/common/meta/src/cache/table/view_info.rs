@@ -14,14 +14,12 @@
 
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use store_api::storage::TableId;
 
 use crate::cache::{CacheContainer, Initializer};
 use crate::error;
-use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::view_info::{ViewInfoManager, ViewInfoManagerRef, ViewInfoValue};
 use crate::kv_backend::KvBackendRef;
@@ -34,13 +32,22 @@ pub type ViewInfoCacheRef = Arc<ViewInfoCache>;
 /// Constructs a [ViewInfoCache].
 pub fn new_view_info_cache(
     name: String,
-    cache: Cache<TableId, Arc<ViewInfoValue>>,
+    cache: Cache<(usize, TableId), Arc<ViewInfoValue>>,
     kv_backend: KvBackendRef,
 ) -> ViewInfoCache {
     let view_info_manager = Arc::new(ViewInfoManager::new(kv_backend));
-    let init = init_factory(view_info_manager);
+    let init = init_factory(view_info_manager.clone());
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
+    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_id_key)
+        .with_batch_initializer(Arc::new(move |ids| {
+            let manager = view_info_manager.clone();
+            Box::pin(async move {
+                manager
+                    .batch_get(&ids)
+                    .await
+                    .map(crate::cache::share_batch_values)
+            })
+        }))
 }
 
 fn init_factory(view_info_manager: ViewInfoManagerRef) -> Initializer<TableId, Arc<ViewInfoValue>> {
@@ -58,24 +65,6 @@ fn init_factory(view_info_manager: ViewInfoManagerRef) -> Initializer<TableId, A
     })
 }
 
-fn invalidator<'a>(
-    cache: &'a Cache<TableId, Arc<ViewInfoValue>>,
-    idents: &'a [&CacheIdent],
-) -> BoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        for ident in idents {
-            if let CacheIdent::TableId(view_id) = ident {
-                cache.invalidate(view_id).await
-            }
-        }
-        Ok(())
-    })
-}
-
-fn filter(ident: &CacheIdent) -> bool {
-    matches!(ident, CacheIdent::TableId(_))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -88,6 +77,28 @@ mod tests {
     use crate::ddl::tests::create_view::test_create_view_task;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
+
+    #[tokio::test]
+    async fn test_view_info_cache_batches_backend_reads() {
+        use crate::cache::test_util::assert_batch_cache_reads;
+        use crate::key::view_info::{ViewInfoKey, ViewInfoValue};
+        use crate::key::{MetadataKey, MetadataValue};
+
+        assert_batch_cache_reads(new_view_info_cache, |id| {
+            let value = ViewInfoValue::new(
+                Default::default(),
+                HashSet::new(),
+                vec![],
+                vec![],
+                format!("SELECT {id}"),
+            );
+            (
+                ViewInfoKey::new(id).to_bytes(),
+                value.try_as_raw_value().unwrap(),
+            )
+        })
+        .await;
+    }
 
     #[tokio::test]
     async fn test_view_info_cache() {
@@ -128,7 +139,10 @@ mod tests {
             .await
             .unwrap();
 
-        let view_info = cache.get(1024).await.unwrap().unwrap();
+        let values = cache.get_many(&[1024, 99, 1024]).await.unwrap();
+        assert!(values[1].is_none());
+        assert_eq!(values[0], values[2]);
+        let view_info = values[0].as_ref().unwrap();
         assert_eq!(view_info.view_info, task.create_view.logical_plan);
         assert_eq!(
             view_info.table_names,

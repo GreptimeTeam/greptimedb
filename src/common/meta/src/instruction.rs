@@ -427,6 +427,20 @@ pub enum CacheIdent {
 }
 
 impl CacheIdent {
+    pub(crate) fn flow_id_key(&self) -> Option<&FlowId> {
+        match self {
+            Self::FlowId(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn schema_name_key(&self) -> Option<&SchemaName> {
+        match self {
+            Self::SchemaName(name) => Some(name),
+            _ => None,
+        }
+    }
+
     pub fn table_id_key(&self) -> Option<&TableId> {
         if let Self::TableId(id) = self {
             Some(id)

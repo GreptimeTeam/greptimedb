@@ -27,6 +27,7 @@ use table::table_name::TableName;
 
 use crate::error::Result;
 
+mod batch_scan;
 pub mod error;
 pub mod information_extension;
 pub mod kvbackend;
