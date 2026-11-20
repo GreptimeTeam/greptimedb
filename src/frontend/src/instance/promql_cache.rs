@@ -593,9 +593,10 @@ mod tests {
     /// Admits the test table and opens it, as a background round that proved nothing
     /// changed would, so the request may serve what an earlier one filled.
     fn admission(cache: &RollupCache) -> crate::query_cache::Admission {
-        // The admission comes first: a round can only record what a request has already
-        // registered.
-        let admission = cache.admit(&table(), Instant::now());
+        // The table has to be registered before a round can record it, and the round that
+        // establishes its baseline replaces the state it is registered under: the request is
+        // admitted after it.
+        cache.admit(&table(), Instant::now());
         cache.record_refresh(
             &table(),
             std::collections::BTreeMap::from([(1, 1)]),
@@ -604,7 +605,7 @@ mod tests {
             crate::query_cache::DirtySpan::Nothing,
             Instant::now(),
         );
-        admission
+        cache.admit(&table(), Instant::now())
     }
 
     async fn run<E: WindowExecutor + ?Sized>(
