@@ -191,7 +191,7 @@ type PreparedInput = (
     // of the metadata drop a tree cannot answer about itself: the drop removes every empty label
     // value with the name, so a column holding `NULL` in one series and `''` in another leaves both
     // under one label set. The canonical pass does not collect for it, and
-    // `SKIPPED_LABELSET_CHECK_NULLABLE_KEY` counts the statements it leaves unproved.
+    // `UNPROVED_LABELSET_CHECK_NULLABLE_KEY` counts the statements it leaves unproved.
     bool,
 );
 
@@ -260,13 +260,13 @@ thread_local! {
     /// The canonical pass decides that while it rewrites a tree, and the counter that reports it is
     /// taken once per statement by the offer that answers the plan - so the reason travels beside
     /// the tree the way a refusal travels beside the `None` it answers.
-    static SKIPPED_LABELSET_CHECK: std::cell::Cell<Option<&'static str>> =
+    static UNPROVED_LABELSET_CHECK: std::cell::Cell<Option<&'static str>> =
         const { std::cell::Cell::new(None) };
     /// The reason the counter last reported for a drop over a nullable key.
     ///
     /// The counter is not something a test can read back; this holds the same reason it carries.
     #[cfg(test)]
-    static REPORTED_SKIPPED_LABELSET_CHECK: std::cell::Cell<Option<&'static str>> =
+    static REPORTED_UNPROVED_LABELSET_CHECK: std::cell::Cell<Option<&'static str>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -277,7 +277,7 @@ const NATIVE_DECLINE_UNRECORDED: &str = "cause_not_recorded";
 /// a column that can hold `NULL` in one series and `''` in another, so the labels alone cannot prove
 /// the drop tells two of its series apart. Nothing is collected for that pair, which is exactly what
 /// this reports.
-const SKIPPED_LABELSET_CHECK_NULLABLE_KEY: &str = "nullable_key";
+const UNPROVED_LABELSET_CHECK_NULLABLE_KEY: &str = "nullable_key";
 
 /// Answers the `None` that hands this expression to the existing planner, recording why.
 ///
@@ -308,8 +308,8 @@ pub(crate) fn take_reported_decline() -> Option<&'static str> {
 
 /// Takes the reason the route last reported for a drop over a nullable key.
 #[cfg(test)]
-pub(crate) fn take_reported_skipped_labelset_check() -> Option<&'static str> {
-    REPORTED_SKIPPED_LABELSET_CHECK.with(|reported| reported.replace(None))
+pub(crate) fn take_reported_unproved_labelset_check() -> Option<&'static str> {
+    REPORTED_UNPROVED_LABELSET_CHECK.with(|reported| reported.replace(None))
 }
 
 impl PromPlanner {
@@ -518,17 +518,17 @@ impl PromPlanner {
         // time risk hint, not a collection: nothing is inserted for that pair. The attempts below
         // record it where they decide it; taking it here keeps the count one per statement and
         // leaves nothing behind for the next one.
-        let skipped = SKIPPED_LABELSET_CHECK.with(|skipped| skipped.replace(None));
+        let unproved = UNPROVED_LABELSET_CHECK.with(|unproved| unproved.replace(None));
         match planned {
             // A whole statement answers a row table. A frame is what a composition reads from its
             // operands, so the statement root is never one.
             Some(NativePlanned::Rows(plan)) => {
-                if let Some(reason) = skipped {
+                if let Some(reason) = unproved {
                     crate::metrics::DUPLICATE_LABELSET_CHECK_UNPROVED_TOTAL
                         .with_label_values(&[reason])
                         .inc();
                     #[cfg(test)]
-                    REPORTED_SKIPPED_LABELSET_CHECK.with(|reported| reported.set(Some(reason)));
+                    REPORTED_UNPROVED_LABELSET_CHECK.with(|reported| reported.set(Some(reason)));
                 }
                 Ok(Some(plan))
             }
@@ -1542,8 +1542,8 @@ impl PromPlanner {
             &runtime_source_metrics,
             keys_survive,
         ) {
-            SKIPPED_LABELSET_CHECK
-                .with(|skipped| skipped.set(Some(SKIPPED_LABELSET_CHECK_NULLABLE_KEY)));
+            UNPROVED_LABELSET_CHECK
+                .with(|unproved| unproved.set(Some(UNPROVED_LABELSET_CHECK_NULLABLE_KEY)));
         }
         let root = tree.root();
         // The placement facts the split and the segmentation below are chosen from, and the same

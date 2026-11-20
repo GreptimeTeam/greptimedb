@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::promql::planner::native::{
-    take_native_attempts, take_reported_decline, take_reported_skipped_labelset_check,
+    take_native_attempts, take_reported_decline, take_reported_unproved_labelset_check,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -3463,7 +3463,7 @@ async fn a_nullable_key_statement_records_the_pair_it_leaves_unproved() {
     );
     assert_eq!(
         Some("nullable_key"),
-        take_reported_skipped_labelset_check(),
+        take_reported_unproved_labelset_check(),
         "the pair the labels cannot state went uncounted: {}",
         plan.display_indent_schema()
     );
@@ -3482,10 +3482,39 @@ async fn a_nullable_key_statement_records_the_pair_it_leaves_unproved() {
     );
     assert_eq!(
         None,
-        take_reported_skipped_labelset_check(),
+        take_reported_unproved_labelset_check(),
         "a window that keeps the name collects nothing for the keys: {}",
         plan.display_indent_schema()
     );
+}
+
+/// A fold already answers one series per group, so a drop above it has nothing left to collect.
+///
+/// `sum(x) * 2`, `-sum(x)` and `abs(sum by (tag_0) (x))` each drop the metadata labels above a fold,
+/// and what the fold hands over is one series per group under its grouping labels - no name among
+/// them. The proof therefore holds on the labels the fold reports, and the scan's key columns are not
+/// what decides it: a metric-engine table, whose tag columns are all nullable, plans these
+/// statements without a `Merge`, at the root or anywhere below it.
+#[tokio::test]
+async fn a_drop_above_a_fold_needs_no_collection() {
+    for query in [
+        "sum(some_metric) * 2",
+        "-sum(some_metric)",
+        "abs(sum by (tag_0) (some_metric))",
+    ] {
+        let table_provider = build_test_table_provider_with_nullable_tag("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let trees = fused_trees(&plan);
+        assert!(
+            !trees.is_empty(),
+            "`{query}` left the native route: {}",
+            plan.display_indent_schema()
+        );
+        assert!(
+            !trees.iter().any(|tree| tree.contains("Merge")),
+            "`{query}` collected a drop the fold's own labels already told apart: {trees:?}"
+        );
+    }
 }
 
 /// A scan that carries `__type__` or `__unit__` as a tag can hold two series that agree on
@@ -11418,8 +11447,9 @@ async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
         "avg(some_metric) + 1",
         "-sum(some_metric)",
     ] {
-        let table_provider =
-            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+        // A metric-engine table, whose tag columns are all nullable: the fixture the statements
+        // below ran against before the drop's proof changed, and the one this test pins.
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         let final_node = find_final_split(&plan)
