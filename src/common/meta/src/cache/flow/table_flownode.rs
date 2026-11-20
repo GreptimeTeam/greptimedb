@@ -21,7 +21,7 @@ use moka::future::Cache;
 use moka::ops::compute::Op;
 use table::metadata::TableId;
 
-use crate::cache::container::CacheEntries;
+use crate::cache::container::{CacheEntries, Invalidation};
 use crate::cache::{CacheContainer, Initializer};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
 use crate::key::flow::{TableFlowManager, TableFlowManagerRef};
@@ -63,7 +63,12 @@ pub fn new_table_flownode_set_cache(
     let table_flow_manager = Arc::new(TableFlowManager::new(kv_backend));
     let init = init_factory(table_flow_manager);
 
-    CacheContainer::with_event_handler(name, cache, init, Box::new(invalidator))
+    CacheContainer::with_invalidation(
+        name,
+        cache,
+        init,
+        Invalidation::Events(Box::new(invalidator)),
+    )
 }
 
 fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId, FlownodeFlowSet> {
@@ -326,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn test_flow_event_waits_for_source_lookup() {
         let (started, mut loads) = tokio::sync::mpsc::unbounded_channel();
-        let cache = super::CacheContainer::with_event_handler(
+        let cache = super::CacheContainer::with_invalidation(
             "test".into(),
             CacheBuilder::new(8).build(),
             Arc::new(move |_| {
@@ -337,7 +342,7 @@ mod tests {
                     Ok(Some(Arc::new(HashMap::new())))
                 })
             }),
-            Box::new(super::invalidator),
+            super::Invalidation::Events(Box::new(super::invalidator)),
         );
         let mut read = Box::pin(cache.get(1));
         assert!(futures::poll!(&mut read).is_pending());

@@ -161,7 +161,7 @@ mod tests {
 
     use moka::future::Cache;
 
-    use crate::cache::container::EventHandler;
+    use crate::cache::container::{EventHandler, Invalidation};
     use crate::cache::registry::CacheRegistryBuilder;
     use crate::cache::*;
     use crate::cache_invalidator::{CacheInvalidator, Context};
@@ -172,11 +172,11 @@ mod tests {
         name: &str,
         handler: EventHandler<K, String, CacheIdent>,
     ) -> CacheContainer<K, String, CacheIdent> {
-        CacheContainer::with_event_handler(
+        CacheContainer::with_invalidation(
             name.to_string(),
             Cache::new(128),
             Arc::new(|_| Box::pin(async { Ok(Some("hi".to_string())) })),
-            handler,
+            Invalidation::Events(handler),
         )
     }
 

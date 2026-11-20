@@ -39,19 +39,9 @@ pub type BatchInitializer<K, V> =
 pub(crate) type EventHandler<K, V, T> =
     Box<dyn for<'a> Fn(CacheEntries<'a, K, V>, &'a [T]) -> BoxFuture<'a, ()> + Send + Sync>;
 
-fn invalidate_by_key<K, V, T>(key_of: fn(&T) -> Option<&K>) -> EventHandler<K, V, T>
-where
-    K: Clone + Hash + Eq + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
-    T: Sync + 'static,
-{
-    Box::new(move |entries, tokens| {
-        Box::pin(async move {
-            for key in tokens.iter().filter_map(key_of) {
-                entries.compute(key, |_| Op::Remove).await;
-            }
-        })
-    })
+pub(crate) enum Invalidation<K, V, T> {
+    Key(fn(&T) -> Option<&K>),
+    Events(EventHandler<K, V, T>),
 }
 
 /// Event handlers use the same epoch and per-key compute lock as cache loads.
@@ -90,7 +80,7 @@ where
 pub struct CacheContainer<K, V, CacheToken> {
     name: String,
     cache: Cache<(usize, K), V>,
-    on_events: EventHandler<K, V, CacheToken>,
+    invalidation: Invalidation<K, V, CacheToken>,
     initializer: Initializer<K, V>,
     batch_initializer: Option<BatchInitializer<K, V>>,
     epoch: AtomicUsize,
@@ -112,19 +102,19 @@ where
         initializer: Initializer<K, V>,
         key: fn(&CacheToken) -> Option<&K>,
     ) -> Self {
-        Self::with_event_handler(name, cache, initializer, invalidate_by_key(key))
+        Self::with_invalidation(name, cache, initializer, Invalidation::Key(key))
     }
 
-    pub(crate) fn with_event_handler(
+    pub(crate) fn with_invalidation(
         name: String,
         cache: Cache<(usize, K), V>,
         initializer: Initializer<K, V>,
-        on_events: EventHandler<K, V, CacheToken>,
+        invalidation: Invalidation<K, V, CacheToken>,
     ) -> Self {
         Self {
             name,
             cache,
-            on_events,
+            invalidation,
             initializer,
             batch_initializer: None,
             epoch: AtomicUsize::default(),
@@ -191,7 +181,15 @@ where
 
     /// Applies matching invalidations, waiting for active loads of the affected keys.
     pub async fn invalidate(&self, tokens: &[CacheToken]) -> Result<()> {
-        (self.on_events)(self.entries(), tokens).await;
+        let entries = self.entries();
+        match &self.invalidation {
+            Invalidation::Key(key_of) => {
+                for key in tokens.iter().filter_map(key_of) {
+                    entries.compute(key, |_| Op::Remove).await;
+                }
+            }
+            Invalidation::Events(handler) => handler(entries, tokens).await,
+        }
         Ok(())
     }
 
