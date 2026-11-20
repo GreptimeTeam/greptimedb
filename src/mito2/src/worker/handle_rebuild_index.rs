@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::region::build_index_request;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, info, warn};
 use snafu::{IntoError, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionBuildIndexRequest;
@@ -35,8 +35,9 @@ use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
 use crate::region::options::IndexOptions;
 use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
-use crate::sst::file::{self, FileHandle, FileMeta, RegionFileId, RegionIndexId};
+use crate::sst::file::{self, FileHandle, FileMeta, FileMetaRef, RegionFileId, RegionIndexId};
 use crate::sst::index::handler::{IndexKindProviderRef, PlanContext};
+use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
 use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
@@ -51,6 +52,43 @@ use crate::worker::{RegionWorkerLoop, index_registry};
 pub(crate) struct IndexBuildSnapshot {
     metadata: RegionMetadataRef,
     index_options: IndexOptions,
+}
+
+/// Returns whether a background build may replace the index of `file`: a file that already has
+/// an extension index was indexed whole by its writer, and a replacement would erase those blobs.
+pub(crate) fn needs_background_indexes(file: &FileMeta) -> bool {
+    !ExtensionIndexKind::ALL.iter().any(|kind| {
+        let index_type = IndexKind::Extension(*kind).index_type();
+        file.available_indexes.contains(&index_type)
+            || file
+                .indexes
+                .iter()
+                .any(|column| column.created_indexes.contains(&index_type))
+    })
+}
+
+/// Selects the files that a build of `build_type` for every file of a region builds, from the
+/// region's files that its manifest records (`candidates`, each with the manifest's file meta).
+/// A flush build, which the end of a wait for the Leader lease asks for, builds no extension
+/// index, so it leaves the files that have one. Of the others it builds those whose index in the
+/// version is not current for the plan of `build_type`: a publication committed to the manifest
+/// but not yet applied is still invisible to queries, and its build still holds the file, so a
+/// manual build waits for it.
+fn select_whole_region_builds(
+    candidates: Vec<(FileHandle, FileMetaRef)>,
+    registry: &IndexRegistry,
+    snapshot: &IndexBuildSnapshot,
+    build_type: &IndexBuildType,
+) -> Vec<(FileHandle, FileMetaRef)> {
+    candidates
+        .into_iter()
+        .filter(|(_, file_meta)| {
+            *build_type != IndexBuildType::Flush || needs_background_indexes(file_meta)
+        })
+        .filter(|(file, _)| {
+            index_needs_rebuild(registry, snapshot, file.meta_ref(), build_type.clone())
+        })
+        .collect()
 }
 
 impl<S> RegionWorkerLoop<S> {
@@ -215,6 +253,26 @@ impl<S> RegionWorkerLoop<S> {
             );
             return;
         }
+        // A region that awaits its Leader lease could not publish the index. In async build
+        // mode the end of the wait builds the missing indexes if the region is then a writable
+        // leader.
+        if let Err(e) = region
+            .manifest_ctx
+            .ensure_leader_lease_or_downgrading(region_id)
+        {
+            // A retry has no caller to try again, so the end of the wait re-issues it.
+            if is_retry {
+                info!("Region {region_id} awaits its Leader lease, keeping an index build retry");
+                self.lease_deferred_index_retries
+                    .entry(region_id)
+                    .or_default()
+                    .push(request);
+                return;
+            }
+            info!("Region {region_id} awaits its Leader lease, building no index");
+            sender.send(Err(e));
+            return;
+        }
 
         // Only keep the parts of the version that index builds need, so the
         // memtables and SST version are not pinned across the awaits below.
@@ -294,20 +352,7 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         let build_tasks = if request.file_metas.is_empty() {
-            // Check the version rather than the manifest: a publication committed
-            // to the manifest but not yet applied is still invisible to queries.
-            // Its build still holds the file, so the manual task waits for it.
-            candidates
-                .into_iter()
-                .filter(|(file, _)| {
-                    index_needs_rebuild(
-                        &registry,
-                        &snapshot,
-                        file.meta_ref(),
-                        request.build_type.clone(),
-                    )
-                })
-                .collect::<Vec<_>>()
+            select_whole_region_builds(candidates, &registry, &snapshot, &request.build_type)
         } else {
             candidates
         };
@@ -575,11 +620,59 @@ mod tests {
 
     use super::*;
     use crate::sst::file::ColumnIndexMetadata;
+    use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::handler::{
         BuildContext, IndexCreator, IndexKindHandler, PlanEntry, PlannedIndex,
     };
     use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
     use crate::test_util::CreateRequestBuilder;
+
+    #[test]
+    fn test_whole_region_flush_build_leaves_files_with_extension_indexes() {
+        let request = CreateRequestBuilder::new().build_with_index();
+        let mut metadata = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        metadata.primary_key(request.primary_key);
+        for column in request.column_metadatas {
+            metadata.push_column_metadata(column);
+        }
+        let snapshot = IndexBuildSnapshot {
+            metadata: Arc::new(metadata.build().unwrap()),
+            index_options: IndexOptions::default(),
+        };
+        let registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        let sketched = FileMeta {
+            file_id: FileId::random(),
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: smallvec::smallvec![crate::sst::file::IndexType::HllIndex],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let plain = FileMeta {
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let select = |build_type| {
+            let candidates = [&sketched, &plain]
+                .map(|file| {
+                    let handle = FileHandle::new(file.clone(), Arc::new(NoopFilePurger));
+                    (handle, FileMetaRef::from(file.clone()))
+                })
+                .to_vec();
+            select_whole_region_builds(candidates, &registry, &snapshot, &build_type)
+                .into_iter()
+                .map(|(_, file)| file.file_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(vec![plain.file_id], select(IndexBuildType::Flush));
+        assert_eq!(
+            vec![sketched.file_id, plain.file_id],
+            select(IndexBuildType::Manual)
+        );
+    }
 
     #[derive(Debug)]
     struct MaintenanceHandler;

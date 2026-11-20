@@ -108,7 +108,7 @@ mod puffin_index;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
@@ -1408,6 +1408,23 @@ impl EngineInner {
         }
     }
 
+    /// Logs the end of the wait of `region` for its Leader lease, which lasted `waited`, and
+    /// tells its worker to start what the wait deferred. Does nothing if the lease ended no wait
+    /// or the region waits again, so a wait ends with one notification.
+    fn notify_if_leader_lease_wait_ended(&self, region: &MitoRegionRef, waited: Option<Duration>) {
+        let Some(waited) = waited else {
+            return;
+        };
+        if region.manifest_ctx.awaits_leader_lease() {
+            return;
+        }
+        info!(
+            "Region {} received its Leader lease {:?} after a catchup made it writable",
+            region.region_id, waited
+        );
+        self.workers.notify_leader_lease_wait_ended(region);
+    }
+
     /// Asks the worker to replay the pending tails of `region` if a role change made it
     /// writable. The worker may already have started an ALTER or an edit of the region.
     fn notify_if_became_writable(&self, region: &MitoRegionRef, was_writable: bool) {
@@ -1765,11 +1782,20 @@ impl RegionEngine for MitoEngine {
         }
         if role == RegionRole::Leader {
             let was_writable = region.is_writable();
-            let promoted = region
+            let promotion = region
                 .manifest_ctx
                 .promote_unless_downgrade_started_after(sent_at, region_id);
             self.inner.notify_if_became_writable(&region, was_writable);
-            return Ok(promoted);
+            self.inner
+                .notify_if_leader_lease_wait_ended(&region, promotion.ended_wait);
+            return Ok(promotion.promoted);
+        }
+        // The metasrv grants it to the leader of a region whose route is in staging, and it ends
+        // the wait for a Leader lease too.
+        if role == RegionRole::StagingLeader && region.manifest_ctx.awaits_leader_lease() {
+            let ended_wait = region.manifest_ctx.record_leader_lease(sent_at);
+            self.inner
+                .notify_if_leader_lease_wait_ended(&region, ended_wait);
         }
         let previous = region.set_role(role);
         self.inner.notify_if_can_no_longer_replay(&region, previous);

@@ -60,6 +60,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Followers cannot flush; explicit flush-on-close and region WAL options
         // retain their existing behavior.
         if close_needs_flush(&region, &request) && region.is_flushable() {
+            // A region that awaits its Leader lease holds rows that exist nowhere else only if
+            // it was written to, which happens only after it was routed to; a close, such as the
+            // one of a shutdown, must not drop them. It gives up the role as a downgrade does, so
+            // its flush commits under the downgrade's checks.
+            if region.is_writable() && region.manifest_ctx.awaits_leader_lease() {
+                region.manifest_ctx.begin_downgrade(region_id);
+            }
             info!("Region {} has pending data, waiting for flush", region_id);
             if self.flush_scheduler.is_flush_requested(region_id) {
                 self.flush_scheduler
@@ -127,6 +134,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
         self.granted_leases.remove(region_id);
+        self.lease_deferred_index_retries.remove(&region_id);
         region.deactivate_region_manifest_size_metric();
         self.cancel_tail_replay(region_id);
         region.stop().await;

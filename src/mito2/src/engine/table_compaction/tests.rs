@@ -11,6 +11,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use api::v1::Rows;
 use bytes::Bytes;
@@ -19,14 +20,16 @@ use common_recordbatch::RecordBatches;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use parquet::file::metadata::ParquetMetaData;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{RegionRequest, RegionTruncateRequest};
 use store_api::storage::{FileId, RegionId};
 
 use super::{PublicationOutcome, TableCompactionSnapshot};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::engine::region_hook::{RegionHook, RegionHookRef, VerifiedSstFileInfo};
+use crate::error::Error;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
 use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
@@ -142,6 +145,47 @@ async fn row_count(engine: &MitoEngine, region_id: RegionId) -> usize {
     .iter()
     .map(|batch| batch.num_rows())
     .sum()
+}
+
+#[tokio::test]
+async fn test_publication_refused_awaiting_leader_lease() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let (snapshot, output) = seed(&engine, region_id).await;
+    engine.require_write_lease();
+    engine.freeze_lease_clock(Instant::now());
+    promote_to_await_leader_lease(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.manifest_ctx.manifest_version().await;
+
+    let err = engine
+        .publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::EditRegion { source, .. }
+            if matches!(source.as_ref(), Error::RegionLeaseNotReceived { .. })),
+        "{err:?}"
+    );
+    assert_eq!(region.manifest_ctx.manifest_version().await, version);
+
+    engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            Instant::now(),
+            Instant::now() + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, snapshot, vec![output])
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
