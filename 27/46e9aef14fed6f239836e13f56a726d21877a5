@@ -1,0 +1,23 @@
+src/query/src/dist_plan/planner.rs
+  s_17057bba187655::t_183bf41be8ef5f 976
+Cargo.lock
+  s_17057bba187655::t_e9d7ecf0a1488f 1660,6188,6800,9379,11679,11727,11740,13296,14219,14790,15417
+Cargo.toml
+  s_17057bba187655::t_436d0afb3e6461 167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2746e9aef14fed6f239836e13f56a726d21877a5",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
