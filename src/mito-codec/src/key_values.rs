@@ -451,15 +451,19 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_encoded_row_with_one_of_two_fields() {
-        let meta = new_region_metadata(2, 2);
-        for (field, expected) in [("v0", [Some(2), None]), ("v1", [None, Some(2)])] {
+    fn test_sparse_encoded_row_with_one_supplied_field() {
+        for (num_fields, field, expected) in [
+            (1, "v0", &[Some(2)][..]),
+            (2, "v0", &[Some(2), None][..]),
+            (2, "v1", &[None, Some(2)][..]),
+        ] {
+            let meta = new_region_metadata(2, num_fields);
             let mut mutation = new_mutation(&[PRIMARY_KEY_COLUMN_NAME, TS_NAME, field], 1);
             mutation.write_hint = Some(v1::WriteHint {
                 primary_key_encoding: v1::PrimaryKeyEncoding::Sparse.into(),
             });
             let kvs = KeyValues::new(&meta, mutation).unwrap();
-            check_key_values(&kvs, 1, &[Some(0)], 1, &expected);
+            check_key_values(&kvs, 1, &[Some(0)], 1, expected);
         }
     }
 
