@@ -43,6 +43,18 @@ impl MetadataRegion {
         physical_region_id: RegionId,
         source_region_id: RegionId,
     ) -> Result<()> {
+        self.copy_logical_regions(physical_region_id, source_region_id, |target, batch| {
+            self.put_entries(target, batch)
+        })
+        .await
+    }
+
+    async fn copy_logical_regions<Fut: Future<Output = Result<()>>>(
+        &self,
+        physical_region_id: RegionId,
+        source_region_id: RegionId,
+        mut put: impl FnMut(RegionId, Vec<(String, String)>) -> Fut,
+    ) -> Result<()> {
         let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
         let data_region_id = utils::to_data_region_id(physical_region_id);
         let target_by_source = self
@@ -77,14 +89,15 @@ impl MetadataRegion {
                             .map(|key| key.map(|key| (key, value))),
                     )
                 });
-        self.copy_entries(metadata_region_id, columns).await?;
+        let mut put_batch = |batch| put(metadata_region_id, batch);
+        copy_entries(columns, &mut put_batch).await?;
 
-        // Publish region markers only after all column batches have been written.
+        // All columns are durable before the first marker is published. If a later
+        // marker put fails, retrying replays the completed batches at the same keys.
         let markers = target_by_source
             .values()
             .map(|id| Ok((Self::concat_region_key(*id), String::new())));
-        self.copy_entries(metadata_region_id, stream::iter(markers))
-            .await?;
+        copy_entries(stream::iter(markers), put_batch).await?;
         info!(
             "Transformed {} logical regions metadata to physical region {}, source region: {}",
             target_by_source.len(),
@@ -93,34 +106,33 @@ impl MetadataRegion {
         );
         Ok(())
     }
+}
 
-    /// Copies entries into WAL-backed puts, waiting for each write before reading further.
-    /// An entry larger than the payload budget is written on its own.
-    async fn copy_entries(
-        &self,
-        target: RegionId,
-        entries: impl Stream<Item = Result<(String, String)>>,
-    ) -> Result<()> {
-        pin_mut!(entries);
-        let mut batch = Vec::new();
-        let mut bytes = 0;
-        while let Some((key, value)) = entries.try_next().await? {
-            let size = key.len() + value.len();
-            if !batch.is_empty()
-                && (batch.len() == COPY_BATCH_ROWS
-                    || bytes + size > COPY_BATCH_BYTES.as_bytes() as usize)
-            {
-                self.put_entries(target, std::mem::take(&mut batch)).await?;
-                bytes = 0;
-            }
-            bytes += size;
-            batch.push((key, value));
+/// Copies entries into WAL-backed puts, waiting for each write before reading further.
+/// An entry larger than the payload budget is written on its own.
+async fn copy_entries<Fut: Future<Output = Result<()>>>(
+    entries: impl Stream<Item = Result<(String, String)>>,
+    mut put_batch: impl FnMut(Vec<(String, String)>) -> Fut,
+) -> Result<()> {
+    pin_mut!(entries);
+    let mut batch = Vec::new();
+    let mut bytes = 0;
+    while let Some((key, value)) = entries.try_next().await? {
+        let size = key.len() + value.len();
+        if !batch.is_empty()
+            && (batch.len() == COPY_BATCH_ROWS
+                || bytes + size > COPY_BATCH_BYTES.as_bytes() as usize)
+        {
+            put_batch(std::mem::take(&mut batch)).await?;
+            bytes = 0;
         }
-        if !batch.is_empty() {
-            self.put_entries(target, batch).await?;
-        }
-        Ok(())
+        bytes += size;
+        batch.push((key, value));
     }
+    if !batch.is_empty() {
+        put_batch(batch).await?;
+    }
+    Ok(())
 }
 
 /// Retains the encoded column name and validates it with one reusable scratch buffer.
@@ -149,6 +161,126 @@ mod tests {
     use crate::test_util::TestEnv;
     use crate::utils::to_metadata_region_id;
 
+    async fn batch_lengths(entries: impl Iterator<Item = (String, String)>) -> Vec<usize> {
+        let mut lengths = Vec::new();
+        copy_entries(stream::iter(entries.map(Ok)), |batch| {
+            lengths.push(batch.len());
+            future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+        lengths
+    }
+
+    #[tokio::test]
+    async fn test_copy_entries_row_limit() {
+        let entries = || (0..).map(|id| (id.to_string(), String::new()));
+        assert_eq!(
+            batch_lengths(entries().take(COPY_BATCH_ROWS)).await,
+            [COPY_BATCH_ROWS]
+        );
+        assert_eq!(
+            batch_lengths(entries().take(COPY_BATCH_ROWS + 1)).await,
+            [COPY_BATCH_ROWS, 1]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_copy_entries_payload_limit() {
+        let entries = || {
+            [
+                (
+                    "key".to_string(),
+                    "a".repeat(COPY_BATCH_BYTES.as_bytes() as usize - 5),
+                ),
+                ("b".to_string(), "c".to_string()),
+                ("d".to_string(), String::new()),
+            ]
+            .into_iter()
+        };
+        assert_eq!(batch_lengths(entries().take(2)).await, [2]);
+        assert_eq!(batch_lengths(entries()).await, [2, 1]);
+    }
+
+    #[tokio::test]
+    async fn test_transform_retries_partial_marker_publication() {
+        let env = TestEnv::new().await;
+        let target = env.default_physical_region_id();
+        env.create_physical_region(target, "/copy", vec![]).await;
+        let region = to_metadata_region_id(target);
+        let source = RegionId::new(target.table_id(), 0);
+        let metadata = env.metadata_region();
+        let tables = 1..=COPY_BATCH_ROWS as u32 + 1;
+        let source_id = |table| RegionId::new(table, source.region_number());
+        let target_id = |table| RegionId::new(table, target.region_number());
+        let mut input = tables
+            .clone()
+            .map(|id| {
+                (
+                    MetadataRegion::concat_region_key(source_id(id)),
+                    String::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        input.push((
+            MetadataRegion::concat_column_key(source_id(1), "col"),
+            "value".into(),
+        ));
+        metadata.put_entries(region, input).await.unwrap();
+
+        let mut puts = Vec::new();
+        let err = metadata
+            .copy_logical_regions(target, source, |region, entries| {
+                puts.push(entries.len());
+                let fail = puts.len() == 3;
+                let metadata = &metadata;
+                async move {
+                    if fail {
+                        return crate::error::InvalidRequestSnafu {
+                            region_id: region,
+                            reason: "injected marker put error",
+                        }
+                        .fail();
+                    }
+                    metadata.put_entries(region, entries).await
+                }
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::InvalidRequest { .. }));
+        assert_eq!(puts, [1, COPY_BATCH_ROWS, 1]);
+        assert_eq!(
+            metadata
+                .get(
+                    region,
+                    &MetadataRegion::concat_column_key(target_id(1), "col")
+                )
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("value")
+        );
+        let target_markers = async || {
+            metadata
+                .logical_regions(target)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|id| id.region_number() == target.region_number())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let expected = tables.map(target_id).collect();
+        let partial = target_markers().await;
+        assert_eq!(partial.len(), COPY_BATCH_ROWS);
+        assert!(partial.is_subset(&expected));
+
+        metadata
+            .transform_logical_region_metadata(target, source)
+            .await
+            .unwrap();
+        assert_eq!(target_markers().await, expected);
+    }
+
     #[tokio::test]
     async fn test_copy_entries_retries_after_partial_write() {
         let env = TestEnv::new().await;
@@ -173,10 +305,10 @@ mod tests {
         .build();
         let input = entries.iter().cloned().map(Ok).chain([Err(failure)]);
         assert!(
-            metadata
-                .copy_entries(region, stream::iter(input))
-                .await
-                .is_err()
+            copy_entries(stream::iter(input), |batch| metadata
+                .put_entries(region, batch))
+            .await
+            .is_err()
         );
         assert_eq!(
             metadata.get(region, "large").await.unwrap(),
@@ -184,10 +316,11 @@ mod tests {
         );
         assert_eq!(metadata.get(region, "tail").await.unwrap(), None);
 
-        metadata
-            .copy_entries(region, stream::iter(entries.into_iter().map(Ok)))
-            .await
-            .unwrap();
+        copy_entries(stream::iter(entries.into_iter().map(Ok)), |batch| {
+            metadata.put_entries(region, batch)
+        })
+        .await
+        .unwrap();
         assert_eq!(
             metadata.get(region, "tail").await.unwrap().as_deref(),
             Some("value")
