@@ -589,6 +589,8 @@ impl MitoEngine {
 
     /// Pauses compaction on a loaded region and waits for any active cycle to finish.
     /// Writes and flushes continue while the caller holds the guard.
+    /// The scheduler discards automatic follow-ups skipped during the pause. After the
+    /// last guard is dropped, a fresh trigger can start another compaction cycle.
     pub async fn pause_compaction(
         &self,
         region_id: RegionId,
