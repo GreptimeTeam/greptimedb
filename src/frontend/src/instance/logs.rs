@@ -19,7 +19,7 @@ use client::Output;
 use common_error::ext::BoxedError;
 use log_query::LogQuery;
 use server_error::Result as ServerResult;
-use servers::error::{self as server_error, AuthSnafu, ExecuteQuerySnafu};
+use servers::error::{self as server_error, ExecuteQuerySnafu};
 use servers::interceptor::{LogQueryInterceptor, LogQueryInterceptorRef};
 use servers::query_handler::LogQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
@@ -39,10 +39,8 @@ impl LogQueryHandler for Instance {
             &request.table.schema_name,
             &request.table.table_name,
         )]);
-        let targets = self.resolve_query_permission_targets(targets, &ctx).await?;
-
-        self.check_table_permission(&ctx, PermissionReq::Action(LOG_QUERY), targets)
-            .context(AuthSnafu)?;
+        self.check_server_table_permission(&ctx, PermissionReq::Action(LOG_QUERY), targets)
+            .await?;
 
         interceptor.as_ref().pre_query(&request, ctx.clone())?;
 
