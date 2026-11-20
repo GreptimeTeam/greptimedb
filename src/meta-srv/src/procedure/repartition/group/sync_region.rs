@@ -675,47 +675,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sync_regions_retryable_instruction_error() {
-        let mut env = TestingEnv::new();
-        let table_id = 1024;
-        let region_id = RegionId::new(table_id, 3);
-        let mut persistent_context = new_persistent_context(table_id, vec![], vec![]);
-        persistent_context.group_prepare_result = Some(test_prepare_result(table_id));
+    async fn test_procedure_reissues_sync_after_retryable_copy_error() {
+        use std::sync::Arc;
+        use std::time::Duration;
 
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        use common_meta::instruction::{
+            Instruction, InstructionReply, MetadataCompaction, SimpleReply,
+        };
+        use common_meta::state_store::KvStateStore;
+        use common_procedure::local::{LocalManager, ManagerConfig};
+        use common_procedure::{ProcedureManager, ProcedureWithId};
+
+        use crate::handler::HeartbeatMailbox;
+        use crate::procedure::repartition::group::RepartitionGroupProcedure;
+        use crate::procedure::test_util::new_flush_region_reply_for_region;
+
+        let mut env = TestingEnv::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         env.mailbox_ctx
             .insert_heartbeat_response_receiver(Channel::Datanode(1), tx)
             .await;
-        send_mock_reply(env.mailbox_ctx.mailbox().clone(), rx, move |id| {
-            Ok(new_sync_region_reply_with_error(
-                id,
-                region_id,
-                false,
-                true,
-                Some(InstructionError {
-                    code: StatusCode::StorageUnavailable,
-                    message: "manifest delta disappeared".to_string(),
-                    retry_hint: RetryHint::Retryable,
-                }),
-            ))
-        });
-
-        let mut ctx = env.create_context(persistent_context);
-        let sync_region = SyncRegion {
-            region_routes: vec![RegionRoute {
-                region: Region {
-                    id: region_id,
+        let mut persistent = new_persistent_context(1024, vec![], vec![]);
+        let source = RegionId::new(1024, 1);
+        let target = RegionId::new(1024, 3);
+        persistent.group_prepare_result = Some(test_prepare_result(1024));
+        let procedure = RepartitionGroupProcedure {
+            context: env.create_context(persistent),
+            state: Box::new(SyncRegion {
+                region_routes: vec![RegionRoute {
+                    region: Region {
+                        id: target,
+                        ..Default::default()
+                    },
+                    leader_peer: Some(Peer::empty(1)),
                     ..Default::default()
-                },
-                leader_peer: Some(Peer::empty(1)),
-                ..Default::default()
-            }],
+                }],
+            }),
         };
-
-        let err = sync_region
-            .sync_regions(&mut ctx, &mut true)
+        let store = Arc::new(KvStateStore::new(env.kv_backend.clone()));
+        let manager = LocalManager::new(
+            ManagerConfig {
+                retry_delay: Duration::from_millis(1),
+                ..Default::default()
+            },
+            store.clone(),
+            store,
+            None,
+            None,
+        );
+        manager.start().await.unwrap();
+        let _watcher = manager
+            .submit(ProcedureWithId::with_random_id(Box::new(procedure)))
             .await
-            .unwrap_err();
-        assert_matches!(err, Error::RetryLater { .. });
+            .unwrap();
+        let mailbox = env.mailbox_ctx.mailbox();
+        let mut first_sync_id = None;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut msg = rx.recv().await.unwrap().unwrap().mailbox_message.unwrap();
+                let id = msg.id;
+                let reply = match HeartbeatMailbox::json_instruction(&msg).unwrap() {
+                    Instruction::FlushRegions(_) => {
+                        new_flush_region_reply_for_region(id, source, true, None)
+                    }
+                    Instruction::MetadataCompaction(MetadataCompaction::Pause { .. }) => {
+                        msg.payload = Some(api::v1::meta::mailbox_message::Payload::Json(
+                            serde_json::to_string(&InstructionReply::MetadataCompaction(
+                                SimpleReply {
+                                    result: true,
+                                    error: None,
+                                },
+                            ))
+                            .unwrap(),
+                        ));
+                        msg
+                    }
+                    Instruction::MetadataCompaction(MetadataCompaction::Release { .. }) => continue,
+                    Instruction::SyncRegions(requests) => {
+                        assert_eq!(requests.len(), 1);
+                        assert_eq!(requests[0].region_id, target);
+                        if let Some(first) = first_sync_id {
+                            assert_ne!(id, first);
+                            break;
+                        }
+                        first_sync_id = Some(id);
+                        new_sync_region_reply_with_error(
+                            id,
+                            target,
+                            false,
+                            true,
+                            Some(InstructionError::new(
+                                StatusCode::StorageUnavailable,
+                                "source metadata file disappeared",
+                                RetryHint::Retryable,
+                            )),
+                        )
+                    }
+                    other => panic!("unexpected instruction {other:?}"),
+                };
+                mailbox.on_recv(id, Ok(reply)).await.unwrap();
+            }
+        })
+        .await
+        .expect("runner must send a second SyncRegions request");
+        manager.stop().await.unwrap();
     }
 }

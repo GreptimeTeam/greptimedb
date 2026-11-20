@@ -460,8 +460,8 @@ impl ErrorExt for Error {
 
             ForbiddenPhysicalAlter { .. }
             | ForbiddenPhysicalWrite { .. }
-            | UnsupportedRegionRequest { .. }
-            | MissingFiles { .. } => StatusCode::Unsupported,
+            | UnsupportedRegionRequest { .. } => StatusCode::Unsupported,
+            MissingFiles { .. } => StatusCode::StorageUnavailable,
 
             DeserializeColumnMetadata { .. }
             | SerializeColumnMetadata { .. }
@@ -519,6 +519,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            MissingFiles { .. } => RetryHint::Retryable,
             PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 RetryHint::RetryAfterRouteRefresh
             }
@@ -552,6 +553,38 @@ impl ErrorExt for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_metadata_sync_missing_files_instruction_retry_hint() {
+        use common_meta::instruction::InstructionError;
+        use snafu::IntoError;
+
+        let source = RegionId::new(1, 1);
+        let target = RegionId::new(1, 2);
+        let missing_source = mito2::error::MetadataCopyFileNotFoundSnafu {
+            path: "table/data.parquet",
+        }
+        .into_error(object_store::Error::new(
+            object_store::ErrorKind::NotFound,
+            "missing",
+        ));
+        for err in [
+            MitoCopyRegionFromOperationSnafu {
+                source_region_id: source,
+                target_region_id: target,
+            }
+            .into_error(BoxedError::new(missing_source)),
+            MissingFilesSnafu {
+                region_id: target,
+                file_ids: vec![FileId::random()],
+            }
+            .build(),
+        ] {
+            let reply = InstructionError::from_error(&err);
+            assert_eq!(reply.code, StatusCode::StorageUnavailable);
+            assert_eq!(reply.retry_hint, RetryHint::Retryable);
+        }
+    }
 
     #[test]
     fn test_missing_region_retry_hints() {
