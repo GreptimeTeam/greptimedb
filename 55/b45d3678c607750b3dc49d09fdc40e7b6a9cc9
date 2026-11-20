@@ -1,5 +1,36 @@
 src/client/src/database.rs
   h_623774b620da8e 1312-1315
+  s_17057bba187655::t_9583d37a68e1e3 1310-1311,1316-1338
+src/mito2/src/engine/scan_test.rs
+  s_17057bba187655::t_9583d37a68e1e3 7723-7729,7732-7849
+src/meta-srv/src/procedure/repartition/group/update_metadata/exit_staging_region.rs
+  s_17057bba187655::t_9583d37a68e1e3 48-49,158,171
+src/query/src/dummy_catalog.rs
+  s_17057bba187655::t_9583d37a68e1e3 340-343,349-363,705-727
+src/meta-srv/src/procedure/repartition/group/update_metadata/apply_staging_region.rs
+  s_17057bba187655::t_9583d37a68e1e3 190
+src/partition/src/manager.rs
+  s_17057bba187655::t_9583d37a68e1e3 126,135
+src/query/src/dist_plan/merge_scan.rs
+  s_17057bba187655::t_9583d37a68e1e3 525,617,663-668,698,792-797,2184,2629-2641,2759-2779
+src/query/src/dist_plan/planner.rs
+  s_17057bba187655::t_9583d37a68e1e3 23,153-158,217-219,238,247-248,261,265,267-268,270-276,305,307,309-336,339,462,722-725,727-728,933,942-951,953-954,959-960,962,994-1058
+src/meta-srv/src/procedure/repartition/group/update_metadata.rs
+  s_17057bba187655::t_9583d37a68e1e3 144
+src/metric-engine/src/engine/read.rs
+  s_17057bba187655::t_9583d37a68e1e3 596,614
+src/store-api/src/storage/requests.rs
+  s_17057bba187655::t_9583d37a68e1e3 50-52,123-130
+src/query/src/error.rs
+  s_17057bba187655::t_9583d37a68e1e3 364-370,453,472,506-520,522,525
+tests/compatibility/metadata/repartition_readiness/README.md
+  s_17057bba187655::t_9583d37a68e1e3 4-5,9,13
+src/mito2/src/engine.rs
+  s_17057bba187655::t_9583d37a68e1e3 1259-1280
+src/common/meta/src/rpc/router.rs
+  s_17057bba187655::t_9583d37a68e1e3 231,235-236,241
+src/mito2/src/error.rs
+  s_17057bba187655::t_9583d37a68e1e3 888-895,1840,1895
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -9,6 +40,16 @@ src/client/src/database.rs
   "humans": {
     "h_623774b620da8e": {
       "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
     }
   }
 }
