@@ -1,0 +1,39 @@
+{
+  "format": "columnar-samples",
+  "version": 1,
+  "identity_encoding": "exact-sparse-key-area",
+  "region_id": 0,
+  "source_file_id": "5f6a8e51-a745-4861-98d5-b3fa42941581",
+  "generation": "3fdf6074-3a16-47c8-bd41-e0f4f0cbcd3d",
+  "timestamp": {
+    "column_id": 3,
+    "name": "ts",
+    "unit": "millisecond"
+  },
+  "fields": [
+    {
+      "column_id": 2,
+      "name": "field_0",
+      "type": "float64",
+      "nullable": true
+    }
+  ],
+  "files": [
+    {
+      "part_id": 0,
+      "file_size": 1085,
+      "num_rows": 6,
+      "num_blocks": 6,
+      "first": {
+        "table_id": 1,
+        "tsid": 7
+      },
+      "last": {
+        "table_id": 1,
+        "tsid": 7
+      },
+      "min_timestamp": 100,
+      "max_timestamp": 105
+    }
+  ]
+}
