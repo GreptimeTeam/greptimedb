@@ -48,6 +48,10 @@ DEFAULT_CASES = [
 
 HEAVY_CASES = [
     "tests/perf/query_cases/prom_remote_write_7913/case.toml",
+    # The rollup cache case compares a candidate-only frontend feature against
+    # an uncached base, so it is a feature measurement rather than a routine
+    # scan-path gate: run it on demand, not on every PR.
+    "tests/perf/query_cases/prom_rollup_cache_warm_range/case.toml",
     # High-cardinality direct-SST cases exceed the default query-regression
     # runner's resources (the self-hosted runner is repeatedly lost during the
     # run). Keep them in the heavy set so they only run on demand.
@@ -445,6 +449,7 @@ def run_remote_case(
         render = [
             str(runner), "render-remote-config", "--case", str(case_path),
             "--fixture-generator", str(fixture_generator),
+            "--target", target.name,
             "--output", str(target.frontend_config),
         ]
         render_status = subprocess.run(render, check=False).returncode
