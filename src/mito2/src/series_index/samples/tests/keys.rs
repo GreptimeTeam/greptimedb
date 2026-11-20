@@ -37,7 +37,7 @@ use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::purger::series_index_channel;
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
-    self, KeyRef, MAGIC, Page, PayloadReference, TRAILER_SIZE, Trailer,
+    self, KeyRef, MAGIC, Page, PayloadLimit, PayloadReference, TRAILER_SIZE, Trailer,
 };
 use crate::series_index::samples::{ColumnarSamplesFormat, Manifest};
 use crate::series_index::{TABLE_ID_COLUMN, TSID_COLUMN};
@@ -317,7 +317,8 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
                 &trailer.root,
                 trailer.depth,
                 trailer.areas(),
-                &manifest
+                &manifest,
+                PayloadLimit::Page
             )
             .is_err(),
             "{bad:?} must not decode"
@@ -640,6 +641,7 @@ async fn part_root(
         trailer.depth,
         trailer.areas(),
         &manifest,
+        PayloadLimit::Page,
     )
     .unwrap();
     (trailer, page, bytes)
@@ -1029,7 +1031,7 @@ async fn unpayable_key_prefetch_issues_no_key_read() {
 /// One writer over one long-keyed series, returning the accounting after the second block flushes
 /// plus the size of one key copy.
 ///
-/// `root_capacity` is one and `page_bytes` admits exactly one maximal descriptor per leaf, so the
+/// `max_leaves_per_part` is one and `page_bytes` admits exactly one maximal descriptor per leaf, so the
 /// second block starts a new part while the series continues into it.
 async fn cross_rollover_accounting(part_bytes: u64) -> ((u64, u64, u64, usize), u64) {
     use crate::series_index::format::FormatWriter;
@@ -1045,7 +1047,7 @@ async fn cross_rollover_accounting(part_bytes: u64) -> ((u64, u64, u64, usize), 
         block_rows: 1,
         part_bytes,
         page_bytes: 244,
-        root_capacity: 1,
+        max_leaves_per_part: 1,
         ..Default::default()
     };
     let generation = FileId::random();
@@ -1517,7 +1519,7 @@ async fn pruned_block_does_not_hide_the_boundary_key() {
     let format = ColumnarSamplesFormat {
         block_rows: 1,
         page_bytes: 476,
-        root_capacity: 1,
+        max_leaves_per_part: 1,
         ..Default::default()
     };
     let first = new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 7);

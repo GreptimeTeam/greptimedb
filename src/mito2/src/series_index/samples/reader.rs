@@ -38,7 +38,7 @@ use crate::series_index::format::{SamplesBatch, SamplesFormatReader, SamplesRead
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
-    self, Areas, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
+    self, Areas, Block, BlockOrder, Bounds, Column, Page, PageReference, PayloadLimit, Trailer,
 };
 use crate::series_index::samples::{
     MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, invalid, require, unsupported,
@@ -367,7 +367,7 @@ impl SamplesFormatReader for SamplesReader {
                             }
                         } else if complete { require(block.ordinal == 0, "initial sample ordinal is not zero")?; }
                         for column in &block.columns {
-                            column.payload.validate(payload_position, trailer.payload_end, false)?;
+                            column.payload.validate(payload_position, trailer.payload_end, PayloadLimit::Chunk)?;
                             payload_position = column.payload.end()?;
                         }
                         // Ownership is exact, so it needs the block's key rather than its
@@ -781,6 +781,13 @@ async fn load_metadata_page(
     manifest: &Manifest,
 ) -> Result<Arc<Page>> {
     let (path, size) = object;
+    // A depth-two page is the part's root: the one page that names every leaf and therefore the
+    // only one measured against the root limit. Everything else is a leaf.
+    let limit = if depth == 2 {
+        PayloadLimit::Root
+    } else {
+        PayloadLimit::Page
+    };
     metadata_cache::load(
         cache,
         format!("{path}/{size}/{reference:?}/{depth}/{}", areas.payload_end),
@@ -797,6 +804,7 @@ async fn load_metadata_page(
                 depth,
                 areas,
                 manifest,
+                limit,
             )
         },
     )
@@ -1307,7 +1315,7 @@ async fn prefetch_blocks(
         for column in &selected {
             column
                 .payload
-                .validate(metadata::HEADER_SIZE, payload_end, false)?;
+                .validate(metadata::HEADER_SIZE, payload_end, PayloadLimit::Chunk)?;
             let range = column.payload.offset..column.payload.end()?;
             if let Some(previous) = next_range.as_mut()
                 && can_merge_ranges(previous, &range)

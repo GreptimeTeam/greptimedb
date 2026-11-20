@@ -13,6 +13,9 @@
 // limitations under the License.
 
 //! Lossless codecs, selective time navigation, corruption and artifact lifecycle.
+//!
+//! The root page is the one page a part cannot subdivide, so the tests that bound a part's
+//! block count live here: they write many one-block leaves into one part and read them back.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -32,7 +35,8 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
 use super::metadata::{
-    Bounds, HEADER_SIZE, KEY_CHECKSUM_BYTES, Page, PayloadReference, TRAILER_SIZE, Trailer,
+    Bounds, HEADER_SIZE, KEY_CHECKSUM_BYTES, Page, PageReference, PayloadLimit, PayloadReference,
+    TRAILER_SIZE, Trailer,
 };
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
@@ -210,6 +214,7 @@ async fn root_page(
         trailer.depth,
         trailer.areas(),
         &manifest,
+        PayloadLimit::Page,
     )
     .unwrap();
     (manifest, trailer, page, bytes)
@@ -405,7 +410,7 @@ async fn equal_timestamps_cross_leaves_and_parts() {
         block_rows: 1,
         // One block descriptor plus header; a block now also stores its exact series key.
         page_bytes: 288,
-        root_capacity: 2,
+        max_leaves_per_part: 2,
         ..Default::default()
     };
     let rows: Vec<_> = (0..7)
@@ -455,6 +460,312 @@ async fn equal_timestamps_cross_leaves_and_parts() {
         .unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].column(0).null_count(), 1);
+}
+
+/// One descriptor of the four-column fixture schema: `56 + 44 * 4` bytes.
+const DESCRIPTOR: usize = 232;
+/// One metric row of one series, as `(table_id, tsid, timestamp, sequence, operation, value)`.
+fn series_rows(count: i64) -> Vec<Sample> {
+    (0..count)
+        .map(|i| (1, 7, i, i as u64, 0, Some(i as u64)))
+        .collect()
+}
+
+/// A part's block count is bounded by its root, not by the leaf page limit.
+///
+/// Every page but the root is one leaf, and a part can always add another leaf, so the leaf
+/// limit costs nothing. The root names every leaf, so bounding it by the leaf limit capped a
+/// four-column part at 910 leaves: this writes 911 one-block leaves in one part and reads every
+/// row back.
+#[tokio::test]
+async fn root_internal_page_may_exceed_page_limit() {
+    let store = store();
+    let meta = metadata();
+    // The leaf limit admits exactly one descriptor plus the page header, so every block is its
+    // own leaf and the root has to name all of them.
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 12 + DESCRIPTOR,
+        ..Default::default()
+    };
+    let rows = series_rows(911);
+    let handle = build(&format, &store, meta.clone(), &[batch(&meta, &rows, false)]).await;
+    let descriptor = manifest(&store, &handle).await;
+    assert_eq!(
+        1,
+        descriptor.files.len(),
+        "one part holds every block; the root is its only ceiling"
+    );
+    let bytes = store
+        .read(&descriptor.part_path(0))
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(
+        2, trailer.depth,
+        "many leaves make the root an internal page"
+    );
+    let payload = trailer.root.payload;
+    let decoded = payload
+        .unpack(&bytes[payload.offset as usize..payload.end().unwrap() as usize])
+        .unwrap();
+    assert!(
+        decoded.len() > metadata::PAGE_LIMIT,
+        "the root itself is past the leaf limit: {} bytes",
+        decoded.len()
+    );
+    assert!(decoded.len() <= metadata::MAX_ROOT_BYTES);
+    let Page::Internal(children) = Page::decode(
+        &decoded,
+        &trailer.root,
+        trailer.depth,
+        trailer.areas(),
+        &descriptor,
+        PayloadLimit::Root,
+    )
+    .unwrap() else {
+        panic!("a multi-leaf part's root is an internal page")
+    };
+    assert_eq!(911, children.len());
+    let reader = format.reader(store, handle).await.unwrap();
+    let out = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(collect_rows(&out), rows);
+}
+
+/// A part that needs one leaf keeps the leaf itself as its root.
+#[tokio::test]
+async fn single_leaf_keeps_depth_one() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let rows = series_rows(4);
+    let handle = build(&format, &store, meta.clone(), &[batch(&meta, &rows, false)]).await;
+    // The helper asserts the part count and the depth; the root is the leaf page itself, so a
+    // one-leaf part keeps the bytes it had before the root could be an internal page.
+    let (_, trailer, page, _) = root_page(&store, &handle).await;
+    assert!(trailer.root.payload.decoded as usize <= metadata::PAGE_LIMIT);
+    let Page::Leaf(blocks) = page else {
+        panic!("a one-leaf part's root is the leaf itself")
+    };
+    assert_eq!(1, blocks.len());
+    let reader = format.reader(store, handle).await.unwrap();
+    let out = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(collect_rows(&out), rows);
+}
+
+/// A part rolls at the configured leaf count, ahead of any byte target.
+#[tokio::test]
+async fn explicit_max_leaves_rolls() {
+    let store = store();
+    let meta = metadata();
+    // One block per leaf and at most three leaves per part: seven blocks are three parts.
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 12 + DESCRIPTOR,
+        max_leaves_per_part: 3,
+        ..Default::default()
+    };
+    let rows = series_rows(7);
+    let handle = build(&format, &store, meta.clone(), &[batch(&meta, &rows, false)]).await;
+    let descriptor = manifest(&store, &handle).await;
+    assert_eq!(
+        descriptor
+            .files
+            .iter()
+            .map(|part| part.num_blocks)
+            .collect::<Vec<_>>(),
+        vec![3, 3, 1]
+    );
+    // The series continues across the part boundaries, so every row must still read back.
+    let reader = format.reader(store, handle).await.unwrap();
+    let out = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(collect_rows(&out), rows);
+}
+
+/// Rewrites a one-leaf part into the depth-two layout older parts hold, by hand.
+///
+/// A part with several leaves used to reach them through an internal root page. Nothing writes
+/// that layout any more - a multi-leaf root is written through the root limit - but the bytes on
+/// disk are the same, so a reader has to keep accepting them.
+async fn internal_root_fixture(
+    store: &ObjectStore,
+    handle: &SamplesFileHandle,
+) -> SamplesFileHandle {
+    let (mut descriptor, mut trailer, page, mut bytes) = root_page(store, handle).await;
+    let Page::Leaf(blocks) = page else {
+        panic!("a one-leaf part holds one leaf page")
+    };
+    assert_eq!(6, blocks.len());
+    bytes.truncate(trailer.key_end as usize);
+    let mut children = Vec::new();
+    for group in blocks.chunks(2) {
+        let leaf = Page::Leaf(group.to_vec());
+        let (payload, stored) =
+            metadata::pack(&leaf.encode(), bytes.len() as u64, 1, PayloadLimit::Page).unwrap();
+        bytes.extend_from_slice(&stored);
+        children.push(PageReference {
+            bounds: leaf.bounds().unwrap(),
+            payload,
+        });
+    }
+    assert_eq!(3, children.len());
+    let root = Page::Internal(children);
+    let (payload, stored) =
+        metadata::pack(&root.encode(), bytes.len() as u64, 1, PayloadLimit::Page).unwrap();
+    bytes.extend_from_slice(&stored);
+    trailer.root = PageReference {
+        bounds: root.bounds().unwrap(),
+        payload,
+    };
+    trailer.depth = 2;
+    trailer.file_length = (bytes.len() + TRAILER_SIZE as usize) as u64;
+    bytes.extend_from_slice(&trailer.encode());
+
+    let part_path = descriptor.part_path(0);
+    store.write(&part_path, bytes.clone()).await.unwrap();
+    descriptor.files[0].file_size = bytes.len() as u64;
+    let manifest_path = descriptor.path();
+    let json = serde_json::to_vec(&descriptor).unwrap();
+    store.write(&manifest_path, json.clone()).await.unwrap();
+    let mut entry = handle.entry().clone();
+    for object in &mut entry.artifact.objects {
+        if object.path == part_path {
+            object.file_size = bytes.len() as u64;
+        } else if object.path == manifest_path {
+            object.file_size = json.len() as u64;
+        }
+    }
+    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
+    let (purger, _) = series_index_channel(store.clone());
+    SamplesFileHandle::new(handle.file_id(), entry, purger)
+}
+
+/// A hand-assembled depth-two part still reads, whatever wrote it.
+#[tokio::test]
+async fn v1_internal_root_still_reads() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        ..Default::default()
+    };
+    let rows = series_rows(6);
+    let v1 = build(&format, &store, meta.clone(), &[batch(&meta, &rows, false)]).await;
+    assert_eq!(1, manifest(&store, &v1).await.files.len());
+    let v2 = internal_root_fixture(&store, &v1).await;
+    let descriptor = manifest(&store, &v2).await;
+    let bytes = store
+        .read(&descriptor.part_path(0))
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(2, trailer.depth);
+    let payload = trailer.root.payload;
+    let Page::Internal(children) = Page::decode(
+        &payload
+            .unpack(&bytes[payload.offset as usize..payload.end().unwrap() as usize])
+            .unwrap(),
+        &trailer.root,
+        trailer.depth,
+        trailer.areas(),
+        &descriptor,
+        PayloadLimit::Root,
+    )
+    .unwrap() else {
+        panic!("the legacy root names the leaves")
+    };
+    assert_eq!(3, children.len());
+    let reader = format.reader(store, v2).await.unwrap();
+    let out = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(collect_rows(&out), rows);
+}
+
+/// Skipping a leaf between two selected blocks clears adjacency across the gap.
+///
+/// Series 3 restarts inside the skipped leaf, so the block after the gap carries ordinal one.
+/// Read as if it followed the previous block directly, the ordinal check would reject it: only a
+/// cleared adjacency accepts the gap.
+#[tokio::test]
+async fn skipped_child_keeps_adjacency_false() {
+    let store = store();
+    let meta = metadata();
+    // Two descriptors per leaf, so the six one-row blocks become three leaves of two blocks.
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 12 + 2 * DESCRIPTOR,
+        ..Default::default()
+    };
+    let rows: Vec<Sample> = [(1, 100), (1, 101), (2, 0), (3, 1), (3, 2), (3, 3)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, time))| (1, id, time, i as u64, 0, Some(i as u64)))
+        .collect();
+    let handle = build(&format, &store, meta.clone(), &[batch(&meta, &rows, false)]).await;
+    let descriptor = manifest(&store, &handle).await;
+    assert_eq!(1, descriptor.files.len(), "one part holds all three leaves");
+    let bytes = store
+        .read(&descriptor.part_path(0))
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(
+        2, trailer.depth,
+        "three leaves make the root an internal page"
+    );
+    // The middle leaf is still a candidate by identifier; only its time envelope is outside the
+    // request, so the reader skips the whole page and the gap must not count as adjacency.
+    let reader = format.reader(store, handle).await.unwrap();
+    let mut req = full_request();
+    req.keys = Some(BTreeSet::from([
+        exact(&meta, &["a", "b"], 1, 1),
+        exact(&meta, &["a", "b"], 1, 3),
+    ]));
+    req.start = Some(2);
+    let out = reader
+        .read(req)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(collect_rows(&out), vec![rows[0], rows[1], rows[4], rows[5]]);
 }
 /// Wraps one encoded primary key in the canonical exact identity.
 fn exact(meta: &RegionMetadataRef, tags: &[&str; 2], table_id: u32, tsid: u64) -> ExactSeriesKey {
@@ -936,14 +1247,21 @@ fn payload_limits_and_timestamp_envelopes() {
         max: 50,
     });
     assert_eq!((bounds.min, bounds.max), (0, 200));
-    let (mut reference, bytes) = metadata::pack(&[1, 2, 3], (1u64 << 32) + 5, 1, false).unwrap();
+    let (mut reference, bytes) = metadata::pack(
+        &[1, 2, 3],
+        (1u64 << 32) + 5,
+        1,
+        metadata::PayloadLimit::Chunk,
+    )
+    .unwrap();
     reference
-        .validate(16, reference.end().unwrap(), false)
+        .validate(16, reference.end().unwrap(), metadata::PayloadLimit::Chunk)
         .unwrap();
     assert_eq!(reference.unpack(&bytes).unwrap(), [1, 2, 3]);
     reference.offset = u64::MAX;
     assert!(reference.end().is_err());
-    let (mut reference, bytes) = metadata::pack(&vec![0; 1024], 16, 1, false).unwrap();
+    let (mut reference, bytes) =
+        metadata::pack(&vec![0; 1024], 16, 1, metadata::PayloadLimit::Chunk).unwrap();
     reference.decoded = 1000;
     assert!(reference.unpack(&bytes).is_err());
 }
@@ -975,9 +1293,15 @@ async fn malformed_framing_and_payload_corruption() {
         .payload
         .unpack(&original[trailer.root.payload.offset as usize..end])
         .unwrap();
-    let Page::Leaf(blocks) =
-        Page::decode(&decoded, &trailer.root, 1, trailer.areas(), &manifest).unwrap()
-    else {
+    let Page::Leaf(blocks) = Page::decode(
+        &decoded,
+        &trailer.root,
+        1,
+        trailer.areas(),
+        &manifest,
+        PayloadLimit::Page,
+    )
+    .unwrap() else {
         panic!()
     };
     let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
@@ -1020,7 +1344,8 @@ async fn malformed_framing_and_payload_corruption() {
                 &trailer.root,
                 1,
                 trailer.areas(),
-                &manifest
+                &manifest,
+                PayloadLimit::Page
             )
             .is_err()
         );
@@ -1408,33 +1733,47 @@ async fn inline_key_artifact_is_rebuilt_not_reused() {
     engine.stop().await.unwrap();
 }
 
-/// Fields the frozen v1 manifest still has; unknown-to-the-current-format ones are
-/// deliberately not parsed, so the artifact reaches the reader's rejection path.
+/// The identity fields every frozen manifest carries.
+///
+/// Only these three are parsed, so the rest of a frozen manifest reaches the reader exactly as
+/// stored: the v1 artifact is rejected on its own discriminator, not on a field this helper
+/// drops.
 #[derive(serde::Deserialize)]
-struct FrozenV1Manifest {
+struct FrozenManifestIdentity {
     region_id: u64,
     source_file_id: FileId,
     generation: FileId,
 }
 
-async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
-    let bytes =
-        include_str!("../../../../../tests/compatibility/wire/mito_columnar_samples/v1-part.hex")
-            .split_whitespace()
-            .collect::<String>();
-    let bytes = (0..bytes.len())
+/// Decodes the whitespace-separated hex a frozen part is stored as.
+fn hex_bytes(text: &str) -> Vec<u8> {
+    let text = text.split_whitespace().collect::<String>();
+    (0..text.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&bytes[i..i + 2], 16).unwrap())
-        .collect::<Vec<_>>();
-    let json = include_str!(
-        "../../../../../tests/compatibility/wire/mito_columnar_samples/v1-manifest.json"
-    );
-    let frozen: FrozenV1Manifest = serde_json::from_str(json).unwrap();
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// Directory holding the frozen sample artifacts, relative to this crate.
+fn frozen_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/compatibility/wire/mito_columnar_samples")
+}
+
+/// Installs frozen manifest and part bytes under the paths the manifest derives.
+///
+/// The recorded object sizes are the exact lengths of the bytes handed in, because the reader
+/// locates the manifest and trailer from them instead of statting the objects.
+async fn frozen_handle(store: &ObjectStore, json: &str, bytes: &[u8]) -> SamplesFileHandle {
+    let frozen: FrozenManifestIdentity = serde_json::from_str(json).unwrap();
     let prefix = crate::series_index::samples::samples_prefix(frozen.region_id, frozen.generation);
     let manifest_path = format!("{prefix}manifest.json");
     let part_path = format!("{prefix}part-0.samples");
-    store.write(&part_path, bytes.clone()).await.unwrap();
-    store.write(&manifest_path, json).await.unwrap();
+    store.write(&part_path, bytes.to_vec()).await.unwrap();
+    store
+        .write(&manifest_path, json.as_bytes().to_vec())
+        .await
+        .unwrap();
     let objects = vec![
         crate::series_index::artifact::ArtifactObject {
             path: manifest_path,
@@ -1466,6 +1805,159 @@ async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
         },
         purger,
     )
+}
+
+async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
+    let bytes = hex_bytes(include_str!(
+        "../../../../../tests/compatibility/wire/mito_columnar_samples/v1-part.hex"
+    ));
+    let json = include_str!(
+        "../../../../../tests/compatibility/wire/mito_columnar_samples/v1-manifest.json"
+    );
+    frozen_handle(store, json, &bytes).await
+}
+
+/// The six rows the frozen multi-leaf part holds, in stored block order.
+///
+/// Values are raw IEEE-754 bit patterns because one row is negative zero; the null row is a
+/// delete marker, which the format preserves instead of filtering.
+const V2_ROWS: [Sample; 6] = [
+    (1, 7, 100, 0, 1, Some(0x0000_0000_0000_0000)),
+    (1, 7, 101, 1, 1, Some(0x8000_0000_0000_0000)),
+    (1, 7, 102, 2, 1, Some(0x3ff8_0000_0000_0000)),
+    (1, 7, 103, 3, 1, Some(0xc000_0000_0000_0000)),
+    (1, 7, 104, 4, 0, None),
+    (1, 7, 105, 5, 1, Some(0x4000_0000_0000_0000)),
+];
+
+async fn frozen_v2_handle(store: &ObjectStore) -> SamplesFileHandle {
+    let bytes = hex_bytes(include_str!(
+        "../../../../../tests/compatibility/wire/mito_columnar_samples/v2-multi-leaf/part.hex"
+    ));
+    let json = include_str!(
+        "../../../../../tests/compatibility/wire/mito_columnar_samples/v2-multi-leaf/manifest.json"
+    );
+    frozen_handle(store, json, &bytes).await
+}
+
+/// A frozen multi-leaf part is a readable positive example, not a rejection test.
+///
+/// It pins what the writer emits for a part whose root is an internal page: three leaves of two
+/// single-row blocks under a depth-two root, and the six rows they hold.
+#[tokio::test]
+async fn frozen_v2_multi_leaf_fixture_is_readable() {
+    let store = store();
+    let handle = frozen_v2_handle(&store).await;
+    let descriptor = manifest(&store, &handle).await;
+    assert_eq!(1, descriptor.files.len(), "the fixture is one part");
+    let bytes = store
+        .read(&descriptor.part_path(0))
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(2, trailer.depth, "three leaves need an internal root");
+    let payload = trailer.root.payload;
+    let Page::Internal(children) = Page::decode(
+        &payload
+            .unpack(&bytes[payload.offset as usize..payload.end().unwrap() as usize])
+            .unwrap(),
+        &trailer.root,
+        trailer.depth,
+        trailer.areas(),
+        &descriptor,
+        PayloadLimit::Root,
+    )
+    .unwrap() else {
+        panic!("the frozen root names the leaves")
+    };
+    assert_eq!(3, children.len());
+    // The leaves stay leaf pages; only the root is measured against the root limit.
+    assert!(
+        children
+            .iter()
+            .all(|child| child.payload.decoded as usize <= metadata::PAGE_LIMIT)
+    );
+
+    let format = ColumnarSamplesFormat::default();
+    let reader = format.reader(store, handle).await.unwrap();
+    let out = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(V2_ROWS.to_vec(), collect_rows(&out));
+}
+
+/// Regenerates the frozen multi-leaf fixture with the real writer.
+///
+/// Run it only when the format itself changes, never to make a reader test pass:
+///
+/// ```text
+/// cargo test -p mito2 --lib regenerate_frozen_v2_multi_leaf_fixture -- --ignored
+/// ```
+#[ignore = "writes the frozen multi-leaf fixture; run only when the format changes"]
+#[tokio::test]
+#[allow(clippy::print_stderr)] // The sizes it reports are the ones the fixture README records.
+async fn regenerate_frozen_v2_multi_leaf_fixture() {
+    let store = store();
+    let meta = metadata();
+    // Two descriptors per leaf, so the six one-row blocks become three leaves and the part's
+    // root has to be an internal page.
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 12 + 2 * DESCRIPTOR,
+        ..Default::default()
+    };
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[batch(&meta, &V2_ROWS, false)],
+    )
+    .await;
+    let descriptor = manifest(&store, &handle).await;
+    assert_eq!(1, descriptor.files.len(), "the fixture is one part");
+    assert_eq!(6, descriptor.files[0].num_blocks);
+    let bytes = store
+        .read(&descriptor.part_path(0))
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(2, trailer.depth, "three leaves need an internal root");
+
+    let dir = frozen_dir().join("v2-multi-leaf");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hex = bytes
+        .chunks(16)
+        .map(|line| {
+            line.iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+                + "\n"
+        })
+        .collect::<String>();
+    std::fs::write(dir.join("part.hex"), &hex).unwrap();
+    let json = serde_json::to_string_pretty(&descriptor).unwrap() + "\n";
+    std::fs::write(dir.join("manifest.json"), &json).unwrap();
+    eprintln!(
+        "wrote {} part bytes ({} hex) and {} manifest bytes",
+        bytes.len(),
+        hex.len(),
+        json.len()
+    );
 }
 
 /// A frozen artifact written under hash-only identity must be rejected, never read:

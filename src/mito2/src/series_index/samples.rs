@@ -83,7 +83,12 @@ pub(crate) struct ColumnarSamplesFormat {
     pub(crate) part_bytes: u64,
     pub(crate) metadata_bytes: usize,
     pub(crate) page_bytes: usize,
-    pub(crate) root_capacity: usize,
+    /// Leaves after which the writer closes a part, ahead of the root's own size limit.
+    ///
+    /// A part's root names every leaf, so a part that keeps adding leaves ends with a root
+    /// that is large to decode and useless to prune. Rolling at a leaf count keeps both bounded
+    /// even when a part's byte target is far from reached.
+    pub(crate) max_leaves_per_part: usize,
 }
 impl Default for ColumnarSamplesFormat {
     fn default() -> Self {
@@ -92,7 +97,7 @@ impl Default for ColumnarSamplesFormat {
             part_bytes: 512 * 1024 * 1024,
             metadata_bytes: 8 * 1024 * 1024,
             page_bytes: metadata::PAGE_LIMIT,
-            root_capacity: metadata::ROOT_CAPACITY,
+            max_leaves_per_part: metadata::MAX_LEAF_COUNT,
         }
     }
 }
