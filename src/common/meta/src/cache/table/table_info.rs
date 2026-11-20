@@ -39,8 +39,8 @@ pub fn new_table_info_cache(
     let table_info_manager = Arc::new(TableInfoManager::new(kv_backend));
     let init = init_factory(table_info_manager.clone());
 
-    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_id_key)
-        .with_batch_initializer(Arc::new(move |ids| {
+    CacheContainer::new(name, cache, init, CacheIdent::table_id_key).with_batch_initializer(
+        Arc::new(move |ids| {
             let manager = table_info_manager.clone();
             Box::pin(async move {
                 Ok(manager
@@ -50,7 +50,8 @@ pub fn new_table_info_cache(
                     .map(|(id, value)| (id, Arc::new(value.table_info)))
                     .collect())
             })
-        }))
+        }),
+    )
 }
 
 fn init_factory(table_info_manager: TableInfoManagerRef) -> Initializer<TableId, Arc<TableInfo>> {

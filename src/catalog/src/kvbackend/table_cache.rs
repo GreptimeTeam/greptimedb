@@ -37,7 +37,7 @@ pub fn new_table_cache(
 ) -> TableCache {
     let init = init_factory(table_info_cache, table_name_cache);
 
-    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_name_key)
+    CacheContainer::new(name, cache, init, CacheIdent::table_name_key)
 }
 
 fn init_factory(

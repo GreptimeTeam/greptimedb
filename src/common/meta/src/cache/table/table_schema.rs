@@ -40,7 +40,7 @@ pub fn new_table_schema_cache(
     let init = init_factory(table_info_manager);
 
     // The table-to-schema mapping is retained across targeted invalidations.
-    CacheContainer::new_coordinated(name, cache, init, |_| None)
+    CacheContainer::new(name, cache, init, |_| None)
 }
 
 fn init_factory(table_info_manager: TableInfoManager) -> Initializer<TableId, Arc<SchemaName>> {

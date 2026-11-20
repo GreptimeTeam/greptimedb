@@ -21,7 +21,7 @@ use moka::future::Cache;
 use moka::ops::compute::Op;
 use table::metadata::TableId;
 
-use crate::cache::container::{CoordinatedEntries, CoordinatedInvalidation};
+use crate::cache::container::{CacheEntries, Invalidation};
 use crate::cache::{CacheContainer, Initializer};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
 use crate::key::flow::{TableFlowManager, TableFlowManagerRef};
@@ -63,11 +63,11 @@ pub fn new_table_flownode_set_cache(
     let table_flow_manager = Arc::new(TableFlowManager::new(kv_backend));
     let init = init_factory(table_flow_manager);
 
-    CacheContainer::with_coordinated_invalidation(
+    CacheContainer::with_invalidation(
         name,
         cache,
         init,
-        CoordinatedInvalidation::Events(invalidator),
+        Invalidation::Events(Box::new(invalidator)),
     )
 }
 
@@ -108,7 +108,7 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
 }
 
 async fn handle_create_flow(
-    cache: &CoordinatedEntries<'_, TableId, FlownodeFlowSet>,
+    cache: &CacheEntries<'_, TableId, FlownodeFlowSet>,
     CreateFlow {
         flow_id,
         source_table_ids,
@@ -135,7 +135,7 @@ async fn handle_create_flow(
 }
 
 async fn handle_drop_flow(
-    cache: &CoordinatedEntries<'_, TableId, FlownodeFlowSet>,
+    cache: &CacheEntries<'_, TableId, FlownodeFlowSet>,
     DropFlow {
         flow_id,
         source_table_ids,
@@ -164,7 +164,7 @@ async fn handle_drop_flow(
 }
 
 fn invalidator<'a>(
-    cache: CoordinatedEntries<'a, TableId, FlownodeFlowSet>,
+    cache: CacheEntries<'a, TableId, FlownodeFlowSet>,
     idents: &'a [CacheIdent],
 ) -> BoxFuture<'a, ()> {
     Box::pin(async move {
@@ -331,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn test_flow_event_waits_for_source_lookup() {
         let (started, mut loads) = tokio::sync::mpsc::unbounded_channel();
-        let cache = super::CacheContainer::with_coordinated_invalidation(
+        let cache = super::CacheContainer::with_invalidation(
             "test".into(),
             CacheBuilder::new(8).build(),
             Arc::new(move |_| {
@@ -342,7 +342,7 @@ mod tests {
                     Ok(Some(Arc::new(HashMap::new())))
                 })
             }),
-            super::CoordinatedInvalidation::Events(super::invalidator),
+            super::Invalidation::Events(Box::new(super::invalidator)),
         );
         let mut read = Box::pin(cache.get(1));
         assert!(futures::poll!(&mut read).is_pending());

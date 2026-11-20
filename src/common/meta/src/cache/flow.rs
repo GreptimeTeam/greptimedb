@@ -32,7 +32,7 @@ use crate::kv_backend::KvBackendRef;
 pub type FlowInfoCache = CacheContainer<FlowId, Arc<FlowInfoValue>, CacheIdent>;
 pub type FlowInfoCacheRef = Arc<FlowInfoCache>;
 
-/// Builds a coordinated cache for individual and batched flow lookups.
+/// Builds a cache for individual and batched flow lookups.
 pub fn new_flow_info_cache(
     name: String,
     cache: Cache<(usize, FlowId), Arc<FlowInfoValue>>,
@@ -40,7 +40,7 @@ pub fn new_flow_info_cache(
 ) -> FlowInfoCache {
     let manager = Arc::new(FlowInfoManager::new(backend));
     let single = manager.clone();
-    CacheContainer::new_coordinated(
+    CacheContainer::new(
         name,
         cache,
         Arc::new(move |id| {

@@ -797,6 +797,7 @@ mod tests {
         CacheContainer, CacheRegistryBuilder, Initializer, LayeredCacheRegistryBuilder,
     };
     use common_meta::ddl::test_util::create_table::test_create_table_task;
+    use common_meta::instruction::CacheIdent;
     use common_meta::key::table_route::{LogicalTableRouteValue, TableRouteValue};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use moka::future::Cache as FutureCache;
@@ -1159,9 +1160,8 @@ mod tests {
         let table_route_cache = Arc::new(CacheContainer::new(
             "test_table_route_cache".to_string(),
             FutureCache::new(16),
-            Box::new(|_, _| Box::pin(async { Ok(()) })),
             route_initializer,
-            |_| true,
+            CacheIdent::table_id_key,
         ));
 
         let load_count = Arc::new(AtomicUsize::new(0));
@@ -1179,9 +1179,8 @@ mod tests {
         let table_info_cache = Arc::new(CacheContainer::new(
             "test_table_info_cache".to_string(),
             FutureCache::new(16),
-            Box::new(|_, _| Box::pin(async { Ok(()) })),
             table_info_initializer,
-            |_| true,
+            CacheIdent::table_id_key,
         ));
 
         let logical_table = DistTable::table(Arc::new(metric_table_info(
