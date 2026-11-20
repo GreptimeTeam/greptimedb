@@ -2046,6 +2046,7 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
         .collect();
     assert_eq!(sources.len(), 2);
     let flat = crate::compaction::CompactionSstReaderBuilder {
+        narthex_format: true,
         metadata: region.metadata(),
         sst_layer: layer.clone(),
         cache: engine.cache_manager(),

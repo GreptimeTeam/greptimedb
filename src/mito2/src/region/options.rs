@@ -209,6 +209,41 @@ impl RegionOptions {
         Ok(())
     }
 
+    /// Validates external files before admitting them into this region.
+    /// Parquet layouts may differ, but the storage family is fixed at creation.
+    pub(crate) fn validate_file_formats<'a>(
+        &self,
+        region_id: RegionId,
+        files: impl IntoIterator<Item = &'a crate::sst::file::FileMeta>,
+        series_indexes: impl IntoIterator<Item = &'a crate::sst::file::FileMeta>,
+    ) -> Result<()> {
+        use crate::sst::file::FileFormat;
+
+        let narthex = self.sst_format == Some(FormatType::Narthex);
+        for file in files {
+            ensure!(
+                matches!(
+                    (&file.format, narthex),
+                    (FileFormat::Parquet, false) | (FileFormat::NarthexSamples(_), true)
+                ),
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Imported file format does not match the region storage format",
+                }
+            );
+        }
+        for index in series_indexes {
+            ensure!(
+                narthex && matches!(index.format, FileFormat::NarthexSeriesIndex(_)),
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Series indexes require Narthex region storage",
+                }
+            );
+        }
+        Ok(())
+    }
+
     /// Validates narthex schema support and format-specific column compression.
     /// The caller must resolve the SST format before validation.
     pub(crate) fn validate_schema(&self, metadata: &RegionMetadata) -> Result<()> {

@@ -58,6 +58,11 @@ impl PartitionPruner {
         let mut dedup_set = HashSet::with_capacity(pruner.inner.stream_ctx.input.num_files());
 
         let num_memtables = pruner.inner.stream_ctx.input.num_memtables();
+        let partition_ranges = if pruner.inner.stream_ctx.input.requires_narthex_preparation() {
+            &[][..]
+        } else {
+            partition_ranges
+        };
         for part_range in partition_ranges {
             let range_meta = &pruner.inner.stream_ctx.ranges[part_range.identifier];
             let pre_filter_mode = pruner.inner.stream_ctx.range_pre_filter_mode(part_range);
@@ -68,14 +73,6 @@ impl PartitionPruner {
                     .is_file_range_index(*row_group_index)
                 {
                     let file_index = row_group_index.index - num_memtables;
-                    if matches!(
-                        pruner.inner.stream_ctx.input.files[file_index]
-                            .meta_ref()
-                            .format,
-                        crate::sst::file::FileFormat::NarthexSamples(_)
-                    ) {
-                        continue;
-                    }
                     if dedup_set.contains(&file_index) {
                         continue;
                     } else {

@@ -827,7 +827,8 @@ impl MemtableSstWriter {
                         sst_info,
                         partition_expr.clone(),
                         pk_range,
-                        version.options.preserve_row_sequence,
+                        version.options.preserve_row_sequence
+                            || version.options.sst_format == Some(FormatType::Narthex),
                     )?);
                 }
                 if self.hook.is_some() {
@@ -1004,11 +1005,7 @@ impl MemtableSstWriter {
             num_series: sst_info.num_series,
             primary_key_min,
             primary_key_max,
-            preserve_row_sequence: preserve_row_sequence
-                || matches!(
-                    sst_info.format,
-                    crate::sst::file::FileFormat::NarthexSamples(_)
-                ),
+            preserve_row_sequence,
             format: sst_info.format.clone(),
         })
     }

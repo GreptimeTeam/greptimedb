@@ -49,7 +49,6 @@ use crate::request::{
     RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
     SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
-use crate::sst::file::FileFormat;
 use crate::sst::index::IndexBuildType;
 use crate::sst::{file, location};
 use crate::wal::EntryId;
@@ -972,6 +971,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
     let region_id = region.region_id;
+    region.version().options.validate_file_formats(
+        region_id,
+        &edit.files_to_add,
+        &edit.series_indexes_to_add,
+    )?;
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
     let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;
@@ -1064,8 +1068,10 @@ async fn edit_region(
     preload_sst_cache: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
-    for file in edit.files_to_add.iter().chain(&edit.series_indexes_to_add) {
-        if !matches!(file.format, file::FileFormat::Parquet) {
+    let narthex_format =
+        region.version().options.sst_format == Some(crate::sst::FormatType::Narthex);
+    if narthex_format {
+        for file in edit.files_to_add.iter().chain(&edit.series_indexes_to_add) {
             snafu::ensure!(
                 file.region_id.table_id() == region_id.table_id() && file.valid_inventory(),
                 crate::error::InvalidRequestSnafu {
@@ -1074,28 +1080,22 @@ async fn edit_region(
                 }
             );
         }
-    }
-    // Direct edits can register mixed-format metadata. Open the artifacts eagerly
-    // when importing into a region configured for authoritative Narthex storage.
-    if region.version().options.sst_format == Some(crate::sst::FormatType::Narthex) {
         for samples in &edit.files_to_add {
-            if !matches!(samples.format, file::FileFormat::Parquet) {
-                use crate::series_index::format::SamplesFormatReader;
-                let handle = file::FileHandle::new(samples.clone(), region.file_purger.clone());
-                let handle = crate::series_index::artifact::SamplesFileHandle::from_narthex(
-                    handle,
-                    &region.access_layer.build_region_dir(samples.region_id),
-                )?;
-                let reader = crate::series_index::samples::reader::SamplesReader::open(
-                    region.access_layer.object_store().clone(),
-                    handle,
-                )
-                .await?;
-                crate::series_index::format::validate_sample_schema(
-                    &reader.schema(),
-                    &region.metadata(),
-                )?;
-            }
+            use crate::series_index::format::SamplesFormatReader;
+            let handle = file::FileHandle::new(samples.clone(), region.file_purger.clone());
+            let handle = crate::series_index::artifact::SamplesFileHandle::from_narthex(
+                handle,
+                &region.access_layer.build_region_dir(samples.region_id),
+            )?;
+            let reader = crate::series_index::samples::reader::SamplesReader::open(
+                region.access_layer.object_store().clone(),
+                handle,
+            )
+            .await?;
+            crate::series_index::format::validate_sample_schema(
+                &reader.schema(),
+                &region.metadata(),
+            )?;
         }
         for index in &edit.series_indexes_to_add {
             let handle = file::FileHandle::new(index.clone(), region.file_purger.clone());
@@ -1117,11 +1117,9 @@ async fn edit_region(
     }
     if let Some(write_cache) = cache_manager.write_cache()
         && preload_sst_cache
+        && !narthex_format
     {
         for file_meta in &edit.files_to_add {
-            if !matches!(file_meta.format, FileFormat::Parquet) {
-                continue;
-            }
             let write_cache = write_cache.clone();
             let layer = region.access_layer.clone();
             let listener = listener.clone();

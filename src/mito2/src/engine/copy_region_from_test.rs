@@ -770,6 +770,7 @@ async fn test_narthex_copy_and_remap(
         .collect();
     if with_index {
         let batches = crate::compaction::CompactionSstReaderBuilder {
+            narthex_format: true,
             metadata: owner.metadata(),
             sst_layer: owner.access_layer.clone(),
             cache: engine.cache_manager(),
@@ -1094,4 +1095,157 @@ async fn test_narthex_copy_and_remap(
         );
     }
     engine.stop().await.unwrap();
+}
+
+// Storage-family rejection must happen before publication, including empty regions.
+#[rstest::rstest]
+#[case::parquet_to_narthex("flat", "narthex")]
+#[case::narthex_to_parquet("narthex", "flat")]
+#[tokio::test]
+async fn test_region_storage_format_admission(
+    #[case] source_format: &str,
+    #[case] target_format: &str,
+) {
+    use crate::manifest::action::RegionEdit;
+    use crate::sst::file::{FileFormat, FileMeta, NarthexSamplesMeta, NarthexSeriesIndexMeta};
+    use crate::test_util::sst_util::sst_region_metadata_with_encoding;
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(Default::default()).await;
+    let source = RegionId::new(42, 0);
+    let target = RegionId::new(42, 1);
+    for (id, format) in [(source, source_format), (target, target_format)] {
+        let mut request = CreateRequestBuilder::new()
+            .tag_num(1)
+            .field_num(1)
+            .insert_option("primary_key_encoding", "sparse")
+            .insert_option("sst_format", format)
+            .build();
+        let reserved = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+        request
+            .column_metadatas
+            .extend(reserved.column_metadatas.into_iter().take(2));
+        request
+            .primary_key
+            .splice(0..0, reserved.primary_key.into_iter().take(2));
+        engine
+            .handle_request(id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+    }
+    let region = engine.get_region(target).unwrap();
+    let before = region.manifest_ctx.manifest().await;
+    let sequence = region.version_control.current().last_sequence;
+
+    let error = engine
+        .handle_request(
+            target,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::Format(source_format.to_string())],
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.output_msg().contains("to or from Narthex"), "{error}");
+
+    // Reapplying the selected storage format is an idempotent operation.
+    engine
+        .handle_request(
+            target,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::Format(target_format.to_string())],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let error = engine
+        .copy_region_from(
+            target,
+            MitoCopyRegionFromRequest {
+                source_region_id: source,
+                parallelism: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .output_msg()
+            .contains("Cannot copy between Parquet and Narthex"),
+        "{error}"
+    );
+
+    let foreign_format = if source_format == "narthex" {
+        FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+            use_file_sequence: false,
+            manifest_size: 1,
+            parts: Default::default(),
+        }))
+    } else {
+        FileFormat::Parquet
+    };
+    let error = engine
+        .edit_region(
+            target,
+            RegionEdit {
+                files_to_add: vec![FileMeta {
+                    region_id: target,
+                    format: foreign_format,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .output_msg()
+            .contains("does not match the region storage format"),
+        "{error}"
+    );
+
+    // Index metadata must not bypass the region's storage-family admission.
+    let invalid_index_format = if target_format == "narthex" {
+        FileFormat::Parquet
+    } else {
+        FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
+            manifest_size: 1,
+            parts: Default::default(),
+            sources: Vec::new(),
+        }))
+    };
+    let error = engine
+        .edit_region(
+            target,
+            RegionEdit {
+                series_indexes_to_add: vec![FileMeta {
+                    region_id: target,
+                    format: invalid_index_format,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .output_msg()
+            .contains("Series indexes require Narthex"),
+        "{error}"
+    );
+    let after = region.manifest_ctx.manifest().await;
+    assert_eq!(before.manifest_version, after.manifest_version);
+    assert_eq!(before.sst_format, after.sst_format);
+    assert!(after.files.is_empty());
+    assert!(after.series_indexes.is_empty());
+    assert_eq!(sequence, region.version_control.current().last_sequence);
 }

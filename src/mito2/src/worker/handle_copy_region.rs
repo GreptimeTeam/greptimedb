@@ -92,11 +92,12 @@ impl<S> RegionWorkerLoop<S> {
 
             match region_edit {
                 Some(region_edit)
-                    if !region_edit.series_indexes_to_add.is_empty()
-                        || region_edit.files_to_add.iter().any(|file| {
-                            file.level == file::LEVEL_SHARED
-                                || !matches!(file.format, file::FileFormat::Parquet)
-                        }) =>
+                    if region.version().options.sst_format
+                        == Some(crate::sst::FormatType::Narthex)
+                        || region_edit
+                            .files_to_add
+                            .iter()
+                            .any(|file| file.level == file::LEVEL_SHARED) =>
                 {
                     // Shared references and narthex artifacts enter the serialized
                     // edit lane for destination admission sequences.
@@ -204,6 +205,16 @@ impl<S> RegionWorkerLoop<S> {
             .context(MissingManifestSnafu {
                 region_id: source_region_id,
             })?;
+        let narthex_format =
+            region.version().options.sst_format == Some(crate::sst::FormatType::Narthex);
+        ensure!(
+            (source_region_manifest.sst_format == crate::sst::FormatType::Narthex)
+                == narthex_format,
+            InvalidRequestSnafu {
+                region_id: target_region_id,
+                reason: "Cannot copy between Parquet and Narthex regions",
+            }
+        );
         // Metadata sync transforms copied rows and then removes these references.
         // It cannot retire shared inputs through the ordinary edit API, so reject
         // them before either physical copying or extending the target manifest.
@@ -236,7 +247,7 @@ impl<S> RegionWorkerLoop<S> {
             }
             if file_meta.level == file::LEVEL_SHARED {
                 new_file_metas.push(file_meta.as_ref().clone());
-            } else if matches!(file_meta.format, file::FileFormat::NarthexSamples(_)) {
+            } else if narthex_format {
                 let (copied, objects) = prepare_narthex_copy(region, file_meta).await?;
                 new_file_metas.push(copied);
                 file_descriptors.extend(objects);
@@ -303,11 +314,11 @@ impl<S> RegionWorkerLoop<S> {
             committed_sequence: None,
             ..Default::default()
         };
-        if !edit.series_indexes_to_add.is_empty()
-            || edit.files_to_add.iter().any(|file| {
-                file.level == file::LEVEL_SHARED
-                    || !matches!(file.format, file::FileFormat::Parquet)
-            })
+        if narthex_format
+            || edit
+                .files_to_add
+                .iter()
+                .any(|file| file.level == file::LEVEL_SHARED)
         {
             return Ok((Some(edit), source_file_ids));
         }

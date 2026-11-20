@@ -496,14 +496,6 @@ impl ScanRegion {
     fn use_series_scan(&self) -> bool {
         self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
             || self.version.options.sst_format == Some(crate::sst::FormatType::Narthex)
-            || self.version.ssts.levels().iter().any(|level| {
-                level.files.values().any(|file| {
-                    matches!(
-                        file.meta_ref().format,
-                        crate::sst::file::FileFormat::NarthexSamples(_)
-                    )
-                })
-            })
     }
 
     /// Creates a scan input.
@@ -1525,12 +1517,6 @@ impl ScanInputBuilder {
 impl ScanInput {
     pub(crate) fn requires_narthex_preparation(&self) -> bool {
         self.narthex_format
-            || self.files.iter().any(|file| {
-                matches!(
-                    file.meta_ref().format,
-                    crate::sst::file::FileFormat::NarthexSamples(_)
-                )
-            })
     }
 
     pub(crate) fn uses_scan_memory_limit(&self) -> bool {

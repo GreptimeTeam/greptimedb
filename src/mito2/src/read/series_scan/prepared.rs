@@ -191,7 +191,7 @@ pub(super) fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool
 /// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
 /// error: the caller scans those sources with the ordinary reader instead.
 pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
-    if narthex::has_narthex_files(context) {
+    if context.input.requires_narthex_preparation() {
         narthex::file_indices(context, ranges)?;
         return Ok(true);
     }
@@ -479,7 +479,7 @@ impl ColumnarPreparedSource {
         let started = Instant::now();
         let input = &context.input;
         let metadata = input.region_metadata();
-        let (samples, series) = if narthex::has_narthex_files(&context) {
+        let (samples, series) = if context.input.requires_narthex_preparation() {
             narthex::open_sources(&context, &ranges, &scan_pool).await?
         } else {
             open_sidecar_sources(&context, &ranges).await?
@@ -553,7 +553,7 @@ impl ColumnarPreparedSource {
                         .map_err(|e| invalid(e.to_string()))?,
                 );
             }
-            if narthex::has_narthex_files(&context)
+            if context.input.requires_narthex_preparation()
                 && let Some(partition) =
                     narthex_partition_filter(metadata.partition_expr.as_deref(), None)?
             {

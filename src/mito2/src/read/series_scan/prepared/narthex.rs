@@ -45,10 +45,6 @@ use store_api::metric_engine_consts::{
     DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
 };
 
-pub(crate) fn has_narthex_files(context: &StreamContext) -> bool {
-    context.input.requires_narthex_preparation()
-}
-
 /// Validates every assignment before opening authoritative objects. Missing support is an
 /// error, never permission to read narthex files through the legacy adapter.
 pub(crate) fn file_indices(
@@ -71,14 +67,6 @@ pub(crate) fn file_indices(
                 ));
             }
             let i = index.index - context.input.num_memtables();
-            if !matches!(
-                context.input.files[i].meta_ref().format,
-                FileFormat::NarthexSamples(_)
-            ) {
-                return Err(invalid(
-                    "narthex preparation cannot mix narthex and Parquet files",
-                ));
-            }
             if index.row_group_index != -1 {
                 return Err(invalid(
                     "narthex preparation requires a complete samples assignment",

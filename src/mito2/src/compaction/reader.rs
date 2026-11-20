@@ -50,6 +50,7 @@ pub(crate) struct CompactionSstReaderBuilder<'a> {
     pub(crate) cache: CacheManagerRef,
     pub(crate) inputs: &'a [FileHandle],
     pub(crate) append_mode: bool,
+    pub(crate) narthex_format: bool,
     pub(crate) filter_deleted: bool,
     pub(crate) time_range: Option<TimestampRange>,
     pub(crate) merge_mode: MergeMode,
@@ -137,6 +138,7 @@ impl CompactionSstReaderBuilder<'_> {
             .with_json2_rewrite_targets(targets)
             .with_files(self.inputs.to_vec())
             .with_compaction(true)
+            .with_narthex_format(self.narthex_format)
             .with_compaction_read_parallelism(self.read_parallelism)
             .with_batch_size(batch_size)
             .with_append_mode(self.append_mode)
@@ -159,15 +161,12 @@ impl CompactionSstReaderBuilder<'_> {
 
     /// Reads the footers of all inputs concurrently, keeping the input order.
     async fn collect_parquet_metadata(&self) -> Result<Vec<Arc<ParquetMetaData>>> {
+        if self.narthex_format {
+            return Ok(Vec::new());
+        }
         let reads: Vec<_> = self
             .inputs
             .iter()
-            .filter(|file| {
-                matches!(
-                    file.meta_ref().format,
-                    crate::sst::file::FileFormat::Parquet
-                )
-            })
             .map(|file_handle| self.read_parquet_metadata(file_handle))
             .collect();
         let metadata: Vec<_> = futures::stream::iter(reads)
@@ -334,6 +333,7 @@ mod tests {
         assert_eq!(2, inputs.len());
 
         let mut source = CompactionSstReaderBuilder {
+            narthex_format: false,
             metadata: version.metadata.clone(),
             sst_layer: region.access_layer.clone(),
             cache: engine.cache_manager(),

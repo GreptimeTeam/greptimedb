@@ -1488,16 +1488,6 @@ pub(crate) async fn scan_flat_file_ranges(
     read_type: &'static str,
     partition_pruner: Arc<PartitionPruner>,
 ) -> Result<BoxedRecordBatchStream> {
-    let file = stream_ctx.input.file_from_index(index);
-    if matches!(
-        file.meta_ref().format,
-        crate::sst::file::FileFormat::NarthexSamples(_)
-    ) {
-        return crate::error::UnsupportedOperationSnafu {
-            err_msg: "Narthex files must be read through scanner-wide preparation",
-        }
-        .fail();
-    }
     let mut reader_metrics = ReaderMetrics {
         filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
         ..Default::default()
