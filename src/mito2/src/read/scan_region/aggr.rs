@@ -235,9 +235,7 @@ fn overlapping_files(input: &ScanInput, files: &[usize]) -> Vec<bool> {
             let file = &input.files[index];
             Extent {
                 time: file.time_range(),
-                key: file
-                    .raw_primary_key_range()
-                    .and_then(|_| file.primary_key_range(mapper)),
+                key: file.primary_key_range(mapper),
             }
         })
         .collect();

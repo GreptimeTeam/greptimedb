@@ -1,4 +1,4 @@
--- The same results must hold with experimental_metadata_aggr enabled or disabled.
+-- Regression coverage for non-append COUNT with metadata aggregation off (the default).
 CREATE TABLE metadata_count_test (
   host STRING,
   ts TIMESTAMP TIME INDEX,
