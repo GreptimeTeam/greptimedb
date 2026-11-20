@@ -33,7 +33,9 @@ use crate::sst::parquet::file_range::TagDecodeState;
 use crate::sst::parquet::flat_format::{primary_key_column_index, sequence_column_index};
 use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, prefilter_flat_batch_by_primary_key};
 
-/// Iterator for reading data inside a bulk part.
+/// Iterator for reading an encoded Parquet bulk part.
+/// Narthex parts are dispatched by `EncodedBulkPart::read` through their sample
+/// decoder and [`BulkPartBatchIter`] instead.
 pub struct EncodedBulkPartIter {
     context: BulkIterContextRef,
     row_groups_to_read: VecDeque<usize>,
@@ -52,7 +54,7 @@ pub struct EncodedBulkPartIter {
 }
 
 impl EncodedBulkPartIter {
-    /// Creates a new [BulkPartIter].
+    /// Creates an iterator for an encoded Parquet bulk part.
     pub fn try_new(
         encoded_part: &EncodedBulkPart,
         context: BulkIterContextRef,

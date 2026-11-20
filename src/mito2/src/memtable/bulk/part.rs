@@ -436,12 +436,12 @@ impl UnorderedPart {
     }
 
     /// Returns the total estimated uncompressed bytes across all parts.
-    pub(super) fn estimated_bytes(&self) -> usize {
+    pub(crate) fn estimated_bytes(&self) -> usize {
         self.total_bytes
     }
 
     /// Returns the sequence interval occupied by pending small writes.
-    pub(super) fn sequence_bounds(&self) -> Option<(SequenceNumber, SequenceNumber)> {
+    pub(crate) fn sequence_bounds(&self) -> Option<(SequenceNumber, SequenceNumber)> {
         (!self.is_empty()).then_some((self.min_sequence, self.max_sequence))
     }
 
@@ -1320,14 +1320,16 @@ impl EncodedBulkPart {
         }
     }
 
-    /// Converts this `EncodedBulkPart` to `SstInfo`.
+    /// Returns SST metadata for an encoded Parquet part that can be uploaded directly.
+    /// Narthex parts return `None`: they contain in-memory sample blocks rather than
+    /// a complete persisted artifact and currently require decoding and re-encoding on flush.
     ///
     /// # Arguments
     /// * `file_id` - The SST file ID to assign to this part
-    ///
-    /// # Returns
-    /// Returns a `SstInfo` instance with information derived from this bulk part's metadata
     pub(crate) fn to_sst_info(&self, file_id: FileId) -> Option<SstInfo> {
+        // TODO(yingwen): Support direct flush of encoded Narthex parts by assembling
+        // the persisted manifest/parts inventory and SST metadata without decoding
+        // and re-encoding their sample columns.
         let parquet_metadata = self.parquet_metadata()?;
         let unit = self.metadata.region_metadata.time_index_type().unit();
         let max_row_group_uncompressed_size: u64 = parquet_metadata
@@ -1461,7 +1463,7 @@ impl BulkPartEncoder {
         Self::new_with_float_field_encoding(metadata, row_group_size, FloatFieldEncoding::default())
     }
 
-    pub(super) fn new_with_float_field_encoding(
+    pub(crate) fn new_with_float_field_encoding(
         metadata: RegionMetadataRef,
         row_group_size: usize,
         float_field_encoding: FloatFieldEncoding,
@@ -1492,7 +1494,7 @@ impl BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
-    pub(super) fn with_narthex_format(mut self, narthex_format: bool) -> Self {
+    pub(crate) fn with_narthex_format(mut self, narthex_format: bool) -> Self {
         self.narthex_format = narthex_format;
         self
     }
