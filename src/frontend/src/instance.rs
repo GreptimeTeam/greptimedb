@@ -288,7 +288,7 @@ impl Instance {
         }
 
         Some(SlowQueryTimer::new(
-            CatalogQueryStatement::Plan(stmt_text.to_string()),
+            CatalogQueryStatement::Text(stmt_text.to_string()),
             schema_name,
             self.slow_query_options.threshold,
             self.slow_query_options.sample_ratio,
@@ -924,7 +924,7 @@ impl Instance {
             let schema_name = query_ctx.current_schema();
             let slow_query_timer = self.slow_query_options.enable.then(|| {
                 SlowQueryTimer::new(
-                    CatalogQueryStatement::Plan(query.clone()),
+                    CatalogQueryStatement::Text(query.clone()),
                     schema_name.clone(),
                     self.slow_query_options.threshold,
                     self.slow_query_options.sample_ratio,
@@ -2755,7 +2755,7 @@ mod tests {
     fn test_record_explain_analyze_timeout_uses_empty_metrics_without_plan() {
         let event_recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
         let timer = SlowQueryTimer::new(
-            QueryStatement::Plan("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
+            QueryStatement::Text("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
             "public".to_string(),
             Duration::from_secs(3600),
             0.0,
@@ -2777,7 +2777,7 @@ mod tests {
     async fn test_attach_timeout_records_explain_analyze_metrics() {
         let event_recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
         let timer = SlowQueryTimer::new(
-            QueryStatement::Plan("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
+            QueryStatement::Text("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
             "public".to_string(),
             Duration::from_secs(3600),
             0.0,
