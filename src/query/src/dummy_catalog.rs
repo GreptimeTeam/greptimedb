@@ -208,7 +208,7 @@ impl TableProvider for DummyTableProvider {
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
         // File readers may use predicates for pruning without filtering individual rows.
-        if self.engine.name() == FILE_ENGINE {
+        if self.is_file_engine() {
             return Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()]);
         }
 
@@ -264,6 +264,11 @@ impl DummyTableProvider {
 
     pub fn region_metadata(&self) -> RegionMetadataRef {
         self.metadata.clone()
+    }
+
+    /// Returns whether this provider scans File Engine regions.
+    pub(crate) fn is_file_engine(&self) -> bool {
+        self.engine.name() == FILE_ENGINE
     }
 
     /// Sets the ordering hint of the query to the provider.
