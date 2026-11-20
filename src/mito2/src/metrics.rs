@@ -692,11 +692,34 @@ lazy_static! {
         ).unwrap();
 
     /// Histogram for GC operation duration by stage.
+    ///
+    /// Stages: `total`, `list_files`, `filter_deletable_files`, `delete_files` and
+    /// `update_manifest`. `list_files` and `filter_deletable_files` are only recorded by
+    /// full listing passes and split such a pass into the LIST I/O half and the in-memory
+    /// reference-set plus filtering half.
     pub static ref GC_DURATION_SECONDS: HistogramVec = register_histogram_vec!(
         "greptime_mito_gc_duration_seconds",
         "GC operation duration by stage",
         &[STAGE_LABEL],
         exponential_buckets(0.01, 10.0, 6).unwrap(),
+    ).unwrap();
+
+    /// Histogram for the number of object store entries listed for one region by one
+    /// full listing GC pass, region root and index dir combined. Only full listing
+    /// passes record it; there is no region label to keep the cardinality bounded.
+    pub static ref GC_LISTED_ENTRY_CNT: Histogram = register_histogram!(
+        "greptime_mito_gc_listed_entry_count",
+        "entries listed for one region by a full listing GC pass (root and index combined)",
+        vec![0.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 10_000_000.0],
+    ).unwrap();
+
+    /// Histogram for the reference set size of one region in one full listing GC pass,
+    /// that is the number of files its manifest holds. Only full listing passes record
+    /// it; there is no region label to keep the cardinality bounded.
+    pub static ref GC_MANIFEST_FILE_CNT: Histogram = register_histogram!(
+        "greptime_mito_gc_manifest_file_count",
+        "files referenced by the manifest of one region in a full listing GC pass",
+        vec![0.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 10_000_000.0],
     ).unwrap();
 
     /// Counter for GC runs by mode.

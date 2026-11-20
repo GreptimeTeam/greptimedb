@@ -49,7 +49,8 @@ use crate::error::{
 use crate::manifest::action::{RegionManifest, RemovedFile};
 use crate::metrics::{
     GC_DELETE_FILE_CNT, GC_DURATION_SECONDS, GC_ERRORS_TOTAL, GC_FILES_DELETED_TOTAL,
-    GC_ORPHANED_INDEX_FILES, GC_RUNS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES,
+    GC_LISTED_ENTRY_CNT, GC_MANIFEST_FILE_CNT, GC_ORPHANED_INDEX_FILES, GC_RUNS_TOTAL,
+    GC_SKIPPED_UNPARSABLE_FILES,
 };
 use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_indexes};
@@ -551,6 +552,9 @@ impl LocalGcWorker {
         let all_entries = if let Some(manifest) = &manifest
             && self.full_file_listing
         {
+            // Observation only: the manifest file count is the size of the reference set
+            // this pass builds in memory, so it can be compared with the listed entries.
+            GC_MANIFEST_FILE_CNT.observe(manifest.files.len() as f64);
             // do the time consuming listing only when full_file_listing is true(and region is open)
             // and do it first to make sure we have the latest manifest etc.
             self.list_from_object_store(region_id, manifest.files.len())
@@ -564,6 +568,15 @@ impl LocalGcWorker {
         } else {
             vec![]
         };
+        // Observation only: time from holding the listed entries to having the deletable
+        // candidate set ready, that is building the reference sets plus filtering. Recorded
+        // as a stage next to `list_files` so the LIST I/O half and the in-memory half of a
+        // full listing pass can be compared. Fast passes skip it for a fair comparison.
+        let filter_timer = self.full_file_listing.then(|| {
+            GC_DURATION_SECONDS
+                .with_label_values(&["filter_deletable_files"])
+                .start_timer()
+        });
         let mode = if self.full_file_listing {
             "full_listing"
         } else {
@@ -613,6 +626,9 @@ impl LocalGcWorker {
                 all_entries,
             )
             .await?;
+        if let Some(filter_timer) = filter_timer {
+            filter_timer.observe_duration();
+        }
 
         let mut hook_deferred_files = false;
         if let Some(hook) = &self.hook {
@@ -963,6 +979,9 @@ impl LocalGcWorker {
                 }
             }
         }
+        // Observation only: entries this full listing collected for the region, narthex
+        // artifacts included, that is what the pass then holds in memory.
+        GC_LISTED_ENTRY_CNT.observe(all_entries.len() as f64);
         info!(
             "gc: full listing mode cost {} secs using {lister_cnt} lister for root={root_cnt} index={index_cnt} files in region {}.",
             start.elapsed().as_secs_f64(),
