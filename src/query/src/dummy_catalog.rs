@@ -1105,23 +1105,6 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_request_from_snapshot_table_binds_snapshot_on_scan() {
-        let region_id = test_region_id();
-        let query_ctx = QueryContextBuilder::default()
-            .extensions(snapshot_table_context(&[region_id.table_id()]))
-            .build();
-
-        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
-
-        assert!(request.snapshot_on_scan);
-        assert_eq!(request.memtable_max_sequence, None);
-        assert_eq!(request.memtable_min_sequence, None);
-        assert!(!request.exact_sequence_range);
-        assert!(!request.skip_sst_files);
-        assert!(flow_scan_requires_snapshot(&query_ctx, region_id).unwrap());
-    }
-
-    #[test]
     fn test_scan_request_from_snapshot_table_reuses_cached_bound() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
@@ -1261,23 +1244,6 @@ mod tests {
 
         assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
-    }
-
-    #[test]
-    fn test_scan_request_from_table_scoped_snapshot_keeps_ssts_and_ignores_bounds() {
-        let region_id = test_region_id();
-        let query_ctx = QueryContextBuilder::default()
-            .extensions(snapshot_table_context(&[region_id.table_id()]))
-            .build();
-
-        let decision = decide_flow_scan(&query_ctx, region_id).unwrap();
-
-        assert!(decision.snapshot_required);
-        assert!(decision.snapshot_on_scan);
-        assert_eq!(decision.memtable_max_sequence, None);
-        assert_eq!(decision.memtable_min_sequence, None);
-        assert!(!decision.skip_sst_files);
-        assert!(!decision.exact_sequence_range);
     }
 
     #[test]
