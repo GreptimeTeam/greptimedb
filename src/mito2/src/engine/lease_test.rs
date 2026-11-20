@@ -1088,9 +1088,8 @@ async fn test_compaction_skipped_awaiting_leader_lease() {
 async fn test_index_build_retry_refused_awaiting_leader_lease_runs_after_it() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("index-retry-awaiting-lease").await;
-    let listener = Arc::new(WriteWalListener::default());
     let engine = env
-        .create_engine_with(async_build_mode_config(false), None, Some(listener), None)
+        .create_engine_with(async_build_mode_config(false), None, None, None)
         .await;
     engine.require_write_lease();
     engine.freeze_lease_clock(Instant::now());

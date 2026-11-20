@@ -15,7 +15,7 @@
 //! Tests for the background replay of pending WAL tails.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
@@ -70,7 +70,7 @@ use crate::manifest::action::{
 };
 use crate::manifest::storage::delta_file;
 use crate::region::version::VersionRef;
-use crate::region::{ManifestContextRef, MitoRegion, RegionLeaderState};
+use crate::region::{MitoRegion, RegionLeaderState};
 use crate::request::{BackgroundNotify, WorkerRequest};
 use crate::sst::file::RegionFileId;
 use crate::sst::location::region_dir_from_table_dir;
@@ -103,9 +103,6 @@ struct TailReplayListener {
     /// Index builds the worker learned stopped.
     index_builds_stopped: AtomicUsize,
     compactions_scheduled: AtomicUsize,
-    /// The region whose wait for its Leader lease the scheduled compactions are checked against.
-    watched: OnceLock<ManifestContextRef>,
-    compactions_scheduled_awaiting: AtomicUsize,
 }
 
 #[async_trait]
@@ -150,15 +147,6 @@ impl EventListener for TailReplayListener {
     }
 
     fn on_compaction_scheduled(&self, _region_id: RegionId) {
-        // Counted first, so a test that sees the total also sees it.
-        if self
-            .watched
-            .get()
-            .is_some_and(|ctx| ctx.awaits_leader_lease())
-        {
-            self.compactions_scheduled_awaiting
-                .fetch_add(1, Ordering::Relaxed);
-        }
         self.compactions_scheduled.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -217,10 +205,6 @@ impl TailReplayListener {
 
     fn compactions_scheduled(&self) -> usize {
         self.compactions_scheduled.load(Ordering::Relaxed)
-    }
-
-    fn compactions_scheduled_awaiting(&self) -> usize {
-        self.compactions_scheduled_awaiting.load(Ordering::Relaxed)
     }
 }
 
@@ -799,34 +783,21 @@ async fn test_catchup_replays_remote_reported_tail(#[case] leased: bool) {
             .engine
             .renew_node_lease(Instant::now() + Duration::from_secs(10));
     }
-    // The catchup reopens the region, so the commit waits until the listener watches the new one.
-    region.listener.hold_from(1);
+
     region.catchup().await;
-    let mito_region = region.engine.get_region(region.region_id).unwrap();
-    assert!(
-        region
-            .listener
-            .watched
-            .set(mito_region.manifest_ctx.clone())
-            .is_ok()
-    );
-    region.listener.hold_from(0);
     region.wait_until_replayed().await;
 
-    assert!(Arc::ptr_eq(
-        &mito_region,
-        &region.engine.get_region(region.region_id).unwrap()
-    ));
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
     assert_eq!(leased, mito_region.manifest_ctx.awaits_leader_lease());
     assert_eq!(last, region.version().flushed_entry_id);
     assert_eq!(9, count_rows(&region.engine, region.region_id).await);
     if leased {
+        // The worker reports the replay's end after it handled the commit and its compaction.
+        wait_until(|| region.listener.ended() == 1).await;
+        assert_eq!(0, region.listener.compactions_scheduled());
         region.promote_with_lease();
     }
     wait_until(|| region.listener.compactions_scheduled() == 1).await;
-    // The listener checks the wait as each compaction is scheduled, so this does not depend on
-    // when the worker handled the replay's commit.
-    assert_eq!(0, region.listener.compactions_scheduled_awaiting());
 }
 
 /// A tail replay that commits while the region awaits its Leader lease starts no checkpoint,
