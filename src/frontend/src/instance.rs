@@ -297,12 +297,12 @@ impl Instance {
         ))
     }
 
-    /// `tracked_text` is set for a statement tracked in the process list (see
-    /// [should_track_statement_process]): its `Display`, which masks credentials.
+    /// Registers the statement in the process list if `stmt_for_log`, which
+    /// [StatementForLog::new] built from it, is `Tracked`.
     async fn query_statement(
         &self,
         stmt: Statement,
-        tracked_text: Option<&str>,
+        stmt_for_log: &StatementForLog,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
@@ -325,7 +325,7 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        if let Some(stmt_text) = tracked_text {
+        if let Some(stmt_text) = stmt_for_log.tracked_text() {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
             let slow_query_timer =
@@ -816,7 +816,7 @@ impl Instance {
                     // prints.
                     let stmt_for_log = StatementForLog::new(&stmt);
                     match self
-                        .query_statement(stmt, stmt_for_log.tracked_text(), query_ctx.clone())
+                        .query_statement(stmt, &stmt_for_log, query_ctx.clone())
                         .await
                     {
                         Ok(output) => {
