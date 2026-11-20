@@ -35,7 +35,8 @@ use common_meta::key::table_name::TableNameKey;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use futures_util::stream::BoxStream;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
+use itertools::Either;
 use moka::sync::Cache;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::{Channel, QueryContext};
@@ -572,38 +573,12 @@ impl CatalogManager for KvBackendCatalogManager {
         schema: &'a str,
         query_ctx: Option<&'a QueryContext>,
     ) -> BoxStream<'a, Result<TableRef>> {
-        let sys_tables = try_stream!({
-            // System tables
-            let sys_table_names = self.system_catalog.table_names(schema, query_ctx);
-            for table_name in sys_table_names {
-                if let Some(table) =
-                    self.system_catalog
-                        .table(catalog, schema, &table_name, query_ctx)
-                {
-                    yield table;
-                }
+        try_stream! {
+            for table in self.system_tables(catalog, schema, query_ctx) {
+                yield table;
             }
-        });
-
-        let user_tables = try_stream!({
-            let routes: TableRouteCacheRef =
-                self.cache_registry.get().context(CacheNotFoundSnafu {
-                    name: "table_route_cache",
-                })?;
-            let infos: TableInfoCacheRef =
-                self.cache_registry.get().context(CacheNotFoundSnafu {
-                    name: "table_info_cache",
-                })?;
-            let ids = self
-                .table_metadata_manager
-                .table_name_manager()
-                .tables(catalog, schema)
-                .map(|entry| {
-                    entry
-                        .map(|(_, value)| value.table_id())
-                        .map_err(BoxedError::new)
-                        .context(ListTablesSnafu { catalog, schema })
-                });
+            let (infos, routes) = self.table_caches()?;
+            let ids = self.user_table_ids(catalog, schema);
             let batches =
                 BatchScanner::METADATA.scan(ids, |ids| Self::load_tables(ids, &infos, &routes));
             let mut batches = std::pin::pin!(batches);
@@ -612,8 +587,67 @@ impl CatalogManager for KvBackendCatalogManager {
                     yield table;
                 }
             }
-        });
-        Box::pin(sys_tables.chain(user_tables))
+        }
+        .boxed()
+    }
+}
+
+impl KvBackendCatalogManager {
+    fn system_tables<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+        query_ctx: Option<&'a QueryContext>,
+    ) -> impl Iterator<Item = TableRef> + 'a {
+        self.system_catalog
+            .table_names(schema, query_ctx)
+            .into_iter()
+            .filter_map(move |name| self.system_catalog.table(catalog, schema, &name, query_ctx))
+    }
+
+    fn user_table_ids<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+    ) -> impl Stream<Item = Result<TableId>> + 'a {
+        self.table_metadata_manager
+            .table_name_manager()
+            .tables(catalog, schema)
+            .map(move |entry| {
+                entry
+                    .map(|(_, value)| value.table_id())
+                    .map_err(BoxedError::new)
+                    .context(ListTablesSnafu { catalog, schema })
+            })
+    }
+
+    fn table_caches(&self) -> Result<(TableInfoCacheRef, TableRouteCacheRef)> {
+        let routes = self.cache_registry.get().context(CacheNotFoundSnafu {
+            name: "table_route_cache",
+        })?;
+        let infos = self.cache_registry.get().context(CacheNotFoundSnafu {
+            name: "table_info_cache",
+        })?;
+        Ok((infos, routes))
+    }
+
+    /// Yields a complete table batch before starting the next metadata load.
+    pub(crate) fn sequential_table_batches<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+    ) -> impl Stream<Item = Result<impl Iterator<Item = TableRef> + 'a>> + 'a {
+        const BATCH_SIZE: usize = 128;
+        try_stream! {
+            yield Either::Left(self.system_tables(catalog, schema, None));
+
+            let (infos, routes) = self.table_caches()?;
+            let mut batches = self.user_table_ids(catalog, schema).ready_chunks(BATCH_SIZE);
+            while let Some(batch) = batches.next().await {
+                let ids = batch.into_iter().collect::<Result<Vec<_>>>()?;
+                yield Either::Right(Self::load_tables(ids, &infos, &routes).await?);
+            }
+        }
     }
 }
 
