@@ -106,9 +106,10 @@ time_range_layout = "non_overlapping_per_sst"
 series_layout = "timestamp_major"
 
 # Evaluation grid: 00:00:45Z-00:01:45Z at a 15-second step, five evaluations.
-# One query scans [1704066945, 1704067305] -- all eight files and all 100,000
-# series -- and the five evaluations read a growing prefix of that single scan,
-# so the same file set is read whichever shape below is measured.
+# The plain shapes scan [1704066945, 1704067305] -- all eight files and all
+# 100,000 series -- and their five evaluations read a growing prefix of that one
+# scan. The shapes below that pin, offset or filter by host read fewer
+# files/series by construction; each says so where it appears.
 
 # 1. Bare selector: the control group.
 [[scenario.queries]]
@@ -282,9 +283,9 @@ iterations = 9
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 20
 
-# 12. Subquery: a ten-minute window at a one-minute step is 11 inner
-# evaluations per outer one, so the outer grid is kept to two points (22 inner
-# evaluations) instead of the five used elsewhere.
+# 12. Subquery: a ten-minute window at a one-minute step holds ten aligned inner
+# points per outer one (the window is left-open), so the outer grid is kept to
+# two points -- twenty inner evaluations -- instead of the five used elsewhere.
 [[scenario.queries]]
 name = "max_over_time_rate_10m_1m"
 kind = "tql"

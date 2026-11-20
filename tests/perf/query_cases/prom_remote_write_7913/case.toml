@@ -80,8 +80,9 @@ max_candidate_latency_regression_pct = 100
 # Every one is measured with `TQL ANALYZE VERBOSE` (the framework reads
 # `execution_time_ms` from the ANALYZE output) over the two hours starting one
 # hour after ingestion starts, so `offset 1h` still reads stored samples. The
-# subquery query uses a coarser 15-minute outer step because a one-minute inner
-# step over a one-hour range is 61 inner evaluations per outer one.
+# subquery query pairs a five-minute inner step with a coarser 15-minute outer
+# step, which keeps the inner evaluation count bounded without changing the
+# shape being measured.
 #
 # `... / ignoring(host) ...` is a valid one-to-one match here: `instance` is
 # unique per series in this fixture, so ignoring `host` still leaves a distinct
