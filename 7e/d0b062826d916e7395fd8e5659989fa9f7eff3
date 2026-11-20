@@ -1,0 +1,19 @@
+src/mito2/src/engine.rs
+  s_c311425adc0214::t_894ec730c67530 561-562
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7ed0b062826d916e7395fd8e5659989fa9f7eff3",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+src/metric-engine/src/engine/sync/region.rs
+  s_c311425adc0214::t_b39ae23b35d369 18,20,111-115,120,122-144,307-310,312-315,317,320,324,326,333-337,341,344-353,355-362,364-374,403-405,407-408,410-411
+  s_c311425adc0214::t_28124b4774612a 376-402
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9fad887f75ca060900ca0b6bc3a58874e8d14398",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

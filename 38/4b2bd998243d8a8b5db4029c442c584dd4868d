@@ -1,0 +1,22 @@
+src/meta-srv/src/procedure/repartition/allocate_region.rs
+  s_f1adaf4d85f1fe::t_c8c999bffdb4de 115-116,200-214
+src/meta-srv/src/procedure/repartition.rs
+  s_f1adaf4d85f1fe::t_c8c999bffdb4de 330-339,342-347,2118-2126,2128-2130,2143,2176-2195,2197-2206
+  s_f1adaf4d85f1fe::t_506fdbd4561b6f 61,340-341,2207-2220,2226-2235,2238-2241
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "384b2bd998243d8a8b5db4029c442c584dd4868d",
+  "prompts": {},
+  "sessions": {
+    "s_f1adaf4d85f1fe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f1f0-c411-7560-b495-e444035db727",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
