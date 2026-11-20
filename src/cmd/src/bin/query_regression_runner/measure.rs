@@ -359,14 +359,14 @@ fn query_label(query: &Query) -> &str {
 /// itself, and a statement that is not the timed query cannot prove anything about
 /// it.
 fn validate_native_queries(case_path: &Path, queries: &[Query]) -> Result<()> {
-    if let Some(query) = queries
-        .iter()
-        .find(|query| query.require_native && !is_tql_plan_statement(&query.query))
-    {
+    if let Some(query) = queries.iter().find(|query| {
+        query.require_native
+            && (query.kind.as_deref() == Some("prom_http") || !is_tql_plan_statement(&query.query))
+    }) {
         return Err(format!(
             "case {}: query `{}` declares require_native but is not a `TQL ANALYZE ... FORMAT \
-             JSON` statement; only that form answers the plan tree of the statement being timed, \
-             so nothing else can prove the native route",
+             JSON` request to `/v1/sql`; only that statement answers the plan tree of the query \
+             being timed, so nothing else can prove the native route",
             case_path.display(),
             query_label(query),
         )
@@ -884,6 +884,12 @@ mod tests {
             (
                 Some("sql"),
                 "/* TQL ANALYZE FORMAT JSON */ SELECT 'FusedSeries' AS plan",
+            ),
+            // The statement parses, but this kind sends it to the Prometheus
+            // range endpoint, which answers no plan tree.
+            (
+                Some("prom_http"),
+                "TQL ANALYZE FORMAT JSON (0, 10, '5s') some_metric",
             ),
         ] {
             let error = validate_native_queries(case_path, &[native_query(kind, statement)])
