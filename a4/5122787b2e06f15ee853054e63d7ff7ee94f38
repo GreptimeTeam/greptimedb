@@ -1,0 +1,63 @@
+tests/compatibility/wire/metadata_compaction/instructions.json
+  s_c311425adc0214::t_6e43df6a9d479f 1-4
+src/common/meta/src/instruction.rs
+  s_c311425adc0214::t_6e43df6a9d479f 1465-1487
+  s_c311425adc0214::t_65f9dcae311644 1007-1018,1020-1024,1058-1059,1341,1372
+  s_e7d54a0ecd324b::t_0208c4669087c9 1019,1371,1373,1464
+src/datanode/src/heartbeat/handler.rs
+  s_c311425adc0214::t_65f9dcae311644 35,48,62,107,153-154,177,213,264
+  s_e7d54a0ecd324b::t_334752cae8dc4c 152
+src/meta-srv/src/procedure/repartition/group/sync_region.rs
+  s_c311425adc0214::t_6e43df6a9d479f 103,117,119,128,136,147-148,150,156-157,257,326,487-596,652,697
+  s_e7d54a0ecd324b::t_1ed9df7ef2fd72 20-23,28,63,97-102,104-116,118,120-127,129-135,137-146,149,151-155,158,185,203,207,227-256,258,310,313-317,320-321,325,328-336,356,486,629,650-651,653,695-696,698
+src/datanode/src/heartbeat/handler/metadata_compaction.rs
+  s_c311425adc0214::t_65f9dcae311644 1-20,22-35,37-44,47,49-52,54,56-71,73-80,82,84,86-90,92-94,96-98,100-102,104-108,110-111,113-114,116,118,120,127-137,139-144,146-154,206,211,239,241,244-245
+  s_c311425adc0214::t_6e43df6a9d479f 36,46,48,53,72,109,121-126
+  s_c311425adc0214::t_f14be880698326 21
+  s_c311425adc0214::t_18c2c1a8506684 45
+  s_c311425adc0214::t_3ffebcfecaf412 55
+  s_c311425adc0214::t_352b5f0e7cc086 81
+  s_c311425adc0214::t_616b9ed2384a9c 83
+  s_c311425adc0214::t_19e1b92bf6c685 85
+  s_c311425adc0214::t_eb9b3318fccbe2 91
+  s_c311425adc0214::t_689ff246f0e388 95
+  s_c311425adc0214::t_5668e1f47dbbae 99
+  s_c311425adc0214::t_94c50dced77f0a 103
+  s_c311425adc0214::t_430068583d0766 112
+  s_c311425adc0214::t_5424ca56ebd905 115
+  s_c311425adc0214::t_49810148c31330 117
+  s_c311425adc0214::t_d4ef0397957790 119
+  s_c311425adc0214::t_01d166837cad4e 138
+  s_c311425adc0214::t_d89524bfc5c93e 145
+  s_c311425adc0214::t_a18049b43d3185 155-157,203-205
+  s_c311425adc0214::t_11bcd4268892ad 207-210
+  s_c311425adc0214::t_cc652eae21ca4e 212-214,236-238
+  s_c311425adc0214::t_b7ce6110eb8e2e 240
+  s_c311425adc0214::t_54b26a96cc2d02 242-243
+src/metric-engine/src/engine.rs
+  s_c311425adc0214::t_65f9dcae311644 558-568
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a45122787b2e06f15ee853054e63d7ff7ee94f38",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_e7d54a0ecd324b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f74b-2355-7d11-8e5d-68c391ddc57a",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
