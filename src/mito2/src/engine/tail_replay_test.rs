@@ -139,7 +139,8 @@ impl EventListener for TailReplayListener {
     }
 
     fn on_tail_replay_ended(&self, _region_id: RegionId) {
-        self.ended.fetch_add(1, Ordering::Relaxed);
+        // A test that sees the end also sees the counts of the callbacks before it.
+        self.ended.fetch_add(1, Ordering::Release);
     }
 
     async fn on_index_build_stopped(&self, _region_file_id: RegionFileId) {
@@ -173,7 +174,7 @@ impl TailReplayListener {
     }
 
     fn ended(&self) -> usize {
-        self.ended.load(Ordering::Relaxed)
+        self.ended.load(Ordering::Acquire)
     }
 
     fn failed(&self) -> bool {
