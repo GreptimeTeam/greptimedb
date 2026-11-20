@@ -228,7 +228,7 @@ case for issue #7913. It writes 8192 series × 20160 samples through remote-writ
 in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
 TQL selectors. It is not included in the default `all` case set because ingestion
 cost dominates routine CI validation. Commenting `/query-regression heavy` runs
-only this case; `/query-regression` runs the nine routine default cases, including
+the heavy set, which starts with this case; `/query-regression` runs the nine routine default cases, including
 `sst_float_bss`, `promql_instant_last_row_9034`, and
 `mito_prefilter_all_match`. Manual
 workflow dispatch accepts the `heavy` token to select this case.
@@ -237,7 +237,7 @@ workflow dispatch accepts the `heavy` token to select this case.
 companion to `promql_constant_tag_concat_ms_100k`: 100,000 series x 8 samples in
 8 non-overlapping SSTs (800,000 rows, `TIMESTAMP(3)`, not `append_mode`), with 19
 queries covering the split aggregate, `topk`, `on(...)`/`ignoring` matching,
-`avg`/`max`/`quantile_over_time`, `label_replace` writing `__name__`, filter and
+`avg`/`max`/`quantile_over_time`, `label_replace` rewriting a label (`dst`), filter and
 `bool` comparison, `and`, a subquery, `offset`, `@` and an instant evaluation.
 Every query must stay on the native fused-series route. Like the other
 high-cardinality cases it is in the `heavy` set, not the routine one.
@@ -570,8 +570,9 @@ The workflow runs when an allowlisted repository admin comments
 `/query-regression` on a non-draft PR. It does not rerun on pushes,
 ready-for-review, or reopen events. `/query-regression` runs the nine routine
 default cases, including `sst_float_bss`, `promql_instant_last_row_9034`, and
-`mito_prefilter_all_match`; `/query-regression heavy` runs only the
-high-cardinality remote-write #7913 case. PR runs build base/candidate once and
+`mito_prefilter_all_match`; `/query-regression heavy` runs the heavy set: the
+high-cardinality remote-write #7913 case, the two constant-tag concat cases, and
+`many_short_series`. PR runs build base/candidate once and
 use `--allow-large-fixture`. Manual `workflow_dispatch` runs can pass `all`,
 `heavy`, one case path, or a comma/whitespace-separated list of case paths, and
 can override refs.
