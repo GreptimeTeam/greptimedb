@@ -290,9 +290,9 @@
 | `rollup_cache.max_bytes` | String | `256MiB` | The total memory budget for cached chunks and their annotations. |
 | `rollup_cache.chunk` | String | `5m` | The canonical chunk duration. A query whose step does not divide it bypasses the cache. |
 | `rollup_cache.tail` | String | `10m` | Output points this close to wall-clock now may still be receiving data, so they are executed directly and never cached. |
-| `rollup_cache.max_staleness` | String | `30s` | How old a source-sequence reading may be before lookups stop trusting it. |
+| `rollup_cache.refresh_interval` | String | `1s` | How often the background refresher probes an active source table. It bounds how stale a served chunk can be; no request waits for, or measures, a round. |
 | `rollup_cache.max_age` | String | `1h` | How old a cached chunk may be before it is evicted, independent of source changes. |
-| `rollup_cache.source_probe` | Bool | `true` | Whether lookups probe the source table's sequence and invalidate affected spans before serving an entry. Required for correctness on writable tables; explicit DELETE mixed with distant PUTs, truncate, and TTL expiry remain documented scope limits. |
+
 
 ## Distributed Mode
 
@@ -460,9 +460,9 @@
 | `rollup_cache.max_bytes` | String | `256MiB` | The total memory budget for cached chunks and their annotations. |
 | `rollup_cache.chunk` | String | `5m` | The canonical chunk duration. A query whose step does not divide it bypasses the cache. |
 | `rollup_cache.tail` | String | `10m` | Output points this close to wall-clock now may still be receiving data, so they are executed directly and never cached. |
-| `rollup_cache.max_staleness` | String | `30s` | How old a source-sequence reading may be before lookups stop trusting it. |
+| `rollup_cache.refresh_interval` | String | `1s` | How often the background refresher probes an active source table. It bounds how stale a served chunk can be; no request waits for, or measures, a round. |
 | `rollup_cache.max_age` | String | `1h` | How old a cached chunk may be before it is evicted, independent of source changes. |
-| `rollup_cache.source_probe` | Bool | `true` | Whether lookups probe the source table's sequence and invalidate affected spans before serving an entry. Required for correctness on writable tables; explicit DELETE mixed with distant PUTs, truncate, and TTL expiry remain documented scope limits. |
+
 
 ### Metasrv
 

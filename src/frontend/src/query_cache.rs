@@ -43,14 +43,12 @@
 //!
 //! # Admission
 //!
-//! The cache serves a source table only while a background refresher has recently
-//! proved it unchanged. The proof is the table's `last_success`: the instant of its
-//! last successful probe round. A request never probes; it reads that instant and,
-//! when it is older than [`RollupCache::admission_window`]
-//! (`2 * refresh_interval`), bypasses the cache and runs its original plan. A cold
-//! table, a table no background round has proved yet, and a table whose last round
-//! failed all bypass instead of waiting, and a table is admitted again only after a
-//! later round succeeds.
+//! The cache serves a source table only after a background round has proved a
+//! complete cursor domain for it. A request never probes: every lookup checks the
+//! table's current readiness under its lock, and a cold table, a table no round has
+//! proved yet, and a table whose last round failed all bypass instead of waiting.
+//! A later successful round opens the table again. `last_success` is observation
+//! only; it is not an admission deadline.
 //!
 //! # Validity
 //!
