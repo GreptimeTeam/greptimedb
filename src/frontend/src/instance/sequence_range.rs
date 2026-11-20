@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
+use common_meta::rpc::router::RegionRoute;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::RecordBatchMetrics;
@@ -46,10 +47,73 @@ use crate::error::{
 use crate::query_cache::{DirtySpan, RollupCache, SourceTable, TimeChunk};
 
 /// How many regions one probe round reports on.
-fn probe_regions(table_id: u32, route: &common_meta::rpc::router::RegionRoute) -> u64 {
+fn probe_regions(table_id: u32, route: &RegionRoute) -> u64 {
     // A metric logical table owns the logical region IDs even though its route points
     // at a physical table, which is why the probe scans the queryable table.
     RegionId::new(table_id, route.region.id.region_number()).as_u64()
+}
+
+/// The physical region and the logical region of every region of one route, paired.
+///
+/// A round asks the probe in the logical domain — the one the table's own SQL names, and
+/// the one [`probe_regions`] reconstructs — while the cache holds what a request's read
+/// reported, and a request reads a metric logical table's *physical* regions. The region
+/// number joins the two domains: a logical table owns `RegionId::new(logical_table_id, n)`
+/// for the physical `RegionId::new(physical_table_id, n)` its regions were created from, so
+/// `n` names one region in either domain.
+///
+/// `None` means the route cannot be paired one-to-one — it is empty, it repeats a region
+/// number, or its regions do not all belong to one table — and the round must prove
+/// nothing: a guessed pair would advance a cursor of another region.
+fn paired_regions(logical_table_id: u32, region_routes: &[RegionRoute]) -> Option<Vec<(u64, u64)>> {
+    let mut paired = Vec::with_capacity(region_routes.len());
+    let mut numbers = BTreeSet::new();
+    let mut table_id = None;
+    for route in region_routes {
+        let physical = route.region.id;
+        if table_id.is_some_and(|known| known != physical.table_id())
+            || !numbers.insert(physical.region_number())
+        {
+            return None;
+        }
+        table_id = Some(physical.table_id());
+        paired.push((physical.as_u64(), probe_regions(logical_table_id, route)));
+    }
+    (!paired.is_empty()).then_some(paired)
+}
+
+/// The probe's bounds for `paired`, in the logical domain it asks in, taken from the
+/// physical-domain `cursors` the cache holds.
+///
+/// A region the table did not have last round starts from zero, so its whole history is
+/// part of this round's delta; a region it no longer has is dropped, and the next round
+/// that has it again starts from zero.
+fn logical_lower(paired: &[(u64, u64)], cursors: &BTreeMap<u64, u64>) -> BTreeMap<u64, u64> {
+    paired
+        .iter()
+        .map(|(physical, logical)| (*logical, cursors.get(physical).copied().unwrap_or(0)))
+        .collect()
+}
+
+/// The probe's logical-domain watermarks restated in the physical domain the cache holds.
+///
+/// The probe reports one watermark per region it was asked about, so a region without one
+/// here, a region of an answer that is not in `paired`, or a repeated physical key means the
+/// answer and the route do not describe the same regions one-to-one: [`None`], and no cursor
+/// moves.
+fn physical_watermarks(
+    paired: &[(u64, u64)],
+    high: &BTreeMap<u64, u64>,
+) -> Option<BTreeMap<u64, u64>> {
+    let mut physical = BTreeMap::new();
+    for (physical_region, logical_region) in paired {
+        let watermark = high.get(logical_region)?;
+        if physical.insert(*physical_region, *watermark).is_some() {
+            return None;
+        }
+    }
+    // The answer names exactly the regions the route paired, no more and no fewer.
+    (physical.len() == paired.len() && physical.len() == high.len()).then_some(physical)
 }
 
 /// The background refresher of the rollup cache.
@@ -127,6 +191,18 @@ impl Instance {
         Ok(())
     }
 
+    /// Runs one background round of the rollup cache, for a test that must not guess
+    /// the timing of the refresher.
+    ///
+    /// Production starts the task instead ([`Instance::start_rollup_cache_refresher`]);
+    /// this is the same round, invoked directly, and it exists only in a testing build
+    /// so that an end-to-end test observes a round it ran rather than a period it
+    /// waited for.
+    #[cfg(feature = "testing")]
+    pub async fn refresh_rollup_cache_once_for_test(&self) {
+        self.refresh_rollup_cache_once().await;
+    }
+
     /// Runs one background round over every active source table of the rollup cache.
     ///
     /// Nothing here is on a request's path: a request reads the readiness the last
@@ -157,6 +233,11 @@ impl Instance {
     /// [`None`] means the round proved nothing, and the caller must close the
     /// table's readiness. A round never advances a cursor without a proof: a removed
     /// row may advance a sequence without leaving a timestamp to invalidate by.
+    ///
+    /// The probe asks about the table's own regions — the logical ones of a metric
+    /// logical table — while the cursors it starts from, and the ones it answers, are
+    /// keyed by the regions a request's read reports, which for that table are the
+    /// physical ones. [`paired_regions`] is the only place the two domains meet.
     async fn refresh_source_table(
         &self,
         cache: &RollupCache,
@@ -182,28 +263,14 @@ impl Instance {
             .find_physical_table_route_with_id(table_id)
             .await
             .ok()?;
-        let regions = route
-            .region_routes
-            .iter()
-            .map(|route| probe_regions(table_id, route))
-            .collect::<Vec<_>>();
-        if regions.is_empty() {
-            return None;
-        }
+        let paired = paired_regions(table_id, &route.region_routes)?;
 
-        let cursors = cache.cursors(table);
-        // A region the table did not have last round starts from zero, so its whole
-        // history is part of this round's delta; a region it no longer has is
-        // dropped, and the next round that has it again starts from zero.
-        let lower = regions
-            .iter()
-            .map(|region| (*region, cursors.get(region).copied().unwrap_or(0)))
-            .collect::<BTreeMap<_, _>>();
+        let lower = logical_lower(&paired, &cache.cursors(table));
         let (high, min, max) = self
             .probe_sequence_range(&table_name, &lower, &query_ctx)
             .await
             .ok()?;
-        if high.len() != regions.len()
+        if high.len() != lower.len()
             || high.keys().any(|region| !lower.contains_key(region))
             || high
                 .iter()
@@ -211,7 +278,10 @@ impl Instance {
         {
             return None;
         }
+        // The probe answered in the domain it was asked in; the cache, the watermark it
+        // commits and the read it compares against all speak the physical one.
         let changed = high != lower;
+        let high = physical_watermarks(&paired, &high)?;
         let dirty = match (min, max) {
             (Some(min), Some(max)) => {
                 let min_ms = min.convert_to(TimeUnit::Millisecond)?;
@@ -488,6 +558,7 @@ fn validate_watermarks(
 #[cfg(test)]
 mod tests {
     use common_error::ext::ErrorExt;
+    use common_meta::rpc::router::Region;
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::RegionWatermarkEntry;
     use datatypes::prelude::ConcreteDataType;
@@ -567,6 +638,168 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    /// A route entry for one region, which is all the pairing reads of it.
+    fn region_route(region_id: RegionId) -> RegionRoute {
+        RegionRoute {
+            region: Region {
+                id: region_id,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The region id `table_id` owns for `region_number`, in whichever domain the id is
+    /// asked for: the logical table's own, or the physical table's behind it.
+    fn region_id(table_id: u32, region_number: u32) -> u64 {
+        RegionId::new(table_id, region_number).as_u64()
+    }
+
+    const LOGICAL_TABLE_ID: u32 = 1025;
+    const PHYSICAL_TABLE_ID: u32 = 1024;
+
+    /// The route of a physical table with two regions, as the logical table's round sees it.
+    fn physical_routes() -> Vec<RegionRoute> {
+        (0..2)
+            .map(|region_number| region_route(RegionId::new(PHYSICAL_TABLE_ID, region_number)))
+            .collect()
+    }
+
+    #[test]
+    fn sequence_range_pairs_each_logical_region_with_its_physical_region() {
+        assert_eq!(
+            paired_regions(LOGICAL_TABLE_ID, &physical_routes()).unwrap(),
+            vec![
+                (
+                    region_id(PHYSICAL_TABLE_ID, 0),
+                    region_id(LOGICAL_TABLE_ID, 0)
+                ),
+                (
+                    region_id(PHYSICAL_TABLE_ID, 1),
+                    region_id(LOGICAL_TABLE_ID, 1)
+                ),
+            ]
+        );
+        // A table that is not logical keeps both domains identical, so its round is the
+        // identity mapping over the same region ids.
+        assert_eq!(
+            paired_regions(
+                PHYSICAL_TABLE_ID,
+                &[region_route(RegionId::new(PHYSICAL_TABLE_ID, 7))]
+            )
+            .unwrap(),
+            vec![(
+                region_id(PHYSICAL_TABLE_ID, 7),
+                region_id(PHYSICAL_TABLE_ID, 7)
+            )]
+        );
+    }
+
+    #[test]
+    fn sequence_range_rejects_a_route_it_cannot_pair_one_to_one() {
+        // Nothing to probe proves nothing.
+        assert!(paired_regions(LOGICAL_TABLE_ID, &[]).is_none());
+        // One region number twice: a physical cursor would belong to two logical regions.
+        assert!(
+            paired_regions(
+                LOGICAL_TABLE_ID,
+                &[
+                    region_route(RegionId::new(PHYSICAL_TABLE_ID, 0)),
+                    region_route(RegionId::new(PHYSICAL_TABLE_ID, 1)),
+                    region_route(RegionId::new(PHYSICAL_TABLE_ID, 0)),
+                ]
+            )
+            .is_none()
+        );
+        // Regions of two tables: the route is not the one table the round is probing.
+        assert!(
+            paired_regions(
+                LOGICAL_TABLE_ID,
+                &[
+                    region_route(RegionId::new(PHYSICAL_TABLE_ID, 0)),
+                    region_route(RegionId::new(PHYSICAL_TABLE_ID + 9, 1)),
+                ]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn sequence_range_starts_the_probe_from_the_physical_cursors() {
+        let paired = paired_regions(LOGICAL_TABLE_ID, &physical_routes()).unwrap();
+        // The cursors the cache holds are the physical regions a request's read reported.
+        let cursors = BTreeMap::from([(region_id(PHYSICAL_TABLE_ID, 0), 11)]);
+        // The probe is asked about the logical regions, each starting from the sequence its
+        // physical region got to; a region without a cursor starts from zero.
+        assert_eq!(
+            logical_lower(&paired, &cursors),
+            BTreeMap::from([
+                (region_id(LOGICAL_TABLE_ID, 0), 11),
+                (region_id(LOGICAL_TABLE_ID, 1), 0)
+            ])
+        );
+    }
+
+    #[test]
+    fn sequence_range_commits_a_logical_probe_answer_as_physical_cursors() {
+        let paired = paired_regions(LOGICAL_TABLE_ID, &physical_routes()).unwrap();
+        let lower = logical_lower(
+            &paired,
+            &BTreeMap::from([(region_id(PHYSICAL_TABLE_ID, 0), 11)]),
+        );
+        let high = validate_watermarks(
+            &lower,
+            &metrics(&[
+                (region_id(LOGICAL_TABLE_ID, 0), Some(11)),
+                (region_id(LOGICAL_TABLE_ID, 1), Some(4)),
+            ]),
+        )
+        .unwrap();
+        // The cursors and the watermark committed from them name the physical regions the
+        // next read of the table will report.
+        assert_eq!(
+            physical_watermarks(&paired, &high).unwrap(),
+            BTreeMap::from([
+                (region_id(PHYSICAL_TABLE_ID, 0), 11),
+                (region_id(PHYSICAL_TABLE_ID, 1), 4),
+            ])
+        );
+    }
+
+    #[test]
+    fn sequence_range_rejects_a_probe_answer_that_misses_a_paired_region() {
+        let paired = paired_regions(LOGICAL_TABLE_ID, &physical_routes()).unwrap();
+        let complete = BTreeMap::from([
+            (region_id(LOGICAL_TABLE_ID, 0), 11),
+            (region_id(LOGICAL_TABLE_ID, 1), 4),
+        ]);
+        assert!(physical_watermarks(&paired, &complete).is_some());
+        // An answer that leaves a paired region out cannot move either cursor.
+        let missing = BTreeMap::from([(region_id(LOGICAL_TABLE_ID, 0), 11)]);
+        assert!(physical_watermarks(&paired, &missing).is_none());
+        // Neither can an answer that reports a region the route did not pair.
+        let mut extra = complete.clone();
+        extra.insert(region_id(LOGICAL_TABLE_ID, 2), 4);
+        assert!(physical_watermarks(&paired, &extra).is_none());
+        // A pairing that repeats a physical key is not one-to-one.
+        assert!(
+            physical_watermarks(
+                &[
+                    (
+                        region_id(PHYSICAL_TABLE_ID, 0),
+                        region_id(LOGICAL_TABLE_ID, 0)
+                    ),
+                    (
+                        region_id(PHYSICAL_TABLE_ID, 0),
+                        region_id(LOGICAL_TABLE_ID, 1)
+                    ),
+                ],
+                &complete,
+            )
+            .is_none()
+        );
     }
 
     /// The hull `batches` fold into, or why they fold into nothing.
