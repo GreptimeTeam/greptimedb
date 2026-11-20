@@ -12954,7 +12954,213 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     )
     .await;
 
+    test_otlp_cumulative_histogram_validation(&client).await;
+
     guard.remove_all().await;
+}
+
+async fn test_otlp_cumulative_histogram_validation(client: &TestClient) {
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+    use opentelemetry_proto::tonic::metrics::v1::{
+        self as otel_metrics, AggregationTemporality, Exemplar, HistogramDataPoint, Metric,
+        ResourceMetrics, ScopeMetrics, exemplar, metric,
+    };
+
+    const TS_NANOS: u64 = 1_753_780_559_000_000_000;
+    const TS_SECS: i64 = 1_753_780_559;
+
+    let series_attr = |value: &str| KeyValue {
+        key: "series".to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value.to_string())),
+        }),
+        ..Default::default()
+    };
+    let exemplar_point = |val: f64| Exemplar {
+        time_unix_nano: TS_NANOS,
+        value: Some(exemplar::Value::AsDouble(val)),
+        ..Default::default()
+    };
+    let cumulative_request =
+        |name: &str, data_points: Vec<HistogramDataPoint>| ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        name: name.to_string(),
+                        data: Some(metric::Data::Histogram(otel_metrics::Histogram {
+                            data_points,
+                            aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+    let send_otlp_metrics = |req: ExportMetricsServiceRequest| {
+        send_req(
+            client,
+            vec![(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            )],
+            "/v1/otlp/v1/metrics",
+            req.encode_to_vec(),
+            false,
+        )
+    };
+
+    // All-rejected cases: reported layout mismatch and isolated count-total mismatch.
+    for (name, bad_counts, expected_err) in [
+        ("malformed_cum_len_hist", vec![1, 2], "bucket_counts length"),
+        (
+            "malformed_cum_count_hist",
+            vec![1, 2, 4],
+            "buckets contain 7 observations, declared count is 8",
+        ),
+    ] {
+        let req = cumulative_request(
+            name,
+            vec![HistogramDataPoint {
+                time_unix_nano: TS_NANOS,
+                count: 8,
+                sum: Some(10.0),
+                explicit_bounds: vec![0.0, 1.0],
+                bucket_counts: bad_counts,
+                exemplars: vec![exemplar_point(0.75)],
+                ..Default::default()
+            }],
+        );
+        let res = send_otlp_metrics(req).await;
+        assert_eq!(StatusCode::BAD_REQUEST, res.status(), "{name}");
+        let status = GoogleRpcStatus::decode(res.bytes().await.as_ref()).unwrap();
+        assert_eq!(tonic::Code::InvalidArgument as i32, status.code, "{name}");
+        assert!(
+            status.message.contains(expected_err),
+            "{name}: {}",
+            status.message
+        );
+        validate_data(
+            name,
+            client,
+            &format!(
+                "select count(*) from information_schema.tables where table_name in \
+                 ('{name}_bucket', '{name}_sum', '{name}_count', 'greptime_metrics_exemplars');"
+            ),
+            "[[0]]",
+        )
+        .await;
+    }
+
+    // Mixed valid control + malformed sibling: only the valid sibling writes rows/exemplars.
+    for (name, bad_counts, expected_err) in [
+        (
+            "mixed_cum_len_hist",
+            vec![1, 2],
+            "bucket_counts length 2 must equal explicit_bounds length 2 plus one",
+        ),
+        (
+            "mixed_cum_count_hist",
+            vec![1, 2, 4],
+            "buckets contain 7 observations, declared count is 8",
+        ),
+    ] {
+        let valid = HistogramDataPoint {
+            attributes: vec![series_attr("valid")],
+            time_unix_nano: TS_NANOS,
+            count: 4,
+            sum: Some(2.0),
+            explicit_bounds: vec![0.0, 1.0],
+            bucket_counts: vec![1, 2, 1],
+            exemplars: vec![exemplar_point(0.25)],
+            ..Default::default()
+        };
+        let malformed = HistogramDataPoint {
+            attributes: vec![series_attr("malformed")],
+            time_unix_nano: TS_NANOS,
+            count: 8,
+            sum: Some(10.0),
+            explicit_bounds: vec![0.0, 1.0],
+            bucket_counts: bad_counts,
+            exemplars: vec![exemplar_point(0.75)],
+            ..Default::default()
+        };
+        let res = send_otlp_metrics(cumulative_request(name, vec![valid, malformed])).await;
+        assert_eq!(StatusCode::OK, res.status(), "{name}");
+        let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+        let partial = body
+            .partial_success
+            .unwrap_or_else(|| panic!("{name}: expected partial_success"));
+        assert_eq!(1, partial.rejected_data_points, "{name}");
+        assert_eq!(
+            partial.error_message,
+            format!("metric `{name}`: {expected_err}")
+        );
+
+        validate_data(
+            &format!("{name}_bucket"),
+            client,
+            &format!("select series, le, greptime_value from {name}_bucket order by le;"),
+            "[[\"valid\",\"0\",1.0],[\"valid\",\"1\",3.0],[\"valid\",\"inf\",4.0]]",
+        )
+        .await;
+        validate_data(
+            &format!("{name}_sum"),
+            client,
+            &format!("select series, greptime_value from {name}_sum;"),
+            "[[\"valid\",2.0]]",
+        )
+        .await;
+        validate_data(
+            &format!("{name}_count"),
+            client,
+            &format!("select series, greptime_value from {name}_count;"),
+            "[[\"valid\",4.0]]",
+        )
+        .await;
+        validate_data(
+            &format!("{name}_exemplar_count"),
+            client,
+            &format!(
+                "select count(*) from greptime_metrics_exemplars where greptime_metric = '{name}_bucket';"
+            ),
+            "[[1]]",
+        )
+        .await;
+        validate_data(
+            &format!("{name}_exemplar_join"),
+            client,
+            &format!(
+                "select count(*) from greptime_metrics_exemplars e \
+                 join greptime_physical_table m \
+                 on e.__table_id = m.__table_id and e.__tsid = m.__tsid \
+                 and e.le = m.le and e.series = m.series \
+                 where e.greptime_metric = '{name}_bucket' \
+                 and m.series = 'valid' and e.le = '1' and e.greptime_value = 0.25;"
+            ),
+            "[[1]]",
+        )
+        .await;
+
+        let prom_res = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?query={}&time={TS_SECS}",
+                encode(&format!("histogram_quantile(0.5,{name}_bucket)"))
+            ))
+            .send()
+            .await;
+        assert_eq!(StatusCode::OK, prom_res.status(), "{name}");
+        let prom_body: Value = prom_res.json().await;
+        assert_eq!(prom_body["status"], "success", "{name}: {prom_body}");
+        let results = prom_body["data"]["result"].as_array().unwrap();
+        assert_eq!(1, results.len(), "{name}: {prom_body}");
+        assert_eq!(
+            results[0]["metric"]["series"], "valid",
+            "{name}: {prom_body}"
+        );
+        assert_eq!(results[0]["value"][1], "0.5", "{name}: {prom_body}");
+    }
 }
 
 pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
@@ -13024,7 +13230,10 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
     let response = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
     let partial_success = response.partial_success.unwrap();
     assert_eq!(1, partial_success.rejected_data_points);
-    assert!(partial_success.error_message.contains("scale -5"));
+    assert_eq!(
+        partial_success.error_message,
+        "metric `otlp_exponential_latency`: scale -5 is unsupported; minimum supported scale is -4"
+    );
 
     validate_data(
         "otlp_exponential_histogram_row",
