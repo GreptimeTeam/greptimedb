@@ -1,0 +1,29 @@
+src/common/meta/src/instruction.rs
+  s_c311425adc0214::t_c6513c247e2f80 1043,1046-1047,1491-1500,1503,1506-1507,1509
+  s_c311425adc0214::t_7cb16002c5da71 1508
+src/datanode/src/heartbeat/handler/metadata_compaction.rs
+  s_c311425adc0214::t_c6513c247e2f80 20,24,32,36,45-46,89-90,118,130-137,157-158,160-163,169-170,172-177,201,221-231,237-241,244-247,250,269-272,275,279,284
+  s_c311425adc0214::t_beef34f8c8969a 39,49-61,64-83,232-236
+  s_c311425adc0214::t_9350df18626250 159,171,248-249,273-274
+src/meta-srv/src/procedure/repartition/group/sync_region.rs
+  s_c311425adc0214::t_c6513c247e2f80 21,99,105-106,108-109,123,132,142-143,145,147,241,248,337,359,546,552,555,566,592,594-599,615-618
+  s_c311425adc0214::t_cbd18cc758f8a9 107,144
+src/datanode/src/heartbeat/handler.rs
+  s_c311425adc0214::t_c6513c247e2f80 80,92,290
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "928dd472d853f5c8f2f7b40c8b2be441ec061dad",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
