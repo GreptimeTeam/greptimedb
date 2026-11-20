@@ -283,16 +283,15 @@ impl FlowQueryExtensions {
         }
 
         let incremental_table_ids = incremental_table_ids(incremental_after_seqs.as_ref());
-        if let Some(snapshot_table_ids) = &snapshot_table_ids {
-            if let Some(overlap) = snapshot_table_ids
+        if let Some(snapshot_table_ids) = &snapshot_table_ids
+            && let Some(overlap) = snapshot_table_ids
                 .iter()
                 .find(|table_id| incremental_table_ids.contains(table_id))
-            {
-                return Err(invalid_query_context_extension(format!(
-                    "Table {} appears in both {} and {}; snapshot and incremental tables must be disjoint.",
-                    overlap, FLOW_SNAPSHOT_TABLE_IDS, FLOW_INCREMENTAL_AFTER_SEQS
-                )));
-            }
+        {
+            return Err(invalid_query_context_extension(format!(
+                "Table {} appears in both {} and {}; snapshot and incremental tables must be disjoint.",
+                overlap, FLOW_SNAPSHOT_TABLE_IDS, FLOW_INCREMENTAL_AFTER_SEQS
+            )));
         }
 
         Ok(Some(Self {
