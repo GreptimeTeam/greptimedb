@@ -587,6 +587,8 @@ mod tests {
     /// The metadata version every test round reports: no test moves the schema under a
     /// table it is filling.
     const SOURCE_VERSION: u64 = 0;
+    /// The table id every test round reports: no test rebuilds a table under its own name.
+    const SOURCE_TABLE_ID: u32 = 1024;
 
     /// Admits the test table and opens it, as a background round that proved nothing
     /// changed would, so the request may serve what an earlier one filled.
@@ -598,6 +600,7 @@ mod tests {
             &table(),
             std::collections::BTreeMap::from([(1, 1)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             crate::query_cache::DirtySpan::Nothing,
             Instant::now(),
         );
@@ -638,6 +641,7 @@ mod tests {
             &table(),
             std::collections::BTreeMap::from([(1, 2)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             crate::query_cache::DirtySpan::Hull(hull),
             Instant::now(),
         );

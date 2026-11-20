@@ -129,7 +129,21 @@
 //! across the change is refused when it tries to publish. The same happens when the table's
 //! metadata version moved, because a schema change can change the value of rows already stored
 //! without moving any sequence: a column dropped and added back with a default answers
-//! differently for the same timestamps.
+//! differently for the same timestamps. The same happens again when the table's own id moved,
+//! because a metric logical table rebuilt under the same name keeps its version and the physical
+//! regions behind it while its logical identity is another one.
+//!
+//! Such a restart replaces the state the table is registered under instead of emptying it, so a
+//! fill that was admitted before it holds a state of its own for good: another fill of the same
+//! identity that registers after the restart creates its query in the replacement, and the
+//! earlier one still cannot publish into it.
+//!
+//! A table's *first* round is its baseline. Every query that registered while the table had no
+//! domain starts with an empty watermark, which bounds nothing, so everything it filled was read
+//! under no domain. That round makes the baseline the watermark of every such query and drops the
+//! payloads the baseline cannot vouch for — a read of another set of regions, or one that is
+//! behind it — because no later round could vouch for them either. A query that registers after
+//! the baseline inherits the table's cursors, so the table is never cold for it.
 //!
 //! Nothing on either side waits for the other.
 //!
@@ -157,9 +171,10 @@
 //! synchronous and no lock is held across an await, so a caller may await its storage
 //! read without holding anything.
 //!
-//! A refresh round holds the table lock across its scan and its cursor update, so a
-//! request cannot admit the table in the middle of one. A fill that was already running
-//! is dealt with by the publication order instead of by waiting for it.
+//! A refresh round holds the registry lock across its scan and its cursor update, so a
+//! request cannot admit the table, publish into it, or read its state in the middle of
+//! one. A fill that was already running is dealt with by the publication order and by
+//! the identity of the state it captured instead of by waiting for it.
 //!
 //! # Not covered
 //!
@@ -175,7 +190,7 @@
 
 #![allow(dead_code)] // The planning and identity helpers are exercised by the tests below.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -885,6 +900,10 @@ pub enum DirtySpan {
 /// The background refresher is the only writer of the cursors, the readiness, and
 /// the per-query invalidated watermarks; the request path only registers the table, reads
 /// its readiness, and compares a read's sequence against that watermark when it publishes.
+///
+/// A round that cannot be applied to what is committed does not empty a state: it registers a
+/// replacement (see [`RollupCache::record_refresh`]), so the state a request was admitted under
+/// stays identifiable and becomes inert.
 #[derive(Debug)]
 pub(crate) struct TableState {
     table: SourceTable,
@@ -906,6 +925,14 @@ struct TableStateInner {
     /// same name and type answers its default for the same timestamps — so a round of another
     /// version empties the table exactly like a change it cannot bound.
     source_version: Option<u64>,
+    /// The id of the source table these cursors were committed against, as the catalog
+    /// resolved it.
+    ///
+    /// A metric logical table can be rebuilt under its own name: the name stays, the metadata
+    /// version stays, the physical regions behind it stay, and only its logical id moves. What
+    /// a round proved is therefore a proof about this id too, and a round of another one
+    /// restarts the table exactly like a version change.
+    source_table_id: Option<u32>,
     /// Whether a background round has proved this table since it was registered.
     ///
     /// A lookup is answered only for a ready table: an unproved table's entries may
@@ -918,8 +945,9 @@ struct TableStateInner {
     /// dependencies cannot reject the fills of another query that reads the same
     /// table but different data.
     ///
-    /// The map is pruned by every dirty round, and the whole table is forgotten once
-    /// it goes idle, so it is bounded by the identities admitted in the last
+    /// The map is pruned by every round: a query whose payloads are all gone and that no fill
+    /// has registered for [`IDLE_TABLE_TIMEOUT`] is dropped, and the whole table is forgotten
+    /// once it goes idle, so it is bounded by the identities read in the last
     /// [`IDLE_TABLE_TIMEOUT`].
     queries: HashMap<QueryIdentity, QueryState>,
     /// When the last round proved the table, which is what finds a failing
@@ -947,7 +975,7 @@ impl TableState {
 ///
 /// It is per query and not per table, so an invalidation of one query cannot reject the
 /// fills of another query that reads the same table but different data.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct QueryState {
     /// The source sequence the last invalidation of this query was committed at, per
     /// region.
@@ -957,13 +985,21 @@ struct QueryState {
     /// publishes only when its read reported the same regions and is at least as far in
     /// every one of them, so a payload materialized before the invalidation cannot be
     /// published after it. It starts at the table's committed cursors — or empty while the
-    /// table has no domain yet — and only a round moves it.
+    /// table has no domain yet — and only a round moves it, which is also what makes a table's
+    /// first round the watermark of everything it filled while it was cold.
     invalidated_watermark: BTreeMap<u64, u64>,
     /// How many times this query's cache changed.
     ///
     /// It advances on every published payload and on every committed invalidation, and it
     /// admits nothing: it is the count of changes, not a token a fill has to hold.
     version: u64,
+    /// When a fill of this query last registered.
+    ///
+    /// It is what reclaims a query nothing keeps any more: a state with no resident payload
+    /// that no fill has registered for [`IDLE_TABLE_TIMEOUT`] is dropped by a round, so a table
+    /// many identities read once does not keep a watermark per identity for as long as it is
+    /// active.
+    last_used: Instant,
 }
 
 impl QueryState {
@@ -999,7 +1035,9 @@ impl QueryState {
 /// round while the request runs.
 ///
 /// It is not a claim that the table is servable: readiness is re-read under the table
-/// lock on every lookup, so a failing round stops the serving at the next chunk.
+/// lock on every lookup, so a failing round stops the serving at the next chunk. Nor does it
+/// outlive a restart of the table: the state it captured is replaced then, and its lookups miss
+/// and its publications are refused for the rest of the request.
 pub struct Admission {
     state: Arc<TableState>,
 }
@@ -1342,6 +1380,18 @@ impl RollupCache {
         self.hits.load(Ordering::SeqCst)
     }
 
+    /// How many query identities `table` still tracks.
+    ///
+    /// Tests state with it that a query nothing keeps is reclaimed and one with a resident
+    /// payload is not; production reads nothing of the sort, so it is not part of the cache's
+    /// surface.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn query_count(&self, table: &SourceTable) -> usize {
+        self.table_state(table)
+            .map(|state| state.inner.lock().unwrap().queries.len())
+            .unwrap_or(0)
+    }
+
     /// Plans `stmt` of `identity` into chunk keys and direct spans as of `now`.
     ///
     /// The returned direct spans are the caller's to send to storage; their points
@@ -1436,7 +1486,12 @@ impl RollupCache {
     /// A query that registers while the table already has a committed domain starts its
     /// watermark at the table's cursors rather than at nothing: the table is not cold, so a
     /// read of a new identity has no more right to publish an unproved sequence than one of
-    /// an identity that was already reading it.
+    /// an identity that was already reading it. A table that had no domain yet gets one with
+    /// its first round, which makes the baseline the watermark of every query that was
+    /// already registered (see [`RollupCache::record_refresh`]).
+    ///
+    /// Registering also marks the query as used, which is what keeps a round from reclaiming
+    /// the state of a query that is still being read.
     pub fn begin_fill(
         &self,
         admission: &Admission,
@@ -1447,14 +1502,18 @@ impl RollupCache {
         {
             let mut inner = admission.state.inner.lock().unwrap();
             let watermark = inner.cursors.clone();
+            let now = Instant::now();
             // Registered before the read: the identity a round has to move the watermark of
-            // exists while this fill runs.
+            // exists while this fill runs, and registering is what keeps a state nothing has
+            // filled for a while from being reclaimed under it.
             inner
                 .queries
                 .entry(key.identity().clone())
+                .and_modify(|query| query.last_used = now)
                 .or_insert_with(|| QueryState {
                     invalidated_watermark: watermark,
                     version: 0,
+                    last_used: now,
                 });
         }
         FillGuard {
@@ -1479,10 +1538,11 @@ impl RollupCache {
     /// A publication is a cache change, so it advances the query's version counter, which
     /// admits nothing and only records that the cache changed.
     ///
-    /// The publication also requires the table to still be the state the request was
-    /// admitted under, so a state that was reclaimed rejects the fill instead of
-    /// publishing into its replacement. Every check and the store happen without releasing
-    /// the table lock.
+    /// The publication also requires the table to still be registered under the state the
+    /// request was admitted under, so a state that was reclaimed or restarted rejects the fill
+    /// instead of publishing into its replacement — even when another fill of the same identity
+    /// has already registered its query in that replacement. Every check and the store happen
+    /// without releasing the table lock.
     ///
     /// The entry's input dependency is the span the fill registered: a dirty hull
     /// invalidates the entry when it reaches that span, not the chunk's own output span,
@@ -1599,27 +1659,36 @@ impl RollupCache {
     /// proves nothing, the table stops being served, and nothing at all is advanced.
     ///
     /// A table's first round starts from zero cursors, so its delta covers every row the
-    /// table has ever had, including whatever a request filled before the table was
-    /// proved. Applying that delta is therefore enough to open the table; there is no
-    /// separate baseline eviction, and one is only used when the probe cannot bound the
-    /// change at all or when a round restarts the table below. That round is also what
-    /// commits the table's `source_version` as its baseline.
+    /// table has ever had, including whatever a request filled before the table was proved.
+    /// That round is the table's baseline and is also what commits its `source_version` and its
+    /// `source_table_id`: every query that registered while the table was cold has its watermark
+    /// moved to the round's vector, and every entry whose read that vector cannot vouch for is
+    /// dropped, so a cold read cannot be served, or let another read publish, afterwards.
     ///
-    /// Two rounds cannot be applied to what is committed and instead restart the table from
-    /// their own vector: one whose regions are of another domain — a route that gained or
-    /// lost a region re-keys the cursors — and one that read another metadata version, because
-    /// a schema change can answer differently for rows that are already stored even when no
-    /// sequence moved. Both drop every entry, forget every query, and are then the new
-    /// baseline, so nothing read before them can be published or served after them.
+    /// Three rounds cannot be applied to what is committed and instead restart the table from
+    /// their own vector: one whose regions are of another domain — a route that gained or lost a
+    /// region re-keys the cursors — one that read another metadata version, because a schema
+    /// change can answer differently for rows that are already stored even when no sequence
+    /// moved, and one that read another table id, because a metric logical table rebuilt under its
+    /// own name keeps its version while its logical identity moves. Each replaces the state the
+    /// table is registered under, so nothing read before it can be published or served after it.
+    ///
+    /// A committed round also reclaims the queries of the table that nothing keeps any more: see
+    /// [`RollupCache::reclaim_queries`].
     pub fn record_refresh(
         &self,
         table: &SourceTable,
         cursors: BTreeMap<u64, u64>,
         source_version: u64,
+        source_table_id: u32,
         dirty: DirtySpan,
         now: Instant,
     ) -> bool {
-        let Some(state) = self.table_state(table) else {
+        // The registry before the table state, the order [`RollupCache::insert`] uses: a round
+        // that restarts the table swaps the state it is registered under while holding both, so
+        // neither a publication nor an admission can observe the pair half swapped.
+        let mut tables = self.tables.lock().unwrap();
+        let Some(state) = tables.get(table).cloned() else {
             return true;
         };
         let high = cursors.clone();
@@ -1630,7 +1699,7 @@ impl RollupCache {
             inner.ready = false;
             return false;
         }
-        match domain_of(&inner.cursors, &high) {
+        let restart = match domain_of(&inner.cursors, &high) {
             Domain::Regressed => {
                 // The round's vector cannot replace what is committed — a region went back — so
                 // the table proves nothing: it stops being served, nothing is committed, and the
@@ -1638,15 +1707,28 @@ impl RollupCache {
                 inner.ready = false;
                 return false;
             }
-            Domain::Rekeyed => {
-                self.reset_table(table, &mut inner, cursors, source_version, now);
-                return true;
+            Domain::Rekeyed => true,
+            Domain::Baseline => {
+                self.establish_baseline(table, &mut inner, &high);
+                false
             }
-            Domain::Baseline | Domain::Same => {}
-        }
-        // A version change moves no sequence, so it would otherwise pass as a quiet round.
-        if !inner.cursors.is_empty() && inner.source_version != Some(source_version) {
-            self.reset_table(table, &mut inner, cursors, source_version, now);
+            // A version or a table id moves no sequence, so it would otherwise pass as a quiet
+            // round.
+            Domain::Same => {
+                inner.source_version != Some(source_version)
+                    || inner.source_table_id != Some(source_table_id)
+            }
+        };
+        if restart {
+            self.reset_table(
+                &mut tables,
+                table,
+                &mut inner,
+                cursors,
+                source_version,
+                source_table_id,
+                now,
+            );
             return true;
         }
         if !matches!(dirty, DirtySpan::Nothing) && !self.can_commit(&inner, &high) {
@@ -1665,40 +1747,144 @@ impl RollupCache {
         inner.cursors = cursors;
         inner.ready = true;
         inner.source_version = Some(source_version);
+        inner.source_table_id = Some(source_table_id);
         inner.last_success = Some(now);
+        // Committed under the table lock, so a fill that registers after this round — or a query
+        // that is still being read — is seen by the reclamation of this one.
+        self.reclaim_queries(table, &mut inner, now);
         true
     }
 
-    /// Forgets everything `table` committed and restarts it from the round's `cursors`.
+    /// Replaces the state `table` is registered under, restarting it from the round's `cursors`.
     ///
     /// This is what a round that cannot be applied to the committed state does: one of another
-    /// region domain, and one of another metadata version. The entries go because their
-    /// payloads were materialized from data the new domain or the new version may describe
-    /// differently, and the queries go because a fill that is reading right now would otherwise
-    /// publish against a watermark that no longer bounds it — the next [`RollupCache::insert`]
-    /// of such a fill finds no query state and refuses it.
+    /// region domain, one of another metadata version, and one of another table id. The entries
+    /// go because their payloads were materialized from data the new domain, the new version or
+    /// the new table may describe differently.
     ///
-    /// The round's own vector becomes the new baseline, so the round is committed like any
-    /// other successful one and the next round is compared with it. A region this round saw for
-    /// the first time was probed from zero, so its whole history is part of this round's delta;
-    /// the entries of the other regions are already gone, so nothing of theirs is wanted.
+    /// The state itself is replaced rather than emptied, and the replacement carries the round's
+    /// vector, version and id as its baseline. A fill that is reading right now holds the state it
+    /// was admitted under: emptying that one in place would let it publish into the tables of a
+    /// state that a later fill of the same identity has registered again, because the identity is
+    /// the same. A replacement makes the publication fail on the identity of the state alone, and
+    /// the queries of the old state are cleared and its readiness closed, so nothing can be
+    /// published into it nor served from it either.
+    ///
+    /// The registry stays held while the entries are dropped, so no publication — of the old state
+    /// or of the replacement — can slip between the swap and the removals.
+    // The restart is the round: its vector, its version, its table id and its instant are exactly
+    // the proof being committed, and bundling them into another type would only rename them.
+    #[allow(clippy::too_many_arguments)]
     fn reset_table(
         &self,
+        tables: &mut HashMap<SourceTable, Arc<TableState>>,
         table: &SourceTable,
         inner: &mut TableStateInner,
         cursors: BTreeMap<u64, u64>,
         source_version: u64,
+        source_table_id: u32,
         now: Instant,
     ) {
+        let last_used = inner.last_used;
+        inner.ready = false;
         inner.queries.clear();
+        let regions = cursors.len();
+        tables.insert(
+            table.clone(),
+            Arc::new(TableState {
+                table: table.clone(),
+                inner: Mutex::new(TableStateInner {
+                    cursors,
+                    source_version: Some(source_version),
+                    source_table_id: Some(source_table_id),
+                    ready: true,
+                    queries: HashMap::new(),
+                    last_success: Some(now),
+                    last_used,
+                }),
+            }),
+        );
         let dropped = self.invalidate_table(table);
-        inner.cursors = cursors;
-        inner.source_version = Some(source_version);
-        inner.ready = true;
-        inner.last_success = Some(now);
         debug!(
-            "Rollup cache restarted table {table} on {} regions of version {source_version} and dropped {dropped} entries",
-            inner.cursors.len(),
+            "Rollup cache restarted table {table} (id {source_table_id}) on {regions} regions of version {source_version} and dropped {dropped} entries",
+        );
+    }
+
+    /// Makes the table's first round the watermark every query of it is judged against.
+    ///
+    /// A query that registered while the table had no domain has an empty watermark, which
+    /// bounds nothing: nothing the table proved stands behind a read of it. This round is the
+    /// first bound there is, so it becomes the watermark of every query that is already
+    /// registered, and every payload read under no domain is measured against it — one whose read
+    /// reported another set of regions, or got less far than the baseline, is dropped, because
+    /// neither this round nor a later one can vouch for it. A query that registers afterwards
+    /// starts from the committed cursors (see [`RollupCache::begin_fill`]).
+    fn establish_baseline(
+        &self,
+        table: &SourceTable,
+        inner: &mut TableStateInner,
+        high: &BTreeMap<u64, u64>,
+    ) {
+        for query in inner.queries.values_mut() {
+            query.invalidated_watermark = high.clone();
+        }
+        let mut cold = Vec::new();
+        for (key, entry) in self.entries.iter() {
+            if !table.owns(key.identity()) {
+                continue;
+            }
+            let proved = inner
+                .queries
+                .get(key.identity())
+                .is_some_and(|query| query.is_past_watermark(&entry.read_through));
+            if !proved {
+                cold.push(key);
+            }
+        }
+        let mut removed = 0;
+        for key in cold {
+            if self.entries.remove(key.as_ref()).is_some() {
+                removed += 1;
+            }
+        }
+        debug!(
+            "Rollup cache established the baseline of table {table} on {} regions and dropped {removed} unproved entries",
+            high.len(),
+        );
+    }
+
+    /// Drops the query states of `table` that nothing keeps any more.
+    ///
+    /// A query state is a watermark and a counter, registered by every fill and removed by none,
+    /// so a table read by many identities would keep one per identity for as long as the table is
+    /// active. A state is kept while a payload of it is resident, or while a fill of it registered
+    /// within [`IDLE_TABLE_TIMEOUT`]; dropping it is safe, because a fill that is still reading
+    /// then finds no query when it publishes and is refused
+    /// ([`RollupCache::insert`]), which is a miss rather than a payload nothing vouches for.
+    ///
+    /// The scan of the entries only runs when a state is already idle, so a round of a table whose
+    /// queries are all current pays a pass over the query states alone instead of the cache.
+    fn reclaim_queries(&self, table: &SourceTable, inner: &mut TableStateInner, now: Instant) {
+        let idle = |query: &QueryState| {
+            now.saturating_duration_since(query.last_used) > IDLE_TABLE_TIMEOUT
+        };
+        if !inner.queries.values().any(idle) {
+            return;
+        }
+        let held: Vec<Arc<TimeChunkKey>> = self
+            .entries
+            .iter()
+            .filter(|(key, _)| table.owns(key.identity()))
+            .map(|(key, _)| key)
+            .collect();
+        let resident: HashSet<&QueryIdentity> = held.iter().map(|key| key.identity()).collect();
+        let before = inner.queries.len();
+        inner
+            .queries
+            .retain(|identity, query| !idle(query) || resident.contains(identity));
+        debug!(
+            "Rollup cache reclaimed {} idle queries of table {table}",
+            before.saturating_sub(inner.queries.len()),
         );
     }
 
@@ -1951,6 +2137,10 @@ mod tests {
     /// the test says the version moved.
     const SOURCE_VERSION: u64 = 1;
 
+    /// The table id every test round reports, so a round only restarts a table when the test
+    /// says the table was rebuilt under its own name.
+    const SOURCE_TABLE_ID: u32 = 1024;
+
     /// Admits `identity`'s table and opens it, as a background round that proved nothing
     /// changed would.
     ///
@@ -1962,6 +2152,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 11)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         );
@@ -2176,6 +2367,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 11)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         );
@@ -2231,6 +2423,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 12)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Hull(TimeChunk::new(HEAD_MS, HEAD_MS + 1)),
             Instant::now(),
         );
@@ -2284,6 +2477,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 12)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Everything,
             Instant::now(),
         );
@@ -2386,16 +2580,20 @@ mod tests {
     #[test]
     fn a_read_that_misses_a_region_the_resident_one_covered_does_not_replace_it() {
         let cache = cache();
-        let admission = opened(&cache);
+        opened(&cache);
         // A second region joins the table's domain, so a read of both regions is what the
         // table's watermark covers.
         assert!(cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 11), (2, 11)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         ));
+        // A route that gained a region restarts the table, so the request that reads it is one
+        // admitted after the round.
+        let admission = cache.admit(&table(), Instant::now());
         let key = chunk_key();
         let both = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
         assert_eq!(
@@ -2570,6 +2768,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 12)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Hull(TimeChunk::new(HEAD_MS + STEP_MS, HEAD_MS + STEP_MS + 1)),
             Instant::now(),
         );
@@ -2598,6 +2797,7 @@ mod tests {
             &other_table(),
             BTreeMap::from([(1, 3)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Everything,
             Instant::now(),
         );
@@ -2618,6 +2818,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 12)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Everything,
             Instant::now(),
         );
@@ -2634,6 +2835,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 11)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         );
@@ -2650,6 +2852,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 11)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         );
@@ -2672,6 +2875,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 10)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         ));
@@ -2690,6 +2894,7 @@ mod tests {
             &table(),
             BTreeMap::new(),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         ));
@@ -2713,6 +2918,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 11), (2, 4)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         ));
@@ -2720,8 +2926,8 @@ mod tests {
         assert_eq!(cache.cursors(&table()), BTreeMap::from([(1, 11), (2, 4)]));
         assert_eq!(
             cache.lookup(&admission, &key, at(LATER_MS)),
-            Lookup::Miss(MissReason::NotFound),
-            "a chunk of the old route is never served for the new one"
+            Lookup::Miss(MissReason::TableNotProved),
+            "the state the request was admitted under is not the registered one any more"
         );
         assert_eq!(
             cache.insert(&slow, &read_through(), payload(), Arc::default()),
@@ -2729,7 +2935,10 @@ mod tests {
             "a fill of the old domain is not published into the new one"
         );
 
-        // A read of the new domain publishes, and the route losing a region drops it again.
+        // A read of the new domain publishes — from a request admitted after the restart, because
+        // the state the earlier ones captured is not the registered one any more — and the route
+        // losing a region drops it again.
+        let admission = cache.admit(&table(), Instant::now());
         let guard = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
         assert_eq!(
             cache.insert(
@@ -2744,6 +2953,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 12)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         ));
@@ -2766,13 +2976,15 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 11)]),
             SOURCE_VERSION + 1,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         ));
         assert_eq!(cache.entry_count(), 0, "a version change drops every entry");
         assert_eq!(
             cache.lookup(&admission, &key, at(LATER_MS)),
-            Lookup::Miss(MissReason::NotFound)
+            Lookup::Miss(MissReason::TableNotProved),
+            "the state the request was admitted under is not the registered one any more"
         );
         assert_eq!(
             cache.insert(&slow, &read_through(), payload(), Arc::default()),
@@ -2785,23 +2997,176 @@ mod tests {
             "the round of the new version is the new baseline"
         );
 
-        // The next round of that version is quiet, and the one after it keeps the entry.
+        // The next round of that version is quiet, and the one after it keeps the entry. The
+        // request that fills it is admitted after the restart, as every request of a restarted
+        // table is.
         assert!(cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 11)]),
             SOURCE_VERSION + 1,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         ));
+        let admission = cache.admit(&table(), Instant::now());
         assert_eq!(fill(&cache, &admission, &key, at(LATER_MS)), Insert::Stored);
         assert!(cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 11)]),
             SOURCE_VERSION + 1,
+            SOURCE_TABLE_ID,
             DirtySpan::Nothing,
             Instant::now(),
         ));
         assert_eq!(cache.entry_count(), 1, "the same version keeps it");
+    }
+
+    #[test]
+    fn a_round_of_another_table_id_restarts_the_table() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        fill(&cache, &admission, &key, at(LATER_MS));
+
+        // The table was rebuilt under its own name: its logical id moved while its metadata
+        // version and its physical regions stayed the same, so nothing says the entry was read
+        // from the table that carries the name now.
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION,
+            SOURCE_TABLE_ID + 1,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(cache.entry_count(), 0, "a new table id drops every entry");
+        assert_eq!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Miss(MissReason::TableNotProved),
+            "the state the request was admitted under is not the registered one any more"
+        );
+
+        // The next round of that id is the baseline, and the one after it keeps what a fill of it
+        // publishes.
+        let admission = cache.admit(&table(), Instant::now());
+        assert_eq!(fill(&cache, &admission, &key, at(LATER_MS)), Insert::Stored);
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION,
+            SOURCE_TABLE_ID + 1,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(cache.entry_count(), 1, "the same table id keeps it");
+    }
+
+    #[test]
+    fn a_fill_of_a_restarted_table_cannot_publish_after_another_fill_registers() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        // A fill that started before the table restarts.
+        let stale = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+
+        // The schema moved, so the table restarts.
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION + 1,
+            SOURCE_TABLE_ID,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+
+        // The same identity registers a fill of its own on the replacement, and the earlier one
+        // comes back first. The query it would find there is not its own: the state it captured
+        // is the one that is no longer registered, so it is refused however far its read got.
+        let admission = cache.admit(&table(), Instant::now());
+        let fresh = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(&stale, &read_through(), payload(), Arc::default()),
+            Insert::Rejected,
+            "a read of the old schema is refused even when its identity registered again"
+        );
+        assert_eq!(cache.entry_count(), 0);
+
+        // The fill that registered on the replacement publishes.
+        assert_eq!(
+            cache.insert(&fresh, &read_through(), payload(), Arc::default()),
+            Insert::Stored
+        );
+        assert_eq!(cache.entry_count(), 1);
+    }
+
+    #[test]
+    fn a_first_round_drops_the_reads_a_cold_table_kept() {
+        let cache = cache();
+        // A request reads the table before any round has proved it, so its payload is published:
+        // there is nothing for the read to be unproved against yet.
+        let admission = cache.admit(&table(), Instant::now());
+        let key = chunk_key();
+        let cold = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(&cold, &BTreeMap::from([(9, 1)]), payload(), Arc::default()),
+            Insert::Stored
+        );
+
+        // The table's first round establishes its baseline. The read above reported a region the
+        // baseline does not have, so the round cannot vouch for the payload and drops it.
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION,
+            SOURCE_TABLE_ID,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(
+            cache.entry_count(),
+            0,
+            "no cold entry survives the baseline"
+        );
+        assert_eq!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Miss(MissReason::NotFound),
+            "the baseline opens the table, and nothing of the cold read is served"
+        );
+
+        // The identity that registered while the table was cold now inherits the baseline: a read
+        // of another set of regions, or one behind the baseline, is refused.
+        for read in [
+            BTreeMap::from([(9, 1)]),
+            BTreeMap::from([(1, 5)]),
+            BTreeMap::from([(1, 100), (2, 100)]),
+        ] {
+            let guard = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+            assert_eq!(
+                cache.insert(&guard, &read, payload(), Arc::default()),
+                Insert::Rejected,
+                "{read:?} is not the baseline domain"
+            );
+        }
+        // A read of the baseline domain publishes.
+        assert_eq!(fill(&cache, &admission, &key, at(LATER_MS)), Insert::Stored);
+
+        // An identity that registers after the baseline inherits the table's cursors instead of
+        // starting cold, so it cannot publish a read of another set of regions either.
+        let later = TimeChunkKey::new(other_identity(), key.chunk());
+        let subset = cache.begin_fill(&admission, &later, later.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(
+                &subset,
+                &BTreeMap::from([(9, 1)]),
+                payload(),
+                Arc::default()
+            ),
+            Insert::Rejected
+        );
+        assert_eq!(
+            fill(&cache, &admission, &later, at(LATER_MS)),
+            Insert::Stored
+        );
     }
 
     #[test]
@@ -2820,6 +3185,74 @@ mod tests {
             Insert::Rejected
         );
         assert_eq!(cache.entry_count(), 0);
+    }
+
+    #[test]
+    fn a_query_state_nothing_keeps_is_reclaimed_by_a_round() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let resident = chunk_key();
+        // One identity keeps a payload, one has a fill that has not come back yet, and many read
+        // the table once and published nothing.
+        assert_eq!(
+            fill(&cache, &admission, &resident, at(LATER_MS)),
+            Insert::Stored
+        );
+        let in_flight_key = TimeChunkKey::new(other_identity(), resident.chunk());
+        let in_flight = cache.begin_fill(
+            &admission,
+            &in_flight_key,
+            in_flight_key.chunk(),
+            at(LATER_MS),
+        );
+        for index in 0..8 {
+            let identity = QueryIdentity {
+                query: format!("query_{index}"),
+                ..identity()
+            };
+            let key = TimeChunkKey::new(identity, chunk_key().chunk());
+            cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        }
+        assert_eq!(cache.query_count(&table()), 10);
+
+        // A quiet round long after those fills reclaims the states nothing keeps.
+        let idle = Instant::now() + IDLE_TABLE_TIMEOUT + Duration::from_secs(1);
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION,
+            SOURCE_TABLE_ID,
+            DirtySpan::Nothing,
+            idle,
+        ));
+        assert_eq!(
+            cache.query_count(&table()),
+            1,
+            "only the identity with a resident payload is kept"
+        );
+        // The fill that was still reading when its state was reclaimed finds no query and is
+        // refused: the request still gets its own rows, the cache keeps nothing.
+        assert_eq!(
+            cache.insert(&in_flight, &read_through(), payload(), Arc::default()),
+            Insert::Rejected
+        );
+        // The identity that is still resident is served, and a reclaim of its query would have
+        // made the next publication of it fail.
+        assert!(matches!(
+            cache.lookup(&admission, &resident, at(LATER_MS)),
+            Lookup::Hit { .. }
+        ));
+        // A reclaimed identity is not lost: its next fill registers a state again and publishes.
+        let guard = cache.begin_fill(
+            &admission,
+            &in_flight_key,
+            in_flight_key.chunk(),
+            at(LATER_MS),
+        );
+        assert_eq!(
+            cache.insert(&guard, &read_through(), payload(), Arc::default()),
+            Insert::Stored
+        );
     }
 
     #[test]
@@ -2878,6 +3311,7 @@ mod tests {
             &elsewhere,
             BTreeMap::from([(1, 2)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Everything,
             Instant::now(),
         );
@@ -2908,6 +3342,7 @@ mod tests {
             &table(),
             BTreeMap::from([(1, 12)]),
             SOURCE_VERSION,
+            SOURCE_TABLE_ID,
             DirtySpan::Hull(TimeChunk::new(HEAD_MS, HEAD_MS + 1)),
             Instant::now(),
         );

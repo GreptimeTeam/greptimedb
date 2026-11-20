@@ -3608,6 +3608,8 @@ mod tests {
             BTreeMap::from([(1, 1)]),
             // No test moves the schema under a table it proves.
             0,
+            // Nor rebuilds it under its own name.
+            1024,
             DirtySpan::Nothing,
             Instant::now(),
         );

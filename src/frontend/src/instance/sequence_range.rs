@@ -62,21 +62,26 @@ fn probe_regions(table_id: u32, route: &RegionRoute) -> u64 {
 /// for the physical `RegionId::new(physical_table_id, n)` its regions were created from, so
 /// `n` names one region in either domain.
 ///
+/// `physical_table_id` is the table the resolver says the logical `logical_table_id` is
+/// backed by, and every region of the route has to belong to it: a route that points
+/// elsewhere describes regions of another table, and pairing its numbers would commit the
+/// cursors of one table under the name of another.
+///
 /// `None` means the route cannot be paired one-to-one — it is empty, it repeats a region
-/// number, or its regions do not all belong to one table — and the round must prove
-/// nothing: a guessed pair would advance a cursor of another region.
-fn paired_regions(logical_table_id: u32, region_routes: &[RegionRoute]) -> Option<Vec<(u64, u64)>> {
+/// number, or its regions do not all belong to the resolved physical table — and the round
+/// must prove nothing: a guessed pair would advance a cursor of another region.
+fn paired_regions(
+    logical_table_id: u32,
+    physical_table_id: u32,
+    region_routes: &[RegionRoute],
+) -> Option<Vec<(u64, u64)>> {
     let mut paired = Vec::with_capacity(region_routes.len());
     let mut numbers = BTreeSet::new();
-    let mut table_id = None;
     for route in region_routes {
         let physical = route.region.id;
-        if table_id.is_some_and(|known| known != physical.table_id())
-            || !numbers.insert(physical.region_number())
-        {
+        if physical.table_id() != physical_table_id || !numbers.insert(physical.region_number()) {
             return None;
         }
-        table_id = Some(physical.table_id());
         paired.push((physical.as_u64(), probe_regions(logical_table_id, route)));
     }
     (!paired.is_empty()).then_some(paired)
@@ -217,9 +222,15 @@ impl Instance {
             match self.refresh_source_table(cache, &table).await {
                 // A round that cannot commit its vector leaves the cursors where they were:
                 // the next round sees the same delta and retries.
-                Some((cursors, source_version, dirty)) => {
-                    if !cache.record_refresh(&table, cursors, source_version, dirty, Instant::now())
-                    {
+                Some((cursors, source_version, source_table_id, dirty)) => {
+                    if !cache.record_refresh(
+                        &table,
+                        cursors,
+                        source_version,
+                        source_table_id,
+                        dirty,
+                        Instant::now(),
+                    ) {
                         debug!("Rollup cache could not commit a round of {table}");
                     }
                 }
@@ -228,8 +239,8 @@ impl Instance {
         }
     }
 
-    /// Probes one source table and answers its new cursors, the metadata version it read
-    /// them at, and what the probe found changed.
+    /// Probes one source table and answers its new cursors, the metadata version and the
+    /// table id it read them at, and what the probe found changed.
     ///
     /// [`None`] means the round proved nothing, and the caller must close the
     /// table's readiness. A round never advances a cursor without a proof: a removed
@@ -242,6 +253,11 @@ impl Instance {
     /// keep serving what it read under another version. [`RollupCache::record_refresh`]
     /// therefore compares it with the version its cursors were committed at.
     ///
+    /// The id is part of the proof for the same reason the version is: a metric logical table
+    /// rebuilt under its own name keeps its version and the physical regions behind it, and
+    /// only its logical id moves, so a round of another id proves nothing about what an entry
+    /// was read from. [`RollupCache::record_refresh`] therefore restarts the table on it.
+    ///
     /// The probe asks about the table's own regions — the logical ones of a metric
     /// logical table — while the cursors it starts from, and the ones it answers, are
     /// keyed by the regions a request's read reports, which for that table are the
@@ -250,7 +266,7 @@ impl Instance {
         &self,
         cache: &RollupCache,
         table: &SourceTable,
-    ) -> Option<(BTreeMap<u64, u64>, u64, DirtySpan)> {
+    ) -> Option<(BTreeMap<u64, u64>, u64, u32, DirtySpan)> {
         let table_name = TableName::new(table.catalog(), table.schema(), table.table());
         // The probe is not a request: it runs as the frontend, under the catalog and
         // schema the table lives in, and reads nothing that depends on who asked.
@@ -271,12 +287,12 @@ impl Instance {
         // runs then shows up as a version change in the next round, whereas a version read
         // after it would commit the new schema against rows read under the old one.
         let source_version = info.ident.version;
-        let (_physical_table_id, route) = self
+        let (physical_table_id, route) = self
             .partition_manager()
             .find_physical_table_route_with_id(table_id)
             .await
             .ok()?;
-        let paired = paired_regions(table_id, &route.region_routes)?;
+        let paired = paired_regions(table_id, physical_table_id, &route.region_routes)?;
 
         let lower = logical_lower(&paired, &cache.cursors(table));
         let (high, min, max) = self
@@ -318,7 +334,7 @@ impl Instance {
             // A half hull is not a proof.
             _ => DirtySpan::Everything,
         };
-        Some((high, source_version, dirty))
+        Some((high, source_version, table_id, dirty))
     }
 }
 
@@ -683,7 +699,7 @@ mod tests {
     #[test]
     fn sequence_range_pairs_each_logical_region_with_its_physical_region() {
         assert_eq!(
-            paired_regions(LOGICAL_TABLE_ID, &physical_routes()).unwrap(),
+            paired_regions(LOGICAL_TABLE_ID, PHYSICAL_TABLE_ID, &physical_routes()).unwrap(),
             vec![
                 (
                     region_id(PHYSICAL_TABLE_ID, 0),
@@ -700,6 +716,7 @@ mod tests {
         assert_eq!(
             paired_regions(
                 PHYSICAL_TABLE_ID,
+                PHYSICAL_TABLE_ID,
                 &[region_route(RegionId::new(PHYSICAL_TABLE_ID, 7))]
             )
             .unwrap(),
@@ -713,11 +730,12 @@ mod tests {
     #[test]
     fn sequence_range_rejects_a_route_it_cannot_pair_one_to_one() {
         // Nothing to probe proves nothing.
-        assert!(paired_regions(LOGICAL_TABLE_ID, &[]).is_none());
+        assert!(paired_regions(LOGICAL_TABLE_ID, PHYSICAL_TABLE_ID, &[]).is_none());
         // One region number twice: a physical cursor would belong to two logical regions.
         assert!(
             paired_regions(
                 LOGICAL_TABLE_ID,
+                PHYSICAL_TABLE_ID,
                 &[
                     region_route(RegionId::new(PHYSICAL_TABLE_ID, 0)),
                     region_route(RegionId::new(PHYSICAL_TABLE_ID, 1)),
@@ -730,6 +748,7 @@ mod tests {
         assert!(
             paired_regions(
                 LOGICAL_TABLE_ID,
+                PHYSICAL_TABLE_ID,
                 &[
                     region_route(RegionId::new(PHYSICAL_TABLE_ID, 0)),
                     region_route(RegionId::new(PHYSICAL_TABLE_ID + 9, 1)),
@@ -740,8 +759,35 @@ mod tests {
     }
 
     #[test]
+    fn sequence_range_rejects_a_route_of_another_physical_table() {
+        // Every region belongs to one table, but not to the table the resolver named: the
+        // route was swapped under the logical table, so the numbers it pairs name regions of
+        // another table and no cursor may move.
+        assert!(
+            paired_regions(LOGICAL_TABLE_ID, PHYSICAL_TABLE_ID, &physical_routes()).is_some(),
+            "the route the resolver named is the one that pairs"
+        );
+        assert!(
+            paired_regions(LOGICAL_TABLE_ID, PHYSICAL_TABLE_ID + 1, &physical_routes()).is_none()
+        );
+        // One region of the route belongs elsewhere, so the whole route proves nothing.
+        assert!(
+            paired_regions(
+                LOGICAL_TABLE_ID,
+                PHYSICAL_TABLE_ID,
+                &[
+                    region_route(RegionId::new(PHYSICAL_TABLE_ID, 0)),
+                    region_route(RegionId::new(PHYSICAL_TABLE_ID + 1, 1)),
+                ]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn sequence_range_starts_the_probe_from_the_physical_cursors() {
-        let paired = paired_regions(LOGICAL_TABLE_ID, &physical_routes()).unwrap();
+        let paired =
+            paired_regions(LOGICAL_TABLE_ID, PHYSICAL_TABLE_ID, &physical_routes()).unwrap();
         // The cursors the cache holds are the physical regions a request's read reported.
         let cursors = BTreeMap::from([(region_id(PHYSICAL_TABLE_ID, 0), 11)]);
         // The probe is asked about the logical regions, each starting from the sequence its
@@ -757,7 +803,8 @@ mod tests {
 
     #[test]
     fn sequence_range_commits_a_logical_probe_answer_as_physical_cursors() {
-        let paired = paired_regions(LOGICAL_TABLE_ID, &physical_routes()).unwrap();
+        let paired =
+            paired_regions(LOGICAL_TABLE_ID, PHYSICAL_TABLE_ID, &physical_routes()).unwrap();
         let lower = logical_lower(
             &paired,
             &BTreeMap::from([(region_id(PHYSICAL_TABLE_ID, 0), 11)]),
@@ -783,7 +830,8 @@ mod tests {
 
     #[test]
     fn sequence_range_rejects_a_probe_answer_that_misses_a_paired_region() {
-        let paired = paired_regions(LOGICAL_TABLE_ID, &physical_routes()).unwrap();
+        let paired =
+            paired_regions(LOGICAL_TABLE_ID, PHYSICAL_TABLE_ID, &physical_routes()).unwrap();
         let complete = BTreeMap::from([
             (region_id(LOGICAL_TABLE_ID, 0), 11),
             (region_id(LOGICAL_TABLE_ID, 1), 4),
