@@ -357,6 +357,59 @@ seed = 12345
 The outer driver currently supports `direct_readable_sst`,
 `prom_remote_write_then_query`, and `otlp_trace_load`.
 
+## Native PromQL route enforcement
+
+The native fused-series PromQL route is off by default
+(`query.experimental_native_promql`) and a query it does not accept falls back to
+the legacy planner without saying so. A case that means to time the native route
+therefore declares it:
+
+```toml
+[[scenario.queries]]
+name = "native_rate"
+kind = "sql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067200, 1704070800, '15s') rate(some_metric[5m])"
+require_native = true
+warmup = 3
+iterations = 15
+```
+
+`require_native` defaults to `false`, is legal only on a `TQL ANALYZE [VERBOSE]
+FORMAT JSON (...)` statement, and changes two things for that query:
+
+- `query_regression_runner` adds
+  `x-greptime-hints: query.experimental_native_promql=true` to every request it
+  makes for the query, on both the base and the candidate target. A query without
+  the flag sends exactly the request it sent before the flag existed.
+- Once per target, before warmup, the runner runs the same statement one extra
+  time and inspects that untimed response. `FORMAT JSON` is required because the
+  text `ANALYZE` output is plan lines, and a label value or a filter can begin a
+  line with anything; the JSON form answers a plan tree instead. The assertion
+  walks that tree's `children` and reads each node's `name` only, accepting a node
+  whose name is `FusedSeries` or `FusedSeriesExec` (the name may carry the rest of
+  its plan line). A node's `param` is never read, because that is where a label
+  value or a filter spells the marker, and the trailing `Total rows: N` cell is
+  text that carries no node. The timed samples themselves are not re-inspected.
+
+A plan tree without such a node, or a response that is not a JSON plan tree, fails
+that target: the run records a `validation_errors` entry naming the case, query,
+and target plus the observed response, and reports no benchmark measurement for
+that query, so its latency is never compared. The earlier validation sample of the
+first query keeps its own latency; `measure` exits non-zero.
+
+A `require_native` query whose statement is not a `TQL ANALYZE [VERBOSE] FORMAT
+JSON (...)` form — `kind = "prom_http"`, a plain `TQL EVAL`, `TQL ANALYZE` without
+`FORMAT JSON`, plain SQL — is a configuration error: the run stops before it
+contacts either target, with a message naming the case and the query. Only that
+statement answers the plan tree of the statement being timed, so nothing else
+could prove the route. The statement is parsed, so a keyword that only appears in
+a comment does not qualify.
+
+An unknown `query.*` option is a hard HTTP error, so a target whose binary
+predates `query.experimental_native_promql` fails the assertion instead of being
+timed on the legacy route. A `require_native` case needs a base that supports the
+option, and the same holds for the candidate.
+
 ## Metrics
 
 Primary gates should compare query work rather than plan text:

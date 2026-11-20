@@ -226,10 +226,26 @@ pub(super) struct Query {
     pub(super) iterations: usize,
     #[serde(default)]
     pub(super) thresholds: Map<String, Value>,
+    /// Whether this query must be planned on the native PromQL route.
+    ///
+    /// The runner states `query.experimental_native_promql=true` in the request
+    /// hints of every request it makes for the query, on every target, and proves
+    /// the plan tree of the statement names a `FusedSeries`/`FusedSeriesExec` node
+    /// before it records a timing sample. Only a `TQL ANALYZE ... FORMAT JSON`
+    /// statement answers that plan tree, so any other statement is a configuration
+    /// error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(super) require_native: bool,
 }
 
 const fn one() -> usize {
     1
+}
+
+/// Skips the default value of [`Query::require_native`] in reports, so a case
+/// that does not declare it serializes as it did before the field existed.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Serialize)]
