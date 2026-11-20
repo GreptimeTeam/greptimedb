@@ -2,6 +2,7 @@ src/metric-engine/src/engine/sync/region.rs
   h_623774b620da8e 82-84,146-148,320-462
 src/metric-engine/src/metadata_region.rs
   h_623774b620da8e 341-342,345-352,714-759
+  s_c311425adc0214::t_12bd1cf9bd093d 343-344
 src/mito2/src/test_util.rs
   h_623774b620da8e 258,270-271,275-276
 ---
@@ -13,6 +14,16 @@ src/mito2/src/test_util.rs
   "humans": {
     "h_623774b620da8e": {
       "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
     }
   }
 }
