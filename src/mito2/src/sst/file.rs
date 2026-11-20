@@ -388,17 +388,15 @@ pub struct FileMeta {
     /// restore this capability for untrusted inputs.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
-    /// Upper bound of the physical `__sequence` values that a compaction *substituted*
-    /// with a file-level constant. Rows at or below it may carry a number this region
-    /// never allocated for them, so a reader may not compare them with a cursor.
-    /// `Some(0)` = the column carries no per-row numbering at all (legacy import).
+    /// Upper bound of the physical `__sequence` values that a compaction *substituted* with a
+    /// file-level constant. Rows at or below it may carry a number this region never allocated
+    /// for them, so a reader may not compare them with a cursor. `Some(0)` = the column carries
+    /// no per-row numbering at all (legacy import). `None` (and the value of every older
+    /// manifest) means no row of the column was substituted.
     ///
-    /// The value is a bound, not a verdict: a row above it still carries a number its
-    /// writer allocated. A merge takes the maximum of the constants its own reader
-    /// substituted (see [`substituted_row_constant`]) and of the bounds its inputs
-    /// already carried, so an output never loses a substitution an input had.
-    /// `None` (also the value of every older manifest that lacks the field) means no
-    /// row of the column was substituted.
+    /// The value is a bound, not a verdict: a row above it still carries a number its writer
+    /// allocated. A merge states the maximum of the constants it substituted and of the bounds
+    /// its inputs carried ([`substituted_up_to_after_merge`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub substituted_up_to: Option<SequenceNumber>,
     /// Physical encoding, omitted for legacy Parquet files.
@@ -718,16 +716,13 @@ pub(crate) fn known_max_input_sequence<'a>(
     max
 }
 
-/// Returns the constant a reader substitutes for *every* row of `input` when it reads
-/// the file inside `target_region_id`'s sequence domain, or `None` when the physical
-/// column is kept as it is.
+/// Returns the constant a reader substitutes for *every* row of `input` when it reads the file
+/// inside `target_region_id`'s sequence domain, or `None` when the physical column is kept.
 ///
-/// Mirrors the two substituting branches of the Parquet reader in their order
-/// (`sst/parquet/reader.rs`): a **foreign** file (`region_id` of another region) and a
-/// local file whose per-row numbering is not trusted and whose footer proves an
-/// all-zero `__sequence` column. `footer_all_zero` is that footer fact
-/// ([`need_override_sequence`](crate::sst::parquet::format::need_override_sequence)),
-/// which is a property of the statistics and never of the rows.
+/// Mirrors the two substituting branches of the Parquet reader (`sst/parquet/reader.rs`): a
+/// foreign file, and a local file whose per-row numbering is not trusted and whose footer proves
+/// an all-zero `__sequence` column ([`need_override_sequence`], a property of the statistics and
+/// never of the rows).
 pub(crate) fn substituted_row_constant(
     input: &FileMeta,
     target_region_id: RegionId,
@@ -741,16 +736,12 @@ pub(crate) fn substituted_row_constant(
     input.sequence.map(|sequence| sequence.get())
 }
 
-/// Returns the [`FileMeta::substituted_up_to`] bound the merge of `inputs` states on its
-/// output: the maximum of every constant the merge's own reader substituted and of every
-/// bound the inputs already carried, or `None` when neither exists.
+/// Returns the [`FileMeta::substituted_up_to`] bound the merge of `inputs` states on its output:
+/// the maximum of every constant the merge's own reader substituted and of every bound the
+/// inputs already carried, or `None` when neither exists.
 ///
-/// `footer_all_zero` is the input's own all-zero `__sequence` footer fact, in the same
-/// order as `inputs` ([`substituted_row_constant`] takes it per input).
-///
-/// Inheriting an input's bound is not optional: a row substituted by an earlier merge
-/// stays substituted, and taking only this round's constants would re-expose it as a
-/// number a cursor may be compared with whenever this round's constants are smaller.
+/// `footer_all_zero` is each input's all-zero `__sequence` footer fact, in input order. An
+/// input's bound must be inherited: a row substituted by an earlier merge stays substituted.
 pub(crate) fn substituted_up_to_after_merge<'a>(
     target_region_id: RegionId,
     inputs: impl IntoIterator<Item = (&'a FileMeta, bool)>,

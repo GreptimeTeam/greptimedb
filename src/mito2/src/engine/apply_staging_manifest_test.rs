@@ -54,15 +54,9 @@ fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
         .and(col(col_name).lt(Value::Int64(end)))
 }
 
-/// A repartition can keep a region's own files in place: the region id survives, so the
-/// bytes, the numbers and the `preserve_row_sequence` marker all stay as they are.
-///
-/// The staging exit re-marks the barrier of every file it makes visible, and it must not
-/// clear that marker for a file this region already owned. A local file without trusted
-/// per-row numbering denies the whole region its exact `(C, H]` range
-/// (`read/scan_region.rs::exact_sequence_range` fails closed on it), so the rows written
-/// after the repartition could never be read again — the file never left, only its
-/// publisher changed.
+/// A repartition can keep a region's own files in place: the region id survives, so the bytes,
+/// the numbers and the `preserve_row_sequence` marker all stay as they are, and the staging exit
+/// must not clear that marker for a file this region already owned.
 #[tokio::test]
 async fn test_apply_staging_manifest_keeps_the_marker_of_a_kept_file() {
     let mut env = TestEnv::with_prefix("apply-staging-keeps-kept-file-marker").await;

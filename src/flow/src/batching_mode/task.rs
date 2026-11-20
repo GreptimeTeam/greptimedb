@@ -204,15 +204,8 @@ fn encode_insert_plan_request(
 
 /// One round of the read-only source watermark sample.
 ///
-/// A region can be absent from the proved watermark map in two ways, and they mean
-/// different things:
-/// - it is **not** in [`Self::read_regions`]: this round never read it, so the sample
-///   says nothing at all about its watermark;
-/// - it **is** in [`Self::read_regions`] but has no entry in [`Self::watermarks`]: this
-///   round read it and could not prove a watermark.
-///
-/// Neither case is ever reported as `0`: a missing report is not a sequence, and
-/// turning it into one would let a checkpoint advance past rows nobody read.
+/// A region absent from the proved map is never reported as `0`: a missing report is not a
+/// sequence.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionWatermarkSample {
     /// Regions this round covered, i.e. regions the sample plan named and whose
@@ -234,28 +227,9 @@ impl RegionWatermarkSample {
         }
     }
 
-    /// Regions this round covered. A region missing here was not read this round.
-    pub fn read_regions(&self) -> &BTreeSet<u64> {
-        &self.read_regions
-    }
-
-    /// Proved watermarks, always a subset of [`Self::read_regions`].
+    /// Proved watermarks, always a subset of `read_regions`.
     pub fn watermarks(&self) -> &BTreeMap<u64, u64> {
         &self.watermarks
-    }
-
-    /// Regions this round read without proving a watermark for them.
-    pub fn unproved_regions(&self) -> BTreeSet<u64> {
-        self.read_regions
-            .iter()
-            .copied()
-            .filter(|region_id| !self.watermarks.contains_key(region_id))
-            .collect()
-    }
-
-    /// Whether this round read no region at all.
-    pub fn is_empty(&self) -> bool {
-        self.read_regions.is_empty()
     }
 
     /// Keeps only the proved watermarks, dropping the read/unproved distinction.
@@ -313,22 +287,16 @@ impl TreeNodeRewriter for ZeroRowTimeIndexRewriter {
 
 /// Builds the source-side plan of the read-only region watermark sample.
 ///
-/// The sample must reach **every** participating region, because a region states its
-/// watermark through its own terminal metrics and only once its read finishes. A
-/// single `LIMIT` over the whole plan therefore cannot be used: the frontend runs the
-/// plan with `parallelism = 1`, so `LimitStream` ends after the first batch of the
-/// first region and the coalesced input's remaining region clients are never opened,
-/// which is exactly how watermarks went missing. `LIMIT 0` cannot be used either: the
-/// frontend re-decodes the plan with optimization on and `EliminateLimit` rewrites it
-/// into an `EmptyRelation`, so no region opens at all. What is left is a plan with no
-/// truncating operator anywhere, which the caller drains to EOF.
+/// The sample must reach **every** participating region, because a region states its watermark
+/// through its own terminal metrics and only once its read finishes. With `parallelism = 1` a
+/// single `LIMIT` stops after the first region's first batch (the remaining region clients are
+/// never opened, which is how watermarks went missing), and `LIMIT 0` is rewritten into an
+/// `EmptyRelation` by `EliminateLimit`, so no region opens at all. The plan therefore carries no
+/// truncating operator and the caller drains it to EOF.
 ///
-/// Draining must not read business rows, so the sample pins the time index below
-/// every representable value: no row can satisfy that predicate, the storage layer
-/// prunes the region's files and memtables against it, and each region's read still
-/// opens - binding the scan-open snapshot the watermark proves - and finishes at once.
-/// An empty region finishes just as immediately, so "no rows" and "not read" stay
-/// distinguishable through the terminal metrics rather than through rows.
+/// Draining must not read business rows, so the sample pins the time index below every
+/// representable value: the storage layer prunes everything against it, and each region's read
+/// still opens (binding the scan-open snapshot the watermark proves) and finishes at once.
 fn region_watermark_sample_plan(
     input: LogicalPlan,
     time_index_column: &str,

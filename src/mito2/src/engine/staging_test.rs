@@ -2614,7 +2614,6 @@ async fn test_migration_flush_retries_while_staging_ends() {
     assert_eq!(0, migration_flush().await.unwrap().affected_rows);
 }
 
-/// Waits until the region reaches `state`.
 async fn wait_until_region_state(region: &MitoRegionRef, state: RegionLeaderState) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while region.state() != RegionRoleState::Leader(state) {
@@ -2978,7 +2977,6 @@ async fn test_staging_exit_rejects_writes_while_end_commit_pending() {
             .any(|file_id| *file_id == imported.file_id),
         "the file the retry published must be visible"
     );
-    // 3 flushed rows + 2 staged rows + 2 imported rows.
     assert_eq!(
         7,
         count_rows(&engine, region_id).await,

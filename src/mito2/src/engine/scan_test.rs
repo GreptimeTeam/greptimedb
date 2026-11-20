@@ -6421,7 +6421,6 @@ async fn test_read_row_sequence_filters_each_creator_expression_by_its_own_curso
         .await
         .unwrap();
 
-    // The right slice of the creator's domain, holding the numbers 1..6.
     test_util::put_rows(
         &engine,
         source,
@@ -6440,7 +6439,6 @@ async fn test_read_row_sequence_filters_each_creator_expression_by_its_own_curso
     assert_eq!(None, right_file.partition_expr);
     right_file.partition_expr = Some(partition_slice(50, 100).into());
 
-    // The left slice, holding the numbers 7..12.
     test_util::put_rows(
         &engine,
         source,
@@ -6786,7 +6784,6 @@ async fn test_read_row_sequence_hides_substituted_rows_of_local_compaction_outpu
     let source = RegionId::new(1, 2);
     let target = RegionId::new(1, 1);
 
-    // The creator's file states the numbers 1, 2 and 3.
     let (_, source_file) = build_foreign_source_file(&engine, source, 3, true).await;
 
     // The holder of the repartition target, created the way `create_foreign_target` creates it.
@@ -6915,7 +6912,6 @@ async fn test_read_row_sequence_keeps_exact_sequence_range_of_local_file_with_cu
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
-    // The region numbers these rows 1, 2 and 3.
     test_util::put_rows(
         &engine,
         region_id,
@@ -7090,7 +7086,6 @@ async fn test_read_row_sequence_filters_adopted_file_without_cut_by_creator_curs
     let source = RegionId::new(1, 2);
     let target = RegionId::new(1, 1);
 
-    // Five rows numbered 1..5, none of them substituted.
     let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
     create_foreign_target(&engine, target).await;
     adopt_foreign_file(&engine, target, source_file, 6, true, None);
@@ -7162,7 +7157,6 @@ async fn test_read_row_sequence_ignores_holder_bounds_for_foreign_file() {
     let source = RegionId::new(1, 2);
     let target = RegionId::new(1, 1);
 
-    // The creator's file states the numbers 1..=12, none of them substituted.
     let (_, source_file) = build_foreign_source_file(&engine, source, 12, true).await;
     create_foreign_target(&engine, target).await;
     // Admitted at barrier 6: below the numbers its bytes carry, which is the whole point.

@@ -583,25 +583,10 @@ impl ParquetReaderBuilder {
             // sequence that can be trusted.
             file_meta.sequence.map(|sequence| sequence.get())
         } else if self.read_row_sequence && is_foreign {
-            // A physical-sequence read keeps an adopted file's own column: the foreign
-            // branch below would make every row look published by the import, which is
-            // exactly what the caller needs to split apart.
-            //
-            // `preserve_row_sequence` deliberately takes no part here. It describes
-            // whether the *writer* kept per-row numbering, whereas an import (including
-            // a repartition's staging apply) only re-marks the handle and copies the
-            // bytes: the column still holds the numbers their creator allocated. Flow
-            // judges which rows a substitution produced by the file's own
-            // `substituted_up_to` cut, not by the marker, so a file an import re-marked
-            // with `preserve_row_sequence = false` still carries a readable column.
-            //
-            // A source file stating `preserve_row_sequence = false` and no cut is
-            // outside the model (the plateau of a source table whose option is off):
-            // its column may carry no per-row numbering at all, and there is no cut to
-            // hide those rows with. Flow never asks for such a region — the region-level
-            // `preserve_row_sequence` option still denies it the exact range before this
-            // reader runs — so this branch never sees one; it must not be treated as an
-            // ordinary file if it ever does.
+            // A physical-sequence read keeps an adopted file's own column instead of the
+            // substitution below. `preserve_row_sequence` takes no part: an import only
+            // re-marks the handle and copies the bytes, and the file's own
+            // `substituted_up_to` cut is what states a substitution.
             None
         } else if is_foreign {
             file_meta.sequence.map(|sequence| sequence.get())

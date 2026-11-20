@@ -1187,9 +1187,7 @@ pub(crate) enum BackgroundNotify {
 /// Notifies that the staged layout of a region must be published.
 #[derive(Debug)]
 pub(crate) struct ExitStagingRequest {
-    /// Region id.
     pub(crate) region_id: RegionId,
-    /// Result sender of the apply staging request.
     pub(crate) sender: OptionOutputTx,
 }
 

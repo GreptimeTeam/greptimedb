@@ -698,35 +698,17 @@ pub struct RecordBatchMetrics {
     /// Omitted when empty for backward compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub region_watermarks: Vec<RegionWatermarkEntry>,
-    /// Per-region time ranges of the rows a scan deliberately substituted.
-    ///
-    /// A region that re-homes files from another region cannot tell, per row, which
-    /// of the adopted rows its incremental consumers already saw. A read that asks
-    /// for the physical sequence column (Flow's incremental delta) therefore drops
-    /// the rows whose number a substitution produced instead of reporting them as
-    /// new, and reports where those rows sit so the caller recomputes those ranges.
-    /// The scan fails instead of guessing when it cannot decide that, so an empty
-    /// list means "this scan substituted nothing" and never "unknown".
-    ///
-    /// Entries are ordered by region id and each region's ranges are sorted and
-    /// non-overlapping. Omitted when empty for backward compatibility.
+    /// Per-region time ranges of the rows a scan deliberately substituted, so the caller
+    /// recomputes those windows. An empty list means "substituted nothing", never "unknown".
+    /// Entries are ordered by region id, each region's ranges sorted and non-overlapping,
+    /// omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub substituted_row_ranges: Vec<SubstitutedRowRanges>,
-    /// The `(region, partition expression)` pairs this round's scans actually read.
-    ///
-    /// A scan of one region may hold files another region created, and a row's number
-    /// then belongs to the *creator's* domain, which the holder's cursor does not bound.
-    /// A durable cursor keyed by the region alone therefore cannot say which part of a
-    /// creator's value domain this round consumed. A scan that reads physical row
-    /// sequences (`ScanRequest::read_row_sequence`) reports the creator and the partition
-    /// expression of every file it read, so the owner of the cursor can split a
-    /// whole-domain entry into the slices it observed and advance only those it read.
-    ///
-    /// Entries are deduplicated and sorted. Omitted when empty. The wire key states the
-    /// format explicitly (`observed_partition_exprs`): the previous format of this field
-    /// carried a numeric `[lo, hi)` projection of the same expressions, which cannot be
-    /// turned back into them, so old bytes must not be read as expression identities — a
-    /// reader of the old key ignores it instead, which leaves every cursor unadvanced.
+    /// The `(region, partition expression)` pairs this round's scans actually read, so the
+    /// owner of a `(region, slice)` cursor advances only the slices that were read.
+    /// Deduplicated and sorted, omitted when empty. Old bytes carried a numeric projection
+    /// under the previous key, so the new key (`observed_partition_exprs`) is not read back as
+    /// expressions.
     #[serde(
         default,
         rename = "observed_partition_exprs",
@@ -738,11 +720,10 @@ pub struct RecordBatchMetrics {
 /// The partition expression of one region that a scan read rows of, i.e. one
 /// `(region, partition expression)` pair.
 ///
-/// `region_id` is the region that allocated the rows' sequences, i.e. the creator of the
-/// file they were read from — this region itself for a file it wrote. `partition_expr` is
-/// the identity of the expression that file states for its own rows, in the JSON form
-/// `PartitionExpr::as_json_str()` writes; `None` means the file states no expression and
-/// therefore covers its region's complete value domain.
+/// `region_id` is the region that allocated the rows' sequences — the creator of the file they
+/// were read from, this region itself for a file it wrote. `partition_expr` is the identity of
+/// the expression that file states for its own rows (`PartitionExpr::as_json_str()`); `None`
+/// means the file states none and covers its region's complete value domain.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ObservedPartitionExpr {
     pub region_id: u64,
@@ -751,7 +732,6 @@ pub struct ObservedPartitionExpr {
 }
 
 impl ObservedPartitionExpr {
-    /// Creates the observed pair `(region_id, partition_expr)`.
     pub fn new(region_id: u64, partition_expr: Option<String>) -> Self {
         Self {
             region_id,
@@ -774,10 +754,8 @@ pub struct SubstitutedRowRanges {
     pub ranges: Vec<SubstitutedRange>,
 }
 
-/// One `[start, end]` range of row timestamps, in milliseconds since the Unix epoch.
-///
-/// Both ends are inclusive: a caller that owns time windows must recompute every
-/// window that intersects the range.
+/// One `[start, end]` range of row timestamps, in milliseconds since the Unix epoch, both ends
+/// inclusive: a caller that owns time windows must recompute every window that intersects it.
 #[derive(
     serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
 )]
@@ -789,14 +767,9 @@ pub struct SubstitutedRange {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RegionWatermarkEntry {
     pub region_id: u64,
-    /// Identity (`PartitionExpr::as_json_str()`) of the partition expression this entry
-    /// speaks about, or `None` when it speaks about the region's complete value domain.
-    ///
-    /// A statement keyed by the region alone is a whole-domain statement, which is what
-    /// every producer of the pre-expression format states, so leaving the field out keeps
-    /// its meaning. A statement about one expression slice of the region says something
-    /// narrower and must be merged under its own key: merging the two would let a slice
-    /// the round did not read advance as far as one it did.
+    /// Identity (`PartitionExpr::as_json_str()`) of the partition expression this entry speaks
+    /// about, or `None` when it speaks about the region's complete value domain. A slice is
+    /// merged under its own key, never with the region's whole-domain entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_expr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2128,8 +2101,7 @@ mod test {
         };
 
         let value = serde_json::to_value(&metrics).unwrap();
-        // The old key carried a numeric `[lo, hi)` projection that cannot be turned back
-        // into an expression, so the identity now travels under a key of its own.
+        // The old key carried a numeric projection, so the identity travels under its own key.
         assert!(value.get("observed_slices").is_none());
         assert_eq!(
             value.get("observed_partition_exprs").unwrap(),
@@ -2142,8 +2114,7 @@ mod test {
         let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.observed_slices, metrics.observed_slices);
 
-        // Old bytes must not be reinterpreted: the numeric projection is not an expression
-        // identity, so a reader of the new key sees no observation at all.
+        // Old bytes are not reinterpreted: a reader of the new key sees no observation.
         let mut legacy = serde_json::to_value(RecordBatchMetrics::default()).unwrap();
         legacy["observed_slices"] = json!([{ "region_id": 7, "lo": 50, "hi": 100 }]);
         let old: RecordBatchMetrics = serde_json::from_value(legacy).unwrap();
