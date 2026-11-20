@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 common-base.workspace = true
+common-cache.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
