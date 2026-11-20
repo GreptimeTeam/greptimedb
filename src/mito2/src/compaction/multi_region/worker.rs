@@ -55,6 +55,7 @@ pub(crate) async fn execute(
         senders.insert(id, sender);
         let schema = source.schema();
         let limits = source.limits.clone();
+        let source = source.clone();
         let index_plan =
             source
                 .index_plans
@@ -84,6 +85,7 @@ pub(crate) async fn execute(
                     &context,
                     &limits,
                     plan.max_output_file_size,
+                    |file_id| source.footer_all_zero(file_id),
                     index_plan,
                 )
                 .write(input)

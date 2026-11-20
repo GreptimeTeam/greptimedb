@@ -10,7 +10,7 @@
 // either express or implied.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,7 +49,7 @@ use crate::read::flat_merge::FlatMergeReader;
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::read_columns::ReadColumns;
 use crate::read::{BoxedRecordBatchStream, timestamp_array_to_i64_slice};
-use crate::sst::file::{FileHandle, FileMeta};
+use crate::sst::file::{FileHandle, FileMeta, RegionFileId, substituted_row_constant};
 use crate::sst::file_purger::NoopFilePurger;
 use crate::sst::index::IndexBuildType;
 use crate::sst::index::handler::PlanContext;
@@ -102,7 +102,10 @@ pub(crate) struct SharedSource {
     layer: AccessLayerRef,
     cache: CacheStrategy,
     sources: Vec<FileMeta>,
-    legacy_overrides: Vec<bool>,
+    /// Per source file, whether its footer proves that every `__sequence` statistic is 0
+    /// (`need_override_sequence`). Keyed by the cross-region file id so the per-target writers
+    /// can state the same fact the merge reader applies row by row.
+    legacy_overrides: HashMap<RegionFileId, bool>,
     expected_rows: Vec<i64>,
     targets: BTreeMap<RegionId, MultiRegionTarget>,
     metadata: RegionMetadataRef,
@@ -164,9 +167,11 @@ impl SharedSource {
             );
             footers.push(footer);
         }
-        let legacy_overrides = footers
+        let legacy_overrides: HashMap<RegionFileId, bool> = plan
+            .sources
             .iter()
-            .map(|footer| need_override_sequence(footer))
+            .map(|file| file.file_id())
+            .zip(footers.iter().map(|footer| need_override_sequence(footer)))
             .collect();
         let expected_rows = footers
             .iter()
@@ -294,6 +299,17 @@ impl SharedSource {
     pub(crate) fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
+
+    /// Returns whether the footer of `file_id` proves that every `__sequence` statistic is 0
+    /// (`need_override_sequence`). An unknown file answers `false`: a footer without the
+    /// statistic is never "all zero".
+    pub(crate) fn footer_all_zero(&self, file_id: RegionFileId) -> bool {
+        self.legacy_overrides
+            .get(&file_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
     pub(crate) fn peak_group_bytes(&self) -> u64 {
         self.peak_group_bytes.load(Ordering::Relaxed)
     }
@@ -488,18 +504,14 @@ impl SharedSource {
                 reason: "Invalid sequence column",
             })?;
         let source = &self.sources[index];
+        let footer_all_zero = self.footer_all_zero(source.file_id());
         let sequences = owners.iter().enumerate().map(|(row, region)| {
             let input = &self.targets[region].inputs[&source.file_id()];
-            if input.region_id != *region
-                || (!input.preserve_row_sequence && self.legacy_overrides[index])
-            {
-                input
-                    .sequence
-                    .map(|value| value.get())
-                    .unwrap_or_else(|| physical.value(row))
-            } else {
-                physical.value(row)
-            }
+            // The two substituting branches of the shared reader, applied to the routed rows:
+            // a foreign input and a local untrusted input whose footer is all-zero become the
+            // input's file-level constant.
+            substituted_row_constant(input, *region, footer_all_zero)
+                .unwrap_or_else(|| physical.value(row))
         });
         let columns = [
             Arc::new(UInt64Array::from_iter_values(

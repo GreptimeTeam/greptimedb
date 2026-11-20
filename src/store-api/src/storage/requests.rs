@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
@@ -43,6 +44,32 @@ pub enum TimeSeriesDistribution {
     /// Data are organized by time-series first. The scanner will return
     /// all data for one time-series before moving to the next one.
     PerSeries,
+}
+
+/// One slice of an incremental cursor: the partition expression selecting a region's value
+/// domain together with the last sequence consumed inside it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CursorShard {
+    /// Identity (`PartitionExpr::as_json_str()`) of the expression selecting this slice's
+    /// value domain, or `None` for the creator region's complete value domain.
+    pub partition_expr: Option<String>,
+    /// Last sequence consumed in the domain `partition_expr` selects.
+    pub seq: SequenceNumber,
+}
+
+impl CursorShard {
+    pub fn new(partition_expr: Option<String>, seq: SequenceNumber) -> Self {
+        Self {
+            partition_expr,
+            seq,
+        }
+    }
+
+    /// Creates the slice covering a region's complete value domain, which is what a
+    /// region-keyed cursor states.
+    pub fn whole_domain(seq: SequenceNumber) -> Self {
+        Self::new(None, seq)
+    }
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -78,15 +105,46 @@ pub struct ScanRequest {
     pub skip_sst_files: bool,
     /// Whether to bind the effective snapshot upper bound when opening the scan.
     pub snapshot_on_scan: bool,
-    /// Explicit intent to read an exact row-level sequence delta `(min, max]`
-    /// across memtables and all SST files (Flow's `sequence_range` incremental
-    /// mode). The engine performs exact row-level filtering only when the region
-    /// preserves per-row sequences and every participating SST file is trusted;
-    /// otherwise it returns a structured stale/unsupported error so the caller
-    /// falls back instead of silently approximating.
+    /// Explicit intent to read an exact row-level sequence delta `(min, max]` across memtables
+    /// and all SST files (Flow's `sequence_range` incremental mode). Exact row-level filtering
+    /// happens only when the region preserves per-row sequences and every participating SST
+    /// file is trusted; otherwise the read **fails closed** with `SequenceRangeUnsupported`
+    /// (status `InvalidArguments`, retry hint `FALLBACK_MEMTABLE_ONLY_OR_FULL_RECOMPUTE`).
     ///
     /// Historical `memtable_only` reads must never set this flag.
     pub exact_sequence_range: bool,
+    /// Whether this scan reads the **physical** `__sequence` column of a foreign file and hides
+    /// the rows whose number a substitution produced.
+    ///
+    /// The reader then keeps the column of any foreign file, filters its rows by
+    /// [`Self::creator_cursor_shards`] (**fails closed** with `SequenceRangeUnsupported` when
+    /// the creator's cursor is unknown), and hides the rows at or below the file's own
+    /// `FileMeta::substituted_up_to` cut, reporting their timestamp ranges as
+    /// `substituted_row_ranges`. Every other reader, compaction included, leaves this `false`.
+    pub read_row_sequence: bool,
+    /// Per-creator-region cursor slices a physical-sequence read filters with
+    /// ([`Self::read_row_sequence`]), keyed by the region that allocated the numbers. The least
+    /// advanced slice is the file-level bound; each row is compared against the slice that
+    /// selects it.
+    ///
+    /// Empty or absent means no cursor of the creator's domain is known, and an adopted file
+    /// then **fails closed** with `SequenceRangeUnsupported`.
+    pub creator_cursor_shards: Option<Arc<BTreeMap<u64, Vec<CursorShard>>>>,
+    /// Whether this read may cross an invalid boundary: rows whose sequence the region can no
+    /// longer vouch for are returned instead of the read being refused.
+    ///
+    /// It applies no lower sequence bound to memtables, prunes at file granularity only
+    /// (**fails closed** with `SequenceRangeUnsupported` for a file stating no admission
+    /// barrier), requires no row-level exactness, and returns a superset of the windows a stale
+    /// cursor can no longer explain. Ordinary incremental deltas must leave it `false`.
+    pub read_across_invalid_boundary: bool,
+    /// Whether this read requires its snapshot to cover the region's flushed frontier: it reads
+    /// whole windows under a frozen high watermark and may only be committed while that
+    /// watermark still covers everything flushed.
+    ///
+    /// Unlike [`Self::read_across_invalid_boundary`] it never prunes at file granularity and
+    /// never forces a row-sequence override.
+    pub require_flushed_frontier: bool,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
     /// Optional hint from query-driven JSON type concretization.
@@ -180,6 +238,9 @@ impl Display for ScanRequest {
         }
         if self.exact_sequence_range {
             write!(f, "{}exact_sequence_range: true", delimiter.as_str())?;
+        }
+        if self.read_row_sequence {
+            write!(f, "{}read_row_sequence: true", delimiter.as_str())?;
         }
         if self.preserve_pk_dictionary_encoding {
             write!(

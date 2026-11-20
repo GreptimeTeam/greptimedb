@@ -20,10 +20,10 @@ use std::ops::{BitAnd, Range};
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
-use common_telemetry::error;
+use common_telemetry::{debug, error};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
-use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray};
+use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::Schema;
@@ -36,7 +36,7 @@ use parquet::file::statistics::Statistics;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, TimeSeriesRowSelector};
+use store_api::storage::{ColumnId, SequenceNumber, SequenceRange, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 use tokio::sync::OnceCell;
 
@@ -51,7 +51,7 @@ use crate::read::prune::FlatPruneReader;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::flat_format::{
     DecodedPrimaryKeys, FlatReadFormat, decode_primary_keys, primary_key_column_index,
-    time_index_column_index,
+    sequence_column_index, time_index_column_index,
 };
 use crate::sst::parquet::json_align::ProjectedRecordBatchStream;
 use crate::sst::parquet::prefilter::primary_key_filter_mask;
@@ -592,10 +592,46 @@ impl PreFilterMode {
 
 /// Context for partition expression filtering.
 pub(crate) struct PartitionFilterContext {
-    pub(crate) region_partition_physical_expr: Arc<dyn PhysicalExpr>,
-    /// Schema containing only columns referenced by the partition expression.
+    /// Physical expression that selects the rows belonging to this region, or `None` when
+    /// the file states this region's own expression (every row of it belongs here).
+    pub(crate) region_partition_physical_expr: Option<Arc<dyn PhysicalExpr>>,
+    /// Schema containing only the columns referenced by the expressions of this context.
     /// This is used to build a minimal RecordBatch for partition filter evaluation.
     pub(crate) partition_schema: Arc<Schema>,
+    /// The creator's cursor slices a physical-sequence read of an adopted file may hold
+    /// rows of, compiled for per-row evaluation
+    /// ([`ScanRequest::creator_cursor_shards`](store_api::storage::ScanRequest)).
+    ///
+    /// The slices are the creator's own partition expressions, so they do not overlap and
+    /// at most one of them selects a given row. Empty for every other read.
+    pub(crate) creator_slices: Vec<CreatorSliceFilter>,
+    /// Cursor applied to a row of the creator's domain that no slice expression selects.
+    /// `None` when [`Self::creator_slices`] is empty.
+    ///
+    /// A row no slice explains is attributed to the least advanced candidate: re-reading a
+    /// consumed row is recoverable, dropping a live one is not.
+    pub(crate) fallback_cursor: Option<SequenceNumber>,
+    /// The file's own substituted cut
+    /// (`FileMeta::substituted_up_to`), when it states one.
+    ///
+    /// A row at or below the cut carries a sequence a substitution produced, so its number
+    /// says nothing about progress. Such a row is left for the substitution rule, which
+    /// hides it **and** reports its time range for recomputation; deciding it here instead
+    /// would drop it without that report.
+    pub(crate) substituted_cut: Option<SequenceNumber>,
+}
+
+/// Candidate creator cursor slices of one adopted file, as the scan side selects them:
+/// `(partition expression identity, last consumed sequence)` pairs.
+pub(crate) type CreatorSliceCursors = Arc<Vec<(String, SequenceNumber)>>;
+
+/// One candidate creator-cursor slice, compiled for per-row evaluation.
+pub(crate) struct CreatorSliceFilter {
+    /// The slice's partition expression.
+    pub(crate) filter: Arc<dyn PhysicalExpr>,
+    /// Last sequence consumed in that slice: a row this expression selects is delivered
+    /// only when its own sequence is above this value.
+    pub(crate) cursor: SequenceNumber,
 }
 
 /// Common fields for a range to read and filter batches.
@@ -660,14 +696,29 @@ impl RangeBase {
         };
 
         // Apply partition filter
-        if let Some(partition_filter) = &self.partition_filter {
+        if let Some(partition_filter) = &self.partition_filter
+            && (partition_filter.region_partition_physical_expr.is_some()
+                || !partition_filter.creator_slices.is_empty())
+        {
             let record_batch = self.project_record_batch_for_pruning_flat(
                 &input,
                 &partition_filter.partition_schema,
                 &mut tag_decode_state,
             )?;
-            let partition_mask = self.evaluate_partition_filter(&record_batch, partition_filter)?;
-            mask = mask.bitand(&partition_mask);
+            if let Some(region_partition_physical_expr) =
+                &partition_filter.region_partition_physical_expr
+            {
+                let partition_mask =
+                    self.evaluate_partition_filter(&record_batch, region_partition_physical_expr)?;
+                mask = mask.bitand(&partition_mask);
+            }
+            // Which rows of the file this round has already consumed: decided per row by
+            // the creator slice the row belongs to, not by one bound for the whole file.
+            if !partition_filter.creator_slices.is_empty() {
+                let sequence_mask =
+                    self.evaluate_creator_slices(&input, &record_batch, partition_filter)?;
+                mask = mask.bitand(&sequence_mask);
+            }
         }
 
         let num_selected = mask.count_set_bits();
@@ -895,10 +946,9 @@ impl RangeBase {
     fn evaluate_partition_filter(
         &self,
         record_batch: &RecordBatch,
-        partition_filter: &PartitionFilterContext,
+        region_partition_physical_expr: &Arc<dyn PhysicalExpr>,
     ) -> Result<BooleanBuffer> {
-        let columnar_value = partition_filter
-            .region_partition_physical_expr
+        let columnar_value = region_partition_physical_expr
             .evaluate(record_batch)
             .context(EvalPartitionFilterSnafu)?;
         let array = columnar_value
@@ -919,6 +969,89 @@ impl RangeBase {
         }
 
         Ok(mask)
+    }
+
+    /// Computes the mask of rows a physical-sequence read of an adopted file has **not**
+    /// consumed yet.
+    ///
+    /// A row is delivered only when its own sequence is above the cursor of the creator
+    /// slice whose expression selects it: the slice the row belongs to decides, not one
+    /// bound for the whole file. That keeps the read free of re-reads when the file was
+    /// written under one coarse expression while the creator's domain has since been split
+    /// into narrower ones whose cursors advanced differently, and free of lost rows when
+    /// the file's own expression is narrower than the rows it holds.
+    ///
+    /// A row no slice expression selects is attributed to the least advanced candidate
+    /// ([`PartitionFilterContext::fallback_cursor`]) and reported, because dropping it
+    /// would lose live data while re-reading it only repeats a consumed row.
+    fn evaluate_creator_slices(
+        &self,
+        input: &RecordBatch,
+        record_batch: &RecordBatch,
+        partition_filter: &PartitionFilterContext,
+    ) -> Result<BooleanBuffer> {
+        let num_rows = record_batch.num_rows();
+        let slices = &partition_filter.creator_slices;
+
+        // Per slice, the rows whose own sequence is above that slice's cursor.
+        let sequence_column = input.column(sequence_column_index(input.num_columns()));
+        let fallback_cursor = partition_filter.fallback_cursor.unwrap_or_default();
+        let mut not_consumed = Vec::with_capacity(slices.len() + 1);
+        for slice in slices {
+            let mask = SequenceRange::Gt { min: slice.cursor }
+                .filter(sequence_column)
+                .context(ComputeArrowSnafu)?;
+            not_consumed.push(mask);
+        }
+        let fallback_mask = SequenceRange::Gt {
+            min: fallback_cursor,
+        }
+        .filter(sequence_column)
+        .context(ComputeArrowSnafu)?;
+
+        // Per row, the slice whose expression selects it.
+        let mut selected = Vec::with_capacity(slices.len());
+        for slice in slices {
+            selected.push(self.evaluate_partition_filter(record_batch, &slice.filter)?);
+        }
+
+        let substituted_mask = match partition_filter.substituted_cut {
+            // Rows at or below the cut are the substitution rule's business.
+            Some(cut) => Some(
+                SequenceRange::LtEq { max: cut }
+                    .filter(sequence_column)
+                    .context(ComputeArrowSnafu)?,
+            ),
+            None => None,
+        };
+
+        let mut kept = BooleanBufferBuilder::new(num_rows);
+        let mut unmatched = 0;
+        for row in 0..num_rows {
+            if substituted_mask
+                .as_ref()
+                .is_some_and(|mask| mask.value(row))
+            {
+                kept.append(true);
+                continue;
+            }
+            let keep = match selected.iter().position(|mask| mask.value(row)) {
+                Some(index) => not_consumed[index].value(row),
+                None => {
+                    unmatched += 1;
+                    fallback_mask.value(row)
+                }
+            };
+            kept.append(keep);
+        }
+        if unmatched > 0 {
+            debug!(
+                "{} of {} rows of an adopted file match no creator cursor slice; bounding them by the least advanced cursor {}",
+                unmatched, num_rows, fallback_cursor
+            );
+        }
+
+        Ok(kept.finish())
     }
 
     /// Projects the input `RecordBatch` to match the given schema.
@@ -1176,7 +1309,10 @@ mod tests {
                 pre_filter_mode: PreFilterMode::All,
                 partition_filter: Some(PartitionFilterContext {
                     partition_schema: partition_schema.clone(),
-                    region_partition_physical_expr: partition_expr.clone(),
+                    region_partition_physical_expr: Some(partition_expr.clone()),
+                    creator_slices: Vec::new(),
+                    fallback_cursor: None,
+                    substituted_cut: None,
                 }),
             };
             for (skip_fields, skip_tags, expected) in [
@@ -1266,11 +1402,16 @@ mod tests {
                 true,
             )]));
             base.partition_filter = Some(PartitionFilterContext {
-                region_partition_physical_expr: partition_col("tag_0")
-                    .eq(Value::String("".into()))
-                    .try_as_physical_expr(schema.arrow_schema())
-                    .unwrap(),
+                region_partition_physical_expr: Some(
+                    partition_col("tag_0")
+                        .eq(Value::String("".into()))
+                        .try_as_physical_expr(schema.arrow_schema())
+                        .unwrap(),
+                ),
                 partition_schema: schema.clone(),
+                creator_slices: Vec::new(),
+                fallback_cursor: None,
+                substituted_cut: None,
             });
             let temporary = base
                 .project_record_batch_for_pruning_flat(&batch, &schema, &mut TagDecodeState::new())
@@ -1332,10 +1473,15 @@ mod tests {
             .gt_eq(Value::String("a".into()))
             .and(partition_col("tag_0").lt(Value::String("c".into())));
         base.partition_filter = Some(PartitionFilterContext {
-            region_partition_physical_expr: partition_expr
-                .try_as_physical_expr(partition_schema.arrow_schema())
-                .unwrap(),
+            region_partition_physical_expr: Some(
+                partition_expr
+                    .try_as_physical_expr(partition_schema.arrow_schema())
+                    .unwrap(),
+            ),
             partition_schema,
+            creator_slices: Vec::new(),
+            fallback_cursor: None,
+            substituted_cut: None,
         });
 
         let filtered = base

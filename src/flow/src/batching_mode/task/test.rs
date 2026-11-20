@@ -39,7 +39,8 @@ use pretty_assertions::assert_eq;
 use prost::Message;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
-    FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, QueryOptions,
+    FLOW_READ_ROW_SEQUENCE, FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_FENCED, FLOW_SCHEDULED_TIME_MILLIS,
+    FLOW_SINK_TABLE_ID, QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
@@ -1449,6 +1450,7 @@ fn recovery_stream_output(
                 .into_iter()
                 .map(|(region_id, watermark)| RegionWatermarkEntry {
                     region_id,
+                    partition_expr: None,
                     watermark,
                 })
                 .collect(),
@@ -1835,6 +1837,7 @@ fn output_with_region_watermarks(
             .into_iter()
             .map(|(region_id, watermark)| RegionWatermarkEntry {
                 region_id,
+                partition_expr: None,
                 watermark,
             })
             .collect(),
@@ -2982,6 +2985,11 @@ async fn test_sequence_range_producer_emits_capable_source_extensions() {
                 FLOW_INCREMENTAL_AFTER_SEQS,
                 serde_json::json!({"1024": 10, "2048": 20}).to_string(),
             ),
+            // A capable `sequence_range` delta is also the read that splits an adopted
+            // file into consumed and unconsumed rows, so the producer asks the scan for
+            // the physical `__sequence` column and for the substituted cut to hide the
+            // rows whose number a compaction substituted.
+            (FLOW_READ_ROW_SEQUENCE, "true".to_string()),
         ]
     );
 }
@@ -4706,4 +4714,403 @@ async fn test_fenced_incremental_delta_default_wrapper_rejects_before_dispatch()
     let state = task.state.read().unwrap();
     assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
     assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+}
+
+/// Counts how many source partitions a plan actually opened and drained.
+///
+/// A source region states its watermark through its own read's terminal metrics, which
+/// are final only once that read reaches EOF, so "opened" and "finished" are exactly
+/// what a watermark sample has to cause for every participating region.
+#[derive(Debug, Default)]
+struct PartitionCoverage {
+    opened: std::sync::atomic::AtomicUsize,
+    finished: std::sync::atomic::AtomicUsize,
+}
+
+impl PartitionCoverage {
+    fn opened(&self) -> usize {
+        self.opened.load(Ordering::SeqCst)
+    }
+
+    fn finished(&self) -> usize {
+        self.finished.load(Ordering::SeqCst)
+    }
+}
+
+/// A source scan whose per-partition streams report when they open and when they end.
+struct CoverageExec {
+    inner: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    coverage: Arc<PartitionCoverage>,
+}
+
+impl std::fmt::Debug for CoverageExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoverageExec")
+            .field("inner", &self.inner.name())
+            .finish()
+    }
+}
+
+impl datafusion::physical_plan::DisplayAs for CoverageExec {
+    fn fmt_as(
+        &self,
+        _t: datafusion::physical_plan::DisplayFormatType,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        write!(f, "CoverageExec")
+    }
+}
+
+impl datafusion::physical_plan::ExecutionPlan for CoverageExec {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn properties(&self) -> &Arc<datafusion::physical_plan::PlanProperties> {
+        self.inner.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        Vec::new()
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion_common::Result<
+            datafusion_common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion_common::Result<datafusion_common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+    ) -> datafusion_common::Result<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<datafusion::execution::TaskContext>,
+    ) -> datafusion_common::Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        let stream = self.inner.execute(partition, context)?;
+        Ok(Box::pin(CoverageStream {
+            inner: stream,
+            coverage: self.coverage.clone(),
+            started: false,
+            finished: false,
+        }))
+    }
+}
+
+struct CoverageStream {
+    inner: datafusion::physical_plan::SendableRecordBatchStream,
+    coverage: Arc<PartitionCoverage>,
+    started: bool,
+    finished: bool,
+}
+
+impl futures::Stream for CoverageStream {
+    type Item = datafusion_common::Result<datafusion::arrow::record_batch::RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if !self.started {
+            // A region read opens when it is first polled, not when its stream object
+            // is created, which is what `MergeScanExec` does with a region client.
+            self.started = true;
+            self.coverage.opened.fetch_add(1, Ordering::SeqCst);
+        }
+        let poll = Pin::new(&mut self.inner).poll_next(cx);
+        if matches!(poll, Poll::Ready(None)) && !self.finished {
+            self.finished = true;
+            self.coverage.finished.fetch_add(1, Ordering::SeqCst);
+        }
+        poll
+    }
+}
+
+impl datafusion::physical_plan::RecordBatchStream for CoverageStream {
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        self.inner.schema()
+    }
+}
+
+/// A three-partition source table that records partition coverage.
+#[derive(Debug)]
+struct CoverageProvider {
+    inner: datafusion::datasource::MemTable,
+    coverage: Arc<PartitionCoverage>,
+}
+
+#[async_trait::async_trait]
+impl datafusion::catalog::TableProvider for CoverageProvider {
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        self.inner.schema()
+    }
+
+    fn table_type(&self) -> datafusion::logical_expr::TableType {
+        self.inner.table_type()
+    }
+
+    async fn scan(
+        &self,
+        state: &dyn datafusion::catalog::Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[datafusion_expr::Expr],
+        limit: Option<usize>,
+    ) -> datafusion_common::Result<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        let plan = self.inner.scan(state, projection, filters, limit).await?;
+        Ok(Arc::new(CoverageExec {
+            inner: plan,
+            coverage: self.coverage.clone(),
+        }))
+    }
+}
+
+fn timestamp_source_schema() -> datafusion::arrow::datatypes::SchemaRef {
+    Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+        datafusion::arrow::datatypes::Field::new(
+            "ts",
+            datafusion::arrow::datatypes::DataType::Timestamp(
+                datafusion::arrow::datatypes::TimeUnit::Millisecond,
+                None,
+            ),
+            false,
+        ),
+    ]))
+}
+
+/// Builds a three-partition source whose first partition is non-empty, i.e. the shape
+/// that used to starve the sample: the first region answers and the rest are skipped.
+///
+/// Every partition holds several batches so that reaching EOF takes more than one poll:
+/// a read that is cancelled after the first batch must be distinguishable from one that
+/// ran to completion, which is what the terminal watermark needs.
+fn three_partition_timestamp_source(coverage: Arc<PartitionCoverage>) -> Arc<CoverageProvider> {
+    let schema = timestamp_source_schema();
+    let partition = |start: i64| {
+        (0..8)
+            .map(|step| {
+                let batch_start = start + step * 3;
+                let values = (batch_start..batch_start + 3).collect::<Vec<_>>();
+                datafusion::arrow::record_batch::RecordBatch::try_new(
+                    schema.clone(),
+                    vec![Arc::new(
+                        datafusion::arrow::array::TimestampMillisecondArray::from(values),
+                    )],
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let partitions = vec![partition(0), partition(100), partition(200)];
+    Arc::new(CoverageProvider {
+        inner: datafusion::datasource::MemTable::try_new(schema, partitions).unwrap(),
+        coverage,
+    })
+}
+
+/// Runs the watermark sample plan over a three-partition source with
+/// `parallelism = 1` and returns the partition coverage the sample caused.
+async fn run_sample_over_three_partitions(shape: SampleShape) -> Arc<PartitionCoverage> {
+    let coverage = Arc::new(PartitionCoverage::default());
+    let provider = three_partition_timestamp_source(coverage.clone());
+    let input = datafusion_expr::LogicalPlanBuilder::scan(
+        datafusion_common::TableReference::bare("numbers_with_ts"),
+        datafusion::datasource::provider_as_source(provider),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let (plan, expect_rows) = match shape {
+        SampleShape::SampleWithoutTruncation => (
+            super::region_watermark_sample_plan(input, "ts", "greptime", "public").unwrap(),
+            // The pin makes the sample report metadata only, never a business row.
+            false,
+        ),
+        SampleShape::RemovedLimitOne => (
+            // The removed shape: the time-index projection with one `LIMIT` over the
+            // whole plan, which is what truncated the sample after the first
+            // non-empty region.
+            datafusion_expr::LogicalPlanBuilder::from(input)
+                .project(vec![datafusion_expr::col("ts")])
+                .unwrap()
+                .limit(0, Some(1))
+                .unwrap()
+                .build()
+                .unwrap(),
+            true,
+        ),
+    };
+
+    let ctx = datafusion::prelude::SessionContext::new_with_config(
+        datafusion::prelude::SessionConfig::new().with_target_partitions(1),
+    );
+    // `collect` drains the plan to EOF, exactly like `drain_output_data` does.
+    let batches = ctx
+        .execute_logical_plan(plan)
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    if expect_rows {
+        assert_eq!(1, batches.len(), "the removed shape returned one row");
+    } else {
+        assert!(
+            batches.is_empty(),
+            "the sample must not produce a business row, got: {batches:?}"
+        );
+    }
+    coverage
+}
+
+/// The two plan shapes compared by
+/// [`test_region_watermark_sample_reaches_every_partition_with_parallelism_one`].
+#[derive(Clone, Copy, Debug)]
+enum SampleShape {
+    /// The sample shape this module builds: no truncating operator anywhere.
+    SampleWithoutTruncation,
+    /// The removed shape: one `LIMIT 1` over the whole plan.
+    RemovedLimitOne,
+}
+
+/// The sample must reach every participating region: with `parallelism = 1` any
+/// truncating operator ends the read after the first non-empty region's first batch, so
+/// the remaining region reads are cancelled before EOF and never state a watermark.
+#[tokio::test]
+async fn test_region_watermark_sample_reaches_every_partition_with_parallelism_one() {
+    let sampled = run_sample_over_three_partitions(SampleShape::SampleWithoutTruncation).await;
+    assert_eq!(
+        3,
+        sampled.opened(),
+        "every source partition must be opened, not just the first non-empty one"
+    );
+    assert_eq!(
+        3,
+        sampled.finished(),
+        "every source partition must be read to EOF so its terminal watermark is final"
+    );
+
+    // Regression for the removed shape: one `LIMIT` over the whole plan cancels the
+    // remaining partition reads before EOF, which is how watermarks went missing.
+    let truncated = run_sample_over_three_partitions(SampleShape::RemovedLimitOne).await;
+    assert!(
+        truncated.finished() < 3,
+        "a global LIMIT must cancel later partitions before EOF, finished: {}",
+        truncated.finished()
+    );
+}
+
+/// The sample plan must keep every source scan and carry no truncating operator; the
+/// source rows it can return are pinned away by the time-index predicate so the drain
+/// reports metadata instead of reading business rows.
+#[test]
+fn test_region_watermark_sample_plan_has_no_truncation_and_keeps_sources() {
+    let coverage = Arc::new(PartitionCoverage::default());
+    let provider = three_partition_timestamp_source(coverage);
+    let input = datafusion_expr::LogicalPlanBuilder::scan(
+        datafusion_common::TableReference::bare("numbers_with_ts"),
+        datafusion::datasource::provider_as_source(provider),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let plan = super::region_watermark_sample_plan(input, "ts", "greptime", "public").unwrap();
+
+    let mut limits = 0;
+    let mut scans = 0;
+    let mut predicates = Vec::new();
+    plan.apply(|node| {
+        match node {
+            LogicalPlan::Limit(_) => limits += 1,
+            LogicalPlan::TableScan(scan) => {
+                scans += 1;
+                assert_eq!(
+                    "greptime.public.numbers_with_ts",
+                    scan.table_name.to_string(),
+                    "the sample must resolve source tables back to the flow's catalog/schema"
+                );
+            }
+            LogicalPlan::Filter(filter) => predicates.push(filter.predicate.clone()),
+            _ => {}
+        }
+        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+
+    assert_eq!(
+        0, limits,
+        "the sample must not truncate the plan, got: {plan:?}"
+    );
+    assert_eq!(
+        1, scans,
+        "the sample must keep the source scan, got: {plan:?}"
+    );
+    assert_eq!(
+        1,
+        predicates.len(),
+        "the sample must pin the time index, got: {plan:?}"
+    );
+    let expected = datafusion_expr::col("ts").lt(datafusion_expr::lit(
+        datafusion_common::ScalarValue::TimestampMillisecond(
+            Some(Timestamp::MIN_MILLISECOND.value()),
+            None,
+        ),
+    ));
+    assert_eq!(
+        expected, predicates[0],
+        "the sample must pin the time index below every representable value"
+    );
+    let LogicalPlan::Projection(projection) = &plan else {
+        panic!("the sample plan must project the time index, got: {plan:?}");
+    };
+    assert_eq!(1, projection.expr.len());
+}
+
+/// Regression: the fenced repair DML is not an incremental delta, but it must still
+/// carry `flow.repair_mode=fenced`, otherwise mito2 rejects it with `C < B` and the
+/// repair loop never terminates.
+#[tokio::test]
+async fn test_build_flow_query_extensions_marks_fenced_repair_dml() {
+    let (task, _) = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+    )
+    .await
+    .into_task_and_plan();
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    task.state.write().unwrap().start_fenced_repair_windows(
+        BTreeMap::from([(1_u64, 10_u64)]),
+        vec![(Timestamp::new_second(0), Timestamp::new_second(10))],
+    );
+
+    // `can_advance_checkpoints == false`: exactly what a fenced repair DML gets.
+    let extensions = task
+        .build_flow_query_extensions(false, false)
+        .await
+        .unwrap();
+    assert!(
+        extensions.contains(&(FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_FENCED.to_string())),
+        "fenced repair DML must mark the repair mode, got: {extensions:?}"
+    );
+
+    // An ordinary delta (no pending repair) must not mark it.
+    task.state.write().unwrap().abandon_fenced_repair();
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+    assert!(
+        !extensions.iter().any(|(key, _)| *key == FLOW_REPAIR_MODE),
+        "ordinary deltas must not mark the repair mode, got: {extensions:?}"
+    );
 }

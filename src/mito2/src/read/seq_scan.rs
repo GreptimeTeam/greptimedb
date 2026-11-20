@@ -50,6 +50,7 @@ use crate::read::scan_util::{
     scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream, spawn_compact_stream};
+use crate::read::substituted_rows::SubstitutedRowRangesStream;
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
 use crate::region::options::MergeMode;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
@@ -414,10 +415,19 @@ impl SeqScan {
             metrics,
         );
 
-        Ok(Box::pin(RecordBatchStreamWrapper::new(
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamWrapper::new(
             input.mapper.output_schema(),
             Box::pin(record_batch_stream),
-        )))
+        ));
+        // The rows this scan hid and the slices it read (a physical-sequence read only)
+        // travel with the result, so the caller learns which windows it has to recompute
+        // and which cursor slices it consumed.
+        Ok(SubstitutedRowRangesStream::wrap(
+            stream,
+            input.substituted_row_ranges_ref(),
+            input.observed_slices_ref(),
+            input.region_metadata().region_id.as_u64(),
+        ))
     }
 
     #[tracing::instrument(

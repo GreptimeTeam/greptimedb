@@ -432,7 +432,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
             return RegionEditDispatch::Rejected;
         }
-
+        // An edit re-homes files; it records no region-level sequence boundary. The re-mark
+        // re-stamps `sequence` and clears `preserve_row_sequence` only for the files that changed
+        // hands; `FileMeta::substituted_up_to` is kept verbatim.
         // Allow retrieving `is_staging` before spawn the edit region task.
         let is_staging = region.is_staging();
         let expect_state = if is_staging {
@@ -846,6 +848,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
         let durability_barrier = self.wal.durability_barrier(region_id, &region.provider);
+        // Discarding unflushed data drops rows the region owned; the rows that stay
+        // keep their own numbers, so the action records no sequence boundary.
+        let commit_watermark = region.version_control.current().last_sequence;
 
         common_runtime::spawn_global(async move {
             // The frontier moves to the last written entry and sequence, so replaying the
@@ -858,7 +863,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 compaction_time_window: None,
                 flushed_entry_id: Some(discarded_entry_id),
                 flushed_sequence: Some(discarded_sequence),
-                committed_sequence: None,
+                committed_sequence: Some(discarded_sequence.max(commit_watermark)),
                 ..Default::default()
             };
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
@@ -1046,7 +1051,17 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
         };
     for file in &mut edit.files_to_add {
         file.sequence = existing_sequence(file).or(sequence);
-        file.preserve_row_sequence = false;
+        // The marker is judged by ownership. An adopted file's `region_id` belongs to
+        // another region, so its rows carry numbers this region never allocated and are
+        // attributed by the creator's cursor and the file's own `substituted_up_to` cut:
+        // its marker is cleared. A file this region already owned kept its bytes and its
+        // numbering, so it keeps the marker the caller states. A repartition's staging
+        // apply lands here as an edit too, and it must not clear the marker of a file
+        // that merely stays in this region: that would deny every later exact `(C, H]`
+        // read of the region (`read/scan_region.rs::exact_sequence_range`).
+        if file.region_id != region_id {
+            file.preserve_row_sequence = false;
+        }
     }
     Ok(())
 }

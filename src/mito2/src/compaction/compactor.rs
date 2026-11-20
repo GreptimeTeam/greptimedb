@@ -686,6 +686,29 @@ fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
     crate::sst::file::known_max_input_sequence(inputs.iter().map(FileHandle::meta_ref))
 }
 
+/// Computes the output's `substituted_up_to` bound from the inputs and their footer facts.
+///
+/// `legacy_overrides` reports, per input, whether the footer proves the `__sequence` column is
+/// all zero (`need_override_sequence`, from the compaction reader), or `None` when the input is
+/// gone (`compaction/reader.rs`). A gone input has no row in the output, so it contributes
+/// neither rows nor a substituted constant: taking its handle bound anyway would state a cut
+/// that hides live rows of the inputs that were merged.
+fn known_substituted_up_to(
+    region_id: RegionId,
+    inputs: &[FileHandle],
+    legacy_overrides: &[Option<bool>],
+) -> Option<SequenceNumber> {
+    crate::sst::file::substituted_up_to_after_merge(
+        region_id,
+        inputs
+            .iter()
+            .zip(legacy_overrides)
+            .filter_map(|(file, footer_all_zero)| {
+                footer_all_zero.map(|all_zero| (file.meta_ref(), all_zero))
+            }),
+    )
+}
+
 /// Whole-input summaries require a complete output without file rollover.
 fn can_reuse_output_inputs(output: &CompactionOutput, has_rollover: bool) -> bool {
     !has_rollover && output.output_time_range.is_none()
@@ -836,12 +859,20 @@ impl DefaultSstMerger {
                 .with_puffin_metadata_cache(context.cache_manager.puffin_metadata_cache().cloned()),
             can_merge_inputs,
         });
-        let source = tokio::select! {
+        let (reader, legacy_overrides) = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
-            source = builder.build_flat_sst_reader() => source?,
+            reader = builder.build_flat_sst_reader() => reader?,
         };
-        let source = spawn_merge(source);
+        let source = spawn_merge(reader);
+        // The reader substitutes a file-level constant for the rows of a foreign input and of a
+        // local untrusted input whose footer proves an all-zero column
+        // (`sst/parquet/reader.rs`), so the merged column may carry numbers this region never
+        // allocated up to that constant. `legacy_overrides` is that footer fact per input
+        // (`None` for an input that is gone, which contributes neither rows nor a constant);
+        // `substituted_up_to` also inherits the bound every input already carried.
+        let substituted_up_to =
+            known_substituted_up_to(region_id, &output.inputs, &legacy_overrides);
 
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = context.region_metadata.clone();
@@ -910,6 +941,7 @@ impl DefaultSstMerger {
                     primary_key_min,
                     primary_key_max,
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
+                    substituted_up_to,
                     format: sst_info.format.clone(),
                 })
             })
@@ -1669,6 +1701,55 @@ mod tests {
         assert_eq!(None, known_max_input_sequence(&[]));
     }
 
+    /// A gone input has no row in the output, so it states no substituted constant of its own:
+    /// its handle bound belongs to bytes the merge never read. Inheriting it would raise the
+    /// output's cut above live rows of the inputs that *were* merged, and a physical-sequence
+    /// read would then hide them for good.
+    #[test]
+    fn test_known_substituted_up_to_skips_gone_inputs() {
+        let target = RegionId::new(1, 1);
+        let foreign = new_file_handle(FileMeta {
+            region_id: RegionId::new(1, 2),
+            sequence: NonZeroU64::new(9),
+            preserve_row_sequence: true,
+            ..dummy_file_meta()
+        });
+        // The local input keeps its own numbers, so it states no constant itself.
+        let local = new_file_handle(FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(3),
+            preserve_row_sequence: true,
+            ..dummy_file_meta()
+        });
+        let inputs = [foreign, local];
+
+        // Both inputs present: the foreign one is substituted at its handle bound, which the
+        // handle does not write into the output, so the output has to state it.
+        assert_eq!(
+            Some(9),
+            known_substituted_up_to(target, &inputs, &[Some(false), Some(false)])
+        );
+        // The foreign input is gone: its rows never reach the output, so nothing is substituted
+        // and the output states no bound instead of the `9` that would hide the local row at 3.
+        assert_eq!(
+            None,
+            known_substituted_up_to(target, &inputs, &[None, Some(false)])
+        );
+        // An input that is present and carries an inherited bound still contributes it, so the
+        // skip above is about gone inputs and not about the legacy footer fact.
+        let inherited = new_file_handle(FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(3),
+            preserve_row_sequence: true,
+            substituted_up_to: Some(12),
+            ..dummy_file_meta()
+        });
+        assert_eq!(
+            Some(12),
+            known_substituted_up_to(target, &[inherited], &[Some(false)])
+        );
+    }
+
     #[tokio::test]
     async fn test_output_sequence_metadata_preserves_trust_and_unknown_bounds() {
         let mut region = new_test_compaction_region().await;
@@ -1902,7 +1983,7 @@ mod tests {
             } else {
                 deletes.clone()
             });
-            let mut reader = CompactionSstReaderBuilder {
+            let (mut reader, _) = CompactionSstReaderBuilder {
                 metadata: compaction_region.region_metadata.clone(),
                 sst_layer: region.access_layer.clone(),
                 cache: engine.cache_manager(),
@@ -2023,7 +2104,7 @@ mod tests {
             .unwrap();
         assert_eq!(1, files.len());
         let outputs: Vec<_> = files.into_iter().map(new_file_handle).collect();
-        let mut reader = CompactionSstReaderBuilder {
+        let (mut reader, _) = CompactionSstReaderBuilder {
             metadata: version.metadata.clone(),
             sst_layer: region.access_layer.clone(),
             cache: Arc::new(CacheManager::default()),

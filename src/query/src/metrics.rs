@@ -17,7 +17,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_recordbatch::adapter::{
+    ObservedPartitionExpr, RecordBatchMetrics, RegionWatermarkEntry, SubstitutedRange,
+    SubstitutedRowRanges,
+};
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::warn;
 use datafusion::physical_plan::ExecutionPlan;
@@ -32,18 +35,27 @@ use crate::dist_plan::MergeScanExec;
 use crate::error::Result;
 use crate::options::FlowQueryExtensions;
 
-/// Intermediate merge state for one participating region while collecting
-/// terminal correctness watermarks across merge-scan sub-stages.
+/// The key one terminal watermark statement is merged under: the region that
+/// allocated the sequences plus the identity of the partition expression the
+/// statement is about (`None` for the region's complete value domain).
+///
+/// Two statements about the same region but different expressions are statements
+/// about different value domains: a round that read one slice of a region says
+/// nothing about the other slices, so they must not be merged into one entry.
+type WatermarkKey = (u64, Option<String>);
+
+/// Intermediate merge state for one participating `(region, expression)` while
+/// collecting terminal correctness watermarks across merge-scan sub-stages.
 enum MergeState {
-    /// At least one branch reported that this region cannot prove a safe
+    /// At least one branch reported that this key cannot prove a safe
     /// checkpoint watermark for the current query round.
     Unproved,
-    /// All seen branches agree the region can advance safely to this sequence.
+    /// All seen branches agree the domain can advance safely to this sequence.
     Proved(u64),
-    /// Different proved sequences were reported for the same region. The final
+    /// Different proved sequences were reported for the same key. The final
     /// result is degraded to `None`, and the collected values are logged.
     Conflict {
-        /// Distinct proved watermark candidates reported for the region.
+        /// Distinct proved watermark candidates reported for the key.
         watermarks: Vec<u64>,
     },
 }
@@ -212,6 +224,16 @@ impl RecordBatchStream for RegionWatermarkMetricsStream {
         if !region_watermarks.is_empty() {
             metrics.region_watermarks = region_watermarks;
         }
+        // A region scan reports the rows it substituted (adopted files whose sequences a
+        // substitution produced) through its own stream metrics, which a merge-scan
+        // sub-stage keeps per region. Both sources are joined here so the caller sees one
+        // range set per region.
+        let substituted_row_ranges = collect_substituted_row_ranges(self.plan.clone(), &metrics);
+        metrics.substituted_row_ranges = substituted_row_ranges;
+        // Which `(region, partition expression)` pairs the regions actually read travel with
+        // the same result: the owner of a `(region, slice)` cursor splits and advances its
+        // entries by exactly what this round observed.
+        metrics.observed_slices = collect_observed_slices(self.plan.clone(), &metrics);
         Some(metrics)
     }
 }
@@ -252,12 +274,20 @@ pub fn maybe_attach_region_watermark_metrics(
 pub fn terminal_recordbatch_metrics_from_plan(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Option<RecordBatchMetrics> {
-    let region_watermarks = collect_region_watermarks(plan);
-    if region_watermarks.is_empty() {
+    let region_watermarks = collect_region_watermarks(plan.clone());
+    let own = RecordBatchMetrics::default();
+    let substituted_row_ranges = collect_substituted_row_ranges(plan.clone(), &own);
+    let observed_slices = collect_observed_slices(plan, &own);
+    if region_watermarks.is_empty()
+        && substituted_row_ranges.is_empty()
+        && observed_slices.is_empty()
+    {
         None
     } else {
         Some(RecordBatchMetrics {
             region_watermarks,
+            substituted_row_ranges,
+            observed_slices,
             ..Default::default()
         })
     }
@@ -275,8 +305,10 @@ pub fn terminal_recordbatch_metrics_from_plan_if_requested(
     }
 }
 
+/// Collects the proved terminal watermarks of `plan`, one entry per
+/// `(region, partition expression)` the plan's scans stated.
 fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermarkEntry> {
-    let mut merged = BTreeMap::<u64, MergeState>::new();
+    let mut merged = BTreeMap::<WatermarkKey, MergeState>::new();
     let mut stack = vec![plan];
 
     while let Some(plan) = stack.pop() {
@@ -298,7 +330,91 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
     finalize_region_watermarks(merged)
 }
 
-/// Merge a batch of per-region watermark entries into the global merged state.
+/// Collects the time ranges of the rows the plan's region scans substituted.
+///
+/// `own` carries the ranges of the stream that already reported them (a local region
+/// scan in standalone mode), and every merge-scan sub-stage contributes the ranges of
+/// its own regions. Ranges are unioned per region, so a row substituted by two branches
+/// is reported once.
+fn collect_substituted_row_ranges(
+    plan: Arc<dyn ExecutionPlan>,
+    own: &RecordBatchMetrics,
+) -> Vec<SubstitutedRowRanges> {
+    let mut merged = BTreeMap::<u64, BTreeSet<(i64, i64)>>::new();
+    let mut merge = |entries: Vec<SubstitutedRowRanges>| {
+        for entry in entries {
+            let ranges = merged.entry(entry.region_id).or_default();
+            ranges.extend(
+                entry
+                    .ranges
+                    .into_iter()
+                    .map(|range| (range.start_millis, range.end_millis)),
+            );
+        }
+    };
+    merge(own.substituted_row_ranges.clone());
+
+    let mut stack = vec![plan];
+    while let Some(plan) = stack.pop() {
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
+            && !merge_scan.is_flow_sink_scan()
+        {
+            for metrics in merge_scan.sub_stage_metrics() {
+                merge(metrics.substituted_row_ranges);
+            }
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    merged
+        .into_iter()
+        .map(|(region_id, ranges)| SubstitutedRowRanges {
+            region_id,
+            ranges: ranges
+                .into_iter()
+                .map(|(start_millis, end_millis)| SubstitutedRange {
+                    start_millis,
+                    end_millis,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Collects the `(region, partition expression)` pairs the plan's region scans read.
+///
+/// `own` carries the slices of the stream that already reported them (a local region scan
+/// in standalone mode), and every merge-scan sub-stage contributes the slices of its own
+/// regions. A slice reported by two branches is one slice, because it states what was read,
+/// not how often.
+fn collect_observed_slices(
+    plan: Arc<dyn ExecutionPlan>,
+    own: &RecordBatchMetrics,
+) -> Vec<ObservedPartitionExpr> {
+    let mut merged = BTreeSet::new();
+    merged.extend(own.observed_slices.iter().cloned());
+
+    let mut stack = vec![plan];
+    while let Some(plan) = stack.pop() {
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
+            && !merge_scan.is_flow_sink_scan()
+        {
+            for metrics in merge_scan.sub_stage_metrics() {
+                merged.extend(metrics.observed_slices);
+            }
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    merged.into_iter().collect()
+}
+
+/// Merge a batch of watermark entries into the global merged state.
+///
+/// Entries are merged per `(region, partition expression)` ([`WatermarkKey`]): an
+/// entry about one expression slice of a region is a statement about that slice only,
+/// and letting it share a key with the region's whole-domain entry would either
+/// advance a slice the round never read or forget that the region was opened.
 ///
 /// # Merge strategy: correctness over maximum
 ///
@@ -316,13 +432,18 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
 /// checkpoint past rows that a competing MergeScan sub-stage has not yet
 /// scanned, causing Flow to skip data.
 fn merge_region_watermark_entries(
-    merged: &mut BTreeMap<u64, MergeState>,
+    merged: &mut BTreeMap<WatermarkKey, MergeState>,
     entries: impl IntoIterator<Item = RegionWatermarkEntry>,
 ) {
     for entry in entries {
+        let RegionWatermarkEntry {
+            region_id,
+            partition_expr,
+            watermark,
+        } = entry;
         merged
-            .entry(entry.region_id)
-            .and_modify(|existing| match entry.watermark {
+            .entry((region_id, partition_expr))
+            .and_modify(|existing| match watermark {
                 None => match existing {
                     MergeState::Proved(_) => {
                         *existing = MergeState::Unproved;
@@ -345,7 +466,7 @@ fn merge_region_watermark_entries(
                     }
                 },
             })
-            .or_insert(match entry.watermark {
+            .or_insert(match watermark {
                 Some(seq) => MergeState::Proved(seq),
                 None => MergeState::Unproved,
             });
@@ -353,7 +474,7 @@ fn merge_region_watermark_entries(
 }
 
 fn merge_merge_scan_region_watermarks(
-    merged: &mut BTreeMap<u64, MergeState>,
+    merged: &mut BTreeMap<WatermarkKey, MergeState>,
     regions: impl IntoIterator<Item = u64>,
     sub_stage_metrics: impl IntoIterator<Item = RecordBatchMetrics>,
 ) {
@@ -372,7 +493,9 @@ fn merge_merge_scan_region_watermarks(
     // Regions listed by a MergeScanExec participated even when no sub-stage can
     // prove a watermark. Merge missing per-scan region entries as explicit
     // `None` entries so an unproved participating branch vetoes any proof from
-    // another branch for the same region.
+    // another branch for the same region. Participation is stated for the region
+    // as a whole — no sub-stage said anything about one expression of it — so the
+    // missing entry is the region-wide one.
     merge_region_watermark_entries(
         merged,
         regions
@@ -380,27 +503,31 @@ fn merge_merge_scan_region_watermarks(
             .filter(|region_id| !proved_or_unproved_regions.contains(region_id))
             .map(|region_id| RegionWatermarkEntry {
                 region_id,
+                partition_expr: None,
                 watermark: None,
             }),
     );
 }
 
-fn finalize_region_watermarks(merged: BTreeMap<u64, MergeState>) -> Vec<RegionWatermarkEntry> {
+fn finalize_region_watermarks(
+    merged: BTreeMap<WatermarkKey, MergeState>,
+) -> Vec<RegionWatermarkEntry> {
     merged
         .into_iter()
-        .map(|(region_id, state)| RegionWatermarkEntry {
+        .map(|((region_id, partition_expr), state)| RegionWatermarkEntry {
             region_id,
             watermark: match state {
                 MergeState::Unproved => None,
                 MergeState::Proved(seq) => Some(seq),
                 MergeState::Conflict { watermarks } => {
                     warn!(
-                        "Conflicting proved watermarks for region {}: {:?}; degrading to unproved",
-                        region_id, watermarks
+                        "Conflicting proved watermarks for region {} expression {:?}: {:?}; degrading to unproved",
+                        region_id, partition_expr, watermarks
                     );
                     None
                 }
             },
+            partition_expr,
         })
         .collect()
 }
@@ -471,8 +598,27 @@ mod tests {
                 .iter()
                 .map(|(region_id, watermark)| RegionWatermarkEntry {
                     region_id: *region_id,
+                    partition_expr: None,
                     watermark: *watermark,
                 })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn metrics_with_expression_watermarks(
+        entries: &[(u64, Option<&str>, Option<u64>)],
+    ) -> RecordBatchMetrics {
+        RecordBatchMetrics {
+            region_watermarks: entries
+                .iter()
+                .map(
+                    |(region_id, partition_expr, watermark)| RegionWatermarkEntry {
+                        region_id: *region_id,
+                        partition_expr: partition_expr.map(|expr| expr.to_string()),
+                        watermark: *watermark,
+                    },
+                )
                 .collect(),
             ..Default::default()
         }
@@ -534,6 +680,7 @@ mod tests {
                 .region_watermarks,
             vec![RegionWatermarkEntry {
                 region_id: RegionId::new(43, 0).as_u64(),
+                partition_expr: None,
                 watermark: None,
             }]
         );
@@ -550,10 +697,12 @@ mod tests {
             vec![
                 RegionWatermarkEntry {
                     region_id: 1,
+                    partition_expr: None,
                     watermark: None,
                 },
                 RegionWatermarkEntry {
                     region_id: 2,
+                    partition_expr: None,
                     watermark: None,
                 },
             ]
@@ -577,7 +726,73 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 42,
+                partition_expr: None,
                 watermark: Some(7),
+            }]
+        );
+    }
+
+    /// A statement about one partition expression of a region and a statement about the
+    /// region's complete value domain are statements about different domains: merging
+    /// them into one key would either advance a slice the round never read or forget
+    /// that the whole region was opened.
+    #[test]
+    fn merge_merge_scan_region_watermarks_keys_by_region_and_expression() {
+        let mut merged = BTreeMap::new();
+
+        merge_merge_scan_region_watermarks(
+            &mut merged,
+            [42],
+            [
+                metrics_with_expression_watermarks(&[(42, None, Some(9))]),
+                metrics_with_expression_watermarks(&[(42, Some("k0 < 10"), Some(5))]),
+                metrics_with_expression_watermarks(&[(42, Some("k0 >= 10"), Some(7))]),
+            ],
+        );
+
+        assert_eq!(
+            finalize_region_watermarks(merged),
+            vec![
+                RegionWatermarkEntry {
+                    region_id: 42,
+                    partition_expr: None,
+                    watermark: Some(9),
+                },
+                RegionWatermarkEntry {
+                    region_id: 42,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: Some(5),
+                },
+                RegionWatermarkEntry {
+                    region_id: 42,
+                    partition_expr: Some("k0 >= 10".to_string()),
+                    watermark: Some(7),
+                },
+            ]
+        );
+    }
+
+    /// The conflict rule still applies to one and the same expression.
+    #[test]
+    fn merge_merge_scan_region_watermarks_degrades_conflicting_expression_entries() {
+        let mut merged = BTreeMap::new();
+
+        merge_merge_scan_region_watermarks(
+            &mut merged,
+            [42],
+            [
+                metrics_with_expression_watermarks(&[(42, Some("k0 < 10"), Some(5))]),
+                metrics_with_expression_watermarks(&[(42, Some("k0 < 10"), Some(6))]),
+                metrics_with_expression_watermarks(&[(42, Some("k0 < 10"), None)]),
+            ],
+        );
+
+        assert_eq!(
+            finalize_region_watermarks(merged),
+            vec![RegionWatermarkEntry {
+                region_id: 42,
+                partition_expr: Some("k0 < 10".to_string()),
+                watermark: None,
             }]
         );
     }
@@ -599,6 +814,7 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 7,
+                partition_expr: None,
                 watermark: None,
             }]
         );
@@ -621,6 +837,7 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 9,
+                partition_expr: None,
                 watermark: None,
             }]
         );
@@ -643,6 +860,7 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 9,
+                partition_expr: None,
                 watermark: None,
             }]
         );
@@ -663,6 +881,7 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 9,
+                partition_expr: None,
                 watermark: None,
             }]
         );
@@ -683,6 +902,7 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 9,
+                partition_expr: None,
                 watermark: None,
             }]
         );

@@ -1169,6 +1169,11 @@ pub(crate) enum BackgroundNotify {
         /// The reloaded instance.
         result: Result<MitoRegionRef>,
     },
+    /// The staging edit of a region landed: open the publish window in the worker loop
+    /// and publish the staged layout in the background.
+    ExitStaging(ExitStagingRequest),
+    /// A publish window that queued ordinary writes was released: admit them again.
+    EditingWindowClosed,
     /// The region became writable and may have pending tails to replay.
     RegionBecameWritable,
     /// A role change left the region unable to replay its tails (see
@@ -1204,6 +1209,13 @@ pub(crate) enum BackgroundNotify {
     },
 }
 
+/// Notifies that the staged layout of a region must be published.
+#[derive(Debug)]
+pub(crate) struct ExitStagingRequest {
+    pub(crate) region_id: RegionId,
+    pub(crate) sender: OptionOutputTx,
+}
+
 impl BackgroundNotify {
     /// Whether the worker dispatches pending requests after handling this notification.
     ///
@@ -1235,6 +1247,11 @@ impl BackgroundNotify {
             | Self::CopyRegionFromFinished(_)
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
+            // The publish window opens and publishes in the background; the writes it
+            // queues are admitted by the `EditingWindowClosed` it sends when it ends.
+            | Self::ExitStaging(_)
+            // Admits the queued writes itself, then dispatches.
+            | Self::EditingWindowClosed
             | Self::RegionBecameWritable
             | Self::RegionCannotReplay { .. }
             | Self::TailReplayCommitted { .. }

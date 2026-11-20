@@ -59,8 +59,8 @@ use crate::cache::{
     prepare_sst_meta,
 };
 use crate::error::{
-    ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result, SerializePartitionExprSnafu,
-    UnexpectedSnafu,
+    InvalidPartitionExprSnafu, ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result,
+    SerializePartitionExprSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::prune::FlatPruneReader;
@@ -77,7 +77,8 @@ use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
 use crate::sst::parquet::file_range::{
-    FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
+    CreatorSliceCursors, CreatorSliceFilter, FileRangeContext, FileRangeContextRef,
+    PartitionFilterContext, PreFilterMode, RangeBase,
 };
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
@@ -215,6 +216,21 @@ pub struct ParquetReaderBuilder {
     expected_metadata: Option<RegionMetadataRef>,
     /// Whether this reader is for compaction.
     compaction: bool,
+    /// Force every row's sequence to the file's admission barrier, whatever the
+    /// file's own sequence column and trust markers say.
+    ///
+    /// Used only by Flow recovery window discovery, which needs the timestamps of
+    /// the rows a harness cannot trust row by row; ordinary reads leave it `false`
+    /// and keep the foreign/legacy conditional override.
+    force_sequence_override: bool,
+    /// Keep the physical `__sequence` column of a foreign file instead of virtualizing
+    /// it at the handle's barrier.
+    ///
+    /// Used only by Flow's incremental read with `ScanRequest::read_row_sequence`,
+    /// which then hides the rows at or below the file's substituted cut. Every other
+    /// reader leaves it `false`: compaction and ordinary queries depend on the
+    /// substitution.
+    read_row_sequence: bool,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
     /// Whether to run the reduced-column predicate prefilter pass.
@@ -223,6 +239,13 @@ pub struct ParquetReaderBuilder {
     postpone_time_index_filter: bool,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
+    /// Candidate creator-cursor slices of a physical-sequence read of an adopted file:
+    /// `(partition expression identity, last consumed sequence)` pairs
+    /// ([`ScanRequest::creator_cursor_shards`](store_api::storage::ScanRequest)).
+    ///
+    /// The scan side has already dropped the slices whose expression cannot hold rows of
+    /// this file. Every reader but that one leaves it `None`.
+    creator_slice_cursors: Option<CreatorSliceCursors>,
     page_index_policy: PageIndexPolicy,
     defer_optional_page_index: bool,
     /// Scan-wide hint for rows in a decoded batch.
@@ -261,10 +284,13 @@ impl ParquetReaderBuilder {
             fulltext_index_appliers: [None, None],
             expected_metadata: None,
             compaction: false,
+            force_sequence_override: false,
+            read_row_sequence: false,
             pre_filter_mode: PreFilterMode::All,
             enable_predicate_prefilter: true,
             postpone_time_index_filter: false,
             decode_primary_key_values: false,
+            creator_slice_cursors: None,
             page_index_policy: Default::default(),
             defer_optional_page_index: false,
             batch_size: DEFAULT_READ_BATCH_SIZE,
@@ -356,6 +382,41 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
+        self
+    }
+
+    /// Forces the row-level sequence override to the file's admission barrier.
+    ///
+    /// Only Flow recovery window discovery sets this: it needs the timestamps of
+    /// every selected file's rows and must not depend on the file's sequence column
+    /// or on its trust markers.
+    #[must_use]
+    pub fn force_sequence_override(mut self, force_sequence_override: bool) -> Self {
+        self.force_sequence_override = force_sequence_override;
+        self
+    }
+
+    /// Sets the candidate creator-cursor slices of a physical-sequence read of an adopted
+    /// file: `(partition expression identity, last consumed sequence)` pairs.
+    ///
+    /// The reader compiles each identity into a row filter and keeps a row only when its
+    /// own sequence is above the cursor of the slice whose expression selects it
+    /// (`PartitionFilterContext::creator_slices`), so the file's rows are split by the
+    /// domain they belong to instead of by one bound for the whole file.
+    #[must_use]
+    pub(crate) fn creator_slice_cursors(mut self, cursors: Option<CreatorSliceCursors>) -> Self {
+        self.creator_slice_cursors = cursors;
+        self
+    }
+
+    /// Reads the physical `__sequence` of a foreign file instead of substituting the
+    /// handle's barrier for every row.
+    ///
+    /// Only Flow's incremental read sets this; the caller hides the rows a
+    /// substitution produced (see `ScanRequest::read_row_sequence`).
+    #[must_use]
+    pub(crate) fn read_row_sequence(mut self, read_row_sequence: bool) -> Self {
+        self.read_row_sequence = read_row_sequence;
         self
     }
 
@@ -515,7 +576,19 @@ impl ParquetReaderBuilder {
             );
         }
         let file_meta = self.file_handle.meta_ref();
-        let override_sequence = if is_foreign {
+        let override_sequence = if self.force_sequence_override {
+            // Recovery discovery: virtualize every row at the file's own admission
+            // barrier. The rows may carry a foreign or legacy sequence column, and
+            // discovery only needs their timestamps, so the barrier is the only
+            // sequence that can be trusted.
+            file_meta.sequence.map(|sequence| sequence.get())
+        } else if self.read_row_sequence && is_foreign {
+            // A physical-sequence read keeps an adopted file's own column instead of the
+            // substitution below. `preserve_row_sequence` takes no part: an import only
+            // re-marks the handle and copies the bytes, and the file's own
+            // `substituted_up_to` cut is what states a substitution.
+            None
+        } else if is_foreign {
             file_meta.sequence.map(|sequence| sequence.get())
         } else if file_meta.preserve_row_sequence {
             None
@@ -717,6 +790,10 @@ impl ParquetReaderBuilder {
     /// precise filtering gathers these columns temporarily before compatibility.
     /// Compare partition expressions from expected metadata and file metadata,
     /// and build a partition filter if they differ.
+    ///
+    /// It also compiles the candidate creator-cursor slices of a physical-sequence read
+    /// (`Self::creator_slice_cursors`) into row filters: both are per-row expressions over
+    /// the same minimal schema, so one projection of the batch serves all of them.
     fn build_partition_filter(
         &self,
         read_format: &FlatReadFormat,
@@ -731,17 +808,45 @@ impl ParquetReaderBuilder {
         let (region_partition_expr, is_same_region_partition) =
             Self::is_same_region_partition(region_partition_expr_str, file_partition_expr_ref)?;
 
-        if is_same_region_partition {
+        // A file stating this region's own expression holds only this region's rows, so it
+        // needs no region filter; the creator slices below are independent of that.
+        let region_partition_expr = if is_same_region_partition {
+            None
+        } else {
+            region_partition_expr
+        };
+
+        let slice_cursors = self
+            .creator_slice_cursors
+            .as_deref()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if region_partition_expr.is_none() && slice_cursors.is_empty() {
             return Ok(None);
         }
 
-        let Some(region_partition_expr) = region_partition_expr else {
-            return Ok(None);
-        };
-
-        // Collect columns referenced by the partition expression.
+        // Collect columns referenced by every expression this context evaluates.
         let mut referenced_columns = HashSet::new();
-        region_partition_expr.collect_column_names(&mut referenced_columns);
+        if let Some(expr) = &region_partition_expr {
+            expr.collect_column_names(&mut referenced_columns);
+        }
+        let mut creator_slices = Vec::with_capacity(slice_cursors.len());
+        for (identity, cursor) in slice_cursors {
+            let Some(expr) = PartitionExpr::from_json_str(identity)
+                .context(InvalidPartitionExprSnafu { expr: identity })?
+            else {
+                // An identity this build cannot read back cannot be evaluated, and
+                // approximating it would decide a row's domain by guesswork: leave the
+                // whole context out so the caller keeps the conservative file-level bound.
+                debug!(
+                    "Cannot read back creator cursor slice expression {}; falling back to the file-level bound",
+                    identity
+                );
+                return Ok(None);
+            };
+            expr.collect_column_names(&mut referenced_columns);
+            creator_slices.push((expr, *cursor));
+        }
 
         // Build a partition_schema containing only referenced columns.
         let partition_schema = Arc::new(datatypes::schema::Schema::new(
@@ -772,12 +877,28 @@ impl ParquetReaderBuilder {
         ));
 
         let region_partition_physical_expr = region_partition_expr
-            .try_as_physical_expr(partition_schema.arrow_schema())
+            .map(|expr| expr.try_as_physical_expr(partition_schema.arrow_schema()))
+            .transpose()
             .context(SerializePartitionExprSnafu)?;
+        let creator_slices = creator_slices
+            .into_iter()
+            .map(|(expr, cursor)| {
+                Ok(CreatorSliceFilter {
+                    filter: expr
+                        .try_as_physical_expr(partition_schema.arrow_schema())
+                        .context(SerializePartitionExprSnafu)?,
+                    cursor,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let fallback_cursor = creator_slices.iter().map(|slice| slice.cursor).min();
 
         Ok(Some(PartitionFilterContext {
             region_partition_physical_expr,
             partition_schema,
+            creator_slices,
+            fallback_cursor,
+            substituted_cut: self.file_handle.meta_ref().substituted_up_to,
         }))
     }
 

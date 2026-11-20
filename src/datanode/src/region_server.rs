@@ -1029,11 +1029,18 @@ impl RegionWatermarkStream {
     }
 
     fn merged_metrics(&self, mut metrics: RecordBatchMetrics) -> RecordBatchMetrics {
-        if metrics
+        // Opening the region at `snapshot_seq` bounds the region's **complete** value
+        // domain, so this statement is region-wide (`partition_expr: None`) and is a
+        // duplicate only of another region-wide statement of the same region. An entry
+        // about one partition expression says something narrower: dropping this one for
+        // it would forget that the whole region was opened, and dropping that one for
+        // this one would claim a slice nobody read. Both are kept, and the merge that
+        // follows keys them apart.
+        let duplicate = metrics
             .region_watermarks
             .iter()
-            .any(|entry| entry.region_id == self.region_id)
-        {
+            .any(|entry| entry.region_id == self.region_id && entry.partition_expr.is_none());
+        if duplicate {
             return metrics;
         }
 
@@ -1041,6 +1048,7 @@ impl RegionWatermarkStream {
             .region_watermarks
             .push(common_recordbatch::adapter::RegionWatermarkEntry {
                 region_id: self.region_id,
+                partition_expr: None,
                 watermark: Some(self.snapshot_seq),
             });
         metrics
@@ -2559,6 +2567,7 @@ mod tests {
             metrics.region_watermarks,
             vec![RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
+                partition_expr: None,
                 watermark: Some(99),
             }]
         );
@@ -2582,6 +2591,7 @@ mod tests {
         let metrics = RecordBatchMetrics {
             region_watermarks: vec![RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
+                partition_expr: None,
                 watermark: None,
             }],
             ..Default::default()
@@ -2592,9 +2602,57 @@ mod tests {
             merged.region_watermarks,
             vec![RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
+                partition_expr: None,
                 watermark: None,
             }]
         );
+    }
+
+    #[test]
+    fn test_region_watermark_stream_keeps_expression_entries_of_the_same_region() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([1]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
+        let region_id = RegionId::new(42, 7);
+        let wrapped = RegionWatermarkStream::new(stream, region_id, 99);
+        let slice_metrics = RecordBatchMetrics {
+            region_watermarks: vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                watermark: Some(5),
+            }],
+            ..Default::default()
+        };
+
+        let merged = wrapped.merged_metrics(slice_metrics);
+        assert_eq!(
+            merged.region_watermarks,
+            vec![
+                RegionWatermarkEntry {
+                    region_id: region_id.as_u64(),
+                    partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                    watermark: Some(5),
+                },
+                RegionWatermarkEntry {
+                    region_id: region_id.as_u64(),
+                    partition_expr: None,
+                    watermark: Some(99),
+                },
+            ],
+            "the region-wide statement must not be dropped for a narrower one"
+        );
+
+        // A second region-wide statement of the same region is the duplicate to skip.
+        let merged_again = wrapped.merged_metrics(merged);
+        assert_eq!(2, merged_again.region_watermarks.len());
     }
 
     #[tokio::test]
@@ -2620,6 +2678,7 @@ mod tests {
             metrics.region_watermarks,
             vec![RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
+                partition_expr: None,
                 watermark: Some(99),
             }]
         );

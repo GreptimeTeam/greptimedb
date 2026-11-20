@@ -240,6 +240,16 @@ impl RemapManifest {
             }
         );
 
+        // The substituted cut describes the bytes, so the same physical file reached through
+        // two overlapping source regions must state the same one.
+        ensure!(
+            existing.substituted_up_to == new.substituted_up_to,
+            error::InconsistentFileSnafu {
+                file_id: existing.file_id,
+                reason: "substituted_up_to mismatch",
+            }
+        );
+
         Ok(())
     }
 
@@ -253,6 +263,7 @@ impl RemapManifest {
                 manifest.truncated_entry_id = previous_manifest.truncated_entry_id;
                 manifest.compaction_time_window = previous_manifest.compaction_time_window;
                 manifest.committed_sequence = previous_manifest.committed_sequence;
+                // Never regress a boundary recorded on the kept region.
             } else {
                 // new region
                 manifest.flushed_entry_id = 0;

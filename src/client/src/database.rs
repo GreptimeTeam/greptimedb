@@ -181,16 +181,26 @@ impl OutputMetrics {
 
     /// Returns proved per-region watermarks.
     ///
-    /// Entries whose watermark is `None` are intentionally omitted because they
-    /// represent participating regions whose terminal sequence bound was not
-    /// provable.
+    /// The terminal metrics state one entry per `(region, partition expression)`. A
+    /// region-keyed consumer cannot claim a sequence that one of the region's expressions
+    /// has not reached, so a region is omitted when **any** of its entries is unproved
+    /// (that entry represents a participating domain whose terminal sequence bound was not
+    /// provable) and otherwise reports the *minimum* over its entries. With the region-wide
+    /// entries a pre-expression producer writes, that minimum is exactly its one value.
     pub fn region_watermark_map(&self) -> Option<std::collections::HashMap<u64, u64>> {
+        let mut regions: std::collections::HashMap<u64, Option<u64>> = Default::default();
+        for entry in self.get()?.region_watermarks {
+            let slot = regions.entry(entry.region_id).or_insert(entry.watermark);
+            *slot = match (*slot, entry.watermark) {
+                (Some(current), Some(seq)) => Some(current.min(seq)),
+                _ => None,
+            };
+        }
         Some(
-            self.get()?
-                .region_watermarks
+            regions
                 .into_iter()
-                .filter_map(|entry| entry.watermark.map(|seq| (entry.region_id, seq)))
-                .collect::<std::collections::HashMap<_, _>>(),
+                .filter_map(|(region_id, watermark)| watermark.map(|seq| (region_id, seq)))
+                .collect(),
         )
     }
 
@@ -1089,6 +1099,8 @@ mod tests {
     use tonic::metadata::MetadataMap;
     use tonic::{Code, Status};
 
+    use common_recordbatch::adapter::RegionWatermarkEntry;
+
     use super::*;
     use crate::error::TonicSnafu;
 
@@ -1136,6 +1148,7 @@ mod tests {
         serde_json::to_string(&RecordBatchMetrics {
             region_watermarks: vec![common_recordbatch::adapter::RegionWatermarkEntry {
                 region_id: 7,
+                partition_expr: None,
                 watermark: Some(seq),
             }],
             ..Default::default()
@@ -1367,6 +1380,7 @@ mod tests {
             metrics: RecordBatchMetrics {
                 region_watermarks: vec![common_recordbatch::adapter::RegionWatermarkEntry {
                     region_id: 7,
+                    partition_expr: None,
                     watermark: Some(42),
                 }],
                 ..Default::default()
@@ -1695,6 +1709,57 @@ mod tests {
         assert_eq!(
             terminal_metrics.region_watermark_map(),
             Some(std::collections::HashMap::from([(7, 2)]))
+        );
+    }
+
+    #[test]
+    fn test_region_watermark_map_projects_expression_entries_conservatively() {
+        let metrics = OutputMetrics::default();
+        metrics.update(Some(RecordBatchMetrics {
+            region_watermarks: vec![
+                // One region, two expressions: the region may only advance to the least
+                // advanced of them.
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: Some(9),
+                },
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: Some("k0 >= 10".to_string()),
+                    watermark: Some(4),
+                },
+                // One unproved expression omits the whole region.
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: Some(7),
+                },
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: Some("k0 >= 10".to_string()),
+                    watermark: None,
+                },
+                // A region-wide entry keeps its single value.
+                RegionWatermarkEntry {
+                    region_id: 3,
+                    partition_expr: None,
+                    watermark: Some(5),
+                },
+            ],
+            ..Default::default()
+        }));
+
+        assert_eq!(
+            metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([
+                (1_u64, 4_u64),
+                (3_u64, 5_u64)
+            ]))
+        );
+        assert_eq!(
+            metrics.participating_regions(),
+            Some(std::collections::BTreeSet::from([1_u64, 2, 3]))
         );
     }
 

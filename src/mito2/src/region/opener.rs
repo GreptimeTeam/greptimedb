@@ -716,18 +716,20 @@ impl RegionOpener {
             }
         };
 
-        if let Some(committed_in_manifest) = manifest.committed_sequence {
-            let committed_after_replay = version_control.committed_sequence();
-            if committed_in_manifest > committed_after_replay {
-                info!(
-                    "Overriding committed sequence, region: {}, flushed_sequence: {}, committed_sequence: {} -> {}",
-                    self.region_id,
-                    version_control.current().version.flushed_sequence,
-                    version_control.committed_sequence(),
-                    committed_in_manifest
-                );
-                version_control.set_committed_sequence(committed_in_manifest);
-            }
+        // Recovery reports the commit watermark the manifest recorded. The flushed
+        // frontier itself keeps the value the WAL and the manifest name; only the commit
+        // watermark (and through it `last_sequence`) is raised when the manifest is ahead.
+        let recovered_committed = manifest.committed_sequence.unwrap_or_default();
+        let committed_after_replay = version_control.committed_sequence();
+        if recovered_committed > committed_after_replay {
+            info!(
+                "Overriding committed sequence, region: {}, flushed_sequence: {}, committed_sequence: {} -> {}",
+                self.region_id,
+                version_control.current().version.flushed_sequence,
+                committed_after_replay,
+                recovered_committed
+            );
+            version_control.set_committed_sequence(recovered_committed);
         }
 
         let now = self.time_provider.current_time_millis();
