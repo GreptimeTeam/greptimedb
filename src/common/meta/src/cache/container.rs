@@ -90,7 +90,7 @@ impl<K, V, CacheToken> CacheContainer<K, V, CacheToken>
 where
     K: Clone + Hash + Eq + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
-    CacheToken: Send + Sync + 'static,
+    CacheToken: Send + Sync,
 {
     /// Coordinates misses and targeted invalidation through Moka's per-key compute lock.
     /// Invalidation can wait for a backend read. An overlapping reader may return its
@@ -671,7 +671,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invalidate() {
+    async fn test_invalidate_with_borrowed_keys() {
+        let foo = String::from("foo");
+        let bar = String::from("bar");
         let cache = Cache::new(128);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
@@ -679,16 +681,14 @@ mod tests {
             moved_counter.fetch_add(1, Ordering::Relaxed);
             Box::pin(async { Ok(Some("hi".to_string())) })
         });
-        let cache = CacheContainer::new("test".to_string(), cache, init, |key| Some(key));
+        let cache =
+            CacheContainer::new("test".to_string(), cache, init, |key: &&String| Some(*key));
         let value = cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         let value = cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 1);
-        cache
-            .invalidate(&["foo".to_string(), "bar".to_string()])
-            .await
-            .unwrap();
+        cache.invalidate(&[&foo, &bar]).await.unwrap();
         let value = cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 2);
