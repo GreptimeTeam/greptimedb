@@ -30,7 +30,7 @@ use arrow::compute::{cast, take};
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::downcast_dictionary_array;
 use arrow::record_batch::RecordBatch;
-use common_datasource::object_store::build_backend_for_write;
+use common_datasource::object_store::{LocalFileAccess, build_backend_for_write};
 use common_datasource::packed_writer::{PackedTableWriter, PackedWriterRef};
 use common_datasource::parquet_writer::{
     ParquetCreationPolicy, ParquetFileWriter, ParquetWriterLimits,
@@ -352,13 +352,12 @@ impl StatementExecutor {
         packed: Option<PackedWriterRef>,
     ) -> Result<LogicalTableExportSummary> {
         limits.validate()?;
-        let (store, stream) = tokio::select! {
+        let (destination, stream) = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return error::LogicalTableExportCancelledSnafu.fail(),
             result = async {
                 unit.validate_table_routes(self.table_metadata_manager.table_route_manager()).await?;
-                let store = build_backend_for_write(&format!("{}/", directory.trim_end_matches('/')), connection, &self.local_file_access)
-                    .await.context(error::BuildBackendSnafu)?;
+                let destination = LogicalExportDestination::new(directory, connection, &self.local_file_access, packed).await?;
                 let output = self.query_engine.execute(unit.build_plan(time_range)?, query_ctx)
                     .await.context(error::ExecLogicalPlanSnafu)?;
                 let stream = match output.data {
@@ -366,10 +365,37 @@ impl StatementExecutor {
                     OutputData::RecordBatches(batches) => batches.as_stream(),
                     _ => return error::UnexpectedSnafu { violated: "expected physical query rows" }.fail(),
                 };
-                Ok((store, stream))
+                Ok((destination, stream))
             } => result?,
         };
-        export_stream_managed(unit, stream, &store, limits, cancellation, budget, packed).await
+        export_stream_managed(unit, stream, destination, limits, cancellation, budget).await
+    }
+}
+
+/// Uses a per-unit backend for files or the request-owned packed destination.
+pub(crate) enum LogicalExportDestination {
+    Object(ObjectStore),
+    Packed(PackedWriterRef),
+}
+
+impl LogicalExportDestination {
+    async fn new(
+        directory: &str,
+        connection: &HashMap<String, String>,
+        local_file_access: &LocalFileAccess,
+        packed: Option<PackedWriterRef>,
+    ) -> Result<Self> {
+        if let Some(packed) = packed {
+            return Ok(Self::Packed(packed));
+        }
+        let store = build_backend_for_write(
+            &format!("{}/", directory.trim_end_matches('/')),
+            connection,
+            local_file_access,
+        )
+        .await
+        .context(error::BuildBackendSnafu)?;
+        Ok(Self::Object(store))
     }
 }
 
@@ -384,11 +410,10 @@ async fn export_stream(
     export_stream_managed(
         unit,
         stream,
-        store,
+        LogicalExportDestination::Object(store.clone()),
         limits,
         &cancellation.child_token(),
         ExportWriteBudget::new(1),
-        None,
     )
     .await
 }
@@ -396,18 +421,16 @@ async fn export_stream(
 async fn export_stream_managed(
     unit: &LogicalTableExport,
     stream: SendableRecordBatchStream,
-    store: &ObjectStore,
+    destination: LogicalExportDestination,
     limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
     budget: Arc<ExportWriteBudget>,
-    packed: Option<PackedWriterRef>,
 ) -> Result<LogicalTableExportSummary> {
     let mut writers = TableWriters::new(budget.clone());
-    writers.packed = packed;
     let result = write_tables(
         unit,
         stream,
-        store,
+        &destination,
         limits,
         cancellation,
         &mut writers,
@@ -433,7 +456,7 @@ fn check_cancelled(cancellation: &CancellationToken) -> Result<()> {
 async fn write_tables(
     unit: &LogicalTableExport,
     mut stream: SendableRecordBatchStream,
-    store: &ObjectStore,
+    destination: &LogicalExportDestination,
     limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
     writers: &mut TableWriters,
@@ -501,7 +524,9 @@ async fn write_tables(
             check_cancelled(cancellation)?;
             if let Some(file) = unit.logical_tables.get(&id) {
                 if writers.table_id().is_none() {
-                    writers.open(id, file, store, limits, cancellation).await?;
+                    writers
+                        .open(id, file, destination, limits, cancellation)
+                        .await?;
                     written.insert(id);
                     summary.files += 1;
                 }
@@ -536,7 +561,9 @@ async fn write_tables(
     for (&id, file) in &unit.logical_tables {
         if !written.contains(&id) {
             check_cancelled(cancellation)?;
-            writers.open(id, file, store, limits, cancellation).await?;
+            writers
+                .open(id, file, destination, limits, cancellation)
+                .await?;
             writers.close_input();
             summary.files += 1;
         }
@@ -554,20 +581,14 @@ impl ActiveWriter {
     fn open_packed(
         table: &LogicalTableProjection,
         id: u32,
-        store: &ObjectStore,
         limits: LogicalTableExportLimits,
         shared: PackedWriterRef,
     ) -> Result<Self> {
-        let path = format!("table-{id}.parquet");
         let packed = PackedTableWriter::new(shared, table.name.clone(), id, false);
-        let writer = ParquetFileWriter::open_packed(
-            table.schema.clone(),
-            store.clone(),
-            &path,
-            Some(limits.writer),
-            packed,
-        )
-        .map_err(|e| map_writer_error(e, &path))?;
+        let path = packed.path().to_owned();
+        let writer =
+            ParquetFileWriter::open_packed(table.schema.clone(), Some(limits.writer), packed)
+                .map_err(|e| map_writer_error(e, &path))?;
         Ok(Self { path, writer })
     }
 
