@@ -286,9 +286,12 @@ pub trait PermissionChecker: Send + Sync {
         PermissionTableTargets::Unresolved
     }
 
-    /// Classifies whether `targets` can already be decided before resolving
-    /// catalog `is_physical_metric_table` metadata, or returns the indices of
-    /// targets that still need catalog resolution.
+    /// Returns a permission decision or the indices of targets that need catalog resolution.
+    ///
+    /// A checker may return [`TableTargetPrecheck::Allow`] only after authorizing
+    /// both the operation and access to every target. `Allow` skips
+    /// [`Self::check_permission_with_table_targets`] for this request. Returning
+    /// `NeedsPhysicalResolution(vec![])` runs that check without catalog lookups.
     ///
     /// A `false` [`PermissionTableTarget::is_physical_metric_table`] flag may
     /// mean the target has not been looked up yet. If its physical status could
