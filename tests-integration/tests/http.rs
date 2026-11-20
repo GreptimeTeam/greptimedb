@@ -5836,11 +5836,16 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    // `__unit__` leaves with the metric name `sum_over_time` drops, and a scan that carries it can
+    // hold two series that agree on everything else: that is the collision the boundary below is
+    // carried by. A nullable key column is not one - see the note on
+    // `test_remote_write_v2_histogram_native_nullable_tag_boundary`.
     write_native_histogram(
         &client,
         &[
             (prom_store::METRIC_NAME_LABEL, "native_histogram_range"),
             ("job", "api"),
+            ("__unit__", "s"),
         ],
         1000,
         5,
@@ -5852,6 +5857,7 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
         &[
             (prom_store::METRIC_NAME_LABEL, "native_histogram_range"),
             ("job", "api"),
+            ("__unit__", "s"),
         ],
         3000,
         8,
@@ -5873,8 +5879,8 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
         body["data"]["result"][0]["histogram"][1]["sum"], "30",
         "`sum_over_time` adds the sums as {PROMETHEUS_REFERENCE} does"
     );
-    // `sum_over_time` over a native histogram drops the metadata labels, and this table's tags are
-    // nullable, so the canonical pass collects that drop: the answer stands on a canonical merge
+    // `sum_over_time` over a native histogram drops the metadata labels, and this binding carries
+    // `__unit__`, so the canonical pass collects that drop: the answer stands on a canonical merge
     // carrying histogram frames. Lowering such a boundary is two nodes, not one - a producer that
     // runs the statement's own tree per partition and exports a frame, and the consumer above the
     // router that converts the merged frames into the statement's rows. Both are the fused route;
@@ -5893,11 +5899,13 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
 
 /// A native histogram answer crosses a canonical merge on a real metric table.
 ///
-/// Every tag column of a metric-engine table is nullable, so `keys_survive_metadata_drop` is false
-/// on one and every statement whose kernel drops the metadata labels pays a canonical merge - the
-/// `NULL`/`''` pair a drop normalizes into one label set is what the collection is for. For a
-/// histogram answer that merge carries histogram frames, which is the pairing this test pins end to
-/// end: the producer routes the pieces of one label set, the owner merges them with the same kernel
+/// A binding that carries `__unit__` holds two series that agree on everything else, and a kernel
+/// that drops the metadata labels removes `__unit__` with the name, so such a statement pays a
+/// canonical merge. A nullable key column is not what that collection is for: the labels are the
+/// whole of the drop's proof, and the `NULL`/`''` pair they cannot state is deliberately left
+/// outside it. For a histogram answer the merge carries histogram frames, which is the pairing this
+/// test pins end to end: the producer routes the pieces of one label set, the owner merges them with
+/// the same kernel
 /// it merges floats with, and the consumer answers what it collected.
 ///
 /// The statement shapes here are the two sides of that crossing: `sum_over_time(h[1m])` answers the
@@ -5928,6 +5936,7 @@ pub async fn test_remote_write_v2_histogram_native_nullable_tag_boundary(store_t
         &[
             (prom_store::METRIC_NAME_LABEL, "native_histogram_nullable"),
             ("job", "api"),
+            ("__unit__", "s"),
         ],
         1000,
         5,
@@ -5939,21 +5948,23 @@ pub async fn test_remote_write_v2_histogram_native_nullable_tag_boundary(store_t
         &[
             (prom_store::METRIC_NAME_LABEL, "native_histogram_nullable"),
             ("job", "api"),
+            ("__unit__", "s"),
         ],
         3000,
         8,
         20.0,
     )
     .await;
-    // The premise of this test, read off the table the writes created: the `job` tag is nullable, so
-    // a drop of the metadata labels is collected for the key columns rather than proved by them.
+    // The premise of this test, read off the table the writes created: `__unit__` is a tag of the
+    // table, so a drop of the metadata labels removes a label two series could be told apart by and
+    // the labels cannot prove it.
     validate_data(
-        "native histogram nullable tag",
+        "native histogram metadata tag",
         &client,
         "select column_name, is_nullable from information_schema.columns \
          where table_schema = 'public' and table_name = 'native_histogram_nullable' \
-         and column_name = 'job'",
-        "[[\"job\",\"YES\"]]",
+         and column_name = '__unit__'",
+        "[[\"__unit__\",\"YES\"]]",
     )
     .await;
 
