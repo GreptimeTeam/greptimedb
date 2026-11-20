@@ -1,0 +1,18 @@
+src/metric-engine/src/engine/sync/region.rs
+  h_623774b620da8e 82-84,146-148,320-462
+src/metric-engine/src/metadata_region.rs
+  h_623774b620da8e 341-354,694-739
+src/mito2/src/test_util.rs
+  h_623774b620da8e 258,270-271,275-276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3c258c9974eb347c7db2fee7771aae1dedd9111b",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
