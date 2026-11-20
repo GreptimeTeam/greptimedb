@@ -21,10 +21,15 @@ use crate::query_cache::{ConfigError, RollupCacheConfig};
 
 /// Controls the frontend-local cache of PromQL range-query chunks.
 ///
-/// The cache is disabled by default. When enabled, a range query whose expression
-/// is in the window allowlist is cut into canonical chunks; a chunk is reused only
-/// while it is younger than `max_age` and its source table has not advanced past
-/// the sequence cursor recorded when it was filled.
+/// The cache is disabled by default. When enabled, a range query whose expression is in
+/// the window allowlist is cut into canonical chunks, and a chunk is reused only while
+/// it is younger than `max_age` and the source table it reads has been proved by the
+/// background refresher.
+///
+/// The refresher probes the sequence of every source table a request asked for once per
+/// `refresh_interval` and invalidates the chunks whose input the new rows reach. The
+/// request path never probes: it reads the table's readiness, and a table no round has
+/// proved yet answers from storage.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RollupCacheOptions {
@@ -40,22 +45,16 @@ pub struct RollupCacheOptions {
     /// so they are executed directly and never cached.
     #[serde(with = "humantime_serde")]
     pub tail: Duration,
-    /// How old a source-sequence reading may be before lookups stop trusting it.
+    /// How often the background refresher probes an active source table.
+    ///
+    /// It bounds how stale a served chunk can be, and it is the only thing it
+    /// controls: no request waits for a round, and no request measures one.
     #[serde(with = "humantime_serde")]
-    pub max_staleness: Duration,
+    pub refresh_interval: Duration,
     /// How old a cached chunk may be before it is evicted, independent of source
     /// changes.
     #[serde(with = "humantime_serde")]
     pub max_age: Duration,
-    /// Whether lookups first probe the source table's sequence and invalidate the
-    /// affected spans. This is required for correctness on writable tables; turning
-    /// it off serves entries bounded only by `max_age`.
-    ///
-    /// The probe observes visible rows. A DELETE mixed with a distant PUT, a
-    /// truncate followed by new rows, and TTL/compaction removal can erase a
-    /// timestamp that no nonempty hull covers; those writes remain a documented
-    /// scope limit of the cached path.
-    pub source_probe: bool,
 }
 
 impl Default for RollupCacheOptions {
@@ -65,9 +64,8 @@ impl Default for RollupCacheOptions {
             max_bytes: ReadableSize::mb(256),
             chunk: Duration::from_secs(300),
             tail: Duration::from_secs(600),
-            max_staleness: Duration::from_secs(30),
+            refresh_interval: Duration::from_secs(1),
             max_age: Duration::from_secs(3_600),
-            source_probe: true,
         }
     }
 }
@@ -79,7 +77,7 @@ impl RollupCacheOptions {
             self.max_bytes.0,
             self.tail,
             self.chunk,
-            self.max_staleness,
+            self.refresh_interval,
             self.max_age,
         )
     }
@@ -93,7 +91,7 @@ mod tests {
     fn defaults_are_disabled_and_valid() {
         let options = RollupCacheOptions::default();
         assert!(!options.enable);
-        assert!(options.source_probe);
+        assert_eq!(Duration::from_secs(1), options.refresh_interval);
         assert!(options.config().is_ok());
     }
 
@@ -112,10 +110,10 @@ mod tests {
         assert_eq!(options.config(), Err(ConfigError::Chunk));
 
         let options = RollupCacheOptions {
-            max_staleness: Duration::ZERO,
+            refresh_interval: Duration::ZERO,
             ..Default::default()
         };
-        assert_eq!(options.config(), Err(ConfigError::MaxStaleness));
+        assert_eq!(options.config(), Err(ConfigError::RefreshInterval));
 
         let options = RollupCacheOptions {
             max_age: Duration::ZERO,

@@ -22,8 +22,10 @@
 //! - a **hit** reuses the materialized payload and never reaches the executor, so
 //!   the chunk is neither planned nor executed a second time;
 //! - a **miss** executes the chunk's own subwindow ([`windowed_eval_stmt`]), fully
-//!   consumes it, and only then inserts it under the [`FillCursor`] captured
-//!   *before* the read;
+//!   consumes it, and only then inserts it, under the version it took *before* it read
+//!   and only when the read reported the source sequence it reached: a payload whose
+//!   read cannot be ordered against a background invalidation is never published, and
+//!   the request answers from the rows it read;
 //! - a **direct span** (the partial chunks at either end of the request and the
 //!   whole tail) executes its subwindow and is never inserted, because a partial
 //!   chunk must not be keyed as a full one.
@@ -43,9 +45,11 @@
 //! collector, which deduplicates, so a request reports a message once whether the
 //! chunk that recorded it was read now or earlier.
 //!
-//! A statement the cache refuses, or one with nothing cacheable in its coverage,
-//! is returned as [`RangeOutcome::Bypassed`] before the first span is executed, so
-//! the caller can run its original plan unchanged.
+//! A statement the cache refuses, one with nothing cacheable in its coverage, and
+//! one whose spans disagree on their schema is returned as
+//! [`RangeOutcome::Bypassed`], so the caller can run its original plan unchanged.
+//! A request whose source table no background round has proved yet executes and
+//! fills exactly like a proved one; it just never serves a chunk from memory.
 //!
 //! Nothing here knows about permissions, interceptors, cancellation, or the
 //! process list: the caller keeps all of them around this call, so they behave as
@@ -53,6 +57,7 @@
 //!
 //! [`windowed_eval_stmt`]: query::promql::window::windowed_eval_stmt
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -66,8 +71,8 @@ use servers::error::{self as server_error, ExecuteQuerySnafu, UnexpectedResultSn
 use snafu::ResultExt;
 
 use crate::query_cache::{
-    CachedAnnotations, ChunkPlan, DirectSpan, FillCursor, Lookup, MissReason, QueryIdentity,
-    RollupCache, TimeChunk, TimeChunkKey,
+    Admission, CachedAnnotations, ChunkPlan, DirectSpan, Lookup, QueryIdentity, RollupCache,
+    TimeChunk, TimeChunkKey,
 };
 
 /// Executes one PromQL evaluation subwindow.
@@ -82,13 +87,6 @@ pub(crate) trait WindowExecutor: Send + Sync {
     /// Plans and executes `stmt`, returning every row it produced and what the read
     /// recorded.
     async fn execute_window(&self, stmt: EvalStmt) -> server_error::Result<WindowOutput>;
-
-    /// The table ID the source name currently resolves to, when this executor can
-    /// ask the catalog. A fill whose plan may have bound a different incarnation
-    /// must not publish.
-    async fn source_table_id(&self) -> Option<u32> {
-        None
-    }
 }
 
 /// What one evaluation window produced.
@@ -98,8 +96,14 @@ pub(crate) struct WindowOutput {
     pub rows: RecordBatches,
     /// The PromQL annotations the window's read recorded.
     pub annotations: CachedAnnotations,
-    /// Table IDs bound by the executed plan.
-    pub source_table_ids: Vec<u32>,
+    /// The source sequence the read reached, per region.
+    ///
+    /// It is read from the request's terminal region metrics, which the window asks for
+    /// with the region-sequence hint. Empty means the read did not report it, and a window
+    /// that cannot report it is never published: a payload nothing can order against an
+    /// invalidation must not be served. A window served from memory publishes nothing, so
+    /// it reports nothing.
+    pub read_through: BTreeMap<u64, u64>,
 }
 
 /// What a cache-aware range execution produced.
@@ -127,15 +131,21 @@ pub(crate) enum RangeOutcome {
 /// executing only the spans the plan says must be read.
 ///
 /// Wall-clock `now` is what places the tail: points at or after `now - tail` may
-/// still be receiving data, so they are executed directly and never cached.
+/// still be receiving data, so they are executed directly and never cached. It is
+/// also what the fill of every chunk captures before it reads, so an entry's age is
+/// counted from the read that produced it rather than from its insertion.
+///
+/// `admission` is the state of the request's source table, captured before the request
+/// read anything: whether a chunk may be served is re-read from the table under its
+/// lock on every lookup, and every fill of the request takes its publication number
+/// from the query's state before it reads.
 pub(crate) async fn execute_range<E>(
     executor: &E,
     cache: &RollupCache,
     identity: QueryIdentity,
     stmt: &EvalStmt,
     now: SystemTime,
-    source_epoch: u64,
-    source_table_id: Option<u32>,
+    admission: &Admission,
 ) -> server_error::Result<RangeOutcome>
 where
     E: WindowExecutor + ?Sized,
@@ -164,156 +174,91 @@ where
         .build()
     })?;
 
-    if cache.source_epoch() != source_epoch {
-        return Ok(RangeOutcome::Bypassed);
-    }
-    let invalidation_epoch = cache.invalidation_epoch();
     let mut merged = MergedRows::default();
     let mut warnings = Vec::new();
     let mut infos = Vec::new();
     for span in ascending_spans(planned.chunks(), planned.direct()) {
-        if let Some(expected) = source_table_id
-            && executor.source_table_id().await != Some(expected)
-        {
-            // A table incarnation changed after validation. Do not mix old and
-            // replacement rows; let the caller run its original plan.
-            return Ok(RangeOutcome::Bypassed);
-        }
-        let Some(window) = (match span {
+        let window = match span {
             Span::Chunk(key) => {
                 chunk_rows(
                     executor,
                     cache,
+                    admission,
                     key,
                     stmt,
                     &grid,
                     now,
                     dependency_history_ms,
-                    source_epoch,
-                    source_table_id,
                 )
                 .await?
             }
-            Span::Direct(direct) => {
-                let window = execute_span(executor, stmt, &grid, direct.span()).await?;
-                if let Some(expected) = source_table_id
-                    && (window.source_table_ids.is_empty()
-                        || window
-                            .source_table_ids
-                            .iter()
-                            .any(|table_id| *table_id != expected))
-                {
-                    // The direct window bound a different incarnation. Do not mix
-                    // its rows with cached rows from the validated table.
-                    return Ok(RangeOutcome::Bypassed);
-                }
-                Some(window)
-            }
-        }) else {
-            return Ok(RangeOutcome::Bypassed);
+            Span::Direct(direct) => execute_span(executor, stmt, &grid, direct.span()).await?,
         };
         warnings.extend(window.annotations.warnings().iter().cloned());
         infos.extend(window.annotations.infos().iter().cloned());
-        merged.push(window.rows)?;
-    }
-    // A request must not mix rows read on both sides of an observed invalidation.
-    // Discard the partial merge and let the caller run its original plan.
-    if cache.invalidation_epoch() != invalidation_epoch || cache.source_epoch() != source_epoch {
-        return Ok(RangeOutcome::Bypassed);
+        if !merged.push(window.rows) {
+            // The spans disagree on their schema, so they are not one result. Do not
+            // report a merge no plan produced: let the caller run its original plan.
+            return Ok(RangeOutcome::Bypassed);
+        }
     }
     merged.finish(CachedAnnotations::new(warnings, infos))
 }
 
-/// The rows of one cacheable `key`, served from memory when possible.
+/// The rows of one cacheable `key`, served from memory when the table may be
+/// served and filled otherwise.
 ///
-/// The fill cursor is captured before the read it describes, so the entry's age is
-/// counted from the read that produced it and a fill that raced a newer one cannot
-/// overwrite it.
+/// The fill takes its publication number before it reads, so a payload a background
+/// round already invalidated is never published over one that replaces it.
 #[allow(clippy::too_many_arguments)]
 async fn chunk_rows<E>(
     executor: &E,
     cache: &RollupCache,
+    admission: &Admission,
     key: &TimeChunkKey,
     stmt: &EvalStmt,
     grid: &EvalGrid,
     now: SystemTime,
     dependency_history_ms: i64,
-    source_epoch: u64,
-    source_table_id: Option<u32>,
-) -> server_error::Result<Option<WindowOutput>>
+) -> server_error::Result<WindowOutput>
 where
     E: WindowExecutor + ?Sized,
 {
-    // A transition after validation makes both the cached payload and any new
-    // fill unvalidated. Bypass the entire request rather than mix rows from two
-    // source incarnations.
-    if cache.source_epoch() != source_epoch {
-        return Ok(None);
-    }
-    if let Some(expected) = source_table_id
-        && executor.source_table_id().await != Some(expected)
+    if let Lookup::Hit {
+        payload,
+        annotations,
+    } = cache.lookup(admission, key, now)
     {
-        return Ok(None);
+        // The rows and the messages of one read are served together, so a hit reports what
+        // the read it replaces reported. Nothing is published for a hit, so it reports no
+        // sequence.
+        return Ok(WindowOutput {
+            rows: clone_rows(&payload)?,
+            annotations: (*annotations).clone(),
+            read_through: BTreeMap::new(),
+        });
     }
-    let fill: FillCursor = match cache.lookup_fenced(key, now, source_epoch, source_table_id) {
-        Lookup::Hit {
-            payload,
-            annotations,
-            ..
-        } => {
-            // The rows and the messages of one read are served together, so a hit
-            // reports what the read it replaces reported.
-            return Ok(Some(WindowOutput {
-                rows: clone_rows(&payload)?,
-                annotations: (*annotations).clone(),
-                source_table_ids: Vec::new(),
-            }));
-        }
-        Lookup::Miss(MissReason::SourceChanged) => return Ok(None),
-        Lookup::Bypass(_) | Lookup::Miss(_) => match cache.fill_cursor(now) {
-            Ok(fill) => fill
-                .with_source_epoch(source_epoch)
-                .with_source_table_id(source_table_id),
-            // No fill may be validated right now (an unhealthy or stale authority):
-            // read the chunk without keeping it rather than failing a query the
-            // original path answers.
-            Err(_) => {
-                return execute_span(executor, stmt, grid, key.chunk())
-                    .await
-                    .map(Some);
-            }
-        },
-    };
-    let window = execute_span(executor, stmt, grid, key.chunk()).await?;
-    if let Some(expected) = source_table_id
-        && (window.source_table_ids.is_empty()
-            || window
-                .source_table_ids
-                .iter()
-                .any(|table_id| *table_id != expected))
-    {
-        // The executed plan bound a different incarnation from the one validated.
-        // The rows answer the plan that ran but must not be published under the
-        // validated name.
-        return Ok(None);
-    }
-    // Only a fully consumed chunk is inserted: `execute_span` returns rows it read to
-    // the end, and a failure returned above without inserting anything. Its
-    // annotations are stored beside them, and the same ones are returned, so the
-    // request that filled the chunk reports them exactly as a later hit does.
     let chunk = key.chunk();
+    // The history the chunk folds, which is what a dirty source range has to reach to
+    // make this read stale. It is known before the read, so the fill registers it
+    // before it reads.
     let dependency = TimeChunk::new(
         chunk.start_ms().saturating_sub(dependency_history_ms),
         chunk.end_ms(),
     );
-    cache.insert_with_dependency(
-        key.clone(),
-        fill,
+    let fill = cache.begin_fill(admission, key, dependency, now);
+    let window = execute_span(executor, stmt, grid, chunk).await?;
+    // Only a fully consumed chunk is inserted: `execute_span` returns rows it read to
+    // the end, and a failure returned above without inserting anything. Its
+    // annotations are stored beside them, and the same ones are returned, so the
+    // request that filled the chunk reports them exactly as a later hit does.
+    cache.insert(
+        &fill,
+        &window.read_through,
         Arc::new(clone_rows(&window.rows)?),
         Arc::new(window.annotations.clone()),
-        dependency,
     );
-    Ok(Some(window))
+    Ok(window)
 }
 
 /// A copy of `rows`, which the cache hands out by shared reference.
@@ -411,23 +356,20 @@ struct MergedRows {
 }
 
 impl MergedRows {
-    /// Appends one span's rows, refusing a span whose schema is not the result's.
-    fn push(&mut self, rows: RecordBatches) -> server_error::Result<()> {
+    /// Appends one span's rows, reporting whether they joined the result.
+    ///
+    /// A span whose schema differs from the result's cannot be concatenated with the
+    /// spans around it, so the caller bypasses the cache for the whole request
+    /// instead of reporting an answer no plan produced.
+    fn push(&mut self, rows: RecordBatches) -> bool {
         let schema = rows.schema();
         match &self.schema {
-            Some(expected) if expected.arrow_schema() != schema.arrow_schema() => {
-                return Err(UnexpectedResultSnafu {
-                    reason: format!(
-                        "the spans of one range query disagree on their schema: {expected:?} and {schema:?}"
-                    ),
-                }
-                .build());
-            }
+            Some(expected) if expected.arrow_schema() != schema.arrow_schema() => return false,
             Some(_) => {}
             None => self.schema = Some(schema),
         }
         self.rows.extend(rows.take());
-        Ok(())
+        true
     }
 
     /// The merged result: the spans' rows in time order, or the schema alone when
@@ -444,7 +386,7 @@ impl MergedRows {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     use common_recordbatch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
@@ -502,7 +444,6 @@ mod tests {
             step_ms: STEP_MS,
             lookback_ms: 300_000,
             route: QueryRoute::Legacy,
-            ordered: false,
             alias: None,
             read_preference: None,
         }
@@ -519,7 +460,7 @@ mod tests {
             Duration::from_secs(3_600),
         )
         .expect("the test configuration is valid");
-        RollupCache::new(config, None)
+        RollupCache::new(config)
     }
 
     /// One row per grid point of `stmt`, holding the point's timestamp as an integer.
@@ -564,6 +505,10 @@ mod tests {
         fail_at: Option<usize>,
         /// The warning every window the executor runs records.
         warns: Option<String>,
+        /// The source sequence every window reports, as a real read's terminal region
+        /// metrics would. It is well past the test rounds' watermarks, so a fill of this
+        /// executor is publishable.
+        read_through: BTreeMap<u64, u64>,
     }
 
     impl RecordingExecutor {
@@ -610,7 +555,11 @@ mod tests {
             Ok(WindowOutput {
                 rows: rows_of(&stmt),
                 annotations,
-                source_table_ids: Vec::new(),
+                read_through: if self.read_through.is_empty() {
+                    BTreeMap::from([(1, 100)])
+                } else {
+                    self.read_through.clone()
+                },
             })
         }
     }
@@ -630,22 +579,62 @@ mod tests {
         }
     }
 
+    /// The table every test statement reads.
+    fn table() -> crate::query_cache::SourceTable {
+        crate::query_cache::SourceTable::from(&identity("cpu"))
+    }
+
+    /// Admits the test table and opens it, as a background round that proved nothing
+    /// changed would, so the request may serve what an earlier one filled.
+    fn admission(cache: &RollupCache) -> crate::query_cache::Admission {
+        // The admission comes first: a round can only record what a request has already
+        // registered.
+        let admission = cache.admit(&table(), Instant::now());
+        cache.record_refresh(
+            &table(),
+            std::collections::BTreeMap::from([(1, 1)]),
+            crate::query_cache::DirtySpan::Nothing,
+            Instant::now(),
+        );
+        admission
+    }
+
     async fn run<E: WindowExecutor + ?Sized>(
         executor: &E,
         cache: &RollupCache,
         stmt: &EvalStmt,
         query: &str,
     ) -> server_error::Result<RangeOutcome> {
+        let admission = admission(cache);
         execute_range(
             executor,
             cache,
             identity(query),
             stmt,
             at(NOW_MS),
-            cache.source_epoch(),
-            None,
+            &admission,
         )
         .await
+    }
+
+    async fn run_identity<E: WindowExecutor + ?Sized>(
+        executor: &E,
+        cache: &RollupCache,
+        identity: QueryIdentity,
+        stmt: &EvalStmt,
+    ) -> server_error::Result<RangeOutcome> {
+        let admission = admission(cache);
+        execute_range(executor, cache, identity, stmt, at(NOW_MS), &admission).await
+    }
+
+    /// Records a background round of the test table that found `hull` dirty.
+    fn dirty(cache: &RollupCache, hull: TimeChunk) {
+        cache.record_refresh(
+            &table(),
+            std::collections::BTreeMap::from([(1, 2)]),
+            crate::query_cache::DirtySpan::Hull(hull),
+            Instant::now(),
+        );
     }
 
     fn merged(outcome: RangeOutcome) -> RecordBatches {
@@ -712,51 +701,48 @@ mod tests {
                 TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS),
             );
 
+            let admission = admission(&cache);
             let rows = execute_range(
                 &RecordingExecutor::default(),
                 &cache,
                 identity.clone(),
                 &stmt,
                 at(NOW_MS),
-                cache.source_epoch(),
-                None,
+                &admission,
             )
             .await
             .unwrap();
             assert_eq!(points(&merged(rows)).len(), 5, "{query}");
             assert_eq!(cache.entry_count(), 1, "{query}");
-            assert!(matches!(cache.lookup(&key, at(NOW_MS)), Lookup::Hit { .. }));
+            assert!(matches!(
+                cache.lookup(&admission, &key, at(NOW_MS)),
+                Lookup::Hit { .. }
+            ));
 
             // The dependency begins exactly `history_ms` before the output; a
             // disjoint range ending there leaves the entry resident.
             let start = HEAD_MS - history_ms;
-            assert_eq!(
-                cache.invalidate_table_range(
-                    &identity.source_table,
-                    TimeChunk::new(start - 1, start)
-                ),
-                0,
-                "{query}"
-            );
-            assert!(matches!(cache.lookup(&key, at(NOW_MS)), Lookup::Hit { .. }));
+            dirty(&cache, TimeChunk::new(start - 1, start));
+            assert_eq!(cache.entry_count(), 1, "{query}");
+            assert!(matches!(
+                cache.lookup(&admission, &key, at(NOW_MS)),
+                Lookup::Hit { .. }
+            ));
             let end = HEAD_MS + CHUNK_MS;
-            assert_eq!(
-                cache.invalidate_table_range(&identity.source_table, TimeChunk::new(end, end + 1)),
-                0,
-                "{query}"
-            );
-            assert!(matches!(cache.lookup(&key, at(NOW_MS)), Lookup::Hit { .. }));
-            // A single dirty millisecond inside that history evicts the chunk,
-            // even though all its output points come later.
-            assert_eq!(
-                cache.invalidate_table_range(
-                    &identity.source_table,
-                    TimeChunk::new(start, start + 1)
-                ),
-                1,
-                "{query}"
-            );
-            assert!(matches!(cache.lookup(&key, at(NOW_MS)), Lookup::Miss(_)));
+            dirty(&cache, TimeChunk::new(end, end + 1));
+            assert_eq!(cache.entry_count(), 1, "{query}");
+            assert!(matches!(
+                cache.lookup(&admission, &key, at(NOW_MS)),
+                Lookup::Hit { .. }
+            ));
+            // A single dirty millisecond inside that history evicts the chunk, even
+            // though all its output points come later.
+            dirty(&cache, TimeChunk::new(start, start + 1));
+            assert_eq!(cache.entry_count(), 0, "{query}");
+            assert!(matches!(
+                cache.lookup(&admission, &key, at(NOW_MS)),
+                Lookup::Miss(_)
+            ));
         }
     }
 
@@ -768,23 +754,13 @@ mod tests {
         stmt.lookback_delta = Duration::from_millis(i64::MAX as u64);
         let mut identity = identity(query);
         identity.lookback_ms = i64::MAX;
-        let rows = execute_range(
-            &RecordingExecutor::default(),
-            &cache,
-            identity.clone(),
-            &stmt,
-            at(NOW_MS),
-            cache.source_epoch(),
-            None,
-        )
-        .await
-        .unwrap();
+        let rows = run_identity(&RecordingExecutor::default(), &cache, identity, &stmt)
+            .await
+            .unwrap();
         assert_eq!(points(&merged(rows)).len(), 5);
         assert_eq!(cache.entry_count(), 1);
-        assert_eq!(
-            cache.invalidate_range(&identity, TimeChunk::new(i64::MIN, i64::MIN + 1)),
-            1
-        );
+        dirty(&cache, TimeChunk::new(i64::MIN, i64::MIN + 1));
+        assert_eq!(cache.entry_count(), 0);
     }
 
     #[tokio::test]

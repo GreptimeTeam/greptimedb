@@ -105,7 +105,8 @@ pub struct FrontendOptions {
     pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
-    /// The frontend-local cache of PromQL range-query chunks.
+    /// The frontend-local cache of PromQL range-query chunks, and the background
+    /// refresher that keeps it servable.
     pub rollup_cache: RollupCacheOptions,
     /// Environment variable keys to read and report in heartbeat messages.
     pub heartbeat_env_vars: Vec<String>,
@@ -204,6 +205,15 @@ impl Frontend {
             t.shutdown().await;
             return Err(error);
         }
+        // The rollup cache is served only after a background round has proved a source
+        // table, so its refresher starts with the frontend rather than with the first
+        // request.
+        if let Err(error) = self.instance.start_rollup_cache_refresher() {
+            if let Some(t) = &self.heartbeat_task {
+                t.shutdown().await;
+            }
+            return Err(error);
+        }
 
         if let Err(source) = self.servers.start_all().await {
             if let Some(t) = &self.heartbeat_task {
@@ -217,6 +227,11 @@ impl Frontend {
     pub async fn shutdown(&mut self) -> Result<()> {
         if let Some(t) = &self.heartbeat_task {
             t.shutdown().await;
+        }
+        if let Err(error) = self.instance.stop_rollup_cache_refresher().await {
+            // A refresher that cannot be stopped must not stop the servers from
+            // shutting down, and its rounds only ever write cache state.
+            common_telemetry::error!(error; "Failed to stop the rollup cache refresher");
         }
         self.servers
             .shutdown_all()

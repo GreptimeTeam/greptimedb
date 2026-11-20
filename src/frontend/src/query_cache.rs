@@ -41,46 +41,74 @@
 //! still be receiving data, so they are always direct. A historical query whose
 //! end is older than the cutoff therefore caches its whole range.
 //!
+//! # Admission
+//!
+//! The cache serves a source table only while a background refresher has recently
+//! proved it unchanged. The proof is the table's `last_success`: the instant of its
+//! last successful probe round. A request never probes; it reads that instant and,
+//! when it is older than [`RollupCache::admission_window`]
+//! (`2 * refresh_interval`), bypasses the cache and runs its original plan. A cold
+//! table, a table no background round has proved yet, and a table whose last round
+//! failed all bypass instead of waiting, and a table is admitted again only after a
+//! later round succeeds.
+//!
 //! # Validity
 //!
-//! An entry is served only while
-//!
-//! - with a [`CacheAuthority`]: the authority is ready, its reading is younger
-//!   than [`RollupCacheConfig::max_staleness`], and the authority cursor equals the
-//!   cursor the entry was filled at (`cursor equal -> hit`, `cursor changed ->
-//!   miss`, unknown/unhealthy/stale -> miss);
-//! - always: the entry is younger than [`RollupCacheConfig::max_age`], counted
-//!   from the instant the fill captured *before* it read storage, so a slow fill
-//!   is charged for the time it took.
-//!
-//! The authority is optional. Without one the cache is bounded only by
-//! [`RollupCacheConfig::max_age`], which is what a deployment with no sequence
-//! probe can serve; the cursor branch stays in place for the probe.
+//! An admitted entry is served while it is younger than
+//! [`RollupCacheConfig::max_age`], counted from the instant the fill captured
+//! *before* it read storage, so a slow fill is charged for the time it took. Nothing
+//! else is checked on the lookup path: the sequence probe runs in the background,
+//! never inside a request.
 //!
 //! # Invalidation
 //!
-//! A cursor says that *something* changed; it cannot say which chunks that change
-//! reached. [`RollupCache::invalidate_range`] answers that for one identity: it
-//! removes every entry of that identity whose *input dependency* overlaps a dirty
-//! range, leaves every disjoint chunk and every other identity resident, and
-//! returns how many it removed. [`RollupCache::invalidate_table_range`] instead
-//! removes overlapping entries across all identities for a named source table.
+//! A per-region sequence cursor says that *something* changed; it cannot say which
+//! chunks that change reached. Each background round of a table asks
+//! [`Instance::probe_sequence_range`] for the timestamp hull of everything after its
+//! cursors, and [`RollupCache::record_refresh`] removes every entry of that table
+//! whose *input dependency* overlaps the hull ([`DirtySpan`]). Every other chunk,
+//! and every other table, stays resident. A round that proves nothing changed
+//! removes nothing, and a round whose change has no boundable timestamp removes
+//! every entry of the table.
 //!
 //! The input dependency is the span of source data the payload was materialized
-//! from, recorded when the entry is stored. Deriving it from the evaluation
-//! window is not enough: a chunk's output points can all come before a dirty
-//! range while the history they folded — a lookback window, or the range of a
-//! `rate(x[5m])` — still reaches into it. [`RollupCache::insert`] therefore records
-//! the chunk itself as the dependency, and
-//! [`RollupCache::insert_with_dependency`] records a wider span where the caller
-//! knows one; overlap is half-open on both spans, so adjacent spans do not
+//! from, recorded when the entry is stored. Deriving it from the evaluation window
+//! is not enough: a chunk's output points can all come before a dirty range while
+//! the history they folded — a lookback window, or the range of a `rate(x[5m])` —
+//! still reaches into it. [`RollupCache::insert`] takes the dependency from the
+//! caller, which is the only place that knows how far before the chunk the
+//! evaluation read; overlap is half-open on both spans, so adjacent spans do not
 //! invalidate each other.
 //!
-//! Invalidation is bounded by an epoch, not by coordination. A fill captures the
-//! epoch in its [`FillCursor`] before it reads storage, and an insertion whose
-//! epoch is older than the cache's is dropped, so a fill that started before an
-//! invalidation cannot resurrect what it removed. Every invalidation advances the
-//! epoch exactly once, whether or not it removed anything.
+//! The source sequence decides what may be published, and the version only counts cache
+//! changes. Two per-query values carry that:
+//!
+//! - [`QueryState::invalidated_watermark`] is the source sequence the last invalidation of
+//!   the query was committed at, a complete per-region vector — never one number, which
+//!   could hide a region that fell behind;
+//! - [`Entry::read_through`] is the source sequence the read behind a payload reported,
+//!   again per region.
+//!
+//! A fill publishes only when its own read is at least as far as the watermark on every
+//! region the invalidation covers, and at least as far as whatever is resident with at
+//! least one region strictly further — an entry past its age bound is the one exception, and
+//! a read of the same sequence may refresh it. A payload materialized before an invalidation
+//! can therefore never be published after it, and a read that finished later but got less far
+//! cannot replace a newer payload. A read that cannot report its sequence, or whose regions
+//! are a different set, is not published at all. A fill that loses is still returned to the
+//! request that read it.
+//!
+//! The watermark is written only by the rounds. A round that found a dirty hull drops the
+//! entries the hull reaches and moves the watermark of every query of the table to the
+//! probe's high watermark — even when it dropped nothing — and that is the whole of an
+//! invalidation: the hull is the round's input and nothing more, no range is remembered,
+//! and a lookup decides on the readiness of its table and the age of the entry alone.
+//!
+//! [`QueryState::version`] counts the changes to a query's cache: every published payload
+//! and every committed invalidation advances it once. Nothing admits or refuses a fill by
+//! it; it is what tells an observer how many times the cache changed.
+//!
+//! Nothing on either side waits for the other.
 //!
 //! # Memory
 //!
@@ -89,19 +117,26 @@
 //! A payload that is still being filled is not charged until it is inserted, since
 //! the cache cannot see it before then.
 //!
+//! # Tables
+//!
+//! Every table a request is admitted for is registered as active, keyed by its
+//! fully qualified name: a bare table name would match the same name in another
+//! catalog or schema. A table no request has admitted for [`IDLE_TABLE_TIMEOUT`]
+//! stops being refreshed and its entries are dropped, so a frontend that once saw
+//! many tables does not probe them forever.
+//!
 //! # Concurrency
 //!
-//! A lookup is local: it reads the authority status and at most one entry, never
-//! storage, and never waits for an in-flight fill or for cache maintenance. There
-//! is no single-flight, so a miss while another fill of the same chunk is running
-//! proceeds; the competing fills both reach [`RollupCache::insert`], where the
-//! older cursor loses and an equal cursor is replaced. Everything here is
-//! synchronous and no lock is held across an await, so a caller may await its
-//! storage read without holding anything.
+//! A lookup is local: it reads at most one entry, never storage, and never waits for
+//! an in-flight fill or for maintenance. There is no single-flight, so a miss while
+//! another fill of the same chunk is running proceeds; the competing fills both reach
+//! [`RollupCache::insert`], where the older publication loses. Everything here is
+//! synchronous and no lock is held across an await, so a caller may await its storage
+//! read without holding anything.
 //!
-//! An invalidation takes no lock either: it advances the epoch, then scans the
-//! entries and removes the ones it overlaps. A fill that was already running is
-//! dealt with by the epoch rule instead of by waiting for it.
+//! A refresh round holds the table lock across its scan and its cursor update, so a
+//! request cannot admit the table in the middle of one. A fill that was already running
+//! is dealt with by the publication order instead of by waiting for it.
 //!
 //! # Not covered
 //!
@@ -109,20 +144,24 @@
 //! every selected point folds: the first point of a `rate(x[5m])` chunk needs five
 //! minutes of samples *before* the chunk start. Nothing here narrows that history.
 //!
-//! Not implemented: the storage sequence probe behind a [`CacheAuthority`], its
-//! call into invalidation, the query-path invalidation wiring, and any
-//! configuration option.
+//! A rename or a reuse of a physical table, a truncate, a TTL or compaction removal,
+//! and a DELETE mixed with a distant PUT can all erase or move input that the
+//! timestamp hull of a sequence probe does not describe. None of them is detected: an
+//! entry that survives such a write is served until something dirties its dependency
+//! or it ages out.
 
-#![allow(dead_code)] // Wired into the query path by a later milestone.
+#![allow(dead_code)] // The planning and identity helpers are exercised by the tests below.
 
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(any(test, feature = "testing"))]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use common_recordbatch::RecordBatches;
-use moka::ops::compute::Op;
+use common_telemetry::debug;
 use moka::sync::Cache;
 use promql_parser::parser::EvalStmt;
 use query::promql::label_values::signed_millis_since_epoch;
@@ -137,11 +176,22 @@ const REDACTED_QUERY: &str = "<redacted>";
 /// empty result would weigh nothing and the cache could hold unbounded keys.
 const ENTRY_OVERHEAD_BYTES: u64 = 256;
 
-/// The cursor recorded and compared when no authority is configured.
+/// How long a source table stays active after the last request admitted for it.
 ///
-/// It is a placeholder, never a claim: without an authority the cache never
-/// compares cursors and bounds freshness by [`RollupCacheConfig::max_age`] alone.
-const NO_AUTHORITY_CURSOR: u64 = 0;
+/// A table is only refreshed while requests keep reading it: one that no request
+/// has admitted for this long stops being probed and its entries are dropped, so a
+/// frontend that once saw many tables does not probe them forever. The next request
+/// for it registers it again and bypasses until a background round proves it.
+const IDLE_TABLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How many times one invalidation rescans to order the fills that started while it
+/// scanned.
+///
+/// A scan is a pass over the entries and a read of every publication number, so even a
+/// busy table settles in a few of them. A query that is still moving after the last scan
+/// keeps the payloads it published beyond it: they are the newest ones, and the next
+/// round that reaches them, or [`RollupCacheConfig::max_age`], is what takes them out.
+const INVALIDATE_SCANS: usize = 4;
 
 /// The planner that evaluated a PromQL query.
 ///
@@ -189,8 +239,6 @@ pub struct QueryIdentity {
     pub lookback_ms: i64,
     /// The planner that evaluated the query.
     pub route: QueryRoute,
-    /// Whether the request asked for ordered output.
-    pub ordered: bool,
     /// The optional output alias of a PromQL statement
     /// (`QueryStatement::Promql(_, alias)`).
     ///
@@ -217,10 +265,74 @@ impl fmt::Debug for QueryIdentity {
             .field("step_ms", &self.step_ms)
             .field("lookback_ms", &self.lookback_ms)
             .field("route", &self.route)
-            .field("ordered", &self.ordered)
             .field("alias", &self.alias)
             .field("read_preference", &self.read_preference)
             .finish()
+    }
+}
+
+/// The fully qualified name of a source table.
+///
+/// It is what the cache registers a table under and what invalidation matches on:
+/// a bare table name would let a dirty `public.cpu` invalidate another schema's
+/// `cpu`, so every comparison uses all three parts.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SourceTable {
+    catalog: String,
+    schema: String,
+    table: String,
+}
+
+impl SourceTable {
+    /// The table `catalog.schema.table`.
+    pub fn new(
+        catalog: impl Into<String>,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+    ) -> Self {
+        Self {
+            catalog: catalog.into(),
+            schema: schema.into(),
+            table: table.into(),
+        }
+    }
+
+    /// The catalog the table lives in.
+    pub fn catalog(&self) -> &str {
+        &self.catalog
+    }
+
+    /// The schema the table lives in.
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// The table name, without its catalog or schema.
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    /// Whether `identity` reads this table.
+    fn owns(&self, identity: &QueryIdentity) -> bool {
+        identity.catalog == self.catalog
+            && identity.schema == self.schema
+            && identity.source_table == self.table
+    }
+}
+
+impl From<&QueryIdentity> for SourceTable {
+    fn from(identity: &QueryIdentity) -> Self {
+        Self::new(
+            identity.catalog.clone(),
+            identity.schema.clone(),
+            identity.source_table.clone(),
+        )
+    }
+}
+
+impl fmt::Display for SourceTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.catalog, self.schema, self.table)
     }
 }
 
@@ -296,6 +408,34 @@ impl TimeChunk {
     pub fn is_empty(&self) -> bool {
         self.start_ms >= self.end_ms
     }
+}
+
+/// Whether the read `current` may replace a payload the read `resident` produced.
+///
+/// The two have to report the same regions: a read that touched fewer cannot be shown to
+/// describe the same data, so it replaces nothing. Then `current` has to be at least as far
+/// everywhere and strictly further in at least one region — a read of the same sequence says
+/// nothing new about the source. An entry past its age bound is the exception: refreshing it
+/// is worth a read of the same sequence, because the payload is stale by age alone.
+fn may_replace(
+    current: &BTreeMap<u64, u64>,
+    resident: &BTreeMap<u64, u64>,
+    resident_expired: bool,
+) -> bool {
+    if current.len() != resident.len()
+        || resident.keys().any(|region| !current.contains_key(region))
+    {
+        return false;
+    }
+    let mut further = false;
+    for (region, previous) in resident {
+        let now = current[region];
+        if now < *previous {
+            return false;
+        }
+        further |= now > *previous;
+    }
+    further || resident_expired
 }
 
 /// Whether `left` and `right` share at least one millisecond.
@@ -617,49 +757,30 @@ fn push_direct_span(
     Ok(())
 }
 
-/// Why a lookup misses, so a caller can tell a cold chunk from an unusable one.
+/// Why a lookup misses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissReason {
     /// No entry holds this chunk.
     NotFound,
-    /// The entry was filled at a cursor the authority has since moved past.
-    CursorChanged {
-        /// The cursor the entry was filled at.
-        cached: u64,
-        /// The cursor the authority vouches for now.
-        authority: u64,
-    },
-    /// The authority does not know a cursor, so no entry can be served.
-    AuthorityUnknown,
-    /// The authority reported itself unhealthy.
-    AuthorityUnhealthy,
-    /// The authority last confirmed its cursor longer ago than the staleness bound.
-    AuthorityStale {
-        /// How long ago the authority confirmed its cursor.
-        age: Duration,
-    },
     /// The entry was filled longer ago than the hard age bound allows.
     Expired {
         /// How long ago the fill captured its read.
         age: Duration,
     },
-    /// A source rename, repartition, or incarnation changed after validation.
-    SourceChanged,
+    /// No background round has proved the table since it was registered, so nothing
+    /// of it may be served.
+    TableNotProved,
 }
 
 /// The outcome of one [`RollupCache::lookup`].
 #[derive(Debug, PartialEq)]
 pub enum Lookup {
-    /// The whole materialized chunk, filled at `cursor`.
+    /// The whole materialized chunk.
     Hit {
         /// The complete result of the chunk.
         payload: Arc<RecordBatches>,
         /// The warnings and infos the read behind `payload` recorded.
         annotations: Arc<CachedAnnotations>,
-        /// The cursor the payload was filled at.
-        cursor: u64,
-        /// When the payload was inserted.
-        inserted_at: SystemTime,
     },
     /// The chunk cannot be served; execute storage and fill it.
     Miss(MissReason),
@@ -672,91 +793,164 @@ pub enum Lookup {
 pub enum Insert {
     /// The payload became the entry of the chunk.
     Stored,
-    /// A fill at a later cursor already holds the chunk, so nothing was written.
+    /// The fill was not published: the table was invalidated after it was admitted,
+    /// or its state was reclaimed and replaced, so the read behind the payload may
+    /// answer with data nothing vouches for.
     Rejected,
     /// The chunk is empty, so nothing was written.
     Bypassed,
 }
 
-/// The cursor, the invalidation epoch, and the instant, a fill was planned at.
+/// What one background probe round of a source table proved.
 ///
-/// All three are captured before the fill reads storage: the cursor is what the
-/// payload is validated against, the epoch is what a concurrent invalidation
-/// invalidates the fill itself with, and the instant is what its age is counted
-/// from, so a slow fill is neither fresher nor younger than the read it actually
-/// performed.
+/// The probe reports a timestamp hull of the rows written after the round's
+/// cursors, but a sequence can also advance without leaving a timestamp behind (a
+/// DELETE whose row the ordinary scan no longer returns). The three answers keep
+/// those cases apart, because "nothing changed" must not evict and "something
+/// changed somewhere" must.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FillCursor {
-    cursor: u64,
-    epoch: u64,
-    /// The source-table generation validated for the query that owns this fill.
-    source_epoch: u64,
-    /// The source table incarnation validated for the query that owns this fill.
-    source_table_id: Option<u32>,
+pub enum DirtySpan {
+    /// Nothing changed since the last successful round: every entry stays.
+    Nothing,
+    /// Only rows inside this half-open timestamp hull changed.
+    Hull(TimeChunk),
+    /// Rows changed at timestamps the probe cannot bound, so every entry of the
+    /// table goes.
+    Everything,
+}
+
+/// What the cache remembers about one source table.
+///
+/// The background refresher is the only writer of the cursors, the readiness, and
+/// the per-query invalidated watermarks; the request path only registers the table, reads
+/// its readiness, and compares a read's sequence against that watermark when it publishes.
+#[derive(Debug)]
+pub(crate) struct TableState {
+    table: SourceTable,
+    inner: Mutex<TableStateInner>,
+}
+
+#[derive(Debug, Default)]
+struct TableStateInner {
+    /// The per-region sequence the background refresher has proved up to.
+    cursors: BTreeMap<u64, u64>,
+    /// Whether a background round has proved this table since it was registered.
+    ///
+    /// A lookup is answered only for a ready table: an unproved table's entries may
+    /// predate writes that nobody has looked at yet, so serving them would answer
+    /// with data no probe has vouched for.
+    ready: bool,
+    /// Per query identity, what decides whether that query's fills may be stored.
+    ///
+    /// It is per query and not per table, so a dirty hull that reaches one query's
+    /// dependencies cannot reject the fills of another query that reads the same
+    /// table but different data.
+    ///
+    /// The map is pruned by every dirty round, and the whole table is forgotten once
+    /// it goes idle, so it is bounded by the identities admitted in the last
+    /// [`IDLE_TABLE_TIMEOUT`].
+    queries: HashMap<QueryIdentity, QueryState>,
+    /// When the last round proved the table, which is what finds a failing
+    /// refresher. It is observation only: it gates nothing.
+    last_success: Option<Instant>,
+    /// When a request last admitted this table, which is what keeps it active.
+    last_used: Option<Instant>,
+}
+
+impl TableState {
+    fn new(table: SourceTable) -> Self {
+        Self {
+            table,
+            inner: Mutex::new(TableStateInner::default()),
+        }
+    }
+
+    /// The table this state belongs to.
+    fn table(&self) -> &SourceTable {
+        &self.table
+    }
+}
+
+/// The publication state of one query identity on one source table.
+///
+/// It is per query and not per table, so an invalidation of one query cannot reject the
+/// fills of another query that reads the same table but different data.
+#[derive(Debug, Default)]
+struct QueryState {
+    /// The source sequence the last invalidation of this query was committed at, per
+    /// region.
+    ///
+    /// It is the round's high watermark, a complete vector rather than one number: a
+    /// region that fell behind must not be hidden by another region's progress. A fill
+    /// publishes only when the sequence its own read reported is strictly past this, so a
+    /// payload materialized before the invalidation cannot be published after it. Only a
+    /// round writes it.
+    invalidated_watermark: BTreeMap<u64, u64>,
+    /// How many times this query's cache changed.
+    ///
+    /// It advances on every published payload and on every committed invalidation, and it
+    /// admits nothing: it is the count of changes, not a token a fill has to hold.
+    version: u64,
+}
+
+impl QueryState {
+    /// Whether a read that reported `read_through` is at least as far as this query's last
+    /// invalidation on every region the invalidation covers.
+    ///
+    /// The comparison is component by component and allows equality: a read that opened
+    /// exactly at the invalidated sequence saw everything that invalidation described. A
+    /// read that reports a different set of regions cannot be compared at all, so it is not
+    /// publishable.
+    fn is_past_watermark(&self, read_through: &BTreeMap<u64, u64>) -> bool {
+        let watermark = &self.invalidated_watermark;
+        read_through.len() >= watermark.len()
+            && watermark.iter().all(|(region, sequence)| {
+                read_through
+                    .get(region)
+                    .is_some_and(|read| read >= sequence)
+            })
+    }
+}
+
+/// What one request may do with one source table.
+///
+/// It is captured once per request, before the first read, so every chunk of the
+/// request is answered against one table state even if the refresher finishes a
+/// round while the request runs.
+///
+/// It is not a claim that the table is servable: readiness is re-read under the table
+/// lock on every lookup, so a failing round stops the serving at the next chunk.
+pub struct Admission {
+    state: Arc<TableState>,
+}
+
+impl Admission {
+    /// The table the request reads.
+    pub fn table(&self) -> &SourceTable {
+        self.state.table()
+    }
+}
+
+impl fmt::Debug for Admission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Admission")
+            .field("table", &self.state.table())
+            .finish()
+    }
+}
+
+/// What one fill declared before it read storage.
+///
+/// It is created before the read and registers the query, so a round that invalidates while
+/// the fill runs moves the watermark the publication is judged against; it carries no token
+/// of its own, because what may be published is decided by the sequence the read reports.
+#[derive(Debug)]
+pub struct FillGuard {
+    state: Arc<TableState>,
+    identity: QueryIdentity,
+    chunk: TimeChunk,
+    dependency: TimeChunk,
     captured_at: SystemTime,
-}
-
-impl FillCursor {
-    /// The cursor the fill reads storage at.
-    pub fn cursor(&self) -> u64 {
-        self.cursor
-    }
-
-    /// The invalidation epoch of the cache when the fill was planned.
-    ///
-    /// An insertion carries it back to [`RollupCache::insert`], which drops a fill
-    /// that an invalidation has since overtaken.
-    pub fn epoch(&self) -> u64 {
-        self.epoch
-    }
-
-    /// Pins the source-table generation that was validated for this fill.
-    pub(crate) fn with_source_epoch(mut self, source_epoch: u64) -> Self {
-        self.source_epoch = source_epoch;
-        self
-    }
-
-    /// Pins the source table incarnation validated for this fill.
-    pub(crate) fn with_source_table_id(mut self, source_table_id: Option<u32>) -> Self {
-        self.source_table_id = source_table_id;
-        self
-    }
-
-    /// When the fill was planned, before it read storage.
-    pub fn captured_at(&self) -> SystemTime {
-        self.captured_at
-    }
-}
-
-/// The authority cursor a cache may serve, and how much it is trusted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthorityStatus {
-    /// The authority vouches for `cursor`, last confirmed at `observed_at`.
-    ///
-    /// Entries filled at exactly `cursor` are servable; entries filled at any
-    /// other cursor are not. `observed_at` is compared with the `now` of a lookup
-    /// to decide whether the reading is too old to act on.
-    Ready {
-        /// The cursor the authority vouches for.
-        cursor: u64,
-        /// When the authority last confirmed `cursor`.
-        observed_at: SystemTime,
-    },
-    /// The authority cannot name a cursor right now.
-    Unknown,
-    /// The authority reported itself unhealthy.
-    Unhealthy,
-}
-
-/// A source of the cursor that decides which cache entries may be served.
-///
-/// Absent, unknown, unhealthy, or stale authority readings all miss, so a
-/// deployment without a working authority simply never hits. A cache built without
-/// an authority skips the cursor rule entirely and is bounded only by the hard age
-/// bound, which is what a deployment without the storage sequence probe serves.
-pub trait CacheAuthority: Send + Sync {
-    /// The cursor the authority vouches for, and how fresh that reading is.
-    fn status(&self) -> AuthorityStatus;
 }
 
 /// Why a [`RollupCacheConfig`] is unusable.
@@ -766,8 +960,8 @@ pub enum ConfigError {
     Bytes,
     /// A chunk must cover at least one millisecond.
     Chunk,
-    /// The staleness bound must accept an authority reading at all.
-    MaxStaleness,
+    /// The refresh period must leave the cache time to run a round at all.
+    RefreshInterval,
     /// The age bound must accept an entry at all.
     MaxAge,
 }
@@ -777,7 +971,7 @@ impl fmt::Display for ConfigError {
         match self {
             Self::Bytes => f.write_str("the cache byte budget must be positive"),
             Self::Chunk => f.write_str("the chunk duration must be positive"),
-            Self::MaxStaleness => f.write_str("the max staleness must be positive"),
+            Self::RefreshInterval => f.write_str("the refresh interval must be positive"),
             Self::MaxAge => f.write_str("the max age must be positive"),
         }
     }
@@ -788,7 +982,7 @@ impl std::error::Error for ConfigError {}
 /// The bounds a [`RollupCache`] enforces.
 ///
 /// `tail` is a [`Duration`], so it is non-negative by construction and needs no
-/// check; `max_bytes`, `chunk`, `max_staleness`, and `max_age` all have to be
+/// check; `max_bytes`, `chunk`, `refresh_interval`, and `max_age` all have to be
 /// positive.
 ///
 /// `chunk` cannot be validated against the step here, because the step belongs to
@@ -799,7 +993,7 @@ pub struct RollupCacheConfig {
     max_bytes: u64,
     tail: Duration,
     chunk: Duration,
-    max_staleness: Duration,
+    refresh_interval: Duration,
     max_age: Duration,
 }
 
@@ -809,7 +1003,7 @@ impl RollupCacheConfig {
         max_bytes: u64,
         tail: Duration,
         chunk: Duration,
-        max_staleness: Duration,
+        refresh_interval: Duration,
         max_age: Duration,
     ) -> Result<Self, ConfigError> {
         if max_bytes == 0 {
@@ -818,8 +1012,8 @@ impl RollupCacheConfig {
         if chunk.is_zero() {
             return Err(ConfigError::Chunk);
         }
-        if max_staleness.is_zero() {
-            return Err(ConfigError::MaxStaleness);
+        if refresh_interval.is_zero() {
+            return Err(ConfigError::RefreshInterval);
         }
         if max_age.is_zero() {
             return Err(ConfigError::MaxAge);
@@ -828,7 +1022,7 @@ impl RollupCacheConfig {
             max_bytes,
             tail,
             chunk,
-            max_staleness,
+            refresh_interval,
             max_age,
         })
     }
@@ -848,9 +1042,12 @@ impl RollupCacheConfig {
         self.chunk
     }
 
-    /// How old an authority reading may be before it stops being trusted.
-    pub fn max_staleness(&self) -> Duration {
-        self.max_staleness
+    /// How often the background refresher probes an active source table.
+    ///
+    /// It is the only thing this period controls: a request reads the table's
+    /// readiness instead of waiting for, or measuring, a round.
+    pub fn refresh_interval(&self) -> Duration {
+        self.refresh_interval
     }
 
     /// How old an entry may be before it stops being served, counted from the
@@ -971,60 +1168,48 @@ struct Entry {
     payload: Arc<RecordBatches>,
     /// What the read that produced `payload` recorded, served with it.
     annotations: Arc<CachedAnnotations>,
-    /// The cursor the payload was filled at, never the one seen at insertion.
-    cursor: u64,
     /// The span of source data the payload was materialized from.
     ///
     /// A dirty input range invalidates the entry when it overlaps this span, not
     /// the chunk's own output span: the history a chunk folded can reach before
     /// its first output point.
     dependency: TimeChunk,
-    /// The invalidation epoch the fill captured before it read storage.
-    epoch: u64,
-    /// The source table incarnation validated by the probe.
-    source_table_id: Option<u32>,
     /// The bytes this entry is charged: its payload plus a fixed overhead.
     weight: u32,
-    /// When the fill that produced the payload captured its read.
-    validated_at: SystemTime,
-    /// When the entry was inserted.
-    inserted_at: SystemTime,
+    /// When the fill that produced the payload captured its read, which its age is
+    /// counted from.
+    filled_at: SystemTime,
+    /// The source sequence the read behind the payload reached, per region.
+    ///
+    /// It is the payload's source watermark: what the read itself observed, kept with the
+    /// payload as the record of how current it is. Nothing on the lookup path compares it —
+    /// a round invalidates by dropping the entries its hull reaches — and a read that could
+    /// not report it is never published.
+    read_through: BTreeMap<u64, u64>,
 }
 
 /// A bounded, frontend-local cache of whole PromQL chunks.
 ///
 /// The cache is read-through: [`RollupCache::lookup`] answers from memory or says
-/// why it cannot, and the caller executes storage and calls
-/// [`RollupCache::insert`]. Entries are evicted by moka in admission order once the
-/// byte budget is spent, which is bounded but not a strict recency ordering.
+/// why it cannot, and the caller executes storage and calls [`RollupCache::insert`].
+/// Entries are evicted by moka in admission order once the byte budget is spent,
+/// which is bounded but not a strict recency ordering.
+///
+/// Two pieces of state decide what a request may do: the entries, and one
+/// [`TableState`] per source table a request has been admitted for. The background
+/// refresher is the only writer of a table's cursors, its readiness, and its query
+/// watermarks when it invalidates; a request only registers its table, reads its
+/// readiness, and compares the sequence its read reported against that watermark when it
+/// publishes.
 pub struct RollupCache {
     config: RollupCacheConfig,
-    authority: Option<Arc<dyn CacheAuthority>>,
     entries: Cache<TimeChunkKey, Entry>,
-    /// How many invalidations have run, which is what a fill is validated against.
+    /// The active source tables, keyed by fully qualified name.
     ///
-    /// It is advanced by every invalidation method and never read as a clock: only
-    /// the ordering between the epoch a fill captured and the current one matters.
-    invalidation_epoch: AtomicU64,
-    /// The source-table generation a query was validated against. Every rename,
-    /// repartition, or incarnation transition advances it; a fill planned under an
-    /// older generation is rejected even if its ordinary invalidation epoch is new.
-    source_epoch: AtomicU64,
-    /// Whether callers validate the source sequence before serving an entry.
-    ///
-    /// Off by default so an embedder that has no sequence authority (a test, or a
-    /// deployment without the probe) keeps the age-bounded behavior. A deployment
-    /// that can probe turns it on and invalidates the affected table before a
-    /// lookup.
-    source_probe: bool,
-    /// Serializes lookup, publication, and invalidation.
-    ///
-    /// The epoch alone cannot fence publication: a fill may pass its epoch check
-    /// and pause while an invalidation scans, then insert its pre-invalidation
-    /// payload. Holding this lock across the epoch check and the store means an
-    /// invalidation cannot complete between them, and a lookup cannot observe a
-    /// payload that an already-completed invalidation meant to remove.
-    invalidation_lock: Mutex<()>,
+    /// The map is the cache's record of what to refresh: a table is registered by
+    /// the first request admitted for it, kept active while requests keep admitting
+    /// it, and dropped once no request has for [`IDLE_TABLE_TIMEOUT`].
+    tables: Mutex<HashMap<SourceTable, Arc<TableState>>>,
     /// How many lookups were answered from an existing entry.
     ///
     /// Only a test reads it ([`RollupCache::hit_count`]); it is compiled out of a
@@ -1034,70 +1219,24 @@ pub struct RollupCache {
 }
 
 impl RollupCache {
-    /// A cache bounded by `config` and, when given, validated by `authority`.
-    ///
-    /// Without an authority the cache never compares cursors and serves entries
-    /// while they are younger than [`RollupCacheConfig::max_age`].
-    pub fn new(config: RollupCacheConfig, authority: Option<Arc<dyn CacheAuthority>>) -> Self {
+    /// A cache bounded by `config`.
+    pub fn new(config: RollupCacheConfig) -> Self {
         let entries = Cache::builder()
             .max_capacity(config.max_bytes())
             .weigher(|_key: &TimeChunkKey, entry: &Entry| entry.weight)
             .build();
         Self {
             config,
-            authority,
             entries,
-            invalidation_epoch: AtomicU64::new(0),
-            source_epoch: AtomicU64::new(0),
-            source_probe: false,
-            invalidation_lock: Mutex::new(()),
+            tables: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "testing"))]
             hits: AtomicU64::new(0),
         }
     }
 
-    /// Requires callers to validate the source sequence before serving entries.
-    ///
-    /// This is a construction-time switch: a cache that never receives a source
-    /// probe must not pretend to be sequence-consistent, and a cache that does must
-    /// call [`Self::invalidate_table_range`] or [`Self::invalidate_table`] before
-    /// advancing its own cursor.
-    pub fn with_source_probe(mut self) -> Self {
-        self.source_probe = true;
-        self
-    }
-
-    /// Whether this cache expects its caller to validate the source sequence.
-    pub fn source_probe_enabled(&self) -> bool {
-        self.source_probe
-    }
-
     /// The configuration this cache enforces.
     pub fn config(&self) -> &RollupCacheConfig {
         &self.config
-    }
-
-    /// How many invalidations this cache has run.
-    ///
-    /// A fill captures it in its [`FillCursor`] and an insertion compares it with
-    /// the value current at insertion time; nothing else reads it.
-    pub fn invalidation_epoch(&self) -> u64 {
-        self.invalidation_epoch.load(Ordering::SeqCst)
-    }
-
-    /// The source-table generation currently validated.
-    pub fn source_epoch(&self) -> u64 {
-        self.source_epoch.load(Ordering::SeqCst)
-    }
-
-    /// Advances the source-table generation and returns the new value.
-    ///
-    /// A query captures the returned generation before executing; a fill carrying
-    /// an older generation is dropped because its source identity or route may no
-    /// longer be the one it read.
-    pub fn advance_source_epoch(&self) -> u64 {
-        let _guard = self.invalidation_lock.lock().unwrap();
-        self.source_epoch.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// How many entries the cache holds once pending maintenance has run.
@@ -1151,51 +1290,48 @@ impl RollupCache {
         }
     }
 
-    /// Tries to serve `key` from memory as of `now`.
+    /// Registers `table` as active for one request and captures the state its
+    /// lookups and fills are validated against.
     ///
-    /// This is local and infallible: it reads the authority status and at most one
-    /// entry, never storage, and never waits for an in-flight fill or for cache
-    /// maintenance.
-    pub fn lookup(&self, key: &TimeChunkKey, now: SystemTime) -> Lookup {
-        self.lookup_fenced(key, now, self.source_epoch(), None)
+    /// Admission never fails and never waits for the background refresher: whether a
+    /// table may be served is decided per lookup, and a cold or unproved table simply
+    /// answers [`MissReason::TableNotProved`] until a round succeeds. Registering here
+    /// is also what keeps the table on the refresher's list, and what a table is
+    /// idle-evicted by.
+    pub fn admit(&self, table: &SourceTable, now: Instant) -> Admission {
+        let state = {
+            let mut tables = self.tables.lock().unwrap();
+            Arc::clone(
+                tables
+                    .entry(table.clone())
+                    .or_insert_with(|| Arc::new(TableState::new(table.clone()))),
+            )
+        };
+        // Registered under the table lock, so the refresh round that decides what to
+        // probe sees this request before it decides the table is idle.
+        state.inner.lock().unwrap().last_used = Some(now);
+        Admission { state }
     }
 
-    /// [`Self::lookup`] with the source generation the caller validated.
+    /// Tries to serve `key` from memory as of `now`.
     ///
-    /// The check runs under the same lock as the hit decision: a rename that
-    /// advanced the source epoch after the caller's pre-check cannot be followed by
-    /// serving an entry keyed to the old identity.
-    pub fn lookup_fenced(
-        &self,
-        key: &TimeChunkKey,
-        now: SystemTime,
-        source_epoch: u64,
-        source_table_id: Option<u32>,
-    ) -> Lookup {
-        if key.chunk.is_empty() {
+    /// The table's readiness is read under its lock on every call, so a round that
+    /// fails while the request runs stops the serving at the next chunk. This is local
+    /// and infallible: it reads at most one entry, never storage, and never waits for
+    /// an in-flight fill or for cache maintenance.
+    pub fn lookup(&self, admission: &Admission, key: &TimeChunkKey, now: SystemTime) -> Lookup {
+        if key.chunk().is_empty() {
             return Lookup::Bypass(BypassReason::EmptyChunk);
         }
-        let _guard = self.invalidation_lock.lock().unwrap();
-        if self.source_epoch() != source_epoch {
-            return Lookup::Miss(MissReason::SourceChanged);
+        // The readiness is read under the table lock, so a round that failed while the
+        // request runs stops the serving at the next chunk.
+        if !admission.state.inner.lock().unwrap().ready {
+            return Lookup::Miss(MissReason::TableNotProved);
         }
-        let cursor = match self.authorized_cursor(now) {
-            Ok(cursor) => cursor,
-            Err(reason) => return Lookup::Miss(reason),
-        };
         let Some(entry) = self.entries.get(key) else {
             return Lookup::Miss(MissReason::NotFound);
         };
-        if entry.source_table_id != source_table_id {
-            return Lookup::Miss(MissReason::SourceChanged);
-        }
-        if self.authority.is_some() && entry.cursor != cursor {
-            return Lookup::Miss(MissReason::CursorChanged {
-                cached: entry.cursor,
-                authority: cursor,
-            });
-        }
-        let age = now.duration_since(entry.validated_at).unwrap_or_default();
+        let age = now.duration_since(entry.filled_at).unwrap_or_default();
         if age > self.config.max_age() {
             return Lookup::Miss(MissReason::Expired { age });
         }
@@ -1205,233 +1341,320 @@ impl RollupCache {
         Lookup::Hit {
             payload: entry.payload,
             annotations: entry.annotations,
-            cursor: entry.cursor,
-            inserted_at: entry.inserted_at,
         }
     }
 
-    /// The cursor, the epoch, and the instant, a fill of a chunk should be planned
-    /// at.
+    /// Registers one fill of `key` as reading storage, before it reads.
     ///
-    /// Callers must pass the returned [`FillCursor`] to [`RollupCache::insert`]
-    /// instead of reading the authority, or the epoch, again once the fill
-    /// completes.
-    pub fn fill_cursor(&self, now: SystemTime) -> Result<FillCursor, MissReason> {
-        let epoch = self.invalidation_epoch();
-        self.authorized_cursor(now).map(|cursor| FillCursor {
-            cursor,
-            epoch,
-            source_epoch: self.source_epoch(),
-            source_table_id: None,
-            captured_at: now,
-        })
+    /// `dependency` is the span of source data the read touches, which a round compares
+    /// with its dirty hull. `captured_at` is the instant the fill captured before it
+    /// read, which the entry's age is counted from.
+    ///
+    /// The returned [`FillGuard`] is registered with the query, so a round that invalidates
+    /// while the fill runs moves the watermark the publication is judged against.
+    pub fn begin_fill(
+        &self,
+        admission: &Admission,
+        key: &TimeChunkKey,
+        dependency: TimeChunk,
+        captured_at: SystemTime,
+    ) -> FillGuard {
+        // Registered before the read: the identity a round has to move the watermark of
+        // exists while this fill runs.
+        admission
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .queries
+            .entry(key.identity().clone())
+            .or_default();
+        FillGuard {
+            state: Arc::clone(&admission.state),
+            identity: key.identity().clone(),
+            chunk: key.chunk(),
+            dependency,
+            captured_at,
+        }
     }
 
-    /// Stores `payload` as the whole result of `key`'s chunk, filled at `fill`.
+    /// Stores `payload` as the whole result of the chunk `fill` was registered for.
     ///
-    /// The insertion is conditional: a fill at a cursor older than the entry
-    /// already in place is dropped, so a slow fill cannot overwrite a newer one, and
-    /// a fill an invalidation has overtaken is dropped as well, so a slow fill
-    /// cannot resurrect what that invalidation removed. A fill at the same cursor
-    /// replaces the payload, since both read the same storage state. The entry
-    /// records the cursor and the instant of `fill`, not whichever the authority
-    /// reports now, and is charged the bytes of its payload so eviction stays within
-    /// the configured budget.
+    /// The payload is published only when the source sequence its own read reported is at
+    /// least as far as the query's invalidated watermark, and at least as far as whatever the
+    /// chunk holds with at least one region strictly further. A payload a round overtook is
+    /// therefore refused, and so is one that would replace a newer payload; an entry past its
+    /// age bound may still be refreshed by a read of the same sequence. The request that read
+    /// a refused payload still gets it; the cache just does not keep it.
     ///
-    /// The entry's input dependency is the chunk itself: the payload covers exactly
-    /// the points of its span and reads nothing else.
-    /// [`RollupCache::insert_with_dependency`] records a wider span for a read that
-    /// folded history outside it.
+    /// A publication is a cache change, so it advances the query's version counter, which
+    /// admits nothing and only records that the cache changed.
+    ///
+    /// The publication also requires the table to still be the state the request was
+    /// admitted under, so a state that was reclaimed rejects the fill instead of
+    /// publishing into its replacement. Every check and the store happen without releasing
+    /// the table lock.
+    ///
+    /// The entry's input dependency is the span the fill registered: a dirty hull
+    /// invalidates the entry when it reaches that span, not the chunk's own output span,
+    /// because the history a chunk folded can reach before its first point.
     pub fn insert(
         &self,
-        key: TimeChunkKey,
-        fill: FillCursor,
-        payload: Arc<RecordBatches>,
-    ) -> Insert {
-        self.insert_annotated(key, fill, payload, Arc::default())
-    }
-
-    /// [`RollupCache::insert`] with the annotations the read recorded.
-    ///
-    /// The annotations are stored with the payload and served with it, so a hit
-    /// reports what the read it replaces would have reported. A chunk filled
-    /// without them is served without them.
-    pub fn insert_annotated(
-        &self,
-        key: TimeChunkKey,
-        fill: FillCursor,
+        fill: &FillGuard,
+        read_through: &BTreeMap<u64, u64>,
         payload: Arc<RecordBatches>,
         annotations: Arc<CachedAnnotations>,
     ) -> Insert {
-        let dependency = key.chunk();
-        self.insert_with_dependency(key, fill, payload, annotations, dependency)
-    }
-
-    /// [`RollupCache::insert_annotated`] with the input span the payload was
-    /// materialized from.
-    ///
-    /// `dependency` is the span of source data the read touched, which invalidation
-    /// compares against a dirty range. It must contain the chunk's own span, and is
-    /// wider than it whenever the evaluation folded history before the chunk start
-    /// (a lookback window, or the range of `rate(x[5m])`); an entry whose dependency
-    /// is only the chunk is invalidated only by a range that reaches its output points.
-    ///
-    /// The insertion is guarded by `fill`: a fill overtaken by an invalidation is
-    /// dropped, even though its key and cursor are still current, because the read
-    /// behind it may have returned exactly what that invalidation removed.
-    pub fn insert_with_dependency(
-        &self,
-        key: TimeChunkKey,
-        fill: FillCursor,
-        payload: Arc<RecordBatches>,
-        annotations: Arc<CachedAnnotations>,
-        dependency: TimeChunk,
-    ) -> Insert {
-        if key.chunk.is_empty() {
+        if fill.chunk.is_empty() {
             return Insert::Bypassed;
         }
-        let _guard = self.invalidation_lock.lock().unwrap();
-        // An invalidation ran after this fill captured its epoch, so the data the
-        // fill read may be the data the invalidation removed. The fill loses.
-        if self.invalidation_epoch() > fill.epoch() || self.source_epoch() != fill.source_epoch {
+        // A read that could not report the source sequence it reached cannot be ordered
+        // against an invalidation, so it is not published at all.
+        if read_through.is_empty() {
             return Insert::Rejected;
         }
-        let candidate = Entry {
+        // Registry before table state, the order every writer here uses.
+        let tables = self.tables.lock().unwrap();
+        let current = tables.get(fill.state.table());
+        if !current.is_some_and(|current| Arc::ptr_eq(current, &fill.state)) {
+            return Insert::Rejected;
+        }
+        let mut inner = fill.state.inner.lock().unwrap();
+        let Some(query) = inner.queries.get_mut(&fill.identity) else {
+            return Insert::Rejected;
+        };
+        if !query.is_past_watermark(read_through) {
+            // The round that invalidated past this read has already committed.
+            return Insert::Rejected;
+        }
+        let key = TimeChunkKey::new(fill.identity.clone(), fill.chunk);
+        if let Some(resident) = self.entries.get(&key) {
+            // The resident payload's age is measured at the instant this request captured,
+            // which is the request's own clock and not the wall clock of the insertion.
+            let age = fill
+                .captured_at
+                .duration_since(resident.filled_at)
+                .unwrap_or_default();
+            let expired = age > self.config.max_age();
+            if !may_replace(read_through, &resident.read_through, expired) {
+                return Insert::Rejected;
+            }
+        }
+        // The publication is a cache change, so the version counts it.
+        query.version = query.version.saturating_add(1);
+        let entry = Entry {
             weight: Entry::weigh(&payload, &annotations),
             payload,
             annotations,
-            cursor: fill.cursor(),
-            dependency,
-            epoch: fill.epoch(),
-            source_table_id: fill.source_table_id,
-            validated_at: fill.captured_at(),
-            inserted_at: SystemTime::now(),
+            dependency: fill.dependency,
+            filled_at: fill.captured_at,
+            read_through: read_through.clone(),
         };
-        let stored = Arc::clone(&candidate.payload);
-        // `and_compute_with` serializes only the swap of this one key; nothing is
-        // locked across the storage read that produced `payload`.
-        let result = self
-            .entries
-            .entry(key.clone())
-            .and_compute_with(|existing| match existing {
-                Some(entry) if entry.value().cursor > candidate.cursor => Op::Nop,
-                _ => Op::Put(candidate),
-            });
-        if let Some(entry) = result.into_entry()
-            && entry.value().cursor > fill.cursor()
-        {
-            return Insert::Rejected;
-        }
-        // The epoch may have moved between the check above and the store, and the
-        // invalidation that moved it may have scanned this chunk before the store
-        // landed. Drop the entry rather than serve what that invalidation was
-        // meant to remove; a newer fill of the same chunk keeps its own entry, as
-        // only this payload is dropped.
-        if self.invalidation_epoch() > fill.epoch() {
-            self.remove_own_entry(&key, &stored, fill.epoch());
-            return Insert::Rejected;
-        }
+        self.entries.insert(key, entry);
         Insert::Stored
     }
 
-    /// Removes `key` while it still holds `payload` filled at `epoch`.
+    /// The active source tables a background round must refresh, most recently used
+    /// first.
     ///
-    /// A concurrent fill may have replaced the entry since it was written, so the
-    /// removal is conditional on the entry still being the one that lost the epoch
-    /// race.
-    fn remove_own_entry(&self, key: &TimeChunkKey, payload: &Arc<RecordBatches>, epoch: u64) {
-        self.entries
-            .entry(key.clone())
-            .and_compute_with(|existing| match existing {
-                Some(entry)
-                    if entry.value().epoch == epoch
-                        && Arc::ptr_eq(&entry.value().payload, payload) =>
-                {
-                    Op::Remove
-                }
-                _ => Op::Nop,
-            });
+    /// Tables no request has admitted for [`IDLE_TABLE_TIMEOUT`] are dropped here,
+    /// together with the entries they left behind: a table nothing reads must not keep
+    /// occupying the refresher's rounds or the byte budget. The next request for it
+    /// registers a fresh state and is answered from storage until a round proves it.
+    pub fn tables_to_refresh(&self, now: Instant) -> Vec<SourceTable> {
+        let mut tables = self.tables.lock().unwrap();
+        let mut active = Vec::with_capacity(tables.len());
+        let mut idle = Vec::new();
+        for (table, state) in tables.iter() {
+            let last_used = state.inner.lock().unwrap().last_used;
+            let is_idle = last_used
+                .is_some_and(|used| now.saturating_duration_since(used) > IDLE_TABLE_TIMEOUT);
+            if is_idle {
+                idle.push(table.clone());
+            } else {
+                active.push((last_used, table.clone()));
+            }
+        }
+        for table in idle {
+            if let Some(state) = tables.remove(&table) {
+                self.forget_table(&state);
+            }
+        }
+        // Most recently used first, so a refresher that cannot keep up with every table
+        // still keeps up with the ones requests are reading now.
+        active.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        active.into_iter().map(|(_, table)| table).collect()
     }
 
-    /// Drops every entry of `identity` whose input dependency overlaps
-    /// `input_span`, and returns how many entries were removed.
-    ///
-    /// `input_span` is a dirty half-open `[start, end)` range of *source* data, not
-    /// of output points: an entry goes when any part of the history it was
-    /// materialized from is in the range, so a chunk whose output points are all
-    /// earlier can still be invalidated by a dependency that reaches into it.
-    /// Overlap is half-open on both sides, so a range that ends where a dependency
-    /// starts removes nothing. Entries of other identities, and of this identity
-    /// whose dependency is disjoint, stay resident.
-    ///
-    /// The epoch advances once per call, whether or not anything was removed, so a
-    /// fill that captured its epoch before the call cannot store afterwards. The
-    /// method is synchronous and takes no lock, so it never waits for a fill and
-    /// nothing it does is held across an await.
-    ///
-    /// The scan and the removals are not one atomic step: a fill that lands between
-    /// them is removed too, even though it read storage after this call. That costs
-    /// a later miss, never a wrong answer, and is why no fill has to be waited for.
-    pub fn invalidate_range(&self, identity: &QueryIdentity, input_span: TimeChunk) -> usize {
-        let _guard = self.invalidation_lock.lock().unwrap();
-        // Advanced before the scan: a fill that captures the new epoch from now on
-        // read storage after this point, and one that captured an older epoch is
-        // refused by `insert_with_dependency`.
-        self.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
+    /// The per-region cursors a background round of `table` starts from.
+    pub fn cursors(&self, table: &SourceTable) -> BTreeMap<u64, u64> {
+        let Some(state) = self.table_state(table) else {
+            return BTreeMap::new();
+        };
+        state.inner.lock().unwrap().cursors.clone()
+    }
 
+    /// Records one successful background round of `table`.
+    ///
+    /// A round that proved nothing changed keeps every entry, every watermark, and advances
+    /// nothing but the cursors and the readiness. A round that found a dirty hull, or a
+    /// change it cannot bound, commits one invalidation — the entries whose dependency the
+    /// change reaches are dropped and every query of the table moves its watermark to the
+    /// round's high watermark — and only then advances the cursors and the readiness.
+    /// Nothing here waits for a fill: a fill that is still reading is refused when it tries
+    /// to publish.
+    ///
+    /// A table's first round starts from zero cursors, so its delta covers every row the
+    /// table has ever had, including whatever a request filled before the table was
+    /// proved. Applying that delta is therefore enough to open the table; there is no
+    /// separate baseline eviction, and one is only used when the probe cannot bound the
+    /// change at all.
+    pub fn record_refresh(
+        &self,
+        table: &SourceTable,
+        cursors: BTreeMap<u64, u64>,
+        dirty: DirtySpan,
+        now: Instant,
+    ) -> bool {
+        let Some(state) = self.table_state(table) else {
+            return true;
+        };
+        let high = cursors.clone();
+        let mut inner = state.inner.lock().unwrap();
+        if !matches!(dirty, DirtySpan::Nothing) && !self.can_commit(&inner, &high) {
+            // The round's vector cannot replace what is committed — it is empty, of another
+            // domain, or behind a region — so the table proves nothing: it stops being served,
+            // nothing is committed, and the cursors stay where they were so the next round
+            // sees the same delta.
+            inner.ready = false;
+            return false;
+        }
+        match dirty {
+            DirtySpan::Nothing => {}
+            DirtySpan::Hull(span) => self.invalidate(table, &mut inner, Some(span), &high),
+            DirtySpan::Everything => self.invalidate(table, &mut inner, None, &high),
+        }
+        inner.cursors = cursors;
+        inner.ready = true;
+        inner.last_success = Some(now);
+        true
+    }
+
+    /// Whether the round's `high` may be committed over every query's watermark of `table`.
+    ///
+    /// The new vector has to be complete, cover the same regions as the one it replaces, and
+    /// go no further back in any of them. A round that cannot say that proves nothing, and
+    /// the caller must not serve or advance on it. The vector is assigned, never merged: a
+    /// merged bound would keep an older sequence for a region this round moved past.
+    fn can_commit(&self, inner: &TableStateInner, high: &BTreeMap<u64, u64>) -> bool {
+        if high.is_empty() {
+            return false;
+        }
+        inner.queries.values().all(|query| {
+            let previous = &query.invalidated_watermark;
+            previous.is_empty()
+                || (previous.len() == high.len()
+                    && previous.iter().all(|(region, sequence)| {
+                        high.get(region)
+                            .is_some_and(|committed| committed >= sequence)
+                    }))
+        })
+    }
+
+    /// Records one failed background round of `table`.
+    ///
+    /// A failed round proves nothing, so the table stops being served until a later
+    /// round succeeds. Its cursors stay where the last proved round left them, so the
+    /// next round covers everything this one missed, and its entries stay resident:
+    /// nothing says they are wrong, and a round that finds the change drops them.
+    pub fn record_failure(&self, table: &SourceTable) {
+        let Some(state) = self.table_state(table) else {
+            return;
+        };
+        state.inner.lock().unwrap().ready = false;
+    }
+
+    /// The state `table` is registered under, if any request has admitted it.
+    fn table_state(&self, table: &SourceTable) -> Option<Arc<TableState>> {
+        self.tables.lock().unwrap().get(table).cloned()
+    }
+
+    /// Drops what an idle table left behind.
+    ///
+    /// The readiness closes, the query watermarks go with the state, and the entries are
+    /// removed. A fill that was admitted under the evicted state is refused by
+    /// [`RollupCache::insert`], because the registry no longer holds the state it captured
+    /// and the fresh state the next request registers is a different one.
+    fn forget_table(&self, state: &Arc<TableState>) {
+        let mut inner = state.inner.lock().unwrap();
+        inner.ready = false;
+        inner.last_used = None;
+        inner.queries.clear();
+        self.invalidate_table(state.table());
+    }
+
+    /// Invalidates `table` for `hull` and drops the entries whose dependency it reaches.
+    ///
+    /// `hull` is the half-open span the round found dirty; `None` means the change cannot
+    /// be bounded, so every entry of the table goes. Entries of other tables, and of this
+    /// table whose dependency the change does not reach, stay resident.
+    ///
+    /// Every query of the table commits the invalidation — even one that had no entry, and
+    /// even when the cache is empty — because a fill the cache cannot see may be reading
+    /// right now: the watermark has to move past it so that its payload is refused at
+    /// [`RollupCache::insert`]. The removals and the watermark move under one table lock,
+    /// so no fill can publish in between and there is nothing to retry.
+    fn invalidate(
+        &self,
+        table: &SourceTable,
+        inner: &mut TableStateInner,
+        hull: Option<TimeChunk>,
+        high: &BTreeMap<u64, u64>,
+    ) {
+        let reaches = |dependency: TimeChunk| hull.is_none_or(|span| overlaps(dependency, span));
         // The keys are collected first because the scan borrows the cache that the
         // removals mutate.
         let mut dirty = Vec::new();
         for (key, entry) in self.entries.iter() {
-            if key.identity() == identity && overlaps(entry.dependency, input_span) {
+            if table.owns(key.identity()) && reaches(entry.dependency) {
                 dirty.push(key);
             }
         }
-        dirty
-            .into_iter()
-            .filter(|key| self.entries.remove(key.as_ref()).is_some())
-            .count()
-    }
-
-    /// Drops entries for `table` whose input dependencies overlap `input_span`,
-    /// regardless of their query identity, and returns the number removed.
-    ///
-    /// The table is the exact named source table in [`QueryIdentity`]; matching it
-    /// across catalogs and schemas is conservative. As in [`Self::invalidate_range`],
-    /// both spans are half-open, the epoch advances once even if nothing is removed,
-    /// and a concurrent fill that started before invalidation cannot be stored.
-    /// The scan and removals are not atomic, so a newer fill may also be removed.
-    pub fn invalidate_table_range(&self, table: &str, input_span: TimeChunk) -> usize {
-        let _guard = self.invalidation_lock.lock().unwrap();
-        self.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
-
-        let mut dirty = Vec::new();
-        for (key, entry) in self.entries.iter() {
-            if key.identity().source_table == table && overlaps(entry.dependency, input_span) {
-                dirty.push(key);
+        let mut removed = 0;
+        for key in dirty {
+            if self.entries.remove(key.as_ref()).is_some() {
+                removed += 1;
             }
         }
-        dirty
-            .into_iter()
-            .filter(|key| self.entries.remove(key.as_ref()).is_some())
-            .count()
+        // Committed after the removals: every query of the table moves its watermark to the
+        // sequence this round proved, so a fill that is still reading — and whose read did
+        // not get that far — is refused when it tries to publish. A query with nothing
+        // resident moves too, and so does one whose entries were all spared: the fill the
+        // watermark has to refuse is one the cache cannot see. The version counts the change.
+        // The watermark is assigned rather than merged, because the round's vector is
+        // complete and a region that fell behind must not keep an older bound.
+        for query in inner.queries.values_mut() {
+            query.invalidated_watermark = high.clone();
+            query.version = query.version.saturating_add(1);
+        }
+        debug!(
+            "Rollup cache dropped {} entries of table {} for {} and advanced {} query watermarks",
+            removed,
+            table,
+            match hull {
+                Some(span) => format!("[{}, {})", span.start_ms(), span.end_ms()),
+                None => "an unbounded change".to_string(),
+            },
+            inner.queries.len(),
+        );
     }
 
-    /// Drops every entry whose source table is `table`, regardless of span, and
-    /// returns the number removed.
-    ///
-    /// This is the conservative invalidation for a source change whose timestamp
-    /// range cannot be proved: a row removed by compaction may advance the source
-    /// sequence without leaving a timestamp in the new range. Keeping an entry is
-    /// never worth serving a point whose input was erased, so the caller evicts the
-    /// whole table instead of guessing a span.
-    pub fn invalidate_table(&self, table: &str) -> usize {
-        let _guard = self.invalidation_lock.lock().unwrap();
-        self.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
-
+    /// Drops every entry of `table`, regardless of span, and returns how many were
+    /// removed.
+    fn invalidate_table(&self, table: &SourceTable) -> usize {
         let mut dirty = Vec::new();
         for (key, _) in self.entries.iter() {
-            if key.identity().source_table == table {
+            if table.owns(key.identity()) {
                 dirty.push(key);
             }
         }
@@ -1439,29 +1662,6 @@ impl RollupCache {
             .into_iter()
             .filter(|key| self.entries.remove(key.as_ref()).is_some())
             .count()
-    }
-
-    /// The cursor a lookup at `now` may serve, or why it may serve none.
-    fn authorized_cursor(&self, now: SystemTime) -> Result<u64, MissReason> {
-        let Some(authority) = &self.authority else {
-            // No probe is deployed: freshness is bounded by age alone.
-            return Ok(NO_AUTHORITY_CURSOR);
-        };
-        match authority.status() {
-            AuthorityStatus::Unknown => Err(MissReason::AuthorityUnknown),
-            AuthorityStatus::Unhealthy => Err(MissReason::AuthorityUnhealthy),
-            AuthorityStatus::Ready {
-                cursor,
-                observed_at,
-            } => {
-                let age = now.duration_since(observed_at).unwrap_or_default();
-                if age > self.config.max_staleness() {
-                    Err(MissReason::AuthorityStale { age })
-                } else {
-                    Ok(cursor)
-                }
-            }
-        }
     }
 }
 
@@ -1486,7 +1686,6 @@ impl Entry {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier, Mutex};
     use std::time::UNIX_EPOCH;
 
     use promql_parser::parser::parse;
@@ -1535,18 +1734,33 @@ mod tests {
             step_ms: STEP_MS,
             lookback_ms: 300_000,
             route: QueryRoute::Legacy,
-            ordered: false,
             alias: None,
             read_preference: None,
         }
+    }
+
+    /// An identity of the same table that differs only in its query text, so its
+    /// entries are separate from [`identity`]'s.
+    fn other_identity() -> QueryIdentity {
+        QueryIdentity {
+            query: "sum(rate(http_requests_total[5m]))".to_string(),
+            ..identity()
+        }
+    }
+
+    fn table() -> SourceTable {
+        SourceTable::from(&identity())
+    }
+
+    fn other_table() -> SourceTable {
+        SourceTable::new("greptime", "public", "other")
     }
 
     fn chunk_key() -> TimeChunkKey {
         chunk_key_at(0)
     }
 
-    /// The key of the chunk `index` chunks after `HEAD_MS`, so `-1` is the chunk
-    /// that ends where the first one starts.
+    /// The key of chunk `index` after [`HEAD_MS`], so `-1` ends where the first starts.
     fn chunk_key_at(index: i64) -> TimeChunkKey {
         let start = HEAD_MS + index * CHUNK_MS;
         TimeChunkKey::new(identity(), TimeChunk::new(start, start + CHUNK_MS))
@@ -1559,70 +1773,48 @@ mod tests {
     fn config() -> RollupCacheConfig {
         RollupCacheConfig::new(
             1 << 20,
+            Duration::ZERO,
             CHUNK,
-            CHUNK,
-            Duration::from_secs(60),
+            Duration::from_secs(1),
             Duration::from_secs(3_600),
         )
         .expect("the test configuration is valid")
     }
 
-    fn config_with(max_bytes: u64, tail: Duration, chunk: Duration) -> RollupCacheConfig {
-        RollupCacheConfig::new(
-            max_bytes,
-            tail,
-            chunk,
-            Duration::from_secs(60),
-            Duration::from_secs(3_600),
-        )
-        .expect("the test configuration is valid")
-    }
-
-    /// A cache with no authority: freshness is bounded by age alone.
     fn cache() -> RollupCache {
-        RollupCache::new(config(), None)
+        RollupCache::new(config())
     }
 
-    /// An authority whose reading a test sets directly.
-    #[derive(Clone)]
-    struct FakeAuthority {
-        status: Arc<Mutex<AuthorityStatus>>,
+    /// Admits `identity`'s table and opens it, as a background round that proved nothing
+    /// changed would.
+    ///
+    /// The admission comes first because the round can only record what a request has
+    /// already registered.
+    fn opened(cache: &RollupCache) -> Admission {
+        let admission = cache.admit(&table(), Instant::now());
+        cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            DirtySpan::Nothing,
+            Instant::now(),
+        );
+        admission
     }
 
-    impl Default for FakeAuthority {
-        fn default() -> Self {
-            Self {
-                status: Arc::new(Mutex::new(AuthorityStatus::Unknown)),
-            }
-        }
+    /// The source sequence a test read reports, well past every test round's watermark.
+    fn read_through() -> BTreeMap<u64, u64> {
+        BTreeMap::from([(1, 100)])
     }
 
-    impl FakeAuthority {
-        fn ready(&self, cursor: u64, observed_at: SystemTime) {
-            *self.status.lock().unwrap() = AuthorityStatus::Ready {
-                cursor,
-                observed_at,
-            };
-        }
-
-        fn unknown(&self) {
-            *self.status.lock().unwrap() = AuthorityStatus::Unknown;
-        }
-
-        fn unhealthy(&self) {
-            *self.status.lock().unwrap() = AuthorityStatus::Unhealthy;
-        }
-    }
-
-    impl CacheAuthority for FakeAuthority {
-        fn status(&self) -> AuthorityStatus {
-            *self.status.lock().unwrap()
-        }
-    }
-
-    fn authority_cache(authority: &FakeAuthority) -> RollupCache {
-        let authority: Arc<dyn CacheAuthority> = Arc::new(authority.clone());
-        RollupCache::new(config(), Some(authority))
+    /// One fill of `key` under `admission`, taken and published at `now`.
+    fn fill(
+        cache: &RollupCache,
+        admission: &Admission,
+        key: &TimeChunkKey,
+        now: SystemTime,
+    ) -> Insert {
+        let guard = cache.begin_fill(admission, key, key.chunk(), now);
+        cache.insert(&guard, &read_through(), payload(), Arc::default())
     }
 
     fn planned(
@@ -1638,6 +1830,7 @@ mod tests {
         planned_for(identity(), cache, stmt, now)
     }
 
+    #[allow(clippy::type_complexity)]
     fn planned_for(
         identity: QueryIdentity,
         cache: &RollupCache,
@@ -1660,8 +1853,8 @@ mod tests {
         }
     }
 
-    /// Every span a plan returns, in time order, must partition the coverage
-    /// exactly once.
+    /// Every span a plan returns, in time order, must partition the coverage exactly
+    /// once.
     fn assert_partition(span: QuerySpan, chunks: &[TimeChunk], direct: &[DirectSpan]) {
         let mut spans: Vec<TimeChunk> = chunks
             .iter()
@@ -1685,206 +1878,59 @@ mod tests {
         }
         assert!(
             previous_end > span.end_ms(),
-            "the last span must reach past the last point of {:?}",
-            span
+            "the last span must reach past the last point of {span:?}"
         );
-        for direct in direct {
-            assert!(
-                direct.span().start_ms() <= span.end_ms(),
-                "a direct span escapes the coverage: {direct:?}"
-            );
-        }
     }
 
     #[test]
     fn a_sliding_window_reuses_every_interior_chunk() {
         let cache = cache();
-        let now = at(LATER_MS);
-        let first = stmt_between("rate(x[5m])", HEAD_MS, HEAD_MS + 3_600_000, STEP_MS);
-        let second = stmt_between(
-            "rate(x[5m])",
+        // Ten points one minute apart cover two whole five-minute chunks.
+        let first = stmt_from("rate(http_requests_total[5m])", HEAD_MS, 10, STEP_MS);
+        let (_, chunks, direct, _) = planned(&cache, &first, at(LATER_MS));
+        assert_eq!(
+            chunks,
+            vec![
+                TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS),
+                TimeChunk::new(HEAD_MS + CHUNK_MS, HEAD_MS + 2 * CHUNK_MS),
+            ]
+        );
+        assert!(direct.is_empty());
+
+        // Sliding the window by five minutes keeps both chunks and moves the coverage.
+        let second = stmt_from(
+            "rate(http_requests_total[5m])",
             HEAD_MS + CHUNK_MS,
-            HEAD_MS + 3_600_000 + CHUNK_MS,
+            10,
             STEP_MS,
         );
-
-        let (_, first_chunks, _, _) = planned(&cache, &first, now);
-        let (_, second_chunks, _, _) = planned(&cache, &second, now);
-
-        // The interior chunks are the same absolute spans, so they are the same
-        // keys even though the second request starts five minutes later.
-        let shared: Vec<TimeChunk> = second_chunks
-            .iter()
-            .copied()
-            .filter(|chunk| first_chunks.contains(chunk))
-            .collect();
-        assert_eq!(shared.len(), 11, "{shared:?}");
-        let interior = shared[5];
-        let fill = cache.fill_cursor(now).unwrap();
-        let filled = payload();
+        let (_, chunks, _, _) = planned(&cache, &second, at(LATER_MS));
         assert_eq!(
-            cache.insert(
-                TimeChunkKey::new(identity(), interior),
-                fill,
-                filled.clone()
-            ),
-            Insert::Stored
+            chunks,
+            vec![
+                TimeChunk::new(HEAD_MS + CHUNK_MS, HEAD_MS + 2 * CHUNK_MS),
+                TimeChunk::new(HEAD_MS + 2 * CHUNK_MS, HEAD_MS + 3 * CHUNK_MS),
+            ]
         );
-        let Lookup::Hit { payload: hit, .. } =
-            cache.lookup(&TimeChunkKey::new(identity(), interior), now)
-        else {
-            panic!("the interior chunk is a hit under the second window too");
-        };
-        assert!(Arc::ptr_eq(&hit, &filled));
-
-        // The second window starts on a canonical bound, so only the point past
-        // its last chunk is executed directly.
-        let (span, second_all, direct, _) = planned(&cache, &second, now);
-        assert_eq!(second_all.len(), 12);
-        assert_eq!(direct.len(), 1, "{direct:?}");
-        assert_eq!(direct[0].span().start_ms(), span.end_ms());
-        assert_eq!(direct[0].span().end_ms(), span.end_ms() + STEP_MS);
     }
 
     #[test]
     fn the_tail_is_measured_from_now_not_from_the_query_end() {
         let cache = cache();
-        // A historical window: its end is an hour before `now`, so nothing of it
-        // can still be arriving and the whole range is cacheable.
-        let historical = stmt_between("rate(x[5m])", HEAD_MS, HEAD_MS + 3_600_000, STEP_MS);
-        let (span, chunks, direct, tail) = planned(&cache, &historical, at(LATER_MS));
-        assert_eq!(tail, None);
-        assert!(
-            direct
-                .iter()
-                .all(|span| span.reason() == DirectReason::Edge)
-        );
+        let stmt = stmt_from("rate(http_requests_total[5m])", HEAD_MS, 10, STEP_MS);
+        // A wall clock inside the statement's own coverage puts the last points in the
+        // tail even though the query asks for them.
+        let now_ms = HEAD_MS + 6 * STEP_MS;
+        let (span, chunks, direct, tail) = planned(&cache, &stmt, at(now_ms));
         assert_partition(span, &chunks, &direct);
-        assert!(chunks.len() >= 11, "{chunks:?}");
-
-        // A window ending at `now` keeps its last tail direct.
-        let recent = stmt_between(
-            "rate(x[5m])",
-            HEAD_MS + 3_600_000,
-            HEAD_MS + 3_600_000 + 3_600_000,
-            STEP_MS,
-        );
-        let now = at(HEAD_MS + 3_600_000 + 3_600_000);
-        let (span, chunks, direct, tail) = planned(&cache, &recent, now);
-        let tail = tail.expect("the recent window has a tail");
-        assert_eq!(tail.end_ms(), span.end_ms() + STEP_MS);
-        assert_eq!(tail.start_ms(), HEAD_MS + 7_200_000 - CHUNK_MS);
-        assert!(
-            direct
-                .iter()
-                .any(|span| span.reason() == DirectReason::Tail)
-        );
-        assert_partition(span, &chunks, &direct);
-        assert!(chunks.iter().all(|chunk| chunk.end_ms() <= tail.start_ms()));
-    }
-
-    #[test]
-    fn edge_and_tail_spans_partition_an_odd_phase() {
-        // A grid that starts off a step boundary, and off a chunk boundary, so the
-        // request needs a leading and a trailing partial chunk.
-        let step = 37_000;
-        let chunk = 3 * step;
-        let start = 1_001 + 2 * step;
-        let stmt = stmt_from("rate(x[5m])", start, 11, step);
-        let cache = RollupCache::new(
-            config_with(1 << 20, Duration::ZERO, Duration::from_millis(chunk as u64)),
-            None,
-        );
-        let odd_grid = QueryIdentity {
-            step_ms: step,
-            ..identity()
-        };
-        let (span, chunks, direct, tail) = planned_for(odd_grid, &cache, &stmt, at(LATER_MS));
-
-        assert_eq!(tail, None);
-        assert_eq!(chunks.len(), 3, "{chunks:?}");
-        let filled = direct
-            .iter()
-            .filter(|s| s.reason() == DirectReason::Edge)
-            .count();
-        assert_eq!(filled, 2, "a leading and a trailing edge: {direct:?}");
-        assert_partition(span, &chunks, &direct);
-
-        // Every cacheable span is a whole configured chunk, and its bounds are
-        // canonical bounds of this grid's phase.
-        let phase = start.rem_euclid(step);
-        for chunk_span in &chunks {
-            assert_eq!(chunk_span.end_ms() - chunk_span.start_ms(), chunk);
-            assert_eq!((chunk_span.start_ms() - phase) % chunk, 0);
-        }
-        for direct in &direct {
-            assert!(
-                direct.span().end_ms() - direct.span().start_ms() < chunk,
-                "a partial chunk is never keyed as a full one: {direct:?}"
-            );
-        }
+        assert_eq!(chunks.len(), 1);
+        assert!(tail.is_some_and(|tail| tail.end_ms() > now_ms));
     }
 
     #[test]
     fn a_different_step_changes_the_identity() {
-        let finer = QueryIdentity {
-            step_ms: STEP_MS / 2,
-            ..identity()
-        };
-        assert_ne!(finer, identity());
-        assert_ne!(
-            TimeChunkKey::new(finer, TimeChunk::new(0, 1)),
-            TimeChunkKey::new(identity(), TimeChunk::new(0, 1))
-        );
-    }
-
-    #[test]
-    fn a_different_grid_phase_changes_the_chunk_bounds() {
         let cache = cache();
-        let now = at(LATER_MS);
-        let aligned = stmt_from("rate(x[5m])", HEAD_MS, 11, STEP_MS);
-        let shifted = stmt_from("rate(x[5m])", HEAD_MS + 30_000, 11, STEP_MS);
-
-        let (_, aligned_chunks, _, _) = planned(&cache, &aligned, now);
-        let (_, shifted_chunks, _, _) = planned(&cache, &shifted, now);
-        assert!(!aligned_chunks.is_empty() && !shifted_chunks.is_empty());
-        for chunk in &aligned_chunks {
-            assert!(!shifted_chunks.contains(chunk), "{chunk:?} is shared");
-        }
-    }
-
-    #[test]
-    fn the_query_span_is_not_part_of_the_identity() {
-        let first = QuerySpan::of(&stmt_between("x", HEAD_MS, HEAD_MS + 600_000, STEP_MS)).unwrap();
-        let second = QuerySpan::of(&stmt_between(
-            "x",
-            HEAD_MS + 60_000,
-            HEAD_MS + 660_000,
-            STEP_MS,
-        ))
-        .unwrap();
-        assert_ne!(first, second);
-
-        // ... while the identities of both requests are the same one.
-        let cache = cache();
-        let now = at(LATER_MS);
-        let (first_span, _, _, _) = planned(
-            &cache,
-            &stmt_between("x", HEAD_MS, HEAD_MS + 600_000, STEP_MS),
-            now,
-        );
-        let (second_span, _, _, _) = planned(
-            &cache,
-            &stmt_between("x", HEAD_MS + 60_000, HEAD_MS + 660_000, STEP_MS),
-            now,
-        );
-        assert_ne!(first_span, second_span);
-    }
-
-    #[test]
-    fn an_identity_on_another_grid_bypasses() {
-        let cache = cache();
-        let stmt = stmt_from("rate(x[5m])", HEAD_MS, 11, STEP_MS / 2);
+        let stmt = stmt_from("rate(http_requests_total[5m])", HEAD_MS, 10, 2 * STEP_MS);
         assert_eq!(
             cache.plan(identity(), &stmt, at(LATER_MS)),
             ChunkPlan::Bypass(BypassReason::StepMismatch)
@@ -1893,957 +1939,590 @@ mod tests {
 
     #[test]
     fn a_chunk_that_is_not_a_whole_number_of_steps_bypasses() {
-        let odd_chunk = Duration::from_millis(100_000);
-        let stmt = stmt_from("rate(x[5m])", HEAD_MS, 11, STEP_MS);
-
+        // A chunk of 90 seconds is not a whole number of one-minute steps.
+        let short = RollupCacheConfig::new(
+            1 << 20,
+            Duration::ZERO,
+            Duration::from_secs(90),
+            Duration::from_secs(1),
+            Duration::from_secs(3_600),
+        )
+        .unwrap();
+        let cache = RollupCache::new(short);
+        let stmt = stmt_from("rate(http_requests_total[5m])", HEAD_MS, 10, STEP_MS);
         assert_eq!(
-            plan_chunks(&stmt, Duration::ZERO, odd_chunk, at(LATER_MS)),
-            Err(BypassReason::MisalignedChunk)
+            cache.plan(identity(), &stmt, at(LATER_MS)),
+            ChunkPlan::Bypass(BypassReason::MisalignedChunk)
         );
-        assert_eq!(
-            config_with(1 << 20, Duration::ZERO, odd_chunk).chunk_steps(STEP_MS),
-            None
-        );
-        assert_eq!(config().chunk_steps(STEP_MS), Some(5));
-        assert_eq!(config().chunk_steps(STEP_MS / 2), Some(10));
     }
 
     #[test]
     fn a_non_windowable_expression_bypasses_the_cache() {
         let cache = cache();
-        let now = at(LATER_MS);
-        // `sum` is admitted by the window allowlist, `avg` is not.
-        for query in ["avg(rate(x[5m]))", "{host=\"a\"}", "rate(x[5m] offset 1m)"] {
-            let stmt = stmt_from(query, HEAD_MS, 11, STEP_MS);
-            assert_eq!(
-                plan_chunks(&stmt, Duration::ZERO, CHUNK, now),
-                Err(BypassReason::NotWindowable),
-                "{query}"
-            );
-            assert_eq!(
-                cache.plan(identity(), &stmt, now),
-                ChunkPlan::Bypass(BypassReason::NotWindowable),
-                "{query}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_invalid_span_bypasses_the_cache() {
-        let now = at(LATER_MS);
-        let stmt = stmt_from("x", HEAD_MS, 11, STEP_MS);
-        let mut backwards = stmt.clone();
-        backwards.end = backwards.start - Duration::from_millis(STEP_MS as u64);
+        let stmt = stmt_from("http_requests_total + 1", HEAD_MS, 10, STEP_MS);
         assert_eq!(
-            plan_chunks(&backwards, Duration::ZERO, CHUNK, now),
-            Err(BypassReason::InvalidSpan)
-        );
-
-        // A step carrying a sub-millisecond part lays out a grid the planners do
-        // not evaluate on.
-        let mut sub_millisecond = stmt;
-        sub_millisecond.interval = Duration::from_micros(1_500);
-        assert_eq!(
-            plan_chunks(&sub_millisecond, Duration::ZERO, CHUNK, now),
-            Err(BypassReason::InvalidSpan)
-        );
-    }
-
-    #[test]
-    fn identity_fields_are_isolated() {
-        let base = identity();
-        let chunk = TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS);
-        let cases = [
-            QueryIdentity {
-                tenant: "other".to_string(),
-                ..base.clone()
-            },
-            QueryIdentity {
-                catalog: "other".to_string(),
-                ..base.clone()
-            },
-            QueryIdentity {
-                schema: "other".to_string(),
-                ..base.clone()
-            },
-            QueryIdentity {
-                query: "rate(http_requests_total[6m])".to_string(),
-                ..base.clone()
-            },
-            QueryIdentity {
-                source_table: "other".to_string(),
-                ..base.clone()
-            },
-            QueryIdentity {
-                step_ms: STEP_MS * 2,
-                ..base.clone()
-            },
-            QueryIdentity {
-                lookback_ms: 600_000,
-                ..base.clone()
-            },
-            QueryIdentity {
-                route: QueryRoute::Native,
-                ..base.clone()
-            },
-            QueryIdentity {
-                ordered: true,
-                ..base.clone()
-            },
-            QueryIdentity {
-                alias: Some("q".to_string()),
-                ..base.clone()
-            },
-            QueryIdentity {
-                read_preference: Some("LEADER".to_string()),
-                ..base.clone()
-            },
-        ];
-
-        for case in cases {
-            assert_ne!(case, base);
-            assert_ne!(
-                TimeChunkKey::new(case, chunk),
-                TimeChunkKey::new(base.clone(), chunk)
-            );
-        }
-
-        assert_eq!(
-            TimeChunkKey::new(base.clone(), chunk),
-            TimeChunkKey::new(base, chunk)
+            cache.plan(identity(), &stmt, at(LATER_MS)),
+            ChunkPlan::Bypass(BypassReason::NotWindowable)
         );
     }
 
     #[test]
     fn an_identity_prints_its_context_but_never_its_query_text() {
         let printed = format!("{:?}", identity());
-        assert!(printed.contains(REDACTED_QUERY), "{printed}");
-        assert!(!printed.contains("http_requests_total"), "{printed}");
-        let distinct_table = QueryIdentity {
-            source_table: "private_table".to_string(),
-            ..identity()
-        };
-        let printed = format!("{distinct_table:?}");
-        assert!(
-            printed.contains("source_table: \"<redacted>\""),
-            "{printed}"
-        );
-        assert!(!printed.contains("private_table"), "{printed}");
-
-        let chunk = chunk_key();
-        assert!(!format!("{chunk:?}").contains("http_requests_total"));
-
-        // The alias and the read preference are not query text, so they print.
-        let aliased = QueryIdentity {
-            alias: Some("q".to_string()),
-            read_preference: Some("LEADER".to_string()),
-            ..identity()
-        };
-        let printed = format!("{aliased:?}");
-        assert!(printed.contains("alias: Some(\"q\")"), "{printed}");
-        assert!(
-            printed.contains("read_preference: Some(\"LEADER\")"),
-            "{printed}"
-        );
-        assert!(!printed.contains("http_requests_total"), "{printed}");
-    }
-
-    #[test]
-    fn an_alias_change_separates_entries() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        let key = chunk_key();
-        let fill = cache.fill_cursor(now).unwrap();
-        assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
-        assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
-
-        let aliased = TimeChunkKey::new(
-            QueryIdentity {
-                alias: Some("q".to_string()),
-                ..identity()
-            },
-            key.chunk(),
-        );
-        assert!(matches!(
-            cache.lookup(&aliased, now),
-            Lookup::Miss(MissReason::NotFound)
-        ));
-    }
-
-    #[test]
-    fn a_read_preference_change_separates_entries() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        let key = chunk_key();
-        let fill = cache.fill_cursor(now).unwrap();
-        assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
-        assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
-
-        let other = TimeChunkKey::new(
-            QueryIdentity {
-                read_preference: Some("LEADER".to_string()),
-                ..identity()
-            },
-            key.chunk(),
-        );
-        assert!(matches!(
-            cache.lookup(&other, now),
-            Lookup::Miss(MissReason::NotFound)
-        ));
+        assert!(printed.contains("greptime"));
+        assert!(printed.contains("public"));
+        assert!(!printed.contains("http_requests_total"));
+        assert!(printed.contains(REDACTED_QUERY));
     }
 
     #[test]
     fn a_missed_chunk_is_filled_and_then_hit() {
         let cache = cache();
-        let now = at(LATER_MS);
+        let admission = opened(&cache);
         let key = chunk_key();
-
-        assert!(matches!(
-            cache.lookup(&key, now),
+        assert_eq!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
             Lookup::Miss(MissReason::NotFound)
-        ));
-        let fill = cache.fill_cursor(now).expect("no authority always fills");
-        let filled = payload();
-        assert_eq!(
-            cache.insert(key.clone(), fill, filled.clone()),
-            Insert::Stored
         );
-
-        let Lookup::Hit {
-            payload: hit,
-            cursor,
-            ..
-        } = cache.lookup(&key, now)
-        else {
-            panic!("the filled chunk is a hit");
-        };
-        assert_eq!(cursor, NO_AUTHORITY_CURSOR);
-        assert!(Arc::ptr_eq(&hit, &filled));
+        assert_eq!(fill(&cache, &admission, &key, at(LATER_MS)), Insert::Stored);
+        assert!(matches!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Hit { .. }
+        ));
+        assert_eq!(cache.hit_count(), 1);
+        assert_eq!(cache.entry_count(), 1);
     }
 
     #[test]
-    fn only_the_authority_cursor_is_served() {
-        let authority = FakeAuthority::default();
-        authority.ready(1, at(LATER_MS));
-        let cache = authority_cache(&authority);
-        let now = at(LATER_MS);
+    fn an_unproved_table_never_serves() {
+        let cache = cache();
+        // The request fills the chunk, but no round has proved the table yet.
+        let admission = cache.admit(&table(), Instant::now());
         let key = chunk_key();
-        let fill = cache.fill_cursor(now).unwrap();
-        cache.insert(key.clone(), fill, payload());
-
-        // Equal cursor: a hit.
-        authority.ready(1, now);
-        assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
-
-        // Changed cursor: a miss, even though the entry is still resident.
-        authority.ready(2, now);
-        assert!(matches!(
-            cache.lookup(&key, now),
-            Lookup::Miss(MissReason::CursorChanged {
-                cached: 1,
-                authority: 2
-            })
-        ));
-
-        // Unknown and unhealthy authorities never serve anything.
-        authority.unknown();
-        assert!(matches!(
-            cache.lookup(&key, now),
-            Lookup::Miss(MissReason::AuthorityUnknown)
-        ));
+        assert_eq!(fill(&cache, &admission, &key, at(LATER_MS)), Insert::Stored);
         assert_eq!(
-            cache.fill_cursor(now).unwrap_err(),
-            MissReason::AuthorityUnknown
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Miss(MissReason::TableNotProved)
         );
-
-        authority.unhealthy();
+        // A round that proves nothing changed opens the table and keeps the entry.
+        cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            DirtySpan::Nothing,
+            Instant::now(),
+        );
         assert!(matches!(
-            cache.lookup(&key, now),
-            Lookup::Miss(MissReason::AuthorityUnhealthy)
+            cache.lookup(&cache.admit(&table(), Instant::now()), &key, at(LATER_MS)),
+            Lookup::Hit { .. }
         ));
     }
 
     #[test]
-    fn a_stale_authority_reading_never_serves() {
-        let authority = FakeAuthority::default();
-        authority.ready(1, at(LATER_MS));
-        let cache = authority_cache(&authority);
-        let now = at(LATER_MS);
+    fn a_failed_round_closes_the_table() {
+        let cache = cache();
+        let admission = opened(&cache);
         let key = chunk_key();
-        let fill = cache.fill_cursor(now).unwrap();
-        cache.insert(key.clone(), fill, payload());
-
-        // Exactly at the bound the reading is still trusted...
-        authority.ready(1, now - config().max_staleness());
-        assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
-
-        // ...and one millisecond past it, nothing is.
-        let observed_at = now - config().max_staleness() - Duration::from_millis(1);
-        authority.ready(1, observed_at);
+        fill(&cache, &admission, &key, at(LATER_MS));
+        assert!(matches!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Hit { .. }
+        ));
+        cache.record_failure(&table());
         assert_eq!(
-            cache.lookup(&key, now),
-            Lookup::Miss(MissReason::AuthorityStale {
-                age: now.duration_since(observed_at).unwrap()
-            })
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Miss(MissReason::TableNotProved)
         );
-        assert!(cache.fill_cursor(now).is_err());
+        // The entry stays: nothing said it was wrong, and the next round decides.
+        assert_eq!(cache.entry_count(), 1);
     }
 
     #[test]
     fn an_entry_older_than_the_age_bound_never_serves() {
         let cache = cache();
-        let filled_at = at(LATER_MS);
+        let admission = opened(&cache);
         let key = chunk_key();
-        let fill = cache.fill_cursor(filled_at).unwrap();
-        cache.insert(key.clone(), fill, payload());
+        fill(&cache, &admission, &key, at(HEAD_MS));
+        let expiry = HEAD_MS + i64::try_from(config().max_age().as_millis()).unwrap() + 1;
+        assert_eq!(
+            cache.lookup(&admission, &key, at(expiry)),
+            Lookup::Miss(MissReason::Expired {
+                age: Duration::from_millis(
+                    u64::try_from(expiry - HEAD_MS).expect("the age is positive")
+                )
+            })
+        );
+    }
 
-        // The age is counted from the fill's capture, not from the insertion.
-        let bound = config().max_age();
+    #[test]
+    fn a_fill_a_round_overtook_publishes_nothing() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        let slow = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 12)]),
+            DirtySpan::Hull(TimeChunk::new(HEAD_MS, HEAD_MS + 1)),
+            Instant::now(),
+        );
+        // The read reached sequence 5 while the round committed up to 12, so its payload
+        // predates what the round invalidated and is not kept.
+        assert_eq!(
+            cache.insert(&slow, &BTreeMap::from([(1, 5)]), payload(), Arc::default()),
+            Insert::Rejected
+        );
+        assert_eq!(cache.entry_count(), 0);
+        assert_eq!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Miss(MissReason::NotFound)
+        );
+
+        // The fill that starts after the commit reads past the new watermark and publishes.
+        assert_eq!(fill(&cache, &admission, &key, at(LATER_MS)), Insert::Stored);
         assert!(matches!(
-            cache.lookup(&key, filled_at + bound),
+            cache.lookup(&admission, &key, at(LATER_MS)),
             Lookup::Hit { .. }
         ));
-        let now = filled_at + bound + Duration::from_millis(1);
-        assert_eq!(
-            cache.lookup(&key, now),
-            Lookup::Miss(MissReason::Expired {
-                age: bound + Duration::from_millis(1)
-            })
-        );
     }
 
     #[test]
-    fn a_slow_fill_does_not_overwrite_a_newer_entry() {
-        let authority = FakeAuthority::default();
-        authority.ready(1, at(LATER_MS));
-        let cache = authority_cache(&authority);
-        let now = at(LATER_MS);
-        let key = chunk_key();
-
-        // A fill captured at cursor 1 is still running.
-        let slow = cache.fill_cursor(now).unwrap();
-
-        // The authority moves on, and a fill at the new cursor lands first.
-        authority.ready(2, now);
-        let fast = cache.fill_cursor(now).unwrap();
-        let newer = payload();
+    fn a_second_fill_of_the_same_query_publishes_after_the_first() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let first = chunk_key_at(0);
+        let second = chunk_key_at(1);
+        // Fills do not move the watermark, so both chunks of one request publish.
         assert_eq!(
-            cache.insert(key.clone(), fast, newer.clone()),
+            fill(&cache, &admission, &first, at(LATER_MS)),
             Insert::Stored
         );
-
-        // The slow fill's payload is older than what is stored, so it is dropped.
-        assert_eq!(cache.insert(key.clone(), slow, payload()), Insert::Rejected);
-
-        let Lookup::Hit {
-            payload: hit,
-            cursor,
-            ..
-        } = cache.lookup(&key, now)
-        else {
-            panic!("the newer entry is served");
-        };
-        assert_eq!(cursor, 2);
-        assert!(Arc::ptr_eq(&hit, &newer));
+        assert_eq!(
+            fill(&cache, &admission, &second, at(LATER_MS)),
+            Insert::Stored
+        );
+        assert_eq!(cache.entry_count(), 2);
     }
 
     #[test]
-    fn the_fill_cursor_is_recorded_not_the_current_one() {
-        let authority = FakeAuthority::default();
-        authority.ready(1, at(LATER_MS));
-        let cache = authority_cache(&authority);
-        let now = at(LATER_MS);
+    fn a_round_moves_the_watermark_even_with_an_empty_cache() {
+        let cache = cache();
+        let admission = opened(&cache);
         let key = chunk_key();
+        // A fill of an empty cache is reading when the round commits.
+        let slow = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(cache.entry_count(), 0);
+        cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 12)]),
+            DirtySpan::Everything,
+            Instant::now(),
+        );
+        // Nothing was dropped, but the watermark moved past this read, so it is refused.
+        assert_eq!(cache.entry_count(), 0);
+        assert_eq!(
+            cache.insert(&slow, &BTreeMap::from([(1, 5)]), payload(), Arc::default()),
+            Insert::Rejected
+        );
+        // A read that opened at the committed sequence saw everything the invalidation
+        // described, so it publishes; a read of the same sequence as the resident payload
+        // adds nothing, and one that got further replaces it.
+        for (sequence, expected) in [
+            (12, Insert::Stored),
+            (12, Insert::Rejected),
+            (13, Insert::Stored),
+        ] {
+            let next = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+            assert_eq!(
+                cache.insert(
+                    &next,
+                    &BTreeMap::from([(1, sequence)]),
+                    payload(),
+                    Arc::default()
+                ),
+                expected
+            );
+        }
+    }
 
-        let fill = cache.fill_cursor(now).unwrap();
-        // The authority advances while the fill reads storage.
-        authority.ready(9, now);
-        assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
+    #[test]
+    fn a_read_that_is_not_newer_does_not_replace_a_payload() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        let newer = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(
+                &newer,
+                &BTreeMap::from([(1, 20)]),
+                payload(),
+                Arc::default()
+            ),
+            Insert::Stored
+        );
+        // A read that finished later but got less far must not replace it.
+        let older = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(
+                &older,
+                &BTreeMap::from([(1, 10)]),
+                payload(),
+                Arc::default()
+            ),
+            Insert::Rejected
+        );
+        // A read of the same sequence says nothing new, so it does not replace the payload.
+        let same = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(&same, &BTreeMap::from([(1, 20)]), payload(), Arc::default()),
+            Insert::Rejected
+        );
+        // One that got further does.
+        let further = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(
+                &further,
+                &BTreeMap::from([(1, 21)]),
+                payload(),
+                Arc::default()
+            ),
+            Insert::Stored
+        );
+    }
 
-        assert!(matches!(
-            cache.lookup(&key, now),
-            Lookup::Miss(MissReason::CursorChanged {
-                cached: 1,
-                authority: 9
-            })
-        ));
+    #[test]
+    fn an_expired_entry_is_refreshed_by_a_read_of_the_same_sequence() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        // The resident payload was read long before this request captured its instant, so it
+        // is stale by age alone.
+        let old = cache.begin_fill(&admission, &key, key.chunk(), at(HEAD_MS));
+        assert_eq!(
+            cache.insert(&old, &BTreeMap::from([(1, 20)]), payload(), Arc::default()),
+            Insert::Stored
+        );
+        let refreshing = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(
+                &refreshing,
+                &BTreeMap::from([(1, 20)]),
+                payload(),
+                Arc::default()
+            ),
+            Insert::Stored
+        );
+    }
+
+    #[test]
+    fn a_read_that_misses_a_region_the_resident_one_covered_does_not_replace_it() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        let both = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(
+                &both,
+                &BTreeMap::from([(1, 10), (2, 10)]),
+                payload(),
+                Arc::default()
+            ),
+            Insert::Stored
+        );
+        // Region 2 is a region this read did not cover, so it cannot be shown to be at
+        // least as current as the payload it would replace.
+        let one = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(&one, &BTreeMap::from([(1, 20)]), payload(), Arc::default()),
+            Insert::Rejected
+        );
+    }
+
+    #[test]
+    fn a_read_without_a_source_sequence_is_never_published() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        // The read could not say how far it got, so nothing can order it against an
+        // invalidation and it is not published at all.
+        let guard = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(&guard, &BTreeMap::new(), payload(), Arc::default()),
+            Insert::Rejected
+        );
+        assert_eq!(cache.entry_count(), 0);
     }
 
     #[test]
     fn a_hit_reports_the_annotations_of_the_read_it_serves() {
         let cache = cache();
-        let now = at(LATER_MS);
+        let admission = opened(&cache);
         let key = chunk_key();
-        let fill = cache.fill_cursor(now).unwrap();
-
-        // A read that recorded nothing is served with nothing.
-        assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
-        let Lookup::Hit { annotations, .. } = cache.lookup(&key, now) else {
-            panic!("the chunk is resident");
-        };
-        assert!(annotations.is_empty());
-
-        // A read that recorded a warning and an info is served with them.
-        let recorded = CachedAnnotations::new(
-            vec!["b-warning".to_string(), "a-warning".to_string()],
-            vec!["an-info".to_string()],
-        );
+        let annotations = Arc::new(CachedAnnotations::new(
+            vec!["a warning".to_string()],
+            vec!["an info".to_string()],
+        ));
+        let guard = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
         assert_eq!(
-            cache.insert_annotated(key.clone(), fill, payload(), Arc::new(recorded.clone())),
+            cache.insert(&guard, &read_through(), payload(), annotations.clone()),
             Insert::Stored
         );
-        let Lookup::Hit { annotations, .. } = cache.lookup(&key, now) else {
-            panic!("the chunk is resident");
+        let Lookup::Hit {
+            annotations: served,
+            ..
+        } = cache.lookup(&admission, &key, at(LATER_MS))
+        else {
+            panic!("the chunk should be resident");
         };
-        assert_eq!(&recorded, annotations.as_ref());
-        assert_eq!(&recorded.warnings(), &annotations.warnings());
-        // The messages are ordered the way a request reports them.
-        assert_eq!(
-            vec!["a-warning".to_string(), "b-warning".to_string()],
-            annotations.warnings()
-        );
-    }
-
-    #[test]
-    fn the_byte_budget_charges_the_annotations() {
-        let now = at(LATER_MS);
-
-        // The rows alone are charged the fixed overhead and nothing more.
-        let plain = cache();
-        let fill = plain.fill_cursor(now).unwrap();
-        plain.insert(chunk_key(), fill, payload());
-        plain.entries.run_pending_tasks();
-        assert_eq!(ENTRY_OVERHEAD_BYTES, plain.entries.weighted_size());
-
-        // A chunk whose read recorded messages is charged their bytes as well.
-        let long = "w".repeat(4096);
-        let annotated = cache();
-        let fill = annotated.fill_cursor(now).unwrap();
-        annotated.insert_annotated(
-            chunk_key(),
-            fill,
-            payload(),
-            Arc::new(CachedAnnotations::new(
-                vec![long.clone()],
-                vec!["i".to_string()],
-            )),
-        );
-        annotated.entries.run_pending_tasks();
-        assert_eq!(
-            ENTRY_OVERHEAD_BYTES + long.len() as u64 + 1,
-            annotated.entries.weighted_size()
-        );
+        assert_eq!(served, annotations);
     }
 
     #[test]
     fn the_byte_budget_bounds_the_entries() {
-        // Two entries fit: each empty payload costs the per-entry overhead.
-        let cache = RollupCache::new(
-            config_with(ENTRY_OVERHEAD_BYTES * 2, Duration::ZERO, CHUNK),
-            None,
-        );
-        let now = at(LATER_MS);
-        let fill = cache.fill_cursor(now).unwrap();
-
-        for index in 0..4 {
-            let key = TimeChunkKey::new(
-                identity(),
-                TimeChunk::new(HEAD_MS + index * CHUNK_MS, HEAD_MS + (index + 1) * CHUNK_MS),
-            );
-            cache.insert(key, fill, payload());
-        }
-        cache.entries.run_pending_tasks();
-
-        // moka's admission policy picks the victim, so which chunks survive is not
-        // asserted: the budget is.
-        assert!(cache.entries.weighted_size() <= ENTRY_OVERHEAD_BYTES * 2);
-        assert!(cache.entries.entry_count() <= 2);
-    }
-
-    #[test]
-    fn a_miss_does_not_wait_for_an_in_flight_fill() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        let key = chunk_key();
-
-        // One caller's fill is still running: it holds no lock and nothing else
-        // can observe it.
-        let in_flight = cache.fill_cursor(now).unwrap();
-
-        // A second caller misses immediately rather than waiting for it, fills,
-        // and inserts first.
-        assert!(matches!(
-            cache.lookup(&key, now),
-            Lookup::Miss(MissReason::NotFound)
-        ));
-        assert_eq!(
-            cache.insert(key.clone(), in_flight, payload()),
-            Insert::Stored
-        );
-        assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
-    }
-
-    #[test]
-    fn concurrent_fills_do_not_block_each_other() {
-        let cache = Arc::new(cache());
-        let key = chunk_key();
-        let start = Arc::new(Barrier::new(2));
-
-        let fills = (0..2)
-            .map(|_| {
-                let cache = Arc::clone(&cache);
-                let key = key.clone();
-                let start = Arc::clone(&start);
-                std::thread::spawn(move || {
-                    let now = at(LATER_MS);
-                    let fill = cache.fill_cursor(now).expect("no authority always fills");
-                    // Both fills are in flight at once: neither has inserted.
-                    start.wait();
-                    assert!(matches!(
-                        cache.lookup(&key, now),
-                        Lookup::Miss(MissReason::NotFound) | Lookup::Hit { .. }
-                    ));
-                    cache.insert(key, fill, payload())
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for fill in fills {
-            assert_ne!(
-                fill.join().expect("the fill thread panicked"),
-                Insert::Bypassed
-            );
-        }
-        assert!(matches!(
-            cache.lookup(&key, at(LATER_MS)),
-            Lookup::Hit { .. }
-        ));
-    }
-
-    #[test]
-    fn an_empty_chunk_is_bypassed() {
-        let cache = cache();
-        let key = TimeChunkKey::new(identity(), TimeChunk::new(HEAD_MS, HEAD_MS));
-        let now = at(LATER_MS);
-
-        assert_eq!(
-            cache.lookup(&key, now),
-            Lookup::Bypass(BypassReason::EmptyChunk)
-        );
-        let fill = cache.fill_cursor(now).unwrap();
-        assert_eq!(cache.insert(key, fill, payload()), Insert::Bypassed);
-    }
-
-    #[test]
-    fn a_dirty_range_removes_the_chunks_whose_input_it_overlaps() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        let fill = cache.fill_cursor(now).unwrap();
-        for index in -1..=2 {
-            assert_eq!(
-                cache.insert(chunk_key_at(index), fill, payload()),
-                Insert::Stored
-            );
-        }
-        assert_eq!(cache.entry_count(), 4);
-
-        // `[10:00, 10:10)` covers the first two chunks, and neither the chunk that
-        // ends where it starts nor the chunk that starts where it ends is half-open
-        // overlapping it.
-        let dirty = TimeChunk::new(HEAD_MS, HEAD_MS + 2 * CHUNK_MS);
-        assert_eq!(cache.invalidate_range(&identity(), dirty), 2);
-
-        for index in [0, 1] {
-            assert_eq!(
-                cache.lookup(&chunk_key_at(index), now),
-                Lookup::Miss(MissReason::NotFound),
-                "chunk {index} overlaps the dirty range"
-            );
-        }
-        for index in [-1, 2] {
-            assert!(
-                matches!(cache.lookup(&chunk_key_at(index), now), Lookup::Hit { .. }),
-                "chunk {index} is disjoint from the dirty range"
-            );
+        // One entry costs the fixed overhead, so a budget of two of them holds two.
+        let tiny = RollupCacheConfig::new(
+            ENTRY_OVERHEAD_BYTES * 2,
+            Duration::ZERO,
+            CHUNK,
+            Duration::from_secs(1),
+            Duration::from_secs(3_600),
+        )
+        .unwrap();
+        let cache = RollupCache::new(tiny);
+        let admission = opened(&cache);
+        for index in 0..6 {
+            let key = chunk_key_at(index);
+            fill(&cache, &admission, &key, at(LATER_MS));
         }
         assert_eq!(cache.entry_count(), 2);
     }
 
     #[test]
-    fn a_lookback_dependency_invalidates_a_chunk_whose_output_the_dirty_range_misses() {
+    fn an_empty_chunk_is_bypassed() {
         let cache = cache();
-        let now = at(LATER_MS);
-        let fill = cache.fill_cursor(now).unwrap();
-
-        // Chunk `[10:00, 10:05)` was materialized from ten minutes of history, so
-        // its input dependency reaches back to `09:50` even though its output starts
-        // at `10:00`.
-        let dependency = TimeChunk::new(HEAD_MS - 2 * CHUNK_MS, HEAD_MS + CHUNK_MS);
+        let admission = opened(&cache);
+        let key = TimeChunkKey::new(identity(), TimeChunk::new(HEAD_MS, HEAD_MS));
         assert_eq!(
-            cache.insert_with_dependency(
-                chunk_key_at(0),
-                fill,
-                payload(),
-                Arc::default(),
-                dependency,
-            ),
-            Insert::Stored
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Bypass(BypassReason::EmptyChunk)
         );
-        // Its neighbours record only their own chunk as their dependency.
-        for index in [-1, 1] {
-            assert_eq!(
-                cache.insert(chunk_key_at(index), fill, payload()),
-                Insert::Stored
-            );
-        }
-
-        // The dirty range is `[09:51, 09:54)`: earlier than every cached output
-        // point, but inside the history the middle chunk folded.
-        let dirty = TimeChunk::new(HEAD_MS - 9 * 60_000, HEAD_MS - 6 * 60_000);
-        assert_eq!(cache.invalidate_range(&identity(), dirty), 1);
-
-        // The chunk whose window read the dirty range is gone, although its own
-        // output starts six minutes after it...
+        let guard = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
         assert_eq!(
-            cache.lookup(&chunk_key_at(0), now),
-            Lookup::Miss(MissReason::NotFound)
-        );
-        // ...and the neighbours, whose dependency is only their own span and cannot
-        // have read it, stay resident.
-        for index in [-1, 1] {
-            assert!(
-                matches!(cache.lookup(&chunk_key_at(index), now), Lookup::Hit { .. }),
-                "chunk {index} does not depend on the dirty range"
-            );
-        }
-    }
-
-    #[test]
-    fn an_invalidation_leaves_the_same_chunk_of_another_identity_resident() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        let fill = cache.fill_cursor(now).unwrap();
-        let mut other = identity();
-        other.query = "sum(rate(http_requests_total[5m]))".to_string();
-        let key = chunk_key();
-        let other_key = TimeChunkKey::new(other.clone(), key.chunk());
-
-        assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
-        assert_eq!(
-            cache.insert(other_key.clone(), fill, payload()),
-            Insert::Stored
-        );
-
-        // The dirty range is exactly the chunk both identities hold.
-        assert_eq!(cache.invalidate_range(&identity(), key.chunk()), 1);
-
-        assert_eq!(cache.lookup(&key, now), Lookup::Miss(MissReason::NotFound));
-        assert!(matches!(cache.lookup(&other_key, now), Lookup::Hit { .. }));
-
-        // The other identity is invalidatable on its own.
-        assert_eq!(cache.invalidate_range(&other, key.chunk()), 1);
-        assert_eq!(
-            cache.lookup(&other_key, now),
-            Lookup::Miss(MissReason::NotFound)
+            cache.insert(&guard, &read_through(), payload(), Arc::default()),
+            Insert::Bypassed
         );
     }
 
     #[test]
-    fn table_invalidation_removes_overlapping_dependencies_across_identities() {
+    fn a_dirty_round_drops_the_chunks_whose_input_it_overlaps() {
         let cache = cache();
-        let now = at(LATER_MS);
-        let fill = cache.fill_cursor(now).unwrap();
-        let table_a = QueryIdentity {
-            query: "rate(table_a[5m])".to_string(),
-            source_table: "table_a".to_string(),
-            ..identity()
-        };
-        let another_a = QueryIdentity {
-            query: "sum(rate(table_a[10m]))".to_string(),
-            step_ms: STEP_MS * 2,
-            ..table_a.clone()
-        };
-        let other_schema_a = QueryIdentity {
-            schema: "another_schema".to_string(),
-            ..table_a.clone()
-        };
-        let table_b = QueryIdentity {
-            query: "rate(table_b[5m])".to_string(),
-            source_table: "table_b".to_string(),
-            ..identity()
-        };
-        let first = TimeChunkKey::new(table_a.clone(), TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS));
-        let shifted = TimeChunkKey::new(
-            another_a,
-            TimeChunk::new(HEAD_MS + CHUNK_MS, HEAD_MS + 2 * CHUNK_MS),
-        );
-        let other_schema = TimeChunkKey::new(other_schema_a, first.chunk());
-        let other_table = TimeChunkKey::new(table_b, first.chunk());
-        let disjoint = TimeChunkKey::new(
-            table_a,
-            TimeChunk::new(HEAD_MS + 3 * CHUNK_MS, HEAD_MS + 4 * CHUNK_MS),
-        );
-        let dirty = TimeChunk::new(HEAD_MS - CHUNK_MS, HEAD_MS - CHUNK_MS + 1);
+        let admission = opened(&cache);
+        let first = chunk_key_at(0);
+        let second = chunk_key_at(1);
+        fill(&cache, &admission, &first, at(LATER_MS));
+        fill(&cache, &admission, &second, at(LATER_MS));
+        assert_eq!(cache.entry_count(), 2);
 
-        // All but `disjoint` read the dirty history, which is before their output.
-        for key in [&first, &shifted, &other_schema, &other_table] {
-            let dependency = TimeChunk::new(dirty.start_ms(), key.chunk().end_ms());
-            assert_eq!(
-                cache.insert_with_dependency(
-                    key.clone(),
-                    fill,
-                    payload(),
-                    Arc::default(),
-                    dependency,
-                ),
-                Insert::Stored
-            );
-        }
-        assert_eq!(
-            cache.insert(disjoint.clone(), fill, payload()),
-            Insert::Stored
+        // A row written one minute into the first chunk dirties only its dependency.
+        cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 12)]),
+            DirtySpan::Hull(TimeChunk::new(HEAD_MS + STEP_MS, HEAD_MS + STEP_MS + 1)),
+            Instant::now(),
         );
-        assert_eq!(cache.entry_count(), 5);
-
-        assert_eq!(cache.invalidate_table_range("table_a", dirty), 3);
-        assert_eq!(cache.invalidation_epoch(), 1);
-        for key in [&first, &shifted, &other_schema] {
-            assert_eq!(cache.lookup(key, now), Lookup::Miss(MissReason::NotFound));
-        }
-        for key in [&other_table, &disjoint] {
-            assert!(matches!(cache.lookup(key, now), Lookup::Hit { .. }));
-        }
-    }
-
-    #[test]
-    fn whole_table_invalidation_removes_every_span_of_that_table() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        let fill = cache.fill_cursor(now).unwrap();
-        let table_a = QueryIdentity {
-            query: "rate(table_a[5m])".to_string(),
-            source_table: "table_a".to_string(),
-            ..identity()
-        };
-        let table_b = QueryIdentity {
-            query: "rate(table_b[5m])".to_string(),
-            source_table: "table_b".to_string(),
-            ..identity()
-        };
-        let first = TimeChunkKey::new(table_a.clone(), TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS));
-        let far = TimeChunkKey::new(
-            table_a,
-            TimeChunk::new(HEAD_MS + 10 * CHUNK_MS, HEAD_MS + 11 * CHUNK_MS),
-        );
-        let other = TimeChunkKey::new(table_b, first.chunk());
-        for key in [&first, &far, &other] {
-            assert_eq!(cache.insert(key.clone(), fill, payload()), Insert::Stored);
-        }
-
-        // A sequence advance without a timestamp hull may mean an erased row, so
-        // every span of the table goes, not only the one a guessed range covers.
-        assert_eq!(cache.invalidate_table("table_a"), 2);
-        for key in [&first, &far] {
-            assert_eq!(cache.lookup(key, now), Lookup::Miss(MissReason::NotFound));
-        }
-        assert!(matches!(cache.lookup(&other, now), Lookup::Hit { .. }));
         assert_eq!(cache.entry_count(), 1);
-    }
-
-    #[test]
-    fn source_probe_validation_is_opt_in() {
-        assert!(!cache().source_probe_enabled());
-        assert!(
-            RollupCache::new(config(), None)
-                .with_source_probe()
-                .source_probe_enabled()
-        );
-    }
-
-    #[test]
-    fn a_source_epoch_change_rejects_a_fill_planned_before_it() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        let fill = cache.fill_cursor(now).unwrap();
-        assert_eq!(fill.source_epoch, cache.source_epoch());
-
-        let next = cache.advance_source_epoch();
-        assert_eq!(next, fill.source_epoch + 1);
-        assert_eq!(cache.insert(chunk_key(), fill, payload()), Insert::Rejected);
-    }
-
-    #[test]
-    fn table_invalidation_advances_epoch_even_when_nothing_is_removed() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        let key = chunk_key();
-        let before = cache.fill_cursor(now).unwrap();
-        assert_eq!(before.epoch(), 0);
-
-        assert_eq!(cache.invalidate_table_range("missing", key.chunk()), 0);
-        assert_eq!(cache.invalidation_epoch(), 1);
-        // The epoch is global: even an outstanding fill for a different table
-        // must be discarded after a table invalidation.
         assert_eq!(
-            cache.insert(key.clone(), before, payload()),
-            Insert::Rejected
+            cache.lookup(&admission, &first, at(LATER_MS)),
+            Lookup::Miss(MissReason::NotFound)
         );
-
-        let fresh = cache.fill_cursor(now).unwrap();
-        assert_eq!(fresh.epoch(), 1);
-        assert_eq!(cache.insert(key.clone(), fresh, payload()), Insert::Stored);
-        let table = &key.identity().source_table;
-        for span in [
-            TimeChunk::new(HEAD_MS - 1, HEAD_MS),
-            TimeChunk::new(HEAD_MS + CHUNK_MS, HEAD_MS + CHUNK_MS + 1),
-            TimeChunk::new(HEAD_MS, HEAD_MS),
-            TimeChunk::new(HEAD_MS + 1, HEAD_MS),
-        ] {
-            let epoch = cache.invalidation_epoch();
-            assert_eq!(cache.invalidate_table_range(table, span), 0);
-            assert_eq!(cache.invalidation_epoch(), epoch + 1);
-            assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
-        }
-        let epoch = cache.invalidation_epoch();
-        assert_eq!(cache.invalidate_table_range(table, key.chunk()), 1);
-        assert_eq!(cache.invalidation_epoch(), epoch + 1);
-        assert_eq!(cache.lookup(&key, now), Lookup::Miss(MissReason::NotFound));
-        assert_eq!(cache.invalidate_table_range(table, key.chunk()), 0);
-        assert_eq!(cache.invalidation_epoch(), epoch + 2);
-    }
-
-    #[test]
-    fn a_fill_that_started_before_an_invalidation_cannot_land() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        let key = chunk_key();
-
-        // The fill captures its epoch, then reads storage.
-        let outstanding = cache.fill_cursor(now).unwrap();
-
-        // The probe invalidates while that read is still running. The scan takes no
-        // lock and waits for nothing, so it completes against an empty cache.
-        assert_eq!(cache.invalidate_range(&identity(), key.chunk()), 0);
-
-        // The fill's read predates the invalidation, so its payload is dropped even
-        // though its key and cursor are current.
-        assert_eq!(
-            cache.insert(key.clone(), outstanding, payload()),
-            Insert::Rejected
-        );
-        assert_eq!(cache.lookup(&key, now), Lookup::Miss(MissReason::NotFound));
-
-        // A fill that captured the epoch after the invalidation lands normally.
-        let fresh = cache.fill_cursor(now).unwrap();
-        assert_eq!(cache.insert(key.clone(), fresh, payload()), Insert::Stored);
-        assert!(matches!(cache.lookup(&key, now), Lookup::Hit { .. }));
-    }
-
-    #[test]
-    fn every_invalidation_advances_the_epoch_exactly_once() {
-        let cache = cache();
-        let now = at(LATER_MS);
-        assert_eq!(cache.invalidation_epoch(), 0);
-
-        let before = cache.fill_cursor(now).unwrap();
-        assert_eq!(before.epoch(), 0);
-
-        // Nothing is resident: a removal count of zero still advances the epoch.
-        assert_eq!(cache.invalidate_range(&identity(), chunk_key().chunk()), 0);
-        assert_eq!(cache.invalidation_epoch(), 1);
-        assert_eq!(
-            cache.insert(chunk_key(), before, payload()),
-            Insert::Rejected
-        );
-
-        let after = cache.fill_cursor(now).unwrap();
-        assert_eq!(after.epoch(), 1);
-        assert_eq!(cache.insert(chunk_key(), after, payload()), Insert::Stored);
-
-        // A dirty range that overlaps nothing removes nothing, advances the epoch
-        // once, and leaves the entry resident.
-        let disjoint = TimeChunk::new(HEAD_MS + 10 * CHUNK_MS, HEAD_MS + 11 * CHUNK_MS);
-        assert_eq!(cache.invalidate_range(&identity(), disjoint), 0);
-        assert_eq!(cache.invalidation_epoch(), 2);
         assert!(matches!(
-            cache.lookup(&chunk_key(), now),
-            Lookup::Hit { .. }
-        ));
-
-        // An invalidation of another identity removes nothing here either.
-        let mut other = identity();
-        other.alias = Some("other".to_string());
-        let fill = cache.fill_cursor(now).unwrap();
-        assert_eq!(fill.epoch(), 2);
-        assert_eq!(cache.insert(chunk_key(), fill, payload()), Insert::Stored);
-        assert_eq!(cache.invalidate_range(&other, chunk_key().chunk()), 0);
-        assert_eq!(cache.invalidation_epoch(), 3);
-        assert!(matches!(
-            cache.lookup(&chunk_key(), now),
+            cache.lookup(&admission, &second, at(LATER_MS)),
             Lookup::Hit { .. }
         ));
     }
 
     #[test]
-    fn an_invalidation_rejects_a_fill_held_by_another_thread() {
-        let cache = Arc::new(cache());
-        let now = at(LATER_MS);
+    fn a_table_round_spares_another_tables_entries() {
+        let cache = cache();
+        let admission = opened(&cache);
         let key = chunk_key();
-        let captured = Arc::new(Barrier::new(2));
-        let invalidated = Arc::new(Barrier::new(2));
+        fill(&cache, &admission, &key, at(LATER_MS));
 
-        // A fill captures its epoch and is still reading storage when the probe
-        // invalidates: it holds nothing the invalidation needs.
-        let filler = {
-            let cache = Arc::clone(&cache);
-            let key = key.clone();
-            let captured = Arc::clone(&captured);
-            let invalidated = Arc::clone(&invalidated);
-            std::thread::spawn(move || {
-                let fill = cache.fill_cursor(now).unwrap();
-                captured.wait();
-                invalidated.wait();
-                cache.insert(key, fill, payload())
-            })
-        };
+        // A whole-table change of another table reaches nothing here, even though that
+        // table is registered and its round really runs.
+        let _other = cache.admit(&other_table(), Instant::now());
+        cache.record_refresh(
+            &other_table(),
+            BTreeMap::from([(1, 3)]),
+            DirtySpan::Everything,
+            Instant::now(),
+        );
+        assert_eq!(cache.entry_count(), 1);
+        assert!(matches!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Hit { .. }
+        ));
+    }
 
-        captured.wait();
-        assert_eq!(cache.invalidate_range(&identity(), key.chunk()), 0);
-        invalidated.wait();
+    #[test]
+    fn a_whole_table_change_drops_every_span_of_that_table() {
+        let cache = cache();
+        let admission = opened(&cache);
+        fill(&cache, &admission, &chunk_key_at(0), at(LATER_MS));
+        fill(&cache, &admission, &chunk_key_at(1), at(LATER_MS));
+        cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 12)]),
+            DirtySpan::Everything,
+            Instant::now(),
+        );
+        assert_eq!(cache.entry_count(), 0);
+    }
 
+    #[test]
+    fn a_quiet_round_keeps_every_entry_and_advances_nothing() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        fill(&cache, &admission, &key, at(LATER_MS));
+        cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            DirtySpan::Nothing,
+            Instant::now(),
+        );
+        assert_eq!(cache.entry_count(), 1);
+        assert!(matches!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Hit { .. }
+        ));
+        // A fill that started before the quiet round still publishes: nothing was
+        // invalidated.
+        let other = chunk_key_at(1);
+        let slow = cache.begin_fill(&admission, &other, other.chunk(), at(LATER_MS));
+        cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            DirtySpan::Nothing,
+            Instant::now(),
+        );
         assert_eq!(
-            filler.join().expect("the fill thread panicked"),
+            cache.insert(&slow, &read_through(), payload(), Arc::default()),
+            Insert::Stored
+        );
+    }
+
+    #[test]
+    fn a_reclaimed_state_rejects_a_fill() {
+        let cache = cache();
+        let admission = cache.admit(&table(), Instant::now());
+        let key = chunk_key();
+        let fill = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+
+        // An idle table is forgotten and the next request registers a fresh state, which
+        // the request that is still filling never captured.
+        cache.tables.lock().unwrap().remove(&table());
+        cache.admit(&table(), Instant::now());
+        assert_eq!(
+            cache.insert(&fill, &read_through(), payload(), Arc::default()),
             Insert::Rejected
         );
-        assert_eq!(cache.lookup(&key, now), Lookup::Miss(MissReason::NotFound));
+        assert_eq!(cache.entry_count(), 0);
+    }
+
+    #[test]
+    fn an_idle_table_stops_being_refreshed_and_loses_its_entries() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        fill(&cache, &admission, &key, at(LATER_MS));
+        assert_eq!(cache.tables_to_refresh(Instant::now()).len(), 1);
+
+        let later = Instant::now() + IDLE_TABLE_TIMEOUT + Duration::from_secs(1);
+        assert!(cache.tables_to_refresh(later).is_empty());
+        assert_eq!(cache.entry_count(), 0);
     }
 
     #[test]
     fn configuration_validation_rejects_disabled_bounds() {
         let positive = Duration::from_secs(1);
         assert_eq!(
-            RollupCacheConfig::new(0, Duration::ZERO, positive, positive, positive).unwrap_err(),
-            ConfigError::Bytes
+            RollupCacheConfig::new(0, Duration::ZERO, CHUNK, positive, positive),
+            Err(ConfigError::Bytes)
         );
         assert_eq!(
-            RollupCacheConfig::new(1, positive, Duration::ZERO, positive, positive).unwrap_err(),
-            ConfigError::Chunk
+            RollupCacheConfig::new(1, Duration::ZERO, Duration::ZERO, positive, positive),
+            Err(ConfigError::Chunk)
         );
         assert_eq!(
-            RollupCacheConfig::new(1, positive, positive, Duration::ZERO, positive).unwrap_err(),
-            ConfigError::MaxStaleness
+            RollupCacheConfig::new(1, Duration::ZERO, CHUNK, Duration::ZERO, positive),
+            Err(ConfigError::RefreshInterval)
         );
         assert_eq!(
-            RollupCacheConfig::new(1, positive, positive, positive, Duration::ZERO).unwrap_err(),
-            ConfigError::MaxAge
+            RollupCacheConfig::new(1, Duration::ZERO, CHUNK, positive, Duration::ZERO),
+            Err(ConfigError::MaxAge)
+        );
+        let valid = RollupCacheConfig::new(1, Duration::ZERO, CHUNK, positive, positive)
+            .expect("a positive configuration is valid");
+        assert_eq!(valid.refresh_interval(), positive);
+        assert_eq!(valid.max_age(), positive);
+        assert_eq!(valid.max_bytes(), 1);
+        assert_eq!(valid.chunk(), CHUNK);
+        assert_eq!(valid.tail(), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_table_registered_with_a_different_catalog_is_a_different_table() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        fill(&cache, &admission, &key, at(LATER_MS));
+
+        // The same bare name in another schema owns another state and another set of
+        // entries, so a change of it reaches nothing here.
+        let elsewhere = SourceTable::new("greptime", "metrics", "http_requests_total");
+        let _elsewhere = cache.admit(&elsewhere, Instant::now());
+        cache.record_refresh(
+            &elsewhere,
+            BTreeMap::from([(1, 2)]),
+            DirtySpan::Everything,
+            Instant::now(),
+        );
+        assert_eq!(cache.entry_count(), 1);
+        assert_eq!(cache.cursors(&elsewhere), BTreeMap::from([(1, 2)]));
+        assert_eq!(cache.cursors(&table()), BTreeMap::from([(1, 11)]));
+        assert!(matches!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Hit { .. }
+        ));
+    }
+
+    #[test]
+    fn an_identity_of_the_same_table_keeps_its_entries_when_another_is_invalidated() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        fill(&cache, &admission, &key, at(LATER_MS));
+        // Another query of the same table, resident in the chunk before the first.
+        let other_key = TimeChunkKey::new(other_identity(), chunk_key_at(-1).chunk());
+        assert_eq!(
+            fill(&cache, &admission, &other_key, at(LATER_MS)),
+            Insert::Stored
         );
 
-        let valid = RollupCacheConfig::new(64, Duration::ZERO, positive, positive, positive)
-            .expect("a zero tail is valid");
-        assert_eq!(valid.max_bytes(), 64);
-        assert_eq!(valid.tail(), Duration::ZERO);
-        assert_eq!(valid.chunk(), positive);
-        assert_eq!(valid.max_staleness(), positive);
-        assert_eq!(valid.max_age(), positive);
+        // A change inside the first chunk reaches only that chunk's query.
+        cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 12)]),
+            DirtySpan::Hull(TimeChunk::new(HEAD_MS, HEAD_MS + 1)),
+            Instant::now(),
+        );
+        assert_eq!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Miss(MissReason::NotFound)
+        );
+        assert!(matches!(
+            cache.lookup(&admission, &other_key, at(LATER_MS)),
+            Lookup::Hit { .. }
+        ));
     }
 }

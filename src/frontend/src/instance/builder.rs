@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -113,10 +112,8 @@ impl FrontendBuilder {
 
     /// Installs the frontend-local rollup cache of PromQL range queries.
     ///
-    /// Off by default, and not configurable from `FrontendOptions` yet: the cache is
-    /// installed by an embedder that already holds one, which today is a test. This is
-    /// the only seam that turns the cached range path on, so wiring the option later
-    /// is a matter of building a [`RollupCache`] here when the option says so.
+    /// [`crate::frontend::FrontendOptions::rollup_cache`] builds one when it is enabled;
+    /// this seam is for an embedder that already holds one, which today is a test.
     pub fn with_rollup_cache(mut self, rollup_cache: Arc<RollupCache>) -> Self {
         self.rollup_cache = Some(rollup_cache);
         self
@@ -449,13 +446,7 @@ impl FrontendBuilder {
                     }
                     .build()
                 })?;
-                let cache = RollupCache::new(config, None);
-                let cache = if self.options.rollup_cache.source_probe {
-                    cache.with_source_probe()
-                } else {
-                    cache
-                };
-                Some(Arc::new(cache))
+                Some(Arc::new(RollupCache::new(config)))
             }
             None => None,
         };
@@ -486,8 +477,7 @@ impl FrontendBuilder {
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),
             rollup_cache,
-            source_probe_cursors: Arc::new(Mutex::new(HashMap::new())),
-            source_probe_incarnations: Arc::new(Mutex::new(HashMap::new())),
+            rollup_cache_refresher: Arc::new(Mutex::new(None)),
         })
     }
 }
