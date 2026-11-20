@@ -84,8 +84,8 @@ use crate::region::{
     RegionMapRef,
 };
 use crate::request::{
-    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
-    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, BulkInsertRequest, DdlRequest, OptionOutputTx,
+    SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
@@ -907,6 +907,7 @@ impl<S: LogStore> WorkerStarter<S> {
             granted_leases: self.granted_leases,
             staging_regions: self.staging_regions,
             tail_replays: HashMap::new(),
+            lease_deferred_index_retries: HashMap::new(),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -1373,6 +1374,9 @@ struct RegionWorkerLoop<S> {
     staging_regions: StagingRegionsRef,
     /// Running tail replays, which stay here until they report their end.
     tail_replays: HashMap<RegionId, CancellableTaskState>,
+    /// Index build retries refused while their region awaited its Leader lease, which the end of
+    /// the wait re-issues.
+    lease_deferred_index_retries: HashMap<RegionId, Vec<BuildIndexRequest>>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

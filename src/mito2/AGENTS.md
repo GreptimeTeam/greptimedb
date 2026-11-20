@@ -217,8 +217,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   before `commit_staged_locked`. No flush or compaction trigger starts work for a waiting region except
   a downgrade's flush. The lease that ends the wait wakes the worker
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
-  region is then a writable leader, start a compaction, build missing indexes and persist
-  backfilled metadata.
+  region is then a writable leader, start a compaction, build missing indexes, re-issue the
+  index build retries the wait refused and persist backfilled metadata.
 - The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
   region instance, so a reopen during catchup keeps it. Every path that removes a region from
   a worker's region map must also remove its record: `RegionWorkerLoop::remove_region`

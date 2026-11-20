@@ -260,6 +260,15 @@ impl<S> RegionWorkerLoop<S> {
             .manifest_ctx
             .ensure_leader_lease_or_downgrading(region_id)
         {
+            // A retry has no caller to try again, so the end of the wait re-issues it.
+            if is_retry {
+                info!("Region {region_id} awaits its Leader lease, keeping an index build retry");
+                self.lease_deferred_index_retries
+                    .entry(region_id)
+                    .or_default()
+                    .push(request);
+                return;
+            }
             info!("Region {region_id} awaits its Leader lease, building no index");
             sender.send(Err(e));
             return;

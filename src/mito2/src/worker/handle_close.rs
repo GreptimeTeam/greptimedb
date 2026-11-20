@@ -134,6 +134,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
         self.granted_leases.remove(region_id);
+        self.lease_deferred_index_retries.remove(&region_id);
         region.deactivate_region_manifest_size_metric();
         self.cancel_tail_replay(region_id);
         region.stop().await;

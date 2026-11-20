@@ -232,6 +232,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Starts the work that a region deferred while it awaited its Leader lease.
     pub(crate) async fn handle_leader_lease_wait_ended(&mut self, region_id: RegionId) {
+        let retries = self
+            .lease_deferred_index_retries
+            .remove(&region_id)
+            .unwrap_or_default();
         let Some(region) = self.regions.get_region(region_id) else {
             return;
         };
@@ -242,10 +246,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if state == RegionRoleState::Leader(RegionLeaderState::Writable) {
             self.schedule_compaction(&region).await;
             self.build_missing_indexes(&region).await;
+            for request in retries {
+                self.handle_rebuild_index_inner(request, OptionOutputTx::new(None), true)
+                    .await;
+            }
             spawn_persist_backfilled_metadata(&self.listener, &self.sender, region);
         } else {
             info!(
-                "Region {region_id} is {state:?} when its Leader lease wait ends, starting no compaction, building no missing index and persisting no backfilled metadata"
+                "Region {region_id} is {state:?} when its Leader lease wait ends, starting no compaction, building no missing index, re-issuing no index build retry and persisting no backfilled metadata"
             );
         }
         self.listener.on_leader_lease_wait_ended(region_id);

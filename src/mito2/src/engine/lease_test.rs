@@ -34,9 +34,9 @@ use store_api::region_engine::{
     RegionEngine, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    EnterStagingRequest, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionDropRequest, RegionFlushRequest, RegionPutRequest, RegionRequest,
-    RegionTruncateRequest, StagingPartitionDirective,
+    EnterStagingRequest, RegionAlterRequest, RegionBuildIndexRequest, RegionCatchupRequest,
+    RegionCloseRequest, RegionCompactRequest, RegionDropRequest, RegionFlushRequest,
+    RegionPutRequest, RegionRequest, RegionTruncateRequest, StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::task::JoinHandle;
@@ -44,6 +44,7 @@ use tokio::task::JoinHandle;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::basic_test::build_bulk_insert_request;
+use crate::engine::index_build_test::async_build_mode_config;
 use crate::engine::listener::{
     CountingStallListener, EventListener, EventListenerRef, WriteWalListener,
 };
@@ -56,12 +57,16 @@ use crate::engine::staging_test::{
 use crate::error::Error;
 use crate::flush::FlushReason;
 use crate::lease::GrantedLease;
+use crate::manifest::action::RegionEdit;
 use crate::metrics::{FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL};
 use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::request::{BackgroundNotify, BuildIndexRequest, WorkerRequest};
+use crate::sst::file::IndexType;
+use crate::sst::index::IndexBuildType;
 use crate::test_util::{
-    CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, kafka_log_store_factory,
-    multiple_log_store_factories, prepare_test_for_kafka_log_store, raft_engine_log_store_factory,
-    reopen_region, rows_schema,
+    CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, flush_region,
+    kafka_log_store_factory, multiple_log_store_factories, prepare_test_for_kafka_log_store,
+    put_rows, raft_engine_log_store_factory, reopen_region, rows_schema,
 };
 
 const LEASE: Duration = Duration::from_secs(10);
@@ -1075,4 +1080,72 @@ async fn test_compaction_skipped_awaiting_leader_lease() {
     grant_at(&engine, RegionRole::Leader, Instant::now(), None);
     engine.handle_request(REGION_ID, compact()).await.unwrap();
     assert_eq!(manifest_files(&engine).await, vec![6]);
+}
+
+/// An index build retry that the wait refuses is built when the lease ends the wait, also for a
+/// file that the lease-end pass leaves since its writer built an extension index.
+#[tokio::test]
+async fn test_index_build_retry_refused_awaiting_leader_lease_runs_after_it() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("index-retry-awaiting-lease").await;
+    let listener = Arc::new(WriteWalListener::default());
+    let engine = env
+        .create_engine_with(async_build_mode_config(false), None, Some(listener), None)
+        .await;
+    engine.require_write_lease();
+    engine.freeze_lease_clock(Instant::now());
+    let request = CreateRequestBuilder::new().build_with_index();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(REGION_ID, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    let rows = Rows {
+        schema,
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, REGION_ID, rows).await;
+    flush_region(&engine, REGION_ID, None).await;
+    let region = engine.get_region(REGION_ID).unwrap();
+    let mut files = region.all_manifest_files().await.0;
+    files[0].available_indexes.push(IndexType::HllIndex);
+    let edit = RegionEdit {
+        files_to_add: files.clone(),
+        ..Default::default()
+    };
+    engine.edit_region(REGION_ID, edit).await.unwrap();
+    promote_to_await_leader_lease(&engine, REGION_ID).await;
+
+    // What a publication that found the schema changed sends.
+    let notify = BackgroundNotify::IndexBuildRetry(BuildIndexRequest {
+        region_id: REGION_ID,
+        build_type: IndexBuildType::Manual,
+        file_metas: files,
+        result_senders: Vec::new(),
+    });
+    let request = WorkerRequest::Background {
+        region_id: REGION_ID,
+        notify,
+    };
+    let workers = &engine.inner.workers;
+    workers.submit_to_worker(REGION_ID, request).await.unwrap();
+    // The worker handled the retry before this request.
+    let build = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
+    assert_retryable(
+        engine.handle_request(REGION_ID, build).await,
+        lease_not_received,
+    );
+    let has_inverted_index = || {
+        let version = engine.get_region(REGION_ID).unwrap().version();
+        version.ssts.levels()[0].files.values().any(|file| {
+            file.meta_ref()
+                .available_indexes
+                .contains(&IndexType::InvertedIndex)
+        })
+    };
+    assert!(!has_inverted_index());
+
+    grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    wait_until(has_inverted_index).await;
 }
