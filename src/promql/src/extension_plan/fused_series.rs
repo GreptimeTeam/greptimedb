@@ -2217,10 +2217,13 @@ struct StoredSeriesLabels {
 ///   the empty one is dropped. Two such series that agree on every other tag then leave as one
 ///   identity, whether they arrive in one partition or in two.
 ///
-/// This is the rule the logical canonical pass applies to decide whether a node that drops the
-/// metadata labels has to be collected, and the one the physical per-series scan applies to decide
-/// whether such a node can stream. Both read it here so the two answers cannot drift apart: the
-/// planner reads it from the resolved table's metadata, the execution from the bound scan.
+/// The physical per-series scan asks this of its own binding to decide whether a node may stream, so
+/// that its partitions hand over whole series. The plan-time canonical proof does not read it: the
+/// labels alone decide whether a metadata drop is collected, and the planner reads this rule only to
+/// count the statements that proof leaves unproved
+/// ([`leaves_a_drop_to_the_storage_keys`](crate::native::plan::leaves_a_drop_to_the_storage_keys)).
+/// Keeping the rule here is what stops the scan's own answer - read from the bound scan at execution -
+/// from drifting away from the one the plan-time count is stated with.
 pub fn keys_survive_metadata_drop<'a, 'b>(
     logical_tags: impl IntoIterator<Item = &'a str>,
     key_columns: impl IntoIterator<Item = &'b ColumnSchema>,

@@ -4332,23 +4332,23 @@ fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
     );
 }
 
-/// A window that drops empty-valued labels is collected when the scan's key columns can spell the
-/// pair, and the merge above it rejects the two series as one label set.
+/// A window that drops empty-valued labels is collected when its labels cannot prove the drop, and
+/// the merge above it rejects the two series as one label set.
 ///
 /// `{host="web-1", zone=""}` and `{host="web-1"}` are two series to the scan: an empty tag value is
 /// a present label, an absent one is not. `rate` drops the metric name and the empty-valued labels,
 /// so both become `{host="web-1"}` and each covers the same grid.
 ///
-/// The one fact that tells the pass to collect the two is the scan's primary key - whether one of
-/// its columns can hold `NULL` where another holds `''` - and this fixture states that it cannot
-/// prove the pair apart, which is what a nullable tag column says. The window's output is therefore
-/// collected, and the merge is where the second value of one label set at one position is refused:
-/// Prometheus's answer, rather than two pieces of one series leaving unchecked.
+/// The fact that tells the pass to collect the two is the one its labels state: this fixture's
+/// source may hand over several metrics, so the name the window drops is not one every series it
+/// reads shares, and the drop can fold two of them. The window's output is therefore collected, and
+/// the merge is where the second value of one label set at one position is refused: Prometheus's
+/// answer, rather than two pieces of one series leaving unchecked.
 ///
 /// The merge is the canonical pass's decision, not this fixture's: the tree is built as the window
-/// alone and handed to `merge_label_rewrites` with the facts a planner states - it reads one metric
-/// and binds `host`, `zone` and `__name__`, and its key columns can hold that pair - so what is
-/// exercised is the pass's answer.
+/// alone and handed to `merge_label_rewrites` with the facts a planner states - it binds `host`,
+/// `zone` and `__name__`, and it may read several metrics - so what is exercised is the pass's
+/// answer.
 #[test]
 fn two_series_onto_one_label_set_after_a_window_are_rejected() {
     let out_grid = grid(0, 60_000, 5);
@@ -4368,17 +4368,16 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
                 "zone".to_string(),
                 "__name__".to_string(),
             ]],
-            &[Some(Arc::<str>::from("requests"))],
-            // The scan keys its series by a column that can hold `NULL` in one series and `''` in
-            // another, so its labels alone cannot prove the drop.
-            false,
+            // A selector that discovered several metrics binds no single name, so the drop cannot
+            // be proved over it.
+            &[None],
         )
         .unwrap()
     };
     let tree = tree();
     assert!(
         matches!(tree.root().expr, NativeExpr::Merge { .. }),
-        "the key columns cannot tell the pair apart, so the pass collects it: {tree}"
+        "the labels cannot tell the pair apart, so the pass collects it: {tree}"
     );
     let schema = raw_schema();
     let counter = [0, 60_000, 120_000, 180_000, 240_000];
@@ -4467,25 +4466,18 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
     assert_eq!(out.len(), 2, "two series over two hosts are two series");
 }
 
-/// A name-dropping node over one metric is proved by the labels alone only when the scan's key
-/// columns always decode a value; a scan whose keys can spell `NULL` and `''` is collected, and the
-/// merge above the drop is what rejects the pair.
+/// Two hosts survive a name drop the labels prove, each with the values its own statement answers.
 ///
-/// `requests{host="web-1", zone=""}` and `requests{host="web-1"}` are two series to a scan and one
-/// label set to everything that drops empty values: `timestamp(x)`, `rate(x[5m])` and
-/// `timestamp(rate(x[5m]))` all drop the metric name and the empty `zone` with it. The name an
-/// individual series carries is the one the whole scan carries, so the labels alone prove the drop
-/// of that name - but not of the empty value: a primary-key column that holds `NULL` in one series
-/// and `''` in another is exactly this pair, and the pass collects it when the scan states that its
-/// keys cannot tell them apart.
+/// `timestamp(x)`, `rate(x[5m])` and `timestamp(rate(x[5m]))` all drop the metadata labels, and over
+/// a scan bound to one metric whose tags carry no metadata label nothing collects them: the labels
+/// prove the drop, so the pass leaves the selection and the window where they are. What these three
+/// then say about two hosts is what the kernels say.
 ///
-/// Without that fact the drop is proved and nothing is collected, which is what the last block pins:
-/// the two hosts below are two series to the scan and two to every kernel above it.
-///
-/// The statements collected for the key columns alone are counted, not silently paid for: see
-/// `duplicate_labelset_check_collected` in the query planner.
+/// The values are the statement's own. `timestamp` reports each point's own time in seconds, and
+/// `rate` answers the slope of the counter it reads - both fixtures rise one step a minute, so both
+/// hosts answer the same slope and neither's values depend on the other being there.
 #[test]
-fn a_name_dropping_node_over_a_nullable_key_is_collected() {
+fn two_hosts_survive_a_proved_name_drop_with_their_own_values() {
     let out_grid = grid(0, 60_000, 5);
     let schema = raw_schema();
     let counter = [0, 60_000, 120_000, 180_000, 240_000];
@@ -4495,8 +4487,7 @@ fn a_name_dropping_node_over_a_nullable_key_is_collected() {
         "__name__".to_string(),
     ]];
     let metrics = [Some(Arc::<str>::from("requests"))];
-    // `requests{host=host}`, the shape the proved case is told apart by.
-    fn requests(host: &str) -> SeriesLabels {
+    let requests = |host: &str| {
         SeriesLabels::try_new(
             Some("requests".into()),
             vec![Label {
@@ -4505,19 +4496,14 @@ fn a_name_dropping_node_over_a_nullable_key_is_collected() {
             }],
         )
         .unwrap()
-    }
-    // What the merge refuses, or `None` when every piece left it.
-    fn rejected(execution: &mut NativeExecutor) -> Option<String> {
-        loop {
-            match execution.next_chunk() {
-                Ok(None) => return None,
-                // A piece may settle before a later one collides with it.
-                Ok(Some(_)) => {}
-                Err(error) => return Some(error.to_string()),
-            }
-        }
-    }
-
+    };
+    // The two hosts, and the counters they carry: one step per minute each.
+    let hosts = || {
+        vec![
+            (requests("web-1"), [1.0, 2.0, 3.0, 4.0, 5.0]),
+            (requests("web-2"), [6.0, 7.0, 8.0, 9.0, 10.0]),
+        ]
+    };
     let stamps = || {
         let mut node = instant(input(), 300_000, 0, Arc::clone(&out_grid));
         let NativeExpr::Instant { op, .. } = &mut node.expr else {
@@ -4535,7 +4521,7 @@ fn a_name_dropping_node_over_a_nullable_key_is_collected() {
             Arc::clone(&out_grid),
         )
     };
-    let evaluated_stamps = || {
+    let stamped_rate = || {
         let inner = rate();
         let output = inner.output.clone();
         NativeNode {
@@ -4545,106 +4531,145 @@ fn a_name_dropping_node_over_a_nullable_key_is_collected() {
             output,
         }
     };
-    let passed = |root: NativeNode, keys_survive: bool| {
+    // The host each answer belongs to, with that answer's values in absolute grid order.
+    let answers = |root: NativeNode, hosts: Vec<(SeriesLabels, [f64; 5])>| {
         let tree = NativeTree::try_new(root).unwrap();
-        merge_label_rewrites(&tree, &tags, &metrics, keys_survive)
-            .expect("the pass produces a legal tree")
-    };
-    let push = |execution: &mut NativeExecutor, second: SeriesLabels| {
-        execution
-            .push_raw(
-                InputId::new(0),
-                raw_chunk_of(
-                    &schema,
-                    b"series-a",
-                    host_metric(Some("")),
-                    &counter,
-                    &[1.0, 2.0, 3.0, 4.0, 5.0],
-                    true,
-                ),
-            )
-            .unwrap();
-        execution
-            .push_raw(
-                InputId::new(0),
-                raw_chunk_of(
-                    &schema,
-                    b"series-b",
-                    second,
-                    &counter,
-                    &[6.0, 7.0, 8.0, 9.0, 10.0],
-                    true,
-                ),
-            )
-            .unwrap();
-    };
-
-    // A key column that can hold `NULL` in one series and `''` in another: the drop is collected,
-    // and the merge is where the two pieces of one label set are refused.
-    let refused = |name: &str, root: NativeNode| {
-        let tree = passed(root, false);
-        assert!(
-            matches!(tree.root().expr, NativeExpr::Merge { .. }),
-            "`{name}` over a nullable key is collected: {tree}"
-        );
-        let mut execution = executor(&tree, pool());
-        push(&mut execution, host_metric(None));
-        execution.end_of_input().unwrap();
-        let message = rejected(&mut execution)
-            .unwrap_or_else(|| panic!("`{name}` handed two pieces of one label set over"));
-        assert!(
-            message.contains("vector cannot contain metrics with the same labelset"),
-            "`{name}`: the rejection does not name the shared label set: {message}"
-        );
-    };
-    refused("timestamp", stamps());
-    refused("rate", rate());
-    refused("timestamp(rate)", evaluated_stamps());
-
-    // Two series a non-empty label tells apart stay two. Over keys that cannot spell the pair the
-    // drop is proved and nothing is collected - an ordinary `abs`/`rate`/`timestamp` over a normal
-    // metric table - and over a nullable key it is collected, which costs the merge but answers the
-    // same two series.
-    let kept = |name: &str, root: NativeNode| {
-        let tree = passed(root, true);
+        let tree =
+            merge_label_rewrites(&tree, &tags, &metrics).expect("the pass produces a legal tree");
         assert!(
             !matches!(tree.root().expr, NativeExpr::Merge { .. }),
-            "`{name}` keeps every partition: {tree}"
+            "the labels prove the drop, so nothing is collected: {tree}"
         );
         let mut execution = executor(&tree, pool());
-        push(&mut execution, requests("web-2"));
-        let out = run(&mut execution);
-        assert_eq!(2, out.len(), "`{name}`: two series over two hosts are two");
-        assert_ne!(
-            out[0].series.metric, out[1].series.metric,
-            "`{name}`: the two hosts were not two label sets"
-        );
+        for (index, (metric, values)) in hosts.iter().enumerate() {
+            let key = [b"series-a".as_slice(), b"series-b".as_slice()][index];
+            execution
+                .push_raw(
+                    InputId::new(0),
+                    raw_chunk_of(&schema, key, metric.clone(), &counter, values, true),
+                )
+                .unwrap();
+        }
+        // `run` ends the input itself, stage by stage as it pulls.
+        let mut out = run(&mut execution)
+            .into_iter()
+            .map(|chunk| {
+                let host = chunk
+                    .series
+                    .metric
+                    .get("host")
+                    .unwrap_or_else(|| panic!("an answer lost its host: {:?}", chunk.series.metric))
+                    .to_string();
+                (host, decided(&[chunk]))
+            })
+            .collect::<Vec<_>>();
+        out.sort_by(|left, right| left.0.cmp(&right.0));
+        out
     };
-    kept("timestamp", stamps());
-    kept("rate", rate());
-    kept("timestamp(rate)", evaluated_stamps());
-    let kept_over_a_nullable_key = |name: &str, root: NativeNode| {
-        let tree = passed(root, false);
+
+    // `timestamp(x)`: each host answers its sample times in seconds, and the two are two series.
+    let out = answers(stamps(), hosts());
+    assert_eq!(
+        2,
+        out.len(),
+        "two hosts are two series without a merge: {out:?}"
+    );
+    assert_eq!(
+        vec!["web-1".to_string(), "web-2".to_string()],
+        out.iter().map(|(host, _)| host.clone()).collect::<Vec<_>>(),
+        "both hosts are named: {out:?}"
+    );
+    let seconds = (0..5)
+        .map(|position| (position, Some(position as f64 * 60.0)))
+        .collect::<Vec<_>>();
+    for (host, values) in &out {
+        assert_eq!(&seconds, values, "`timestamp(x)` over {host}");
+    }
+
+    // `rate(x[5m])`: each host answers the slope its own counter carries, and the same values it
+    // answers when it is the only series the tree reads. The full window's slope is the anchor the
+    // earlier, extrapolated points approach: one step a minute is one per sixty seconds.
+    let out = answers(rate(), hosts());
+    assert_eq!(
+        2,
+        out.len(),
+        "two hosts are two series without a merge: {out:?}"
+    );
+    for (host, values) in &out {
+        let present = values
+            .iter()
+            .filter_map(|(_, value)| *value)
+            .collect::<Vec<_>>();
         assert!(
-            matches!(tree.root().expr, NativeExpr::Merge { .. }),
-            "`{name}` over a nullable key is collected: {tree}"
+            present.len() >= 4,
+            "`rate` over {host} dropped too many points: {values:?}"
         );
-        let mut execution = executor(&tree, pool());
-        push(&mut execution, requests("web-2"));
-        let out = run(&mut execution);
+        assert!(
+            (present.last().expect("at least one point") - 1.0 / 60.0).abs() < 1e-9,
+            "`rate` over {host} reads one step a minute over the whole window: {values:?}"
+        );
+        let alone = answers(
+            rate(),
+            hosts()
+                .into_iter()
+                .filter(|(metric, _)| metric.get("host") == Some(host.as_str()))
+                .collect(),
+        );
+        assert_eq!(1, alone.len(), "`rate` over {host} alone: {alone:?}");
         assert_eq!(
-            2,
-            out.len(),
-            "`{name}`: two series over two hosts are two, collected or not"
+            &alone[0].1, values,
+            "`rate` over {host} answers what it answers alone: {values:?}"
         );
-        assert_ne!(
-            out[0].series.metric, out[1].series.metric,
-            "`{name}`: the two hosts were not two label sets"
+    }
+    assert_eq!(
+        out[0].1, out[1].1,
+        "the two counters rise alike, so both hosts answer the same values: {out:?}"
+    );
+
+    // `timestamp(rate(x[5m]))`: the same two hosts, each answering its points' own times, and the
+    // same times it answers alone.
+    let out = answers(stamped_rate(), hosts());
+    assert_eq!(
+        2,
+        out.len(),
+        "two hosts are two series without a merge: {out:?}"
+    );
+    for (host, values) in &out {
+        let present = values
+            .iter()
+            .filter_map(|(position, value)| value.map(|value| (*position, value)))
+            .collect::<Vec<_>>();
+        assert!(
+            !present.is_empty(),
+            "`timestamp(rate(x[5m]))` answered nothing for {host}: {values:?}"
         );
-    };
-    kept_over_a_nullable_key("timestamp", stamps());
-    kept_over_a_nullable_key("rate", rate());
-    kept_over_a_nullable_key("timestamp(rate)", evaluated_stamps());
+        for (position, value) in present {
+            assert!(
+                (value - position as f64 * 60.0).abs() < 1e-9,
+                "`timestamp` over {host} reports the point's own time in seconds: {values:?}"
+            );
+        }
+        let alone = answers(
+            stamped_rate(),
+            hosts()
+                .into_iter()
+                .filter(|(metric, _)| metric.get("host") == Some(host.as_str()))
+                .collect(),
+        );
+        assert_eq!(
+            1,
+            alone.len(),
+            "`timestamp(rate(x[5m]))` over {host} alone: {alone:?}"
+        );
+        assert_eq!(
+            &alone[0].1, values,
+            "`timestamp(rate(x[5m]))` over {host} answers what it answers alone: {values:?}"
+        );
+    }
+    assert_eq!(
+        out[0].1, out[1].1,
+        "both hosts answer the same points, so the times are the same: {out:?}"
+    );
 }
 
 /// Two series a `timestamp` hands out under one label set are refused by the merge above it.

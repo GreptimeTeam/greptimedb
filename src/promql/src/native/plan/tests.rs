@@ -1214,12 +1214,12 @@ fn a_broadcast_side_contributes_no_labels() {
     // broadcast reaches each series of its vector side as it is, so whether two series can end
     // under one label set is that side's answer, not the constant's.
     assert!(
-        duplicates_canonical_labels(&aliasing(), &source_tags, &[], true),
+        duplicates_canonical_labels(&aliasing(), &source_tags, &[]),
         "the fixture aliases: a rewrite of a label its input carries can fold two series into one"
     );
     assert_eq!(
-        duplicates_canonical_labels(&aliasing(), &source_tags, &[], true),
-        duplicates_canonical_labels(&clamp_max(aliasing()), &source_tags, &[], true),
+        duplicates_canonical_labels(&aliasing(), &source_tags, &[]),
+        duplicates_canonical_labels(&clamp_max(aliasing()), &source_tags, &[]),
         "a scalar parameter carries no labels, so the map answers its input's identity"
     );
     for node in [
@@ -1229,8 +1229,8 @@ fn a_broadcast_side_contributes_no_labels() {
         binary(eval_time(), clamp_max(aliasing())),
     ] {
         assert_eq!(
-            duplicates_canonical_labels(&aliasing(), &source_tags, &[], true),
-            duplicates_canonical_labels(&node, &source_tags, &[], true),
+            duplicates_canonical_labels(&aliasing(), &source_tags, &[]),
+            duplicates_canonical_labels(&node, &source_tags, &[]),
             "a broadcast keeps the series identity of its vector side"
         );
     }
@@ -1243,7 +1243,7 @@ fn a_broadcast_side_contributes_no_labels() {
         binary(vector_of_one(), aliasing()),
     ] {
         assert!(
-            !duplicates_canonical_labels(&node, &source_tags, &[], true),
+            !duplicates_canonical_labels(&node, &source_tags, &[]),
             "a vector-vector match answers one series per label set, whatever aliases below it"
         );
     }
@@ -2217,8 +2217,7 @@ fn a_fresh_destination_does_not_alias() {
     assert!(!duplicates_canonical_labels(
         &rewritten(inner, "dst", "host"),
         &scan_tags(),
-        &[],
-        true
+        &[]
     ));
 }
 
@@ -2231,8 +2230,7 @@ fn a_rewrite_of_an_existing_label_aliases() {
     assert!(duplicates_canonical_labels(
         &rewritten(inner, "host", "host"),
         &scan_tags(),
-        &[],
-        true
+        &[]
     ));
 }
 
@@ -2247,16 +2245,14 @@ fn a_rewrite_of_the_metric_name_aliases_a_named_source() {
     assert!(duplicates_canonical_labels(
         &rewritten(inner, "__name__", "__name__"),
         &named,
-        &[],
-        true
+        &[]
     ));
     // The delete-only form can fold the same two identities, so it is collected too.
     let inner = input_on(Arc::clone(&out));
     assert!(duplicates_canonical_labels(
         &replaced(inner, "__name__", "", "__name__"),
         &named,
-        &[],
-        true
+        &[]
     ));
 }
 
@@ -2290,8 +2286,7 @@ fn a_name_rewrite_above_a_dropped_name_is_collected() {
             duplicates_canonical_labels(
                 &replaced(dropped, "__name__", "same", "missing"),
                 &named,
-                &[],
-                true
+                &[]
             ),
             "{name}: a name write may alias metrics the kernel left indistinguishable"
         );
@@ -2300,7 +2295,7 @@ fn a_name_rewrite_above_a_dropped_name_is_collected() {
     // where the rewrite alone decides the answer.
     let keeping = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(
-        !duplicates_canonical_labels(&rewritten(keeping, "dst", "host"), &named, &[], true),
+        !duplicates_canonical_labels(&rewritten(keeping, "dst", "host"), &named, &[]),
         "a fresh ordinary destination cannot alias"
     );
 }
@@ -2475,8 +2470,7 @@ fn an_unknown_source_may_alias() {
     assert!(duplicates_canonical_labels(
         &rewritten(inner, "dst", "host"),
         &[],
-        &[],
-        true
+        &[]
     ));
 }
 
@@ -2488,12 +2482,12 @@ fn an_unknown_source_may_alias() {
 /// below it could be told apart by that name.
 ///
 /// A scan bound to one metric names every series it hands over, so no name of its tells two of them
-/// apart, and the labels are the whole proof: the one metric is enough - as long as the scan's key
-/// columns always decode a value. A drop removes every empty label value with the name, so a key
-/// column that holds `NULL` in one series and `''` in another leaves both under one label set and
-/// that half withholds the proof too. A scan that may hand over several metrics is collected, and so
-/// is one carrying `__type__` or `__unit__` among its tags, because only those labels told the two
-/// series apart.
+/// apart, and the labels are the whole proof. A scan that may hand over several metrics is collected,
+/// and so is one carrying `__type__` or `__unit__` among its tags, because only those labels told
+/// the two series apart. The scan's key columns are not asked: a key column that holds `NULL` in one
+/// series and `''` in another decodes to an absent and to an empty label, both of which the drop
+/// normalizes into one, and that pair is deliberately left outside the proof - see
+/// [`metadata_labels_keep_series_apart`].
 #[test]
 fn dropping_the_metric_name_is_a_new_source() {
     let out = grid(0, 60_000, 4);
@@ -2503,54 +2497,49 @@ fn dropping_the_metric_name_is_a_new_source() {
     assert!(duplicates_canonical_labels(
         &dropped,
         &named_scan_tags(),
-        &[],
-        true
+        &[]
     ));
     // The scan reads one metric, so the name it drops told none of its series apart.
     assert!(!duplicates_canonical_labels(
         &dropped,
         &named_scan_tags(),
-        &single,
-        true
+        &single
     ));
     // A source that may hand over several metrics is not proved, and neither is one that carries a
     // metadata label of its own: both can hold two series that only that label told apart.
     assert!(duplicates_canonical_labels(
         &dropped,
         &named_scan_tags(),
-        &[None],
-        true
+        &[None]
     ));
     for metadata in ["__type__", "__unit__"] {
         let mut tags = named_scan_tags();
         tags[0].push(metadata.to_string());
         assert!(
-            duplicates_canonical_labels(&dropped, &tags, &single, true),
+            duplicates_canonical_labels(&dropped, &tags, &single),
             "{metadata}"
         );
     }
-    // The same scan, with a key column that can hold `NULL` in one series and `''` in another: the
-    // empty value leaves with the name, so the one metric no longer proves the drop - and neither
-    // does it for `abs` or a `timestamp` above it, which report the name dropped as well.
-    assert!(duplicates_canonical_labels(
+    // A key column that can hold `NULL` in one series and `''` in another is *not* part of that
+    // proof: the empty value leaves with the name, but the pair is a property of a nullable tag
+    // column rather than of the labels, and every tag column of a metric-engine table is nullable.
+    // Nothing is collected for it, above the window or above a map that drops the name again.
+    assert!(!duplicates_canonical_labels(
         &dropped,
         &named_scan_tags(),
-        &single,
-        false
+        &single
     ));
-    assert!(duplicates_canonical_labels(
+    assert!(!duplicates_canonical_labels(
         &map_over(input_on(Arc::clone(&out))),
         &named_scan_tags(),
-        &single,
-        false
+        &single
     ));
     // A window that keeps the name passes its input's answer on instead.
     let keeping = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(!duplicates_canonical_labels(
         &keeping,
         &named_scan_tags(),
-        &[],
-        true
+        &[]
     ));
     // `timestamp` reports a sample's own time under the name dropped, in both of its forms.
     let stamps = |inner: NativeNode| NativeNode {
@@ -2562,38 +2551,35 @@ fn dropping_the_metric_name_is_a_new_source() {
     assert!(duplicates_canonical_labels(
         &stamps(input_on(Arc::clone(&out))),
         &named_scan_tags(),
-        &[],
-        true
+        &[]
     ));
     assert!(duplicates_canonical_labels(
         &stamps(input_on(Arc::clone(&out))),
         &named_scan_tags(),
-        &[None],
-        true
+        &[None]
     ));
     assert!(!duplicates_canonical_labels(
         &stamps(input_on(Arc::clone(&out))),
         &named_scan_tags(),
-        &single,
-        true
+        &single
     ));
     // A sample-preserving selection keeps the name it read, so it is no source of its own.
     assert!(!duplicates_canonical_labels(
         &instant_sample(input_on(Arc::clone(&out)), Arc::clone(&out)),
         &named_scan_tags(),
-        &[],
-        true
+        &[]
     ));
 }
 
 /// The plan-time counter's question: which statements drop the metadata labels over series whose
 /// labels prove them apart and whose keys do not.
 ///
-/// The labels half is what the walk reads; the key half is stated by the caller, and a drop is
+/// The labels are what the walk reads; the key columns are stated by the caller, and a drop is
 /// counted exactly when the labels prove it, nothing below it has collected already, and the scan's
 /// key columns cannot tell the pair apart - a key column holding `NULL` in one series and `''` in
-/// another, which is a fact about the physical table. This is the tree half of that count: the
-/// planner pairs it with the fact it read from the resolved table.
+/// another, which is a fact about the physical table. Nothing is collected for that pair, so the
+/// count is what keeps the statements it leaves unproved observable. This is the tree half of that
+/// count: the planner pairs it with the fact it read from the resolved table.
 #[test]
 fn a_drop_the_labels_prove_is_counted_only_when_its_keys_do_not() {
     let out = grid(0, 60_000, 4);
@@ -2708,7 +2694,7 @@ fn a_rewrite_after_ranking_or_grouping_may_alias() {
         ("sum by host", grouped_sum),
     ] {
         assert!(
-            !duplicates_canonical_labels(&inner, &source_tags, &[], true),
+            !duplicates_canonical_labels(&inner, &source_tags, &[]),
             "{name}"
         );
         let output = inner.output.clone();
@@ -2726,7 +2712,7 @@ fn a_rewrite_after_ranking_or_grouping_may_alias() {
         };
         assert!(renamed.validate().is_ok(), "{name}");
         assert!(
-            duplicates_canonical_labels(&renamed, &source_tags, &[], true),
+            duplicates_canonical_labels(&renamed, &source_tags, &[]),
             "{name}"
         );
     }
@@ -2847,8 +2833,7 @@ fn a_merge_answers_one_series_per_set() {
     assert!(!duplicates_canonical_labels(
         &merge_over(aliasing),
         &scan_tags(),
-        &[],
-        true
+        &[]
     ));
 }
 

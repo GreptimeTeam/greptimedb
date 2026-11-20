@@ -1334,31 +1334,25 @@ impl NativeNode {
 ///
 /// - A map of math drops the metadata labels, and so do a histogram map, a parameterized map, an
 ///   arithmetic or `bool` scalar broadcast, a range function that computes its result and a
-///   `timestamp` in either of its forms. Such a node is judged by two facts
-///   ([`metadata_drop_keeps_series_apart`]): the labels it and its input report, and the scan's own
-///   key columns. A source bound to one metric names every series it hands over, so the name the
-///   drop removes told none of them apart, and a source that may hand over several is collected; and
-///   because the drop removes every empty label value with the name, a key column that holds `NULL`
-///   in one series and `''` in another - an absent and an empty value, which is one label set once
-///   the empty one is gone - is collected too. `keys_survive` is that second fact, stated by the
-///   caller for the scan below the tree
-///   ([`keys_survive_metadata_drop`](crate::extension_plan::keys_survive_metadata_drop), which is
-///   the same rule the physical per-series scan applies); a caller that cannot state it passes
-///   `false`, and the conservative answer is the one that collects.
+///   `timestamp` in either of its forms. Such a node is judged by the labels it and its input
+///   report ([`metadata_labels_keep_series_apart`]): a source bound to one metric names every series
+///   it hands over, so the name the drop removes told none of them apart, and a source that may hand
+///   over several is collected. A key column that holds `NULL` in one series and `''` in another is
+///   *not* part of that proof - see the doc comment of the function - so a drop whose labels prove
+///   it is never collected for the storage keys alone.
 /// - An `Aggregate` answers its groups, a `Vector` that folds series answers its result sets, and a
 ///   `Binary` that reads whole vectors files its rows by the label set a sample *ends* under and
 ///   refuses two values of a field at one point. A `Set` does the same, and `info` merges the
 ///   results that share a label set. Each answers one series per set it names.
 /// - A `Window` that drops the metadata labels, and the two timestamps, claim one of their own: the
 ///   name is part of the identity a merge groups by, so two series that shared every other label are
-///   one label set from there on - unless the drop tells them apart by the same two-fact rule the
-///   kernels above are judged by.
-/// - The empty-value half of that proof is answered by a [`Merge`](NativeExpr::Merge) at or below the
-///   drop ([`canonical_below`]): a merge hands over one series per canonical label set - the
-///   comparison that treats an empty label value as no label - so no drop above it can fold two of
-///   its series by removing an empty value. What a merge does not answer is the metadata labels
-///   themselves, which the labels half below still has to prove. That is what keeps a chain of drops
-///   over one metric to the one collection at its bottom rather than one per drop.
+///   one label set from there on - unless the labels tell them apart by the same rule the kernels
+///   above are judged by.
+/// - A [`Merge`](NativeExpr::Merge) at or below a drop answers nothing for it
+///   ([`canonical_below`](crate::native::plan::canonical_below)): a merge hands over one series per
+///   canonical label set, but the labels that tell two of its series apart still have to prove the
+///   drop. A chain of drops over one metric is therefore collected once per collision the labels do
+///   not prove, and not at all when they do.
 /// - A node that hands its input's series over unchanged - a selection, a name-keeping window,
 ///   `topk` and its ranking siblings - passes the answer on: an alias below it is still an alias
 ///   above it.
@@ -1371,7 +1365,6 @@ pub fn duplicates_canonical_labels(
     node: &NativeNode,
     source_tags: &[Vec<String>],
     source_metrics: &[Option<Arc<str>>],
-    keys_survive: bool,
 ) -> bool {
     match &node.expr {
         NativeExpr::Input(_)
@@ -1382,48 +1375,37 @@ pub fn duplicates_canonical_labels(
         NativeExpr::Merge { .. } => false,
         // These hand each series over as they read it, so what aliases below them still aliases --
         // except `timestamp`, which reports a sample's own time under the metadata labels dropped
-        // and is therefore a source of duplicates in its own right. A merge below it already hands
-        // over one series per label set, so nothing the drop can fold is left there.
+        // and is therefore a source of duplicates in its own right unless the labels prove that
+        // drop injective ([`metadata_labels_keep_series_apart`]).
         NativeExpr::Instant { input, op } => {
             (op.value == InstantValue::Timestamp
-                && !metadata_drop_keeps_series_apart(
-                    input,
-                    source_tags,
-                    source_metrics,
-                    keys_survive,
-                ))
-                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+                && !metadata_labels_keep_series_apart(input, source_tags, source_metrics))
+                || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
         // A window that drops the metadata labels can fold two series that agreed on every other
         // label into one set, so it is a source of duplicates whether or not its input was one -
-        // unless the labels and the scan's key columns provably tell those series apart still, or a
-        // merge below it already collected them.
+        // unless the labels below it provably tell those series apart still.
         NativeExpr::Window { input, op } => {
             (op.function.drops_metric_name()
-                && !metadata_drop_keeps_series_apart(
-                    input,
-                    source_tags,
-                    source_metrics,
-                    keys_survive,
-                ))
-                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+                && !metadata_labels_keep_series_apart(input, source_tags, source_metrics))
+                || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
         // `timestamp` always drops the metadata labels, so two series it reads can become one set -
-        // unless the labels below it are all bound to one metric and the scan's keys survive the
-        // drop.
+        // unless the labels below it are all bound to one metric, which is what proves that the name
+        // it removes told none of those series apart.
         NativeExpr::Timestamp { input } => {
-            !metadata_drop_keeps_series_apart(input, source_tags, source_metrics, keys_survive)
-                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+            !metadata_labels_keep_series_apart(input, source_tags, source_metrics)
+                || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
         // A parameterized map is a math kernel - `round`, `clamp` - and drops the metadata labels as
         // a math map does, so it answers for the same reason. Its parameter is a scalar and carries
         // no labels of the input's.
         NativeExpr::ParameterizedMap { input, .. } => {
-            !metadata_drop_keeps_series_apart(input, source_tags, source_metrics, keys_survive)
-                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+            !metadata_labels_keep_series_apart(input, source_tags, source_metrics)
+                || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
         NativeExpr::ParameterizedTopK { input, .. } => {
-            duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+            duplicates_canonical_labels(input, source_tags, source_metrics)
         }
         // `scalar()` answers one value, which names no label set at all.
         NativeExpr::ScalarOf { .. } => false,
@@ -1436,20 +1418,15 @@ pub fn duplicates_canonical_labels(
         // an input whose labels this walk cannot derive is collected rather than trusted. Even a
         // whole-vector consumer can emit distinct series whose labels a later rewrite makes equal.
         // A math or histogram kernel in the same map drops the metadata labels, which is a source of
-        // duplicates of its own unless the labels and the scan's keys tell its input's series apart -
-        // see the doc comment above.
+        // duplicates of its own unless the labels tell its input's series apart - see the doc
+        // comment above.
         NativeExpr::Map { input, op } => {
             (op.ops
                 .iter()
                 .any(|operation| matches!(operation, MapOp::Math(_) | MapOp::Histogram(_)))
-                && !metadata_drop_keeps_series_apart(
-                    input,
-                    source_tags,
-                    source_metrics,
-                    keys_survive,
-                ))
+                && !metadata_labels_keep_series_apart(input, source_tags, source_metrics))
                 || map_writes_existing_label(input, op, source_tags).unwrap_or(true)
-                || duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+                || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
         // A fold answers one series per group, which is one label set per group.
         NativeExpr::Aggregate { .. } => false,
@@ -1459,7 +1436,7 @@ pub fn duplicates_canonical_labels(
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
             | BoundVectorOp::Sort(_) => {
-                duplicates_canonical_labels(input, source_tags, source_metrics, keys_survive)
+                duplicates_canonical_labels(input, source_tags, source_metrics)
             }
             // `absent` reports one series, `count_values` one per distinct value, and the histogram
             // functions fold the bucket series of one histogram into one series.
@@ -1477,27 +1454,16 @@ pub fn duplicates_canonical_labels(
                 // Two vectors are matched by label, and the kernel files its rows by the label set a
                 // sample ends under, refusing two values of one field at one point.
                 (true, true) => false,
-                // A broadcast reaches each series of its vector side as it is. An arithmetic one and
-                // one that reports a `bool` drop the metadata labels, which is a source of
-                // duplicates of its own unless the labels and the scan's keys tell its series apart;
-                // a filtering comparison keeps the set it read. A merge below the vector side already
-                // handed over one series per label set, so the drop has nothing left to fold there.
+                // A broadcast reaches each series of its vector side as it is, one series of the
+                // vector side per output series. An arithmetic one and one that reports a `bool`
+                // drop the metadata labels, which is a source of duplicates of its own unless the
+                // labels tell its series apart; a filtering comparison keeps the set it read.
                 (true, false) | (false, true) => {
                     let carried = if vector(left) { left } else { right };
                     let drops_metadata = !matching.op.is_comparison() || matching.return_bool;
                     (drops_metadata
-                        && !metadata_drop_keeps_series_apart(
-                            carried,
-                            source_tags,
-                            source_metrics,
-                            keys_survive,
-                        ))
-                        || duplicates_canonical_labels(
-                            carried,
-                            source_tags,
-                            source_metrics,
-                            keys_survive,
-                        )
+                        && !metadata_labels_keep_series_apart(carried, source_tags, source_metrics))
+                        || duplicates_canonical_labels(carried, source_tags, source_metrics)
                 }
                 // Two scalars name no label set at all.
                 (false, false) => false,
@@ -1578,38 +1544,19 @@ fn map_writes_existing_label(
 ///
 /// This is the whole of the drop's proof: every arm of [`duplicates_canonical_labels`] that decides
 /// whether a collection is needed asks it, and so does [`unifies_its_own_contributions`] at run
-/// time. What it cannot see is a key column that holds `NULL` in one series and `''` in another,
-/// both of which decode to no label once the empty value is dropped with the name. That fact is not
-/// derivable from a tree - it is read from the resolved table - so the caller states it as
-/// `keys_survive`, using the same rule the physical per-series scan applies
-/// ([`keys_survive_metadata_drop`](crate::extension_plan::keys_survive_metadata_drop)).
-/// [`leaves_a_drop_to_the_storage_keys`] is what makes the statements collected for that reason
-/// countable.
-fn metadata_drop_keeps_series_apart(
-    node: &NativeNode,
-    source_tags: &[Vec<String>],
-    source_metrics: &[Option<Arc<str>>],
-    keys_survive: bool,
-) -> bool {
-    // The empty-value half is asked first, because it is the cheap one and because a merge at or
-    // below `node` answers it for the tree ([`canonical_below`]): a merge hands over one series per
-    // canonical label set - the comparison that treats an empty label value as no label - so two of
-    // its series are already distinct under it, and no drop above can fold them by removing an empty
-    // value. What a merge does *not* answer is the metadata labels themselves: it keeps two series
-    // that differ in the name, `__type__` or `__unit__`, and those are exactly what the drop
-    // removes, so the labels half still has to hold on its own.
-    //
-    // A caller that cannot state the key half - one holding no table, or a tree whose scans
-    // disagree - passes `keys_survive = false`, and only a merge below it can then carry the drop.
-    (keys_survive || canonical_below(node))
-        && metadata_labels_keep_series_apart(node, source_tags, source_metrics)
-}
-
-/// Whether the labels alone tell two of `node`'s series apart once the metadata labels are dropped.
+/// time, so the two cannot disagree about a merge.
 ///
-/// This is the half of [`metadata_drop_keeps_series_apart`] a tree can answer about itself; the other
-/// half is the empty values the drop removes - the scan's key columns, or a merge that has already
-/// told those apart. See that function's doc comment for the rule itself.
+/// What it does not answer is a key column that holds `NULL` in one series and `''` in another, both
+/// of which decode to no label once the empty value is dropped with the name. That pair is
+/// deliberately outside the proof: it is a property of a nullable tag column rather than of the
+/// labels, and every tag column of a metric-engine table is nullable, so collecting a drop for it
+/// puts a canonical merge - and the fragmenting boundary that merge carries - over every statement
+/// whose kernel drops the metadata labels, including the ones whose labels prove the drop injective.
+/// The fact is still read from the resolved table
+/// ([`keys_survive_metadata_drop`](crate::extension_plan::keys_survive_metadata_drop)) and the
+/// statements whose labels prove the drop while that pair does not are still counted
+/// ([`leaves_a_drop_to_the_storage_keys`]), so what the pair can hide stays observable even though
+/// nothing is collected for it.
 fn metadata_labels_keep_series_apart(
     node: &NativeNode,
     source_tags: &[Vec<String>],
@@ -1659,15 +1606,16 @@ fn canonical_below(node: &NativeNode) -> bool {
 }
 
 /// Whether `node` drops [`PROMQL_METADATA_LABELS`] on its own over series whose labels are proved to
-/// tell apart and whose keys do not.
+/// tell apart and whose keys are not.
 ///
-/// This is the question of what the drop costs: the labels half of the proof
-/// ([`metadata_labels_keep_series_apart`]) holds, nothing at or below the drop has collected already
-/// ([`canonical_below`]), and the only reason a collection is still needed is the scan's key columns,
-/// a primary-key column that holds `NULL` in one series and `''` in another. Those two decode to an
-/// absent and to an empty label, and the drop normalizes them into one. Such a statement is now
-/// collected for that reason alone ([`metadata_drop_keeps_series_apart`]), and this is the count
-/// that says so.
+/// This is what the pair the proof leaves outside costs, stated rather than collected: the labels
+/// prove the drop ([`metadata_labels_keep_series_apart`]), nothing at or below it has collected
+/// already ([`canonical_below`]), and the scan's primary key holds a column that can spell `NULL` in
+/// one series and `''` in another. Those two decode to an absent and to an empty label, and the drop
+/// normalizes them into one - the case a collection used to be inserted for and that a name-dropping
+/// kernel over a metric-engine table, whose tag columns are all nullable, paid a merge for. The
+/// collection is gone (see [`metadata_labels_keep_series_apart`]) and this is the count that keeps
+/// the statements it would have covered observable.
 ///
 /// Every node that drops the metadata labels on its own counts: a map of math, a histogram map, a
 /// parameterized map and an arithmetic or `bool` scalar broadcast, and the three that rewrite a
@@ -1679,10 +1627,10 @@ fn drops_metadata_labels_over_one_metric(
     source_metrics: &[Option<Arc<str>>],
     keys_survive: bool,
 ) -> bool {
-    // The statement is counted exactly when the drop is collected for the key columns alone: the
-    // labels prove it ([`metadata_labels_keep_series_apart`]), nothing at or below it has collected
-    // already ([`canonical_below`]), and the keys do not survive it - which is the one fact the pass
-    // read from the resolved table and the reason the merge is there.
+    // The statement is counted exactly when the labels prove the drop and the key columns are the
+    // only thing left that does not: nothing at or below it has collected already
+    // ([`canonical_below`]), and the resolved table's keys can spell the `NULL`/`''` pair - which is
+    // the fact this count exists to surface now that nothing is collected for it.
     let decided_by_the_keys = |carried: &NativeNode| {
         !keys_survive
             && metadata_labels_keep_series_apart(carried, source_tags, source_metrics)
@@ -1732,14 +1680,14 @@ fn drops_metadata_labels_over_one_metric(
 }
 
 /// Whether `tree` holds a node that drops the metadata labels over series whose labels are proved to
-/// tell apart and whose keys do not (see [`drops_metadata_labels_over_one_metric`]).
+/// tell apart and whose keys are not (see [`drops_metadata_labels_over_one_metric`]).
 ///
-/// A statement this answers `true` for is one the canonical pass collects for the key columns alone:
-/// the labels prove the drop injective, nothing below it has collected already, and the scan below it
+/// A statement this answers `true` for is one whose drop the labels prove while the scan below it
 /// keys its series by a column that can hold `NULL` in one series and `''` in another
-/// (`keys_survive` is `false`, and the caller states that fact from the resolved table). Those
-/// statements are the price of reading that fact instead of the label-set check the physical scan
-/// only states for itself, so the caller counts them by this answer.
+/// (`keys_survive` is `false`, and the caller states that fact from the resolved table). Nothing is
+/// collected for that pair - the labels are the whole of the proof - so this is the count that keeps
+/// the statements it leaves unproved observable, and the caller reports it as the reason its
+/// label-set check does not cover them.
 pub fn leaves_a_drop_to_the_storage_keys(
     tree: &NativeTree,
     source_tags: &[Vec<String>],
@@ -2909,14 +2857,9 @@ fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
 /// [`duplicates_canonical_labels`] judges a whole label set by, indexed the same way: a node that
 /// drops the metadata labels reports fragments only when
 /// [`metadata_labels_keep_series_apart`] cannot prove the labels tell its series apart. That is the
-/// labels half of the drop's proof, and it is the half a tree can answer about itself. The other half
-/// is whether the scan's key columns can spell one series as `NULL` and another as `''`, both of
-/// which the drop normalizes into one label set: it is stated for the tree as a whole and is asked by
-/// the canonical pass ([`duplicates_canonical_labels`], which reads it as
-/// [`metadata_drop_keeps_series_apart`]). Where that half does not hold, the pass has put its merge
-/// above this node already, so this predicate is asked of the merge instead, which is why asking the
-/// labels half here cannot disagree with the pass about a drop. The statements that half collects
-/// are counted by [`leaves_a_drop_to_the_storage_keys`].
+/// whole of the drop's proof, so this predicate and the canonical pass cannot disagree about a drop:
+/// a `NULL`/`''` pair in one key column is outside it for both, and the statements the pair leaves
+/// unproved are counted by [`leaves_a_drop_to_the_storage_keys`] rather than collected.
 ///
 /// This predicate is only ever asked of a node by the consumer directly above it - the `Window`
 /// `MergeInput` collector and the `limitk` one, both in [`execute`](crate::native::execute) - and
