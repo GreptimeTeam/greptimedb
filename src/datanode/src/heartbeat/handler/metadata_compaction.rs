@@ -17,11 +17,11 @@ use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 
 use common_meta::instruction::{
-    InstructionError, InstructionReply, InstructionResult, MetadataCompaction, MetadataSyncAttempt,
-    SimpleReply,
+    InstructionError, InstructionReply, InstructionResult, MetadataCompaction, SimpleReply,
 };
 use metric_engine::engine::MetricEngine;
 use mito2::compaction::CompactionGuard;
+use store_api::storage::RegionId;
 use tokio::sync::{OnceCell, oneshot};
 use tokio::time::Instant;
 
@@ -29,61 +29,70 @@ use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 
 #[derive(Clone, Default)]
 pub struct MetadataCompactionHandler {
-    leases: Arc<Mutex<HashMap<MetadataSyncAttempt, PauseLease>>>,
+    leases: Arc<Mutex<HashMap<RegionId, PauseLease>>>,
 }
 
 struct PauseLease {
+    pause_id: u64,
     deadline: Instant,
     guard: Arc<OnceCell<CompactionGuard>>,
-    _cancel_expiry: oneshot::Sender<()>,
+    cancel_expiry: oneshot::Sender<()>,
 }
 
 impl MetadataCompactionHandler {
     fn lease(
         &self,
-        attempt: MetadataSyncAttempt,
+        region_id: RegionId,
+        pause_id: u64,
         deadline: Instant,
     ) -> (Arc<OnceCell<CompactionGuard>>, Instant) {
-        match self.leases.lock().unwrap().entry(attempt) {
-            Entry::Occupied(entry) => (entry.get().guard.clone(), entry.get().deadline),
-            Entry::Vacant(entry) => {
-                let guard = Arc::new(OnceCell::new());
-                let (cancel, cancelled) = oneshot::channel();
-                entry.insert(PauseLease {
-                    deadline,
-                    guard: guard.clone(),
-                    _cancel_expiry: cancel,
-                });
-                let leases = Arc::downgrade(&self.leases);
-                let expected = Arc::downgrade(&guard);
-                common_runtime::spawn_global(async move {
-                    tokio::select! {
-                        _ = cancelled => (),
-                        _ = tokio::time::sleep_until(deadline) => {
-                            if let Some(leases) = leases.upgrade()
-                                && let Entry::Occupied(entry) = leases.lock().unwrap().entry(attempt)
-                                && expected.ptr_eq(&Arc::downgrade(&entry.get().guard))
-                            {
-                                entry.remove();
-                            }
-                        }
-                    }
-                });
-                (guard, deadline)
+        let mut leases = self.leases.lock().unwrap();
+        let lease = leases.entry(region_id).or_insert_with(|| PauseLease {
+            pause_id,
+            deadline,
+            guard: Arc::new(OnceCell::new()),
+            cancel_expiry: self.expire_at(region_id, deadline),
+        });
+        if pause_id > lease.pause_id {
+            // Only the latest Pause can release the shared guard.
+            lease.pause_id = pause_id;
+            if deadline > lease.deadline {
+                lease.deadline = deadline;
+                lease.cancel_expiry = self.expire_at(region_id, deadline);
             }
         }
+        (lease.guard.clone(), lease.deadline)
+    }
+
+    fn expire_at(&self, region_id: RegionId, deadline: Instant) -> oneshot::Sender<()> {
+        let leases = Arc::downgrade(&self.leases);
+        let (cancel, cancelled) = oneshot::channel();
+        common_runtime::spawn_global(async move {
+            tokio::select! {
+                _ = cancelled => (),
+                _ = tokio::time::sleep_until(deadline) => {
+                    if let Some(leases) = leases.upgrade()
+                        && let Entry::Occupied(entry) = leases.lock().unwrap().entry(region_id)
+                        && entry.get().deadline == deadline
+                    {
+                        entry.remove();
+                    }
+                }
+            }
+        });
+        cancel
     }
 
     async fn pause(
         &self,
         ctx: &HandlerContext,
-        attempt: MetadataSyncAttempt,
+        region_id: RegionId,
+        pause_id: u64,
         remaining: std::time::Duration,
     ) -> InstructionResult<()> {
         let deadline = Instant::now().checked_add(remaining).ok_or_else(|| {
             InstructionError::legacy_internal_retryable("Invalid metadata sync deadline")
         })?;
-        let region_id = attempt.region_id;
         let engine = ctx
             .region_server
             .find_engine(region_id)
@@ -106,7 +115,7 @@ impl MetadataCompactionHandler {
                 "Source region {region_id} is not writable"
             )));
         }
-        let (lease, deadline) = self.lease(attempt, deadline);
+        let (lease, deadline) = self.lease(region_id, pause_id, deadline);
         tokio::time::timeout_at(
             deadline,
             lease.get_or_try_init(|| metric.pause_metadata_compaction(region_id)),
@@ -118,7 +127,14 @@ impl MetadataCompactionHandler {
             )
         })?
         .map_err(|e| InstructionError::from_error(&e))?;
-        if Instant::now() >= deadline || ctx.region_server.is_region_leader(region_id) != Some(true)
+        if self
+            .leases
+            .lock()
+            .unwrap()
+            .get(&region_id)
+            .is_none_or(|lease| lease.pause_id != pause_id)
+            || Instant::now() >= deadline
+            || ctx.region_server.is_region_leader(region_id) != Some(true)
         {
             return Err(InstructionError::legacy_internal_retryable(
                 "Source metadata compaction lease expired or leadership changed",
@@ -138,15 +154,27 @@ impl InstructionHandler for MetadataCompactionHandler {
         instruction: MetadataCompaction,
     ) -> Option<InstructionReply> {
         match instruction {
-            MetadataCompaction::Pause { attempt, remaining } => {
-                let result = self.pause(ctx, attempt, remaining).await;
+            MetadataCompaction::Pause {
+                region_id,
+                remaining,
+            } => {
+                let result = self
+                    .pause(ctx, region_id, ctx.mailbox_message_id, remaining)
+                    .await;
                 Some(InstructionReply::MetadataCompaction(SimpleReply {
                     result: result.is_ok(),
                     error: result.err(),
                 }))
             }
-            MetadataCompaction::Release(attempt) => {
-                self.leases.lock().unwrap().remove(&attempt);
+            MetadataCompaction::Release {
+                region_id,
+                pause_id,
+            } => {
+                if let Entry::Occupied(entry) = self.leases.lock().unwrap().entry(region_id)
+                    && entry.get().pause_id == pause_id
+                {
+                    entry.remove();
+                }
                 None
             }
         }
@@ -170,7 +198,7 @@ mod tests {
     use crate::tests::mock_region_server;
 
     #[tokio::test]
-    async fn test_metadata_pause_is_attempt_scoped_and_expires() {
+    async fn test_metadata_pause_renews_and_expires() {
         let mut env = TestEnv::with_prefix("metadata-compaction-lease").await;
         let mito = env.create_engine(Default::default()).await;
         let mut server = mock_region_server();
@@ -190,23 +218,36 @@ mod tests {
             .unwrap();
         let ctx = HandlerContext::new_for_test(server, Arc::new(MemoryKvBackend::new()));
         let handler = MetadataCompactionHandler::default();
-        let first = MetadataSyncAttempt {
-            region_id,
-            attempt_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
-        };
-        let second = MetadataSyncAttempt {
-            region_id,
-            attempt_id: "00000000-0000-0000-0000-000000000002".parse().unwrap(),
-        };
-        for attempt in [first, first, second] {
-            handler
-                .pause(&ctx, attempt, Duration::from_secs(60))
-                .await
-                .unwrap();
-        }
+        handler
+            .pause(&ctx, region_id, 1, Duration::from_secs(30))
+            .await
+            .unwrap();
+        let first_deadline = handler.leases.lock().unwrap()[&region_id].deadline;
+        handler
+            .pause(&ctx, region_id, 2, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let renewed = handler.leases.lock().unwrap()[&region_id].deadline;
+        assert!(renewed > first_deadline);
+        handler
+            .pause(&ctx, region_id, 2, Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(handler.leases.lock().unwrap()[&region_id].deadline, renewed);
+        handler
+            .pause(&ctx, region_id, 3, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(handler.leases.lock().unwrap()[&region_id].deadline, renewed);
         for _ in 0..2 {
             handler
-                .handle(&ctx, MetadataCompaction::Release(first))
+                .handle(
+                    &ctx,
+                    MetadataCompaction::Release {
+                        region_id,
+                        pause_id: 2,
+                    },
+                )
                 .await;
         }
         let meta = RegionId::with_group_and_seq(32, METRIC_METADATA_REGION_GROUP, 1);
@@ -225,16 +266,22 @@ mod tests {
             .await
             .unwrap();
         handler
-            .handle(&ctx, MetadataCompaction::Release(second))
+            .handle(
+                &ctx,
+                MetadataCompaction::Release {
+                    region_id,
+                    pause_id: 3,
+                },
+            )
             .await;
         compact().await.unwrap();
         handler
-            .pause(&ctx, first, Duration::from_millis(200))
+            .pause(&ctx, region_id, 4, Duration::from_millis(200))
             .await
             .unwrap();
         assert!(compact().await.is_err());
         tokio::time::timeout(Duration::from_secs(5), async {
-            while handler.leases.lock().unwrap().contains_key(&first) {
+            while handler.leases.lock().unwrap().contains_key(&region_id) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
