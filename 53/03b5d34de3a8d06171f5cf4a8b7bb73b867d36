@@ -1,0 +1,29 @@
+src/metric-engine/src/error.rs
+  s_c311425adc0214::t_28124b4774612a 558-587
+  s_c311425adc0214::t_b39ae23b35d369 463-464,522
+  s_c311425adc0214::t_322f13422268ae 557,588
+src/mito2/src/region/utils.rs
+  s_c311425adc0214::t_b39ae23b35d369 236-247
+  s_c311425adc0214::t_8ac9ee0bf986fa 22
+  s_c311425adc0214::t_037abccf5e5add 309-342
+src/mito2/src/error.rs
+  s_c311425adc0214::t_b39ae23b35d369 104-112,1682,1919
+src/meta-srv/src/procedure/repartition/group/sync_region.rs
+  s_c311425adc0214::t_6523831f430710 678-680,682-694,698-710,712-713,715-728,730-781
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5303b5d34de3a8d06171f5cf4a8b7bb73b867d36",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
