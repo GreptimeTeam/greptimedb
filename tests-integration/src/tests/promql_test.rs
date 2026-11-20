@@ -3229,7 +3229,7 @@ async fn assert_deep_native_plan(instance: &Arc<Instance>, query: &PromQuery) {
     let plan = instance
         .query_engine()
         .planner()
-        .plan(&statement, ctx)
+        .plan(statement, ctx)
         .await
         .unwrap();
     let display = plan.display_indent().to_string();
@@ -3885,7 +3885,7 @@ async fn native_promql_composed_binary_canonical_operand() {
     let logical = instance
         .query_engine()
         .planner()
-        .plan(&stmt, ctx)
+        .plan(stmt, ctx)
         .await
         .unwrap();
     let logical_display = logical.display_indent().to_string();
@@ -4067,7 +4067,7 @@ async fn native_promql_composed_histogram_reset_warning() {
     let logical = instance
         .query_engine()
         .planner()
-        .plan(&statement, Arc::clone(&ctx))
+        .plan(statement, Arc::clone(&ctx))
         .await
         .unwrap();
     let display = logical.display_indent().to_string();
@@ -4311,7 +4311,7 @@ async fn native_promql_composed_grouped_and_multi_selector_operands() {
         let logical = instance
             .query_engine()
             .planner()
-            .plan(&statement, ctx)
+            .plan(statement, ctx)
             .await
             .unwrap();
         let display = logical.display_indent().to_string();

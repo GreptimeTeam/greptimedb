@@ -909,19 +909,19 @@ mod test {
     async fn do_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
-        engine.planner().plan(&stmt, QueryContext::arc()).await
+        engine.planner().plan(stmt, QueryContext::arc()).await
     }
 
     async fn do_query_with_ctx(sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
         let engine = create_test_engine().await;
-        engine.planner().plan(&stmt, query_ctx).await
+        engine.planner().plan(stmt, query_ctx).await
     }
 
     async fn do_union_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_union_test_engine().await;
-        engine.planner().plan(&stmt, QueryContext::arc()).await
+        engine.planner().plan(stmt, QueryContext::arc()).await
     }
 
     async fn query_plan_compare(sql: &str, expected: String) {
@@ -1126,7 +1126,7 @@ mod test {
         let engine = create_test_engine().await;
         let plan = engine
             .planner()
-            .plan(&stmt, query_ctx.clone())
+            .plan(stmt, query_ctx.clone())
             .await
             .unwrap();
         let LogicalPlan::Extension(extension) = plan else {
@@ -1431,8 +1431,7 @@ mod test {
     #[test]
     fn range_deep_union_all_sql() {
         // Regression for #9356 through the SQL planner: debug builds poll queries on 8 MiB worker
-        // stacks. Chains a little longer than this one still overflow there while cloning the
-        // statement in `TryFrom<&Statement> for DfStatement`.
+        // stacks.
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {

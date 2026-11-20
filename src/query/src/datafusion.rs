@@ -1167,7 +1167,7 @@ mod tests {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
-            .plan(&stmt, QueryContext::arc())
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
 
@@ -1190,7 +1190,7 @@ mod tests {
         assert!(
             engine
                 .planner()
-                .plan(&stmt, QueryContext::arc())
+                .plan(stmt, QueryContext::arc())
                 .await
                 .is_err()
         );
@@ -1204,7 +1204,7 @@ mod tests {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
-            .plan(&stmt, QueryContext::arc())
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
 
@@ -1281,7 +1281,7 @@ mod tests {
 
         let plan = engine
             .planner()
-            .plan(&stmt, QueryContext::arc())
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
 
@@ -1686,7 +1686,7 @@ mod tests {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
-            .plan(&stmt, QueryContext::arc())
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
         match engine
@@ -1727,7 +1727,7 @@ mod tests {
         assert!(!insert.can_extract_values());
         let plan = engine
             .planner()
-            .plan(&stmt, QueryContext::arc())
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(

@@ -108,7 +108,7 @@ impl Instance {
         );
         let slow_query_timer = self.slow_query_options.enable.then(|| {
             SlowQueryTimer::new(
-                CatalogQueryStatement::Plan(raw_query.clone()),
+                CatalogQueryStatement::Text(raw_query.clone()),
                 ctx.current_schema(),
                 self.slow_query_options.threshold,
                 self.slow_query_options.sample_ratio,
