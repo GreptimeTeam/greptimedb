@@ -566,6 +566,17 @@ pub struct PutGroupResult {
 }
 
 impl MetricEngine {
+    /// Pauses compaction on the metadata half of a physical metric region.
+    pub async fn pause_metadata_compaction(
+        &self,
+        physical_region: RegionId,
+    ) -> mito2::error::Result<mito2::compaction::CompactionGuard> {
+        self.inner
+            .mito
+            .pause_compaction(crate::utils::to_metadata_region_id(physical_region))
+            .await
+    }
+
     pub fn try_new(mito: MitoEngine, mut config: EngineConfig) -> Result<Self> {
         let metadata_region = MetadataRegion::new(mito.clone());
         let data_region = DataRegion::new(mito.clone());

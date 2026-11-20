@@ -32,6 +32,7 @@ mod enter_staging;
 mod file_ref;
 mod flush_region;
 mod gc_worker;
+mod metadata_compaction;
 mod open_region;
 mod remap_manifest;
 mod sync_region;
@@ -44,6 +45,7 @@ use crate::heartbeat::handler::enter_staging::EnterStagingRegionsHandler;
 use crate::heartbeat::handler::file_ref::{GetFileRefsHandler, GetPackedFileRefsHandler};
 use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
 use crate::heartbeat::handler::gc_worker::{GcRegionsHandler, PackedGcRegionsHandler};
+use crate::heartbeat::handler::metadata_compaction::MetadataCompactionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionsHandler;
 use crate::heartbeat::handler::remap_manifest::RemapManifestHandler;
 use crate::heartbeat::handler::sync_region::SyncRegionHandler;
@@ -57,6 +59,7 @@ pub struct RegionHeartbeatResponseHandler {
     region_server: RegionServer,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
+    metadata_compaction: MetadataCompactionHandler,
     open_region_parallelism: usize,
     gc_tasks: TaskTracker<GcReport>,
     kv_backend: KvBackendRef,
@@ -101,6 +104,7 @@ impl RegionHeartbeatResponseHandler {
             region_server,
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
+            metadata_compaction: MetadataCompactionHandler::default(),
             // Default to half of the number of CPUs.
             open_region_parallelism: (num_cpus::get() / 2).max(1),
             gc_tasks: TaskTracker::new(),
@@ -145,6 +149,9 @@ impl RegionHeartbeatResponseHandler {
             Instruction::EnterStagingRegions(_) => {
                 Ok(Some(Box::new(EnterStagingRegionsHandler.into())))
             }
+            Instruction::MetadataCompaction(_) => {
+                Ok(Some(Box::new(self.metadata_compaction.clone().into())))
+            }
             Instruction::SyncRegions(_) => Ok(Some(Box::new(SyncRegionHandler.into()))),
             Instruction::RemapManifest(_) => Ok(Some(Box::new(RemapManifestHandler.into()))),
             Instruction::ApplyStagingManifests(_) => {
@@ -167,6 +174,7 @@ pub enum InstructionHandlers {
     GcRegions(GcRegionsHandler),
     PackedGcRegions(PackedGcRegionsHandler),
     EnterStagingRegions(EnterStagingRegionsHandler),
+    MetadataCompaction(MetadataCompactionHandler),
     SyncRegions(SyncRegionHandler),
     RemapManifest(RemapManifestHandler),
     ApplyStagingManifests(ApplyStagingManifestsHandler),
@@ -202,6 +210,7 @@ impl_from_handler!(
     GcRegionsHandler => GcRegions,
     PackedGcRegionsHandler => PackedGcRegions,
     EnterStagingRegionsHandler => EnterStagingRegions,
+    MetadataCompactionHandler => MetadataCompaction,
     SyncRegionHandler => SyncRegions,
     RemapManifestHandler => RemapManifest,
     ApplyStagingManifestsHandler => ApplyStagingManifests
@@ -252,6 +261,7 @@ dispatch_instr!(
     GcRegions => GcRegions,
     PackedGcRegions => PackedGcRegions,
     EnterStagingRegions => EnterStagingRegions,
+    MetadataCompaction => MetadataCompaction,
     SyncRegions => SyncRegions,
     RemapManifest => RemapManifest,
     ApplyStagingManifests => ApplyStagingManifests,
