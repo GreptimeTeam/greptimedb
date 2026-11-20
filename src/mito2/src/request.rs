@@ -793,6 +793,12 @@ pub(crate) enum WorkerRequest {
         sender: Sender<SetRegionRoleStateResponse>,
     },
 
+    /// Stops admitting compactions and returns a guard once the active cycle ends.
+    PauseCompaction {
+        region_id: RegionId,
+        sender: Sender<Result<crate::compaction::CompactionGuard>>,
+    },
+
     /// Cancels one live compaction on its owning worker.
     CancelCompaction {
         region_id: RegionId,

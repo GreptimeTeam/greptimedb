@@ -1085,6 +1085,15 @@ impl MitoRegion {
         })
     }
 
+    /// Returns whether the current read version contains any SSTs.
+    pub fn has_ssts(&self) -> bool {
+        self.version()
+            .ssts
+            .levels()
+            .iter()
+            .any(|level| !level.files.is_empty())
+    }
+
     /// Returns the file metas of the region by file ids.
     pub async fn file_metas(&self, file_ids: &[FileId]) -> Vec<Option<FileMeta>> {
         let manifest_files = self.manifest_ctx.manifest().await.files.clone();
