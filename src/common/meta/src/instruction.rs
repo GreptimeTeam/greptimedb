@@ -1043,8 +1043,8 @@ pub enum MetadataCompaction {
         region_id: RegionId,
         remaining: Duration,
     },
-    /// Release only if the latest Pause has this mailbox message ID.
-    Release { region_id: RegionId, pause_id: u64 },
+    /// Resume compaction on the source metadata region.
+    Release { region_id: RegionId },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
@@ -1494,7 +1494,7 @@ mod tests {
                 "remaining": {"secs": 19, "nanos": 500000000}
             }}},
             {"MetadataCompaction": {"Release": {
-                "region_id": 4294967298_u64, "pause_id": 42
+                "region_id": 4294967298_u64
             }}}
         ]);
         let region_id = RegionId::new(1, 2);
@@ -1503,10 +1503,7 @@ mod tests {
                 region_id,
                 remaining: Duration::from_millis(19_500),
             }),
-            Instruction::MetadataCompaction(MetadataCompaction::Release {
-                region_id,
-                pause_id: 42,
-            }),
+            Instruction::MetadataCompaction(MetadataCompaction::Release { region_id }),
         ];
         assert_eq!(
             expected,

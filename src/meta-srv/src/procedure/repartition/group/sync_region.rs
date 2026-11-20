@@ -106,7 +106,7 @@ impl SyncRegion {
             region_id,
             remaining,
         });
-        let (pause_id, reply) =
+        let reply =
             Self::request(&ctx.mailbox, &ctx.server_addr, &source, pause, remaining).await?;
         let InstructionReply::MetadataCompaction(reply) = reply else {
             return error::UnexpectedInstructionReplySnafu {
@@ -139,10 +139,8 @@ impl SyncRegion {
         let mut all_replied = true;
         let result = self.sync_regions(ctx, &mut all_replied).await;
         if all_replied {
-            let release = Instruction::MetadataCompaction(MetadataCompaction::Release {
-                region_id,
-                pause_id,
-            });
+            let release =
+                Instruction::MetadataCompaction(MetadataCompaction::Release { region_id });
             if let Err(err) = Self::release_source(ctx, &source, release).await {
                 warn!(err; "Failed to release source metadata compaction for {region_id}");
             }
@@ -238,14 +236,14 @@ impl SyncRegion {
             .into_iter()
             .zip(&peers)
             .map(|(reply, peer)| match reply {
-                Ok((_, InstructionReply::SyncRegions(SyncRegionsReply { replies })))
+                Ok(InstructionReply::SyncRegions(SyncRegionsReply { replies }))
                     if Self::received_all(&instructions[*peer], &replies) =>
                 {
                     replies
                         .iter()
                         .try_for_each(|reply| Self::handle_sync_region_reply(reply, &now, peer))
                 }
-                Ok((_, reply)) => {
+                Ok(reply) => {
                     *all_replied = false;
                     error::UnexpectedInstructionReplySnafu {
                         mailbox_message: reply.to_string(),
@@ -334,7 +332,7 @@ impl SyncRegion {
         peer: &Peer,
         instruction: Instruction,
         timeout: Duration,
-    ) -> Result<(u64, InstructionReply)> {
+    ) -> Result<InstructionReply> {
         let ch = Channel::Datanode(peer.id);
         let message = Self::message(server_addr, peer, &instruction)?;
         let now = std::time::Instant::now();
@@ -356,7 +354,7 @@ impl SyncRegion {
         };
 
         match receiver.await {
-            Ok(msg) => Ok((msg.id, HeartbeatMailbox::json_reply(&msg)?)),
+            Ok(msg) => HeartbeatMailbox::json_reply(&msg),
             Err(error::Error::MailboxChannelClosed { .. }) => error::RetryLaterSnafu {
                 reason: format!(
                     "Mailbox closed when sending sync region to datanode {:?}, elapsed: {:?}",
@@ -552,7 +550,6 @@ mod tests {
                 assert_eq!(region_id, RegionId::new(1024, 1));
                 assert!(remaining > Duration::ZERO && remaining <= budget);
                 assert!(target_rx.try_recv().is_err());
-                let pause_id = msg.id;
                 let mut ack = msg.clone();
                 ack.payload = Some(api::v1::meta::mailbox_message::Payload::Json(
                     serde_json::to_string(&InstructionReply::MetadataCompaction(SimpleReply {
@@ -563,7 +560,7 @@ mod tests {
                 ));
                 mailbox.on_recv(msg.id, Ok(ack)).await.unwrap();
                 if outcome == "pause_rejected" {
-                    return (region_id, pause_id);
+                    return region_id;
                 }
                 let msg = target_rx
                     .recv()
@@ -589,14 +586,13 @@ mod tests {
                     _ => Ok(new_sync_region_reply(msg.id, target, true, true, None)),
                 };
                 mailbox.on_recv(msg.id, reply).await.unwrap();
-                (region_id, pause_id)
+                region_id
             };
-            let ((region_id, pause_id), result) =
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    tokio::join!(peers, sync.sync_with_paused_source(&mut ctx))
-                })
-                .await
-                .unwrap();
+            let (region_id, result) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(peers, sync.sync_with_paused_source(&mut ctx))
+            })
+            .await
+            .unwrap();
             assert_eq!(result.is_ok(), outcome == "success");
             if outcome == "pause_rejected" {
                 assert!(target_rx.try_recv().is_err());
@@ -612,10 +608,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(
                     HeartbeatMailbox::json_instruction(&msg).unwrap(),
-                    Instruction::MetadataCompaction(MetadataCompaction::Release {
-                        region_id,
-                        pause_id
-                    })
+                    Instruction::MetadataCompaction(MetadataCompaction::Release { region_id })
                 );
             }
         }
