@@ -332,6 +332,146 @@ async fn test_rollup_cache_end_to_end_overwrites() {
     );
 }
 
+/// A schema-only ALTER, end to end: dropping and re-adding the value column changes what
+/// every stored row reads as, while no row's sequence moves.
+///
+/// The round is the only thing that may drop the chunks the old schema filled, so a cache
+/// that keys nothing but the source sequence would answer the dropped column's values
+/// forever. The answer after the round must be the new default, and the request after it must
+/// be a real hit of the refilled chunks rather than a second read.
+#[tokio::test]
+async fn test_rollup_cache_schema_only_alter() {
+    let instance = standalone_with_rollup_cache().await;
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        "CREATE TABLE cache_schema (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)",
+    )
+    .await;
+    let rows = (15..=25)
+        .map(|minute| format!("('a', {}, 1.0)", minute * 60_000))
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO cache_schema (host, ts, val) VALUES {rows}"),
+    )
+    .await;
+
+    let app = prometheus_http_app(&frontend);
+    let cache = frontend
+        .rollup_cache()
+        .expect("the test instance installs the cache")
+        .clone();
+    let before = cache_e2e_expected(1.0);
+
+    // A cold request, one round that proves the table, and the request that really fills.
+    let cold = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    assert_eq!(before, cold, "the cold answer is one point per step");
+    assert_eq!(
+        0,
+        cache.hit_count(),
+        "a table no round has proved serves nothing from memory"
+    );
+    refresh_rollup_cache(&frontend).await;
+    assert_eq!(
+        0,
+        cache.entry_count(),
+        "the first round covers the whole history and keeps no unproved chunk"
+    );
+    let filled_answer = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    assert_eq!(before, filled_answer);
+    let filled = cache.entry_count();
+    assert_eq!(
+        2, filled,
+        "the request filled the two whole chunks of the range"
+    );
+    assert_eq!(
+        0,
+        cache.hit_count(),
+        "the request that filled the chunks served none of them from memory"
+    );
+
+    // The repeat is served from memory: the chunks the ALTER must not vouch for are resident.
+    let hit_answer = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    assert_eq!(before, hit_answer);
+    assert_eq!(filled, cache.entry_count(), "the repeat filled nothing new");
+    assert_eq!(
+        filled,
+        cache.hit_count(),
+        "the repeat served each of the {filled} chunks from memory"
+    );
+    let hits_before_alter = cache.hit_count();
+
+    // A schema-only change: `val` goes away and comes back with a default, so every stored
+    // row reads as the default instead of the value it was written with. No row moves.
+    execute_sql(&frontend, "ALTER TABLE cache_schema DROP COLUMN val").await;
+    execute_sql(
+        &frontend,
+        "ALTER TABLE cache_schema ADD COLUMN val DOUBLE DEFAULT 0",
+    )
+    .await;
+
+    // What a read of storage answers now, which is what a request that executes storage must
+    // report and a chunk filled under the old schema must not.
+    let stored = execute_sql(&frontend, "SELECT val FROM cache_schema ORDER BY ts").await;
+    assert_eq!(
+        "+-----+\n| val |\n+-----+\n| 0.0 |\n| 0.0 |\n| 0.0 |\n| 0.0 |\n| 0.0 |\n| 0.0 |\n| 0.0 |\n| 0.0 |\n| 0.0 |\n| 0.0 |\n| 0.0 |\n+-----+",
+        stored.data.pretty_print().await,
+        "the ALTER re-shaped every stored row to the new default"
+    );
+
+    // The round reads the table's metadata version, so it proves the new schema and drops the
+    // chunks the old one filled even though no sequence moved.
+    refresh_rollup_cache(&frontend).await;
+    assert_eq!(
+        0,
+        cache.entry_count(),
+        "the round dropped every chunk filled under the old schema"
+    );
+
+    let after = cache_e2e_expected(0.0);
+    let after_alter = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    assert_eq!(
+        after, after_alter,
+        "the request answers the new default for every point"
+    );
+    assert_eq!(
+        0,
+        after_alter
+            .iter()
+            .filter(|(_, value)| *value == 1.0)
+            .count(),
+        "no point answers the dropped column's value: {after_alter:?}"
+    );
+    assert_eq!(
+        11,
+        after_alter.len(),
+        "every grid point the range evaluates is answered: {after_alter:?}"
+    );
+    assert_eq!(
+        hits_before_alter,
+        cache.hit_count(),
+        "no chunk filled under the dropped schema answered the request"
+    );
+    assert_eq!(
+        filled,
+        cache.entry_count(),
+        "the request refilled the chunks under the new schema"
+    );
+
+    // The refilled chunks are entries, not a bypass: the repeat is served from memory and
+    // still answers the new default.
+    let repeated = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    assert_eq!(after, repeated, "the refilled answer is served again");
+    assert_eq!(filled, cache.entry_count(), "the repeat filled nothing new");
+    assert_eq!(
+        hits_before_alter + filled,
+        cache.hit_count(),
+        "the repeat served each of the {filled} refilled chunks from memory"
+    );
+}
+
 /// A metric engine logical table, end to end.
 ///
 /// A logical table is read through the physical table underneath, so the round proves a
