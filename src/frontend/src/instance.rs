@@ -4894,7 +4894,9 @@ mod tests {
     fn test_deep_union_all_through_do_query() -> TestResult<()> {
         // Regression for #9356: the statement must not be cloned on its way to the planner. The
         // derived `Clone` of a left-deep `UNION ALL` recurses once per branch, and debug builds
-        // poll queries on 8 MiB worker stacks.
+        // poll queries on 8 MiB worker stacks. On this thread, debug builds overflow at about 430
+        // branches without the fix, and at about 675-720 with it, in the Substrait encode of
+        // `PlanRewriter::new` (Linux arm64 and x86_64, macOS arm64). 550 is between the two.
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
