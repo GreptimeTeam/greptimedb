@@ -77,7 +77,6 @@ pub trait InstructionHandler: Send + Sync {
 
 #[derive(Clone)]
 pub struct HandlerContext {
-    mailbox_message_id: u64,
     pub region_server: RegionServer,
     pub downgrade_tasks: TaskTracker<()>,
     pub flush_tasks: TaskTracker<()>,
@@ -89,7 +88,6 @@ impl HandlerContext {
     #[cfg(test)]
     pub fn new_for_test(region_server: RegionServer, kv_backend: KvBackendRef) -> Self {
         Self {
-            mailbox_message_id: 0,
             region_server,
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
@@ -287,7 +285,6 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
         let mailbox = ctx.mailbox.clone();
         if let Some(handler) = self.build_handler(&instruction)? {
             let context = HandlerContext {
-                mailbox_message_id: meta.id,
                 region_server: self.region_server.clone(),
                 downgrade_tasks: self.downgrade_tasks.clone(),
                 flush_tasks: self.flush_tasks.clone(),
@@ -300,6 +297,16 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 to = %meta.to,
                 handler = %handler.as_ref_str(),
             ));
+            // Apply a one-way Release before dispatching the next Pause on this stream.
+            if matches!(
+                &instruction,
+                Instruction::MetadataCompaction(
+                    common_meta::instruction::MetadataCompaction::Release { .. }
+                )
+            ) {
+                handler.handle(&context, instruction).trace(span).await;
+                return Ok(HandleControl::Continue);
+            }
             let _handle = common_runtime::spawn_global(async move {
                 let reply = handler.handle(&context, instruction).trace(span).await;
                 if let Some(reply) = reply

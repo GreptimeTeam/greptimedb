@@ -33,7 +33,6 @@ pub struct MetadataCompactionHandler {
 }
 
 struct PauseLease {
-    pause_id: u64,
     deadline: Instant,
     guard: Arc<OnceCell<CompactionGuard>>,
     cancel_expiry: oneshot::Sender<()>,
@@ -43,23 +42,17 @@ impl MetadataCompactionHandler {
     fn lease(
         &self,
         region_id: RegionId,
-        pause_id: u64,
         deadline: Instant,
     ) -> (Arc<OnceCell<CompactionGuard>>, Instant) {
         let mut leases = self.leases.lock().unwrap();
         let lease = leases.entry(region_id).or_insert_with(|| PauseLease {
-            pause_id,
             deadline,
             guard: Arc::new(OnceCell::new()),
             cancel_expiry: self.expire_at(region_id, deadline),
         });
-        if pause_id > lease.pause_id {
-            // Only the latest Pause can release the shared guard.
-            lease.pause_id = pause_id;
-            if deadline > lease.deadline {
-                lease.deadline = deadline;
-                lease.cancel_expiry = self.expire_at(region_id, deadline);
-            }
+        if deadline > lease.deadline {
+            lease.deadline = deadline;
+            lease.cancel_expiry = self.expire_at(region_id, deadline);
         }
         (lease.guard.clone(), lease.deadline)
     }
@@ -87,7 +80,6 @@ impl MetadataCompactionHandler {
         &self,
         ctx: &HandlerContext,
         region_id: RegionId,
-        pause_id: u64,
         remaining: std::time::Duration,
     ) -> InstructionResult<()> {
         let deadline = Instant::now().checked_add(remaining).ok_or_else(|| {
@@ -115,7 +107,7 @@ impl MetadataCompactionHandler {
                 "Source region {region_id} is not writable"
             )));
         }
-        let (lease, deadline) = self.lease(region_id, pause_id, deadline);
+        let (lease, deadline) = self.lease(region_id, deadline);
         tokio::time::timeout_at(
             deadline,
             lease.get_or_try_init(|| metric.pause_metadata_compaction(region_id)),
@@ -132,7 +124,7 @@ impl MetadataCompactionHandler {
             .lock()
             .unwrap()
             .get(&region_id)
-            .is_none_or(|lease| lease.pause_id != pause_id)
+            .is_none_or(|current| !Arc::ptr_eq(&current.guard, &lease))
             || Instant::now() >= deadline
             || ctx.region_server.is_region_leader(region_id) != Some(true)
         {
@@ -158,23 +150,14 @@ impl InstructionHandler for MetadataCompactionHandler {
                 region_id,
                 remaining,
             } => {
-                let result = self
-                    .pause(ctx, region_id, ctx.mailbox_message_id, remaining)
-                    .await;
+                let result = self.pause(ctx, region_id, remaining).await;
                 Some(InstructionReply::MetadataCompaction(SimpleReply {
                     result: result.is_ok(),
                     error: result.err(),
                 }))
             }
-            MetadataCompaction::Release {
-                region_id,
-                pause_id,
-            } => {
-                if let Entry::Occupied(entry) = self.leases.lock().unwrap().entry(region_id)
-                    && entry.get().pause_id == pause_id
-                {
-                    entry.remove();
-                }
+            MetadataCompaction::Release { region_id } => {
+                self.leases.lock().unwrap().remove(&region_id);
                 None
             }
         }
@@ -219,37 +202,21 @@ mod tests {
         let ctx = HandlerContext::new_for_test(server, Arc::new(MemoryKvBackend::new()));
         let handler = MetadataCompactionHandler::default();
         handler
-            .pause(&ctx, region_id, 1, Duration::from_secs(30))
+            .pause(&ctx, region_id, Duration::from_secs(30))
             .await
             .unwrap();
         let first_deadline = handler.leases.lock().unwrap()[&region_id].deadline;
         handler
-            .pause(&ctx, region_id, 2, Duration::from_secs(60))
+            .pause(&ctx, region_id, Duration::from_secs(60))
             .await
             .unwrap();
         let renewed = handler.leases.lock().unwrap()[&region_id].deadline;
         assert!(renewed > first_deadline);
         handler
-            .pause(&ctx, region_id, 2, Duration::from_secs(120))
+            .pause(&ctx, region_id, Duration::from_secs(1))
             .await
             .unwrap();
         assert_eq!(handler.leases.lock().unwrap()[&region_id].deadline, renewed);
-        handler
-            .pause(&ctx, region_id, 3, Duration::from_secs(1))
-            .await
-            .unwrap();
-        assert_eq!(handler.leases.lock().unwrap()[&region_id].deadline, renewed);
-        for _ in 0..2 {
-            handler
-                .handle(
-                    &ctx,
-                    MetadataCompaction::Release {
-                        region_id,
-                        pause_id: 2,
-                    },
-                )
-                .await;
-        }
         let meta = RegionId::with_group_and_seq(32, METRIC_METADATA_REGION_GROUP, 1);
         let compact = || mito.handle_request(meta, RegionRequest::Compact(Default::default()));
         let err = compact().await.unwrap_err();
@@ -266,17 +233,11 @@ mod tests {
             .await
             .unwrap();
         handler
-            .handle(
-                &ctx,
-                MetadataCompaction::Release {
-                    region_id,
-                    pause_id: 3,
-                },
-            )
+            .handle(&ctx, MetadataCompaction::Release { region_id })
             .await;
         compact().await.unwrap();
         handler
-            .pause(&ctx, region_id, 4, Duration::from_millis(200))
+            .pause(&ctx, region_id, Duration::from_millis(200))
             .await
             .unwrap();
         assert!(compact().await.is_err());
