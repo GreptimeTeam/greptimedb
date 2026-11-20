@@ -21,6 +21,7 @@ use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_time::{Timestamp, timestamp::TimeUnit};
+use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use futures::TryStreamExt;
 use query::metrics::terminal_recordbatch_metrics_from_plan;
@@ -133,9 +134,12 @@ impl Instance {
             .timestamp_column()
             .ok_or_else(|| unavailable(format!("table {table} has no time-index column")))?;
         let quote = query_ctx.quote_style();
+        // Aggregate in the engine: the probe only ever needs the hull of the
+        // incremental delta, and pulling every changed timestamp back to the
+        // frontend to fold it row by row turns a cheap probe into a wide scan.
+        let quoted_timestamp = Ident::with_quote(quote, &timestamp.name);
         let sql = format!(
-            "SELECT {} FROM {}.{}.{}",
-            Ident::with_quote(quote, &timestamp.name),
+            "SELECT MIN({quoted_timestamp}), MAX({quoted_timestamp}) FROM {}.{}.{}",
             Ident::with_quote(quote, &table.catalog_name),
             Ident::with_quote(quote, &table.schema_name),
             Ident::with_quote(quote, &table.table_name),
@@ -143,7 +147,7 @@ impl Instance {
         let mut statements = parse_stmt(&sql, query_ctx.sql_dialect())?;
         if statements.len() != 1 {
             return Err(unavailable(
-                "timestamp projection did not parse as one statement",
+                "timestamp aggregate did not parse as one statement",
             ));
         }
         let stmt = QueryStatement::Sql(statements.remove(0));
@@ -390,25 +394,26 @@ async fn collect_sequence_range(
     output: Output,
     lower: &BTreeMap<u64, u64>,
 ) -> Result<(BTreeMap<u64, u64>, Option<Timestamp>, Option<Timestamp>)> {
-    let mut min_ts = None;
-    let mut max_ts = None;
+    let mut hull = None;
     let mut stream_metrics = None;
     match output.data {
         OutputData::AffectedRows(_) => {
-            return Err(unavailable("timestamp projection returned affected rows"));
+            return Err(unavailable("timestamp aggregate returned affected rows"));
         }
         OutputData::RecordBatches(batches) => {
             for batch in batches.iter() {
-                update_timestamp_range(batch, &mut min_ts, &mut max_ts)?;
+                absorb_timestamp_hull(batch, &mut hull)?;
             }
         }
         OutputData::Stream(mut stream) => {
             while let Some(batch) = stream.try_next().await.context(CollectRecordbatchSnafu)? {
-                update_timestamp_range(&batch, &mut min_ts, &mut max_ts)?;
+                absorb_timestamp_hull(&batch, &mut hull)?;
             }
             stream_metrics = stream.metrics();
         }
     }
+    let (min_ts, max_ts) =
+        hull.ok_or_else(|| unavailable("timestamp aggregate returned no rows"))?;
     // The stream's terminal metrics contain the same merged proof as the plan
     // when available. Prefer the plan's correctness-first merge; non-stream
     // outputs only expose this plan after execution.
@@ -422,28 +427,62 @@ async fn collect_sequence_range(
     Ok((high, min_ts, max_ts))
 }
 
-fn update_timestamp_range(
+/// Records the single aggregated `(MIN(time_index), MAX(time_index))` row.
+///
+/// The engine aggregates, so the probe must see exactly one row of exactly two
+/// timestamp columns; anything else is not a proof of the delta's hull and must
+/// fail closed instead of being folded leniently.
+fn absorb_timestamp_hull(
     batch: &RecordBatch,
-    min_ts: &mut Option<Timestamp>,
-    max_ts: &mut Option<Timestamp>,
+    hull: &mut Option<(Option<Timestamp>, Option<Timestamp>)>,
 ) -> Result<()> {
-    if batch.num_columns() != 1 {
+    if batch.num_columns() != 2 {
         return Err(unavailable(format!(
-            "timestamp projection returned {} columns",
+            "timestamp aggregate returned {} columns, expected 2",
             batch.num_columns()
         )));
     }
-    let values = Helper::try_into_vector(batch.column(0).clone())
+    let mins = Helper::try_into_vector(batch.column(0).clone())
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-    for index in 0..values.len() {
-        let timestamp = values.get(index).as_timestamp().ok_or_else(|| {
-            unavailable("timestamp projection returned a null or non-timestamp value")
-        })?;
-        *min_ts = Some(min_ts.map_or(timestamp, |value| value.min(timestamp)));
-        *max_ts = Some(max_ts.map_or(timestamp, |value| value.max(timestamp)));
+    let maxs = Helper::try_into_vector(batch.column(1).clone())
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+    for row in 0..batch.num_rows() {
+        if hull.is_some() {
+            return Err(unavailable(
+                "timestamp aggregate returned more than one row",
+            ));
+        }
+        let min = aggregate_timestamp(mins.get(row), "MIN")?;
+        let max = aggregate_timestamp(maxs.get(row), "MAX")?;
+        match (min, max) {
+            (None, None) => {}
+            (Some(min), Some(max)) => {
+                if min > max {
+                    return Err(unavailable(format!(
+                        "timestamp aggregate returned an inverted hull: min={min:?}, max={max:?}"
+                    )));
+                }
+            }
+            _ => return Err(unavailable("timestamp aggregate returned a half-null hull")),
+        }
+        *hull = Some((min, max));
     }
     Ok(())
+}
+
+/// Reads one aggregate cell: `Ok(None)` for a SQL NULL, an error for anything
+/// that is not a timestamp.
+fn aggregate_timestamp(value: Value, name: &str) -> Result<Option<Timestamp>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    value.as_timestamp().map(Some).ok_or_else(|| {
+        unavailable(format!(
+            "timestamp aggregate {name} column returned a non-timestamp value"
+        ))
+    })
 }
 
 fn validate_watermarks(
@@ -490,23 +529,55 @@ mod tests {
     use common_recordbatch::{OrderOption, RecordBatchStream};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-    use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
+    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
     use futures::Stream;
 
     use super::*;
 
-    fn batch(timestamps: Vec<i64>) -> RecordBatch {
+    /// A nullable timestamp column; `MIN`/`MAX` yield NULL on empty input.
+    fn timestamp_column(name: &str) -> ColumnSchema {
+        ColumnSchema::new(
+            name,
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        )
+    }
+
+    /// Builds an aggregate-shaped batch: `width` nullable timestamp columns and
+    /// one row per entry of `rows`.
+    fn timestamp_batch(width: usize, rows: &[Vec<Option<i64>>]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(
+            (0..width)
+                .map(|index| timestamp_column(&format!("c{index}")))
+                .collect::<Vec<_>>(),
+        ));
+        let columns = (0..width)
+            .map(|index| {
+                Arc::new(TimestampMillisecondVector::from(
+                    rows.iter().map(|row| row[index]).collect::<Vec<_>>(),
+                )) as VectorRef
+            })
+            .collect::<Vec<_>>();
+        RecordBatch::new(schema, columns).unwrap()
+    }
+
+    /// The single `(MIN(time_index), MAX(time_index))` row the engine returns.
+    fn hull(min: Option<i64>, max: Option<i64>) -> RecordBatch {
+        timestamp_batch(2, &[vec![min, max]])
+    }
+
+    /// A two-column aggregate whose columns are not timestamps.
+    fn non_timestamp_hull() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new(
-                "observed_at",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
+            ColumnSchema::new("c0", ConcreteDataType::int64_datatype(), true),
+            ColumnSchema::new("c1", ConcreteDataType::int64_datatype(), true),
         ]));
         RecordBatch::new(
             schema,
-            vec![Arc::new(TimestampMillisecondVector::from_vec(timestamps)) as VectorRef],
+            vec![
+                Arc::new(Int64Vector::from_vec(vec![1000])) as VectorRef,
+                Arc::new(Int64Vector::from_vec(vec![3000])) as VectorRef,
+            ],
         )
         .unwrap()
     }
@@ -525,7 +596,7 @@ mod tests {
     }
 
     struct TerminalStream {
-        batch: Option<RecordBatch>,
+        batches: std::vec::IntoIter<RecordBatch>,
         schema: SchemaRef,
         metrics: RecordBatchMetrics,
         done: bool,
@@ -535,7 +606,7 @@ mod tests {
         type Item = common_recordbatch::error::Result<RecordBatch>;
 
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            match self.batch.take() {
+            match self.batches.next() {
                 Some(batch) => Poll::Ready(Some(Ok(batch))),
                 None => {
                     self.done = true;
@@ -560,12 +631,15 @@ mod tests {
         }
     }
 
-    fn output(timestamps: Vec<i64>, metrics: RecordBatchMetrics) -> Output {
-        let batch = batch(timestamps);
-        let schema = batch.schema.clone();
+    fn output(batches: Vec<RecordBatch>, metrics: RecordBatchMetrics) -> Output {
+        let schema = batches
+            .first()
+            .expect("probe output always carries a batch schema")
+            .schema
+            .clone();
         Output::new(
             OutputData::Stream(Box::pin(TerminalStream {
-                batch: Some(batch),
+                batches: batches.into_iter(),
                 schema,
                 metrics,
                 done: false,
@@ -575,11 +649,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequence_range_collects_stream_and_terminal_watermarks() {
+    async fn sequence_range_collects_aggregated_hull_and_terminal_watermarks() {
         let lower = BTreeMap::from([(1, 0), (2, 10)]);
         let result = collect_sequence_range(
             output(
-                vec![3000, -1000, 2000],
+                vec![hull(Some(-1000), Some(3000))],
                 metrics(&[(1, Some(4)), (2, Some(10))]),
             ),
             &lower,
@@ -597,12 +671,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequence_range_empty_rows_keep_proved_high() {
+    async fn sequence_range_null_hull_keeps_proved_high() {
+        // An empty delta aggregates to a single `(NULL, NULL)` row, which is a
+        // proven no-op rather than an unproved hull.
         let lower = BTreeMap::from([(1, 7)]);
-        let result = collect_sequence_range(output(vec![], metrics(&[(1, Some(7))])), &lower)
-            .await
-            .unwrap();
+        let result = collect_sequence_range(
+            output(vec![hull(None, None)], metrics(&[(1, Some(7))])),
+            &lower,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, (lower, None, None));
+    }
+
+    #[tokio::test]
+    async fn sequence_range_rejects_half_null_inverted_and_non_timestamp_hulls() {
+        let lower = BTreeMap::from([(1, 0)]);
+        let watermarks = metrics(&[(1, Some(3))]);
+        for batch in [
+            hull(Some(1000), None),
+            hull(None, Some(3000)),
+            // MIN above MAX cannot be a hull of any row set.
+            hull(Some(3000), Some(1000)),
+            non_timestamp_hull(),
+        ] {
+            assert_eq!(
+                collect_sequence_range(output(vec![batch], watermarks.clone()), &lower)
+                    .await
+                    .unwrap_err()
+                    .status_code(),
+                StatusCode::TableUnavailable
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sequence_range_rejects_wrong_arity_and_row_count() {
+        let lower = BTreeMap::from([(1, 0)]);
+        let watermarks = metrics(&[(1, Some(3))]);
+        for batches in [
+            // One column.
+            vec![timestamp_batch(1, &[vec![Some(1000)]])],
+            // Three columns.
+            vec![timestamp_batch(
+                3,
+                &[vec![Some(1000), Some(1000), Some(2000)]],
+            )],
+            // No row at all: the aggregate always emits one.
+            vec![timestamp_batch(2, &[])],
+            // Two rows in one batch.
+            vec![timestamp_batch(
+                2,
+                &[vec![Some(1000), Some(1000)], vec![Some(2000), Some(2000)]],
+            )],
+            // One row split over two batches is still two rows.
+            vec![hull(Some(1000), Some(1000)), hull(Some(2000), Some(2000))],
+        ] {
+            assert_eq!(
+                collect_sequence_range(output(batches, watermarks.clone()), &lower)
+                    .await
+                    .unwrap_err()
+                    .status_code(),
+                StatusCode::TableUnavailable
+            );
+        }
     }
 
     #[test]
@@ -635,8 +767,11 @@ mod tests {
                 .status_code(),
             StatusCode::TableUnavailable
         );
-        let schema = batch(vec![]).schema.clone();
-        let batches = common_recordbatch::RecordBatches::try_new(schema, vec![]).unwrap();
+        // A well-formed hull without terminal region metrics proves nothing about
+        // which regions participated.
+        let batch = hull(Some(1000), Some(3000));
+        let schema = batch.schema.clone();
+        let batches = common_recordbatch::RecordBatches::try_new(schema, vec![batch]).unwrap();
         assert_eq!(
             collect_sequence_range(Output::new_with_record_batches(batches), &lower)
                 .await
