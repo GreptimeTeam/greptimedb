@@ -34,6 +34,7 @@ use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::Datanode;
 use frontend::instance::Instance;
+use frontend::service_config::RollupCacheOptions;
 use futures::TryStreamExt;
 use meta_srv::metasrv::Metasrv;
 use rstest_reuse::{self, template};
@@ -225,6 +226,23 @@ impl MockInstance for TestContext {
 pub(crate) async fn standalone() -> Arc<dyn MockInstance> {
     let test_name = uuid::Uuid::new_v4().to_string();
     let instance = GreptimeDbStandaloneBuilder::new(&test_name).build().await;
+    Arc::new(instance)
+}
+
+pub(crate) async fn standalone_with_rollup_cache() -> Arc<dyn MockInstance> {
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let cache = RollupCacheOptions {
+        enable: true,
+        tail: std::time::Duration::ZERO,
+        chunk: std::time::Duration::from_secs(300),
+        max_age: std::time::Duration::from_secs(3_600),
+        source_probe: true,
+        ..Default::default()
+    };
+    let instance = GreptimeDbStandaloneBuilder::new(&test_name)
+        .with_rollup_cache(cache)
+        .build()
+        .await;
     Arc::new(instance)
 }
 

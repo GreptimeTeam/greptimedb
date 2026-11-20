@@ -69,7 +69,6 @@ use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
 use common_time::timestamp::TimeUnit;
 use datafusion::dataframe::DataFrame;
-use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
@@ -88,6 +87,7 @@ use promql_parser::util::{ExprVisitor, walk_expr};
 use query::QueryEngineRef;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
+use query::promql::planner::plan_source_table_ids;
 use query::promql::window::windowed_source_table;
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
@@ -119,7 +119,6 @@ use sql::util::{
     extract_tables_from_statement_checked,
 };
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
-use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 use tracing::Span;
 
@@ -1803,28 +1802,6 @@ impl Instance {
     }
 }
 
-/// The table IDs bound by a plan, in traversal order.
-///
-/// A cache fill must be published only when every table the plan read is the
-/// incarnation the source probe validated. Resolving the name again after
-/// execution cannot prove that: the name may have been swapped away and back.
-fn plan_source_table_ids(plan: &LogicalPlan) -> Vec<u32> {
-    let mut ids = Vec::new();
-    let mut stack = vec![plan];
-    while let Some(plan) = stack.pop() {
-        if let LogicalPlan::TableScan(scan) = plan
-            && let Some(source) = scan.source.downcast_ref::<DefaultTableSource>()
-            && let Some(adapter) = source
-                .table_provider
-                .downcast_ref::<DfTableProviderAdapter>()
-        {
-            ids.push(adapter.table().table_info().table_id());
-        }
-        stack.extend(plan.inputs());
-    }
-    ids
-}
-
 /// The planner that evaluated `plan`, which every cache key records.
 ///
 /// Both routes evaluate the same expression on the same grid but build different
@@ -1921,6 +1898,11 @@ impl WindowExecutor for StatementWindowExecutor<'_> {
         } else {
             promql::remove_output_sort(plan)
         };
+        // The fill may be published only when every table the plan read is the
+        // incarnation the source probe validated: a metric logical table is read
+        // through its physical table, so the plan's own report of the logical table
+        // is what this compares. An unreadable plan reports nothing, and nothing is
+        // published.
         let source_table_ids = plan_source_table_ids(&plan);
         let output = CancellableFuture::new(
             self.instance.statement_executor.exec_plan(plan, query_ctx),

@@ -54,8 +54,12 @@ pub(crate) struct SourceProbeState {
     table_name: String,
     /// The bare source name used by [`crate::query_cache::QueryIdentity`].
     source_name: String,
-    /// A name or route transition generation. A probe carries the generation it
-    /// started under and may not advance a cursor after a later transition.
+    /// The table metadata version the cursor was last used with. ALTER changes it
+    /// without changing the table ID or row sequence.
+    table_version: u64,
+    /// A name, metadata, or route transition generation. A probe carries the
+    /// generation it started under and may not advance a cursor after a later
+    /// transition.
     generation: u64,
     cursors: BTreeMap<u64, u64>,
 }
@@ -192,6 +196,7 @@ impl Instance {
             })?;
         let table_info = resolved.table_info();
         let table_id = table_info.table_id();
+        let table_version = table_info.ident.version;
         // A recreated table under the same name is a different incarnation. Its
         // fresh cursor starts at zero, so old entries keyed by the name must go
         // before the first probe of the new table.
@@ -241,9 +246,16 @@ impl Instance {
                         std::mem::replace(&mut stored.source_name, source_table.to_string())
                     });
                     let route_changed = stored.route_version != version;
-                    if renamed_from.is_some() || route_changed {
+                    let metadata_changed = stored.table_version != table_version;
+                    if metadata_changed {
+                        stored.table_version = table_version;
+                    }
+                    if renamed_from.is_some() || route_changed || metadata_changed {
                         stored.generation = stored.generation.saturating_add(1);
                         cache.advance_source_epoch();
+                    }
+                    if metadata_changed {
+                        cache.invalidate_table(source_table);
                     }
                     if route_changed {
                         stored.route_version = version;
@@ -276,6 +288,7 @@ impl Instance {
                             route_version: version,
                             table_name: qualified_name.clone(),
                             source_name: source_table.to_string(),
+                            table_version,
                             generation: 0,
                             cursors: BTreeMap::new(),
                         },
@@ -362,6 +375,7 @@ impl Instance {
                         route_version: version,
                         table_name: qualified_name,
                         source_name: source_table.to_string(),
+                        table_version,
                         generation,
                         cursors: high,
                     },

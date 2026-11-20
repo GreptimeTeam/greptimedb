@@ -691,6 +691,8 @@ pub struct FillCursor {
     epoch: u64,
     /// The source-table generation validated for the query that owns this fill.
     source_epoch: u64,
+    /// The source table incarnation validated for the query that owns this fill.
+    source_table_id: Option<u32>,
     captured_at: SystemTime,
 }
 
@@ -711,6 +713,12 @@ impl FillCursor {
     /// Pins the source-table generation that was validated for this fill.
     pub(crate) fn with_source_epoch(mut self, source_epoch: u64) -> Self {
         self.source_epoch = source_epoch;
+        self
+    }
+
+    /// Pins the source table incarnation validated for this fill.
+    pub(crate) fn with_source_table_id(mut self, source_table_id: Option<u32>) -> Self {
+        self.source_table_id = source_table_id;
         self
     }
 
@@ -973,6 +981,8 @@ struct Entry {
     dependency: TimeChunk,
     /// The invalidation epoch the fill captured before it read storage.
     epoch: u64,
+    /// The source table incarnation validated by the probe.
+    source_table_id: Option<u32>,
     /// The bytes this entry is charged: its payload plus a fixed overhead.
     weight: u32,
     /// When the fill that produced the payload captured its read.
@@ -1015,6 +1025,12 @@ pub struct RollupCache {
     /// invalidation cannot complete between them, and a lookup cannot observe a
     /// payload that an already-completed invalidation meant to remove.
     invalidation_lock: Mutex<()>,
+    /// How many lookups were answered from an existing entry.
+    ///
+    /// Only a test reads it ([`RollupCache::hit_count`]); it is compiled out of a
+    /// production build and never takes part in a lookup decision.
+    #[cfg(any(test, feature = "testing"))]
+    hits: AtomicU64,
 }
 
 impl RollupCache {
@@ -1035,6 +1051,8 @@ impl RollupCache {
             source_epoch: AtomicU64::new(0),
             source_probe: false,
             invalidation_lock: Mutex::new(()),
+            #[cfg(any(test, feature = "testing"))]
+            hits: AtomicU64::new(0),
         }
     }
 
@@ -1087,10 +1105,22 @@ impl RollupCache {
     /// Tests state with it that a request filled exactly the chunks it read, or that
     /// it filled nothing because it never took the cached path. Production reads
     /// nothing of the sort, so it is not part of the cache's surface.
-    #[cfg(test)]
-    pub(crate) fn entry_count(&self) -> u64 {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn entry_count(&self) -> u64 {
         self.entries.run_pending_tasks();
         self.entries.entry_count()
+    }
+
+    /// How many lookups this cache has answered from an existing entry.
+    ///
+    /// Only a served entry advances it: a miss, a fill, and a bypass never do, so a
+    /// test can tell a reused chunk from one that was executed again and stored
+    /// again, which an unchanged [`Self::entry_count`] cannot show on its own.
+    /// Production reads nothing of the sort, so it is not part of the cache's
+    /// surface.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn hit_count(&self) -> u64 {
+        self.hits.load(Ordering::SeqCst)
     }
 
     /// Plans `stmt` of `identity` into chunk keys and direct spans as of `now`.
@@ -1127,7 +1157,7 @@ impl RollupCache {
     /// entry, never storage, and never waits for an in-flight fill or for cache
     /// maintenance.
     pub fn lookup(&self, key: &TimeChunkKey, now: SystemTime) -> Lookup {
-        self.lookup_fenced(key, now, self.source_epoch())
+        self.lookup_fenced(key, now, self.source_epoch(), None)
     }
 
     /// [`Self::lookup`] with the source generation the caller validated.
@@ -1135,7 +1165,13 @@ impl RollupCache {
     /// The check runs under the same lock as the hit decision: a rename that
     /// advanced the source epoch after the caller's pre-check cannot be followed by
     /// serving an entry keyed to the old identity.
-    pub fn lookup_fenced(&self, key: &TimeChunkKey, now: SystemTime, source_epoch: u64) -> Lookup {
+    pub fn lookup_fenced(
+        &self,
+        key: &TimeChunkKey,
+        now: SystemTime,
+        source_epoch: u64,
+        source_table_id: Option<u32>,
+    ) -> Lookup {
         if key.chunk.is_empty() {
             return Lookup::Bypass(BypassReason::EmptyChunk);
         }
@@ -1150,6 +1186,9 @@ impl RollupCache {
         let Some(entry) = self.entries.get(key) else {
             return Lookup::Miss(MissReason::NotFound);
         };
+        if entry.source_table_id != source_table_id {
+            return Lookup::Miss(MissReason::SourceChanged);
+        }
         if self.authority.is_some() && entry.cursor != cursor {
             return Lookup::Miss(MissReason::CursorChanged {
                 cached: entry.cursor,
@@ -1160,6 +1199,9 @@ impl RollupCache {
         if age > self.config.max_age() {
             return Lookup::Miss(MissReason::Expired { age });
         }
+        // The entry is served: nothing else in this cache counts as a hit.
+        #[cfg(any(test, feature = "testing"))]
+        self.hits.fetch_add(1, Ordering::SeqCst);
         Lookup::Hit {
             payload: entry.payload,
             annotations: entry.annotations,
@@ -1180,6 +1222,7 @@ impl RollupCache {
             cursor,
             epoch,
             source_epoch: self.source_epoch(),
+            source_table_id: None,
             captured_at: now,
         })
     }
@@ -1260,6 +1303,7 @@ impl RollupCache {
             cursor: fill.cursor(),
             dependency,
             epoch: fill.epoch(),
+            source_table_id: fill.source_table_id,
             validated_at: fill.captured_at(),
             inserted_at: SystemTime::now(),
         };

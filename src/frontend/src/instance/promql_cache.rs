@@ -164,6 +164,10 @@ where
         .build()
     })?;
 
+    if cache.source_epoch() != source_epoch {
+        return Ok(RangeOutcome::Bypassed);
+    }
+    let invalidation_epoch = cache.invalidation_epoch();
     let mut merged = MergedRows::default();
     let mut warnings = Vec::new();
     let mut infos = Vec::new();
@@ -212,6 +216,11 @@ where
         infos.extend(window.annotations.infos().iter().cloned());
         merged.push(window.rows)?;
     }
+    // A request must not mix rows read on both sides of an observed invalidation.
+    // Discard the partial merge and let the caller run its original plan.
+    if cache.invalidation_epoch() != invalidation_epoch || cache.source_epoch() != source_epoch {
+        return Ok(RangeOutcome::Bypassed);
+    }
     merged.finish(CachedAnnotations::new(warnings, infos))
 }
 
@@ -246,7 +255,7 @@ where
     {
         return Ok(None);
     }
-    let fill: FillCursor = match cache.lookup_fenced(key, now, source_epoch) {
+    let fill: FillCursor = match cache.lookup_fenced(key, now, source_epoch, source_table_id) {
         Lookup::Hit {
             payload,
             annotations,
@@ -262,7 +271,9 @@ where
         }
         Lookup::Miss(MissReason::SourceChanged) => return Ok(None),
         Lookup::Bypass(_) | Lookup::Miss(_) => match cache.fill_cursor(now) {
-            Ok(fill) => fill.with_source_epoch(source_epoch),
+            Ok(fill) => fill
+                .with_source_epoch(source_epoch)
+                .with_source_table_id(source_table_id),
             // No fill may be validated right now (an unhealthy or stale authority):
             // read the chunk without keeping it rather than failing a query the
             // original path answers.

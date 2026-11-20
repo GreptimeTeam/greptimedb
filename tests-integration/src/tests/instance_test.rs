@@ -21,20 +21,22 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, METRICS_EXEMPLARS_TABLE};
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_query::Output;
-use common_recordbatch::util;
+use common_recordbatch::{RecordBatches, util};
 use common_test_util::recordbatch::check_output_stream;
 use datanode::region_server::RegionServer;
 use datatypes::arrow::array::{
-    ArrayRef, AsArray, StringArray, TimestampMillisecondArray, UInt64Array,
+    Array, ArrayRef, AsArray, Float64Array, StringArray, TimestampMillisecondArray, UInt64Array,
 };
 use frontend::error::Error;
 use frontend::instance::Instance;
 use operator::error::Error as OperatorError;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::options::QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN;
+use query::parser::PromQuery;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::error as server_error;
+use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
@@ -44,7 +46,7 @@ use crate::tests::test_util::{
     MockInstance, both_instances_cases, both_instances_cases_with_custom_storages,
     check_unordered_output_stream, create_local_file_test_dir, distributed,
     distributed_with_multiple_object_stores, find_testing_resource, prepare_path, standalone,
-    standalone_instance_case, standalone_with_multiple_object_stores,
+    standalone_instance_case, standalone_with_multiple_object_stores, standalone_with_rollup_cache,
 };
 
 #[apply(standalone_instance_case)]
@@ -132,6 +134,460 @@ async fn test_sequence_range_probe_standalone(instance: Arc<dyn MockInstance>) {
         .unwrap();
     assert_eq!(min, Some(Timestamp::new_millisecond(1000)));
     assert_eq!(max, Some(Timestamp::new_millisecond(1000)));
+}
+
+/// The column names of a PromQL range answer, in order.
+fn cache_e2e_names(rows: &RecordBatches) -> Vec<String> {
+    rows.schema()
+        .column_schemas()
+        .iter()
+        .map(|column| column.name.clone())
+        .collect()
+}
+
+/// The `(timestamp_ms, value)` points of a PromQL range answer over `cache_e2e`.
+///
+/// The rendering of an answer changes with its schema, so a test states which
+/// numbers an answer holds and when it evaluated them, not how a table draws the
+/// whole row.
+fn cache_e2e_points(rows: &RecordBatches) -> Vec<(i64, f64)> {
+    let mut points = Vec::new();
+    for batch in rows.iter() {
+        let columns = batch.schema.column_schemas();
+        let time = columns
+            .iter()
+            .position(|column| column.data_type.is_timestamp())
+            .unwrap_or_else(|| panic!("no time column in {:?}", cache_e2e_names(rows)));
+        let value = columns
+            .iter()
+            .position(|column| column.data_type.is_float())
+            .unwrap_or_else(|| panic!("no value column in {:?}", cache_e2e_names(rows)));
+        let times = batch
+            .column(time)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "the time column is not millisecond: {:?}",
+                    cache_e2e_names(rows)
+                )
+            });
+        let values = batch
+            .column(value)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap_or_else(|| panic!("the value column is not f64: {:?}", cache_e2e_names(rows)));
+        assert_eq!(
+            0,
+            values.null_count(),
+            "an evaluated point has a value: {:?}",
+            cache_e2e_names(rows)
+        );
+        points.extend((0..batch.num_rows()).map(|row| (times.value(row), values.value(row))));
+    }
+    points
+}
+
+#[tokio::test]
+async fn test_rollup_cache_end_to_end_overwrites() {
+    let instance = standalone_with_rollup_cache().await;
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        "CREATE TABLE cache_e2e (host STRING PRIMARY KEY, ts TIMESTAMP(3) TIME INDEX, val DOUBLE)",
+    )
+    .await;
+    let rows = (15..=25)
+        .map(|minute| format!("('a', {}, 1.0)", minute * 60_000))
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO cache_e2e (host, ts, val) VALUES {rows}"),
+    )
+    .await;
+
+    let cache = frontend
+        .rollup_cache()
+        .expect("the test instance installs the cache")
+        .clone();
+    let query = PromQuery {
+        query: "cache_e2e".to_string(),
+        start: "900".to_string(),
+        end: "1500".to_string(),
+        step: "60".to_string(),
+        lookback: "60".to_string(),
+        alias: None,
+    };
+    let expected = (900..=1500)
+        .step_by(60)
+        .map(|second| (second * 1_000, 1.0))
+        .collect::<Vec<_>>();
+
+    // A cold request reads the range and stores every whole chunk it covered.
+    let first = promql_cache_rows(&frontend, &query).await;
+    let filled = cache.entry_count();
+    assert!(filled > 1, "the first request filled its chunks: {filled}");
+    assert_eq!(
+        0,
+        cache.hit_count(),
+        "a cold request reuses no entry: {filled} chunks were filled"
+    );
+    assert_eq!(
+        expected,
+        cache_e2e_points(&first),
+        "the first answer is one point per step: {:?}",
+        cache_e2e_names(&first)
+    );
+
+    // The same request again: every cached chunk is reused, so the answer is
+    // served from memory and nothing is filled a second time. The hit count is
+    // what proves the reuse; an unchanged entry count alone cannot, since a
+    // request that bypassed the cache would leave it unchanged too.
+    let second = promql_cache_rows(&frontend, &query).await;
+    assert_eq!(expected, cache_e2e_points(&second));
+    assert_eq!(
+        filled,
+        cache.entry_count(),
+        "the second request filled nothing new"
+    );
+    let warm_hits = cache.hit_count();
+    assert_eq!(
+        filled, warm_hits,
+        "the second request served each of the {filled} chunks from memory"
+    );
+
+    // A quiet table produces an unchanged empty delta, so the probe invalidates
+    // nothing: the chunks it just filled are served again rather than evicted.
+    let quiet = promql_cache_rows(&frontend, &query).await;
+    assert_eq!(expected, cache_e2e_points(&quiet));
+    assert_eq!(
+        filled,
+        cache.entry_count(),
+        "an unchanged delta kept every chunk"
+    );
+    let quiet_hits = cache.hit_count();
+    assert_eq!(
+        warm_hits + filled,
+        quiet_hits,
+        "an unchanged delta served each of the {filled} chunks again"
+    );
+
+    // A metadata version change must invalidate the entries even though the row
+    // sequence did not move, and the refilled answer must carry the new schema.
+    let epoch = cache.invalidation_epoch();
+    let source_epoch = cache.source_epoch();
+    execute_sql(&frontend, "ALTER TABLE cache_e2e ADD COLUMN note STRING").await;
+    let after_alter = promql_cache_rows(&frontend, &query).await;
+    let alter_hits = cache.hit_count();
+    assert!(
+        cache.source_epoch() > source_epoch,
+        "the schema change advanced the source generation: {} -> {}",
+        source_epoch,
+        cache.source_epoch()
+    );
+    assert!(
+        cache.invalidation_epoch() > epoch,
+        "the schema change invalidated the table: {epoch} -> {}",
+        cache.invalidation_epoch()
+    );
+    assert_eq!(
+        quiet_hits, alter_hits,
+        "no entry filled under the old schema was served"
+    );
+    assert_eq!(
+        filled,
+        cache.entry_count(),
+        "the ALTER request refilled the chunks it read"
+    );
+    assert!(
+        cache_e2e_names(&after_alter)
+            .iter()
+            .any(|name| name == "note"),
+        "the refilled answer has the added column: {:?}",
+        cache_e2e_names(&after_alter)
+    );
+    assert_eq!(
+        expected,
+        cache_e2e_points(&after_alter),
+        "the new schema answers the same numbers"
+    );
+
+    // A sample written inside the cached window but off the request's grid
+    // changes no answer: every point folds the latest sample at or before it, and
+    // each of these points has a row of its own that is later than 16:40. The row
+    // is stored all the same, which the SQL read shows, and the probe still
+    // invalidates the chunk whose input it overlaps, so the request that follows
+    // re-reads that chunk instead of serving it stale.
+    let off_grid_hits = cache.hit_count();
+    execute_sql(
+        &frontend,
+        "INSERT INTO cache_e2e (host, ts, val) VALUES ('a', 1000000, 9.0)",
+    )
+    .await;
+    let stored = execute_sql(&frontend, "SELECT val FROM cache_e2e WHERE ts = 1000000").await;
+    assert_eq!(
+        "+-----+\n| val |\n+-----+\n| 9.0 |\n+-----+",
+        stored.data.pretty_print().await,
+        "the off-grid sample is stored"
+    );
+    let off_grid = promql_cache_rows(&frontend, &query).await;
+    assert_eq!(
+        expected,
+        cache_e2e_points(&off_grid),
+        "no point folds a sample that a later row of the same series supersedes"
+    );
+    assert!(
+        cache.hit_count() > off_grid_hits,
+        "the chunk the sample does not overlap was still served from memory"
+    );
+    assert_eq!(
+        filled,
+        cache.entry_count(),
+        "the request refilled the one chunk it invalidated"
+    );
+
+    // Overwrite a sample the request evaluates: the row at 17:00 changes from 1.0
+    // to 9.0, so the point at 17:00 must answer 9.0 and no longer the old value.
+    // Serving 1.0 would be a stale hit of a chunk the probe should have dropped.
+    let overwrite_hits = cache.hit_count();
+    execute_sql(
+        &frontend,
+        "INSERT INTO cache_e2e (host, ts, val) VALUES ('a', 1020000, 9.0)",
+    )
+    .await;
+    let overwritten = promql_cache_rows(&frontend, &query).await;
+    let overwritten_points = cache_e2e_points(&overwritten);
+    assert_eq!(
+        Some(&(1_020_000, 9.0)),
+        overwritten_points.get(2),
+        "the overwritten point answers the new value: {overwritten_points:?}"
+    );
+    assert_eq!(
+        1,
+        overwritten_points
+            .iter()
+            .filter(|(_, value)| *value == 9.0)
+            .count(),
+        "the overwritten value answers exactly the point it was written at: {overwritten_points:?}"
+    );
+    // Every other point still folds the row it folded before: one value was
+    // replaced, the history around it did not move.
+    assert_eq!(
+        expected
+            .iter()
+            .copied()
+            .filter(|(timestamp, _)| *timestamp != 1_020_000)
+            .collect::<Vec<_>>(),
+        overwritten_points
+            .iter()
+            .copied()
+            .filter(|(timestamp, _)| *timestamp != 1_020_000)
+            .collect::<Vec<_>>(),
+        "only the overwritten point changed"
+    );
+    assert_eq!(
+        filled,
+        cache.entry_count(),
+        "the overwrite request kept the chunk it did not invalidate"
+    );
+    let after_overwrite_hits = cache.hit_count();
+    assert!(
+        after_overwrite_hits > overwrite_hits,
+        "the chunk that does not overlap the overwritten sample was served from memory"
+    );
+
+    // The refilled chunk is an entry, not a bypass: repeating the request serves
+    // every chunk from memory and still answers the overwritten value.
+    let repeated = promql_cache_rows(&frontend, &query).await;
+    assert_eq!(
+        overwritten_points,
+        cache_e2e_points(&repeated),
+        "the refilled answer is served again"
+    );
+    assert_eq!(
+        filled,
+        cache.hit_count() - after_overwrite_hits,
+        "the repeat served each of the {filled} chunks from memory"
+    );
+}
+
+async fn promql_cache_rows(frontend: &Arc<Instance>, query: &PromQuery) -> RecordBatches {
+    let output = servers::prometheus_handler::PrometheusHandler::do_query(
+        frontend.as_ref(),
+        query,
+        QueryContext::arc(),
+    )
+    .await
+    .unwrap();
+    match output.data {
+        OutputData::RecordBatches(rows) => rows,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => panic!("a PromQL query returned affected rows"),
+    }
+}
+
+/// A metric engine logical table is read through the physical table underneath,
+/// so the sequence probe validates a table ID the scan does not name.
+#[tokio::test]
+async fn test_rollup_cache_metric_logical_table() {
+    let instance = standalone_with_rollup_cache().await;
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE cache_metric_phy (
+            host STRING PRIMARY KEY,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX
+        ) ENGINE = metric WITH (physical_metric_table = 'true')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE cache_metric_logical (
+            host STRING PRIMARY KEY,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX
+        ) ENGINE = metric WITH (on_physical_table = 'cache_metric_phy')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE cache_metric_other (
+            host STRING PRIMARY KEY,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX
+        ) ENGINE = metric WITH (on_physical_table = 'cache_metric_phy')"#,
+    )
+    .await;
+    let points = |value: &str| {
+        (15..=25)
+            .map(|minute| format!("('a', {}, {value})", minute * 60_000))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO cache_metric_logical (host, ts, val) VALUES {}",
+            points("1.0")
+        ),
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO cache_metric_other (host, ts, val) VALUES {}",
+            points("2.0")
+        ),
+    )
+    .await;
+
+    // The probe validates the logical table while every read of it is served by
+    // the physical table, so the two IDs differ. A filled chunk is therefore only
+    // possible when the window's plan is recognized as the logical table.
+    let logical = get_table(&frontend, "cache_metric_logical")
+        .await
+        .table_info()
+        .table_id();
+    let physical = get_table(&frontend, "cache_metric_phy")
+        .await
+        .table_info()
+        .table_id();
+    assert_ne!(
+        logical, physical,
+        "a metric logical table is not its physical table"
+    );
+
+    let cache = frontend
+        .rollup_cache()
+        .expect("the test instance installs the cache")
+        .clone();
+    let query = PromQuery {
+        query: "cache_metric_logical".to_string(),
+        start: "900".to_string(),
+        end: "1500".to_string(),
+        step: "60".to_string(),
+        lookback: "60".to_string(),
+        alias: None,
+    };
+    let expected = (900..=1500)
+        .step_by(60)
+        .map(|second| (second * 1_000, 1.0))
+        .collect::<Vec<_>>();
+
+    let first = promql_cache_rows(&frontend, &query).await;
+    let filled = cache.entry_count();
+    assert_eq!(
+        2, filled,
+        "the first request filled the two whole chunks of the range; a plan that \
+         names the physical table instead of the logical one fills nothing"
+    );
+    assert_eq!(0, cache.hit_count(), "a cold request reuses no entry");
+    assert_eq!(
+        expected,
+        cache_e2e_points(&first),
+        "the logical table answers one point per step: {:?}",
+        cache_e2e_names(&first)
+    );
+
+    // The same request again reuses every chunk it filled. The hit count is what
+    // tells a served entry from a bypass, which would leave both counters as they
+    // were.
+    let second = promql_cache_rows(&frontend, &query).await;
+    assert_eq!(expected, cache_e2e_points(&second));
+    assert_eq!(
+        filled,
+        cache.entry_count(),
+        "the second request filled nothing new"
+    );
+    assert_eq!(
+        filled,
+        cache.hit_count(),
+        "the second request served each of the {filled} chunks from memory"
+    );
+
+    // A second logical table over the same physical table answers its own rows and
+    // shares nothing with the first: its chunks are filled under its own identity,
+    // and no entry of the first answers any of its points.
+    let other = PromQuery {
+        query: "cache_metric_other".to_string(),
+        ..query.clone()
+    };
+    let other_expected = expected
+        .iter()
+        .map(|(timestamp, _)| (*timestamp, 2.0))
+        .collect::<Vec<_>>();
+    let other_first = promql_cache_rows(&frontend, &other).await;
+    assert_eq!(
+        other_expected,
+        cache_e2e_points(&other_first),
+        "the second logical table answers its own values"
+    );
+    let other_filled = cache.entry_count();
+    assert_eq!(
+        filled * 2,
+        other_filled,
+        "the second logical table filled the same two chunks under its own identity"
+    );
+    assert_eq!(
+        filled,
+        cache.hit_count(),
+        "no entry of the first logical table answered the second one"
+    );
+
+    let other_second = promql_cache_rows(&frontend, &other).await;
+    assert_eq!(other_expected, cache_e2e_points(&other_second));
+    assert_eq!(
+        other_filled,
+        cache.entry_count(),
+        "the repeated request of the second logical table filled nothing new"
+    );
+    assert_eq!(
+        other_filled,
+        cache.hit_count(),
+        "each of the {other_filled} chunks of both logical tables was served from memory"
+    );
 }
 
 #[apply(both_instances_cases)]
@@ -4053,7 +4509,9 @@ async fn try_execute_sql_with(
     sql: &str,
     query_ctx: QueryContextRef,
 ) -> server_error::Result<Output> {
-    instance.do_query(sql, query_ctx).await.remove(0)
+    SqlQueryHandler::do_query(instance.as_ref(), sql, query_ctx)
+        .await
+        .remove(0)
 }
 
 async fn execute_sql_with(
@@ -5186,13 +5644,13 @@ async fn check_compaction_tasks_sql_lifecycle(
     let compact = {
         let frontend = frontend.clone();
         tokio::spawn(async move {
-            frontend
-                .do_query(
-                    "ADMIN COMPACT_TABLE('compact_inspect', 'strict_window', 'window=3600')",
-                    QueryContext::arc(),
-                )
-                .await
-                .remove(0)
+            SqlQueryHandler::do_query(
+                frontend.as_ref(),
+                "ADMIN COMPACT_TABLE('compact_inspect', 'strict_window', 'window=3600')",
+                QueryContext::arc(),
+            )
+            .await
+            .remove(0)
         })
     };
     tokio::time::timeout(Duration::from_secs(20), listener.wait_handle_finished())
@@ -5440,7 +5898,6 @@ async fn test_exemplar_source_tag_reconciliation() {
 
     use servers::exemplar::query::Query;
     use servers::exemplar::{Exemplar, into_rows};
-    use servers::prometheus_handler::PrometheusHandler;
     use servers::query_handler::PromStoreProtocolHandler;
     use table::requests::AUTO_CREATE_TABLE_KEY;
 
@@ -6230,7 +6687,6 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
 
     use servers::exemplar::query::Query;
     use servers::exemplar::{Exemplar, into_rows};
-    use servers::prometheus_handler::PrometheusHandler;
     use servers::query_handler::PromStoreProtocolHandler;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
@@ -6376,7 +6832,6 @@ async fn test_exemplar_precreated_precision_and_label_defaults(
     use servers::batcher::BatchingProtocol;
     use servers::exemplar::query::Query;
     use servers::exemplar::{Exemplar, into_rows};
-    use servers::prometheus_handler::PrometheusHandler;
     use servers::query_handler::PromStoreProtocolHandler;
     use table::requests::AUTO_CREATE_TABLE_KEY;
 
@@ -6464,7 +6919,6 @@ async fn test_exemplar_cross_schema_exact_identity() {
 
     use servers::exemplar::query::Query;
     use servers::exemplar::{Exemplar, into_rows};
-    use servers::prometheus_handler::PrometheusHandler;
     use servers::query_handler::PromStoreProtocolHandler;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;

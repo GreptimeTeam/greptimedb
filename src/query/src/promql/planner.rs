@@ -6796,5 +6796,114 @@ enum ScalarFunc {
     GeneratedExpr,
 }
 
+/// The `__table_id = <id>` restriction a metric engine rewrite states on a scan, if `expr` is one.
+///
+/// Neither route reads a metric logical table under its own name: both read the physical table and
+/// say which logical table that read stands for in this restriction, so the id it names is the
+/// logical table's own id -- the identity a caller validating the read against the catalog has to
+/// see, and never the physical table the scan below it happens to be. The existing route states the
+/// restriction in a filter above the scan and the native route keeps it in the scan's filters; the
+/// predicate itself is the same, which is why both readers share this recognition.
+pub(crate) fn table_id_restriction(expr: &DfExpr) -> Option<u32> {
+    let DfExpr::BinaryExpr(binary) = expr else {
+        return None;
+    };
+    match binary.op {
+        Operator::Eq => {
+            let DfExpr::Column(column) = binary.left.as_ref() else {
+                return None;
+            };
+            if column.name != DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                return None;
+            }
+            match binary.right.as_ref() {
+                DfExpr::Literal(ScalarValue::UInt32(Some(table_id)), _) => Some(*table_id),
+                _ => None,
+            }
+        }
+        // A restriction the planner or the optimizer merged with a time or field restriction is
+        // one conjunct of it.
+        Operator::And => table_id_restriction(binary.left.as_ref())
+            .or_else(|| table_id_restriction(binary.right.as_ref())),
+        _ => None,
+    }
+}
+
+/// The table IDs a logical plan reads, each naming the table the read is about.
+///
+/// A scan names its table by more than its provider: a metric engine logical table is read through
+/// its physical table, and the rewrite's `__table_id = <id>` restriction is what says which logical
+/// table the read stands for. Reporting the scan's provider there would name a table the request
+/// never asked for, so the restriction's id is reported instead, whichever route kept it.
+///
+/// A scan without a restriction is its provider's table, so a direct read of a physical table is
+/// that table. A scan whose provider cannot be read as a table yields nothing, which leaves a caller
+/// that must recognize every source it reads fail-closed instead of trusting the ones it did.
+pub fn plan_source_table_ids(plan: &LogicalPlan) -> Vec<u32> {
+    fn collect(ids: &mut Vec<u32>, plan: &LogicalPlan) {
+        // The existing route states the restriction in a filter over the physical scan, and wraps
+        // that filter in the alias of the logical table it stands for. Such a filter names the
+        // table the scan below it stands for, so the scan is not a source of its own there.
+        if let Some(table_id) = restricted_scan_table_id(plan) {
+            ids.push(table_id);
+            return;
+        }
+        match plan {
+            LogicalPlan::TableScan(scan) => {
+                // The native route keeps the same restriction in the scan's own filters.
+                if let Some(table_id) = scan.filters.iter().find_map(table_id_restriction) {
+                    ids.push(table_id);
+                } else if let Some(source) = scan.source.downcast_ref::<DefaultTableSource>()
+                    && let Some(adapter) = source
+                        .table_provider
+                        .downcast_ref::<DfTableProviderAdapter>()
+                {
+                    ids.push(adapter.table().table_info().table_id());
+                }
+            }
+            plan => {
+                for input in plan.inputs() {
+                    collect(ids, input);
+                }
+            }
+        }
+    }
+
+    let mut ids = Vec::new();
+    collect(&mut ids, plan);
+    ids
+}
+
+/// The logical table the `__table_id` restriction in `plan` binds the scan below it to.
+///
+/// The rewrites build the restriction directly over the scan they mean, but planning wraps both in
+/// the nodes that rename and project the read. Only a restriction standing over exactly one scan
+/// answers: a restriction above anything else names no single table, and the scans below it are
+/// then left to report their own providers.
+fn restricted_scan_table_id(plan: &LogicalPlan) -> Option<u32> {
+    fn below_read_wrappers(plan: &LogicalPlan) -> &LogicalPlan {
+        match plan {
+            LogicalPlan::SubqueryAlias(alias) => below_read_wrappers(&alias.input),
+            LogicalPlan::Projection(projection) => below_read_wrappers(&projection.input),
+            // A restriction the planner stacks with another, such as the window it reads, is still
+            // the restriction over the scan beneath them both.
+            LogicalPlan::Filter(filter) if table_id_restriction(&filter.predicate).is_none() => {
+                below_read_wrappers(&filter.input)
+            }
+            plan => plan,
+        }
+    }
+
+    let LogicalPlan::Filter(filter) = below_read_wrappers(plan) else {
+        return None;
+    };
+    let table_id = table_id_restriction(&filter.predicate)?;
+    matches!(
+        below_read_wrappers(&filter.input),
+        LogicalPlan::TableScan(_)
+    )
+    .then_some(table_id)
+}
+
 #[cfg(test)]
 mod test;
