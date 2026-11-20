@@ -233,6 +233,15 @@ only this case; `/query-regression` runs the nine routine default cases, includi
 `mito_prefilter_all_match`. Manual
 workflow dispatch accepts the `heavy` token to select this case.
 
+`tests/perf/query_cases/many_short_series/case.toml` is the wide-and-shallow
+companion to `promql_constant_tag_concat_ms_100k`: 100,000 series x 8 samples in
+8 non-overlapping SSTs (800,000 rows, `TIMESTAMP(3)`, not `append_mode`), with 19
+queries covering the split aggregate, `topk`, `on(...)`/`ignoring` matching,
+`avg`/`max`/`quantile_over_time`, `label_replace` writing `__name__`, filter and
+`bool` comparison, `and`, a subquery, `offset`, `@` and an instant evaluation.
+Every query must stay on the native fused-series route. Like the other
+high-cardinality cases it is in the `heavy` set, not the routine one.
+
 The routine default set also includes
 `tests/perf/query_cases/mito_prefilter_all_match/case.toml`. It covers the
 Mito prefilter all-match path, a mixed integer/float filter, and integer and
