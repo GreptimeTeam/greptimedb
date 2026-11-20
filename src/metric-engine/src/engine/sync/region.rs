@@ -15,9 +15,9 @@
 use std::time::Instant;
 
 use common_error::ext::BoxedError;
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use mito2::manifest::action::RegionEdit;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::{MitoCopyRegionFromRequest, SyncRegionFromResponse};
 use store_api::storage::RegionId;
 
@@ -79,9 +79,6 @@ impl MetricEngineInner {
             })?;
 
         if res.copied_file_ids.is_empty() {
-            self.metadata_region
-                .remove_copied_source_keys(target_data_region_id, source_data_region_id)
-                .await?;
             info!(
                 "No files were copied from source region {} to target region {}, copied file ids are empty",
                 source_metadata_region_id, target_metadata_region_id
@@ -111,51 +108,41 @@ impl MetricEngineInner {
                 }
             })
             .collect::<Vec<_>>();
-        // `copy_region_from` does not trigger compaction,
-        // so there should be no files removed and thus no missing files.
-        ensure!(
-            missing_file_ids.is_empty(),
+        let transform = if missing_file_ids.is_empty() {
+            self.metadata_region
+                .transform_logical_region_metadata(target_data_region_id, source_data_region_id)
+                .await
+        } else {
             MissingFilesSnafu {
                 region_id: target_metadata_region_id,
                 file_ids: missing_file_ids,
             }
-        );
-        let files_to_remove = files_to_remove.into_iter().flatten().collect::<Vec<_>>();
-        // Transform the logical region metadata of the target data region.
-        self.metadata_region
-            .transform_logical_region_metadata(target_data_region_id, source_data_region_id)
-            .await?;
-
-        let edit = RegionEdit {
-            files_to_add: vec![],
-            files_to_remove: files_to_remove.clone(),
-            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
-            compaction_time_window: None,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
-            ..Default::default()
+            .fail()
         };
-        self.mito
-            .edit_region(target_metadata_region_id, edit)
-            .await
-            .map_err(BoxedError::new)
-            .context(MitoEditRegionSnafu {
-                region_id: target_metadata_region_id,
-            })?;
-        self.metadata_region
-            .remove_copied_source_keys(target_data_region_id, source_data_region_id)
-            .await?;
+        let files_to_remove: Vec<_> = files_to_remove.into_iter().flatten().collect();
+        if !files_to_remove.is_empty() {
+            let edit = RegionEdit {
+                files_to_remove,
+                timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+                ..Default::default()
+            };
+            let cleanup = self
+                .mito
+                .edit_region(target_metadata_region_id, edit)
+                .await
+                .map_err(BoxedError::new)
+                .context(MitoEditRegionSnafu {
+                    region_id: target_metadata_region_id,
+                });
+            if let Err(err) = cleanup {
+                if transform.is_ok() {
+                    return Err(err);
+                }
+                warn!(err; "Failed to remove copied SSTs from {target_metadata_region_id} after sync failed");
+            }
+        }
+        transform?;
         drop(guard);
-        info!(
-            "Successfully edit metadata region: {} after syncing from source metadata region: {}, files to remove: {:?}",
-            target_metadata_region_id,
-            source_metadata_region_id,
-            files_to_remove
-                .iter()
-                .map(|meta| meta.file_id)
-                .collect::<Vec<_>>(),
-        );
 
         let now = Instant::now();
         // Always recover states from the target metadata region after syncing
@@ -317,146 +304,112 @@ mod tests {
             .unwrap();
     }
 
+    #[rstest::rstest]
+    #[case::transform_fails(true, false)]
+    #[case::both_fail(true, true)]
+    #[case::cleanup_fails(false, true)]
     #[tokio::test]
-    async fn test_retry_after_cleanup_failure_without_compaction() {
-        assert_retry_after_cleanup_failure(None).await;
-    }
-
-    #[tokio::test]
-    async fn test_retry_after_cleanup_failure_with_target_compaction() {
-        assert_retry_after_cleanup_failure(Some(CompactionRegion::Target)).await;
-    }
-
-    #[tokio::test]
-    async fn test_retry_after_cleanup_failure_with_source_compaction() {
-        assert_retry_after_cleanup_failure(Some(CompactionRegion::Source)).await;
-    }
-
-    enum CompactionRegion {
-        Source,
-        Target,
-    }
-
-    async fn assert_retry_after_cleanup_failure(compaction: Option<CompactionRegion>) {
-        use std::time::Duration;
-
+    async fn test_sync_cleans_imported_files_on_error(
+        #[case] invalid_column: bool,
+        #[case] fail_cleanup: bool,
+    ) {
         use mito2::test_util::{DeltaFaults, TestEnv as MitoTestEnv};
+        use store_api::region_engine::MitoCopyRegionFromRequest;
 
         let faults = DeltaFaults::default();
-        let mito_env = MitoTestEnv::with_prefix("sync-cleanup-retry")
+        let mito_env = MitoTestEnv::with_prefix("sync-cleanup")
             .await
             .with_mock_layer(faults.layer());
         let env = TestEnv::with_mito_env(mito_env).await;
+        env.init_metric_region().await;
         let source = env.default_physical_region_id();
+        let logical = env.default_logical_region_id();
         let target = RegionId::new(source.table_id(), 7);
-        env.create_physical_region(source, &TestEnv::default_table_dir(), vec![])
-            .await;
         env.create_physical_region(target, &TestEnv::default_table_dir(), vec![])
             .await;
         let source_meta = crate::utils::to_metadata_region_id(source);
         let target_meta = crate::utils::to_metadata_region_id(target);
         let mito = env.mito();
-        let metric = env.metric();
-        let metadata = &metric.inner.metadata_region;
-        // Keep the source file set stable until the first attempt has failed.
-        let source_guard = mito.pause_compaction(source_meta).await.unwrap();
-        let mut expected = Vec::new();
-        for table_id in 10..15 {
-            let logical = RegionId::new(table_id, source.region_number());
-            let request = create_logical_region_request(&["job"], source, "test");
-            metric
-                .handle_request(logical, RegionRequest::Create(request))
+        let _guard = mito.pause_compaction(source_meta).await.unwrap();
+        if invalid_column {
+            let entries = [(format!("__column_{}_!", logical.as_u64()), String::new())];
+            let put = MetadataRegion::build_put_request_from_iter(entries.into_iter());
+            mito.handle_request(source_meta, RegionRequest::Put(put))
                 .await
                 .unwrap();
-            mito.handle_request(source_meta, RegionRequest::Flush(Default::default()))
-                .await
-                .unwrap();
-            expected.push(RegionId::new(table_id, target.region_number()));
         }
-
-        let sync = || metric.inner.sync_region_from_region(target, source, 1);
-        assert!(metadata.logical_regions(target).await.unwrap().is_empty());
-        let fail_cleanup = metadata.with_writes_paused(target_meta, async {
-            tokio::time::timeout(Duration::from_secs(10), async {
-                while metadata.logical_regions(target).await.unwrap().is_empty() {
-                    tokio::task::yield_now().await;
-                }
-            })
+        mito.handle_request(source_meta, RegionRequest::Flush(Default::default()))
             .await
             .unwrap();
+        // Model a retry after import. The next manifest write will be the cleanup edit.
+        let imported = mito
+            .copy_region_from(
+                target_meta,
+                MitoCopyRegionFromRequest {
+                    source_region_id: source_meta,
+                    parallelism: 1,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!imported.copied_file_ids.is_empty());
+        if fail_cleanup {
             faults.fail_next_write();
-        });
-        let ((), first) = tokio::join!(fail_cleanup, sync());
-        assert!(
-            matches!(first, Err(crate::error::Error::MitoEditRegion { .. })),
-            "{first:?}"
-        );
-        // An uncertain manifest edit closes the region. Replay it before retrying.
-        mito.handle_request(
-            target_meta,
-            RegionRequest::Open(RegionOpenRequest {
-                engine: mito2::engine::MITO_ENGINE_NAME.into(),
-                table_dir: TestEnv::default_table_dir(),
-                path_type: PathType::Metadata,
-                options: Default::default(),
-                skip_wal_replay: false,
-                checkpoint: None,
-                requirements: Default::default(),
-            }),
-        )
-        .await
-        .unwrap();
-        mito.set_region_role(target_meta, store_api::region_engine::RegionRole::Leader)
-            .unwrap();
-        let copied = mito.find_memtable_and_sst_stats(target_meta).unwrap().1;
-        assert!(!copied.is_empty());
-        let changed_region = match compaction {
-            Some(CompactionRegion::Target) => {
-                // Flushing the transformed rows triggers normal automatic compaction.
-                mito.handle_request(target_meta, RegionRequest::Flush(Default::default()))
-                    .await
-                    .unwrap();
-                Some(target_meta)
-            }
-            Some(CompactionRegion::Source) => {
-                drop(source_guard);
-                mito.handle_request(source_meta, RegionRequest::Compact(Default::default()))
-                    .await
-                    .unwrap();
-                Some(source_meta)
-            }
-            None => None,
-        };
-        if let Some(changed_region) = changed_region {
-            tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    let files = mito.find_memtable_and_sst_stats(changed_region).unwrap().1;
-                    if copied
-                        .iter()
-                        .any(|old| files.iter().all(|f| f.file_id != old.file_id))
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("compaction must replace a copied SST before retry");
         }
-        sync().await.unwrap();
-        let mut actual = metadata.logical_regions(target).await.unwrap();
-        actual.sort_unstable();
-        assert_eq!(actual, expected);
-        for id in expected {
-            let source_id = RegionId::new(id.table_id(), source.region_number());
+        let err = env
+            .metric()
+            .inner
+            .sync_region_from_region(target, source, 1)
+            .await
+            .unwrap_err();
+        if invalid_column {
             assert!(
-                metadata
-                    .logical_columns(target, source_id)
-                    .await
-                    .unwrap()
-                    .is_empty()
+                matches!(err, crate::error::Error::DecodeColumnValue { .. }),
+                "{err}"
             );
-            assert_eq!(3, metadata.logical_columns(target, id).await.unwrap().len());
+        } else {
+            assert!(
+                matches!(err, crate::error::Error::MitoEditRegion { .. }),
+                "{err}"
+            );
+        }
+        if !invalid_column {
+            // An uncertain manifest edit closes the target. Reopen it before retrying.
+            mito.handle_request(
+                target_meta,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: mito2::engine::MITO_ENGINE_NAME.into(),
+                    table_dir: TestEnv::default_table_dir(),
+                    path_type: PathType::Metadata,
+                    options: Default::default(),
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+            mito.set_region_role(target_meta, store_api::region_engine::RegionRole::Leader)
+                .unwrap();
+            env.metric()
+                .inner
+                .sync_region_from_region(target, source, 1)
+                .await
+                .unwrap();
+            assert_eq!(
+                env.metadata_region().logical_regions(target).await.unwrap(),
+                vec![RegionId::new(logical.table_id(), target.region_number())]
+            );
+        }
+        if !fail_cleanup {
+            let region = mito.find_region(target_meta).unwrap();
+            assert!(
+                region
+                    .file_metas(&imported.copied_file_ids)
+                    .await
+                    .iter()
+                    .all(Option::is_none)
+            );
         }
     }
 
