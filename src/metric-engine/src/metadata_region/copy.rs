@@ -157,6 +157,9 @@ fn remap_column_key(
 mod tests {
     use std::collections::BTreeMap;
 
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::RegionRequest;
+
     use super::*;
     use crate::test_util::TestEnv;
     use crate::utils::to_metadata_region_id;
@@ -371,7 +374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_transform_only_marked_source_regions() {
+    async fn test_transform_marked_source_regions_across_batches() {
         let env = TestEnv::new().await;
         let target = env.default_physical_region_id();
         env.create_physical_region(target, "/copy", vec![]).await;
@@ -382,34 +385,54 @@ mod tests {
         let target_id = |table| RegionId::new(table, target.region_number());
         let marker = MetadataRegion::concat_region_key;
         let column = MetadataRegion::concat_column_key;
-        let entries = vec![
+        let mut entries = vec![
             (marker(id(10)), String::new()),
             (column(id(10), "标签"), "old-format value".to_string()),
             (marker(id(11)), String::new()),
             (column(id(12), "orphan"), "value".to_string()),
             (marker(RegionId::new(13, 3)), String::new()),
         ];
-        metadata.put_entries(region, entries.clone()).await.unwrap();
+        let mut expected = BTreeMap::from([
+            (marker(target_id(10)), String::new()),
+            (
+                column(target_id(10), "标签"),
+                "old-format value".to_string(),
+            ),
+            (marker(target_id(11)), String::new()),
+        ]);
+        // The source SST has two full column batches and one trailing column.
+        for i in 0..2 * COPY_BATCH_ROWS {
+            let name = format!("column_{i}");
+            entries.push((column(id(10), &name), i.to_string()));
+            expected.insert(column(target_id(10), &name), i.to_string());
+        }
+        expected.extend(entries.iter().cloned());
+        metadata.put_entries(region, entries).await.unwrap();
+        metadata
+            .mito
+            .handle_request(region, RegionRequest::Flush(Default::default()))
+            .await
+            .unwrap();
+
         for _ in 0..2 {
+            let mut batch_sizes = Vec::new();
             metadata
-                .transform_logical_region_metadata(target, source)
+                .copy_logical_regions(target, source, |region, entries| {
+                    batch_sizes.push(entries.len());
+                    metadata.put_entries(region, entries)
+                })
                 .await
                 .unwrap();
+            assert_eq!(batch_sizes, [COPY_BATCH_ROWS, COPY_BATCH_ROWS, 1, 2]);
+            let actual = metadata.load_all(region).await.unwrap();
+            assert_eq!(actual.key_values.len(), expected.len());
+            for (key, value) in &expected {
+                assert_eq!(
+                    actual.key_values.get(key),
+                    Some(value),
+                    "metadata key {key}"
+                );
+            }
         }
-        let expected = entries
-            .into_iter()
-            .chain([
-                (marker(target_id(10)), String::new()),
-                (
-                    column(target_id(10), "标签"),
-                    "old-format value".to_string(),
-                ),
-                (marker(target_id(11)), String::new()),
-            ])
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            *metadata.load_all(region).await.unwrap().key_values,
-            expected
-        );
     }
 }
