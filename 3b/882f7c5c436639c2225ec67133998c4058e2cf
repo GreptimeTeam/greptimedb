@@ -6,8 +6,10 @@ src/meta-srv/src/procedure/repartition.rs
   s_17057bba187655::t_2fc64894de3603 1231,1235,1242,2337-2344,2722-2729
 src/query/src/dist_plan/planner.rs
   s_17057bba187655::t_2fc64894de3603 17,289,292-309,371-377,379-380,667-669,672,790-803,857,892,896-950
+  s_17057bba187655::t_f3c14fb13ef8ef 369,430
 src/partition/src/manager.rs
   s_17057bba187655::t_2fc64894de3603 124-146
+  s_17057bba187655::t_f3c14fb13ef8ef 147
 src/meta-srv/src/procedure/repartition/group.rs
   s_17057bba187655::t_2fc64894de3603 474,476-482
 tests/compatibility/metadata/repartition_readiness/README.md
