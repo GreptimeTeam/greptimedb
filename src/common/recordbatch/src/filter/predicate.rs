@@ -1484,6 +1484,24 @@ mod tests {
         );
     }
 
+    /// Several arrays can be in flight at once because a pool hands out one independent cache per
+    /// checkout. A single `Mutex<meta::Cache>` held for the array loop could not hand out a second
+    /// cache before the first array finished, so this test needs no timing.
+    #[test]
+    fn test_cache_pool_hands_out_independent_caches() {
+        let compiled = CompiledRegex::new("^api$").unwrap();
+        let program = compiled.program().unwrap();
+        let mut caches: Vec<_> = (0..8).map(|_| compiled.get_cache(program)).collect();
+
+        // Every cache is usable while all the others are still checked out.
+        for cache in &mut caches {
+            assert!(program.is_match_with(cache, "api"));
+            assert!(!program.is_match_with(cache, "db"));
+        }
+        assert_eq!(8, compiled.cache_acquisitions());
+        assert_eq!(1, compiled.compilations());
+    }
+
     /// Prove eight evaluations reach the array kernel with their own checked-out cache at the
     /// same time. A shared mutex held over the loop cannot pass the barrier and times out.
     #[test]

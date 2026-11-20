@@ -170,7 +170,14 @@ impl Predicate {
             .context(error::DatafusionSnafu)
     }
 
-    /// Builds a single physical expr according to provided schema.
+    /// Builds a single physical expr for a caller that *evaluates* it against record batches.
+    ///
+    /// Regex comparisons are rewritten into [`PrecompiledRegexExpr`] because
+    /// `create_physical_expr` builds a comparison that recompiles its pattern on every evaluation,
+    /// while a scan evaluates one physical expr per batch.
+    ///
+    /// Pruning must not use this: it never evaluates the expression, only folds it into column
+    /// statistics, so [`Self::to_pruning_physical_exprs`] keeps the plain comparison.
     pub fn to_physical_expr(
         expr: &Expr,
         schema: &arrow::datatypes::SchemaRef,
@@ -186,9 +193,6 @@ impl Predicate {
         let execution_props = &ExecutionProps::new();
         let planning_context = &PhysicalPlanningContext::default();
 
-        // `create_physical_expr` builds a regex comparison that recompiles its pattern on every
-        // evaluation. A scan evaluates one physical expr per batch instead, so prefer the
-        // precompiled form.
         if let Some(physical) = Self::to_regex_physical_expr(
             expr,
             schema,
@@ -199,7 +203,19 @@ impl Predicate {
             return Ok(physical);
         }
 
-        create_physical_expr(expr, df_schema.as_ref(), execution_props, planning_context)
+        Self::to_plain_physical_expr(expr, df_schema.as_ref())
+    }
+
+    /// Builds the physical expr `create_physical_expr` produces, without the regex rewrite.
+    ///
+    /// This is what pruning consumes: it is a shape the pruning predicate builder recognizes.
+    fn to_plain_physical_expr(
+        expr: &Expr,
+        df_schema: &DFSchema,
+    ) -> error::Result<Arc<dyn PhysicalExpr>> {
+        let execution_props = &ExecutionProps::new();
+        let planning_context = &PhysicalPlanningContext::default();
+        create_physical_expr(expr, df_schema, execution_props, planning_context)
             .context(error::DatafusionSnafu)
     }
 
@@ -269,17 +285,28 @@ impl Predicate {
         }))
     }
 
-    /// Builds physical exprs according to provided schema.
-    pub fn to_physical_exprs(
+    /// Builds the physical exprs [`Self::prune_with_stats`] folds into column statistics.
+    ///
+    /// Pruning never evaluates a predicate, and the regex rewrite exists only to make evaluation
+    /// cheap, so this deliberately builds what `create_physical_expr` builds. Besides saving the
+    /// conversion on a per-file (manifest pruning) and per-batch (bulk memtable pruning) path,
+    /// [`PrecompiledRegexExpr`] is a node the pruning predicate builder does not know: it replaces
+    /// unknown nodes with `true`, while the plain comparison below is handled (or rejected) the
+    /// same way it was before the rewrite existed.
+    pub fn to_pruning_physical_exprs(
         &self,
         schema: &arrow::datatypes::SchemaRef,
     ) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
+        let df_schema = schema
+            .clone()
+            .to_dfschema_ref()
+            .context(error::DatafusionSnafu)?;
         let dyn_filters = self.dyn_filter_phy_exprs()?;
 
         Ok(self
             .exprs
             .iter()
-            .filter_map(|expr| Self::to_physical_expr(expr, schema).ok())
+            .filter_map(|expr| Self::to_plain_physical_expr(expr, df_schema.as_ref()).ok())
             .chain(dyn_filters)
             .collect::<Vec<_>>())
     }
@@ -292,7 +319,7 @@ impl Predicate {
         schema: &arrow::datatypes::SchemaRef,
     ) -> Vec<bool> {
         let mut res = vec![true; stats.num_containers()];
-        let physical_exprs = match self.to_physical_exprs(schema) {
+        let physical_exprs = match self.to_pruning_physical_exprs(schema) {
             Ok(expr) => expr,
             Err(e) => {
                 warn!(e; "Failed to build physical expr from predicates: {:?}", &self.exprs);
@@ -367,6 +394,9 @@ fn regex_column_type(expr: &Expr, schema: &arrow::datatypes::SchemaRef) -> Optio
 /// The result is bit-identical to the arrow expression it replaces: `evaluate_array` folds SQL
 /// `NULL` into `false`, so the column's logical nulls are restored afterwards — exactly the validity
 /// arrow's kernel produces for a regex, which never fails on `NULL`.
+///
+/// Only [`Predicate::to_physical_expr`] builds this node, for callers that evaluate the predicate.
+/// Pruning uses [`Predicate::to_pruning_physical_exprs`] and keeps the arrow comparison.
 #[derive(Debug)]
 struct PrecompiledRegexExpr {
     /// The column the pattern is matched against.
@@ -896,6 +926,7 @@ mod tests {
 
     use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion_common::tree_node::TreeNodeRecursion;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{BinaryExpr, Literal, Operator, col, lit};
     use datatypes::arrow::array::{
@@ -1654,7 +1685,7 @@ mod tests {
             false,
         )]));
 
-        let predicates = predicate.to_physical_exprs(&schema).unwrap();
+        let predicates = predicate.to_pruning_physical_exprs(&schema).unwrap();
         assert!(!predicates.is_empty());
 
         let physical_expr = Predicate::to_physical_expr(&col("host").eq(lit("host_a")), &schema);
@@ -1839,21 +1870,70 @@ mod tests {
         assert_same_regex_result(&expr, &schema, &batch);
     }
 
-    /// Pruning constructs the same physical expression but must not initialize its regex. The
-    /// per-regex compile counter is tested in common-recordbatch; here we verify the real pruning
-    /// entry point leaves that same OnceLock uninitialized until evaluation.
+    /// Pruning never evaluates the predicate, so its entry point must keep the plain comparison
+    /// instead of the evaluation-only [`PrecompiledRegexExpr`]: pruning runs once per file
+    /// (manifest pruning) and once per batch (bulk memtable pruning), and a node the pruning
+    /// predicate builder does not recognize would only be replaced by `true`.
+    #[test]
+    fn test_pruning_keeps_the_plain_regex_expr() {
+        let (schema, _) = regex_batch(
+            DataType::Utf8,
+            Arc::new(StringArray::from(vec![Some("host-a"), None, Some("db")])) as ArrayRef,
+            true,
+        );
+        let expr = regex_expr("host", Operator::RegexMatch, "host.*");
+
+        let pruning = Predicate::new(vec![expr.clone()])
+            .to_pruning_physical_exprs(&schema)
+            .unwrap();
+        assert_eq!(1, pruning.len());
+        let physical = &pruning[0];
+        let mut rewritten = false;
+        physical
+            .apply(|node| {
+                rewritten |= node.downcast_ref::<PrecompiledRegexExpr>().is_some();
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        assert!(
+            !rewritten,
+            "pruning must not build the evaluation-only rewrite: {physical}"
+        );
+        // It is exactly what `create_physical_expr` plans, i.e. what pruning saw before the
+        // rewrite existed.
+        assert_eq!(
+            arrow_regex_expr(&expr, &schema).to_string(),
+            physical.to_string()
+        );
+
+        // Evaluation keeps the rewrite.
+        let evaluated = Predicate::to_physical_expr(&expr, &schema).unwrap();
+        assert!(
+            evaluated.downcast_ref::<PrecompiledRegexExpr>().is_some(),
+            "evaluation must precompile the pattern: {evaluated}"
+        );
+    }
+
+    /// Pruning still applies the numeric conjunct of a predicate that also holds a regex, so
+    /// keeping the plain comparison does not weaken pruning.
+    #[tokio::test]
+    async fn test_prune_with_regex_conjunct() {
+        let e = regex_expr("name", Operator::RegexMatch, "^1.*").and(col("cnt").gt_eq(lit(10_i32)));
+        assert_prune(40, vec![e], vec![false, true, true, true]).await;
+    }
+
+    /// The precompiled pattern stays uninitialized until the first evaluation and is then reused.
+    /// The per-regex compile counter is tested in common-recordbatch.
     #[test]
     #[allow(clippy::print_stdout)]
-    fn test_pruning_defers_regex_compilation_until_evaluation() {
+    fn test_precompiled_regex_defers_compilation_until_evaluation() {
         let (schema, batch) = regex_batch(
             DataType::Utf8,
             Arc::new(StringArray::from(vec![Some("host-a"), None, Some("db")])) as ArrayRef,
             true,
         );
-        let predicate = Predicate::new(vec![regex_expr("host", Operator::RegexMatch, "host.*")]);
-        let physical_exprs = predicate.to_physical_exprs(&schema).unwrap();
-        assert_eq!(1, physical_exprs.len());
-        let physical = &physical_exprs[0];
+        let expr = regex_expr("host", Operator::RegexMatch, "host.*");
+        let physical = Predicate::to_physical_expr(&expr, &schema).unwrap();
         let regex = physical.downcast_ref::<PrecompiledRegexExpr>().unwrap();
         let initialized = || format!("{:?}", regex.filter);
         assert!(
@@ -1861,11 +1941,11 @@ mod tests {
             "{}",
             initialized()
         );
-        println!("after to_physical_exprs: regex initializations = 0");
+        println!("after to_physical_expr: regex initializations = 0");
 
         assert_eq!(
             vec![Some(true), None, Some(false)],
-            evaluate_rows(physical, &batch)
+            evaluate_rows(&physical, &batch)
         );
         assert!(
             initialized().contains("initialized: true"),
@@ -1876,7 +1956,7 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(
                 vec![Some(true), None, Some(false)],
-                evaluate_rows(physical, &batch)
+                evaluate_rows(&physical, &batch)
             );
         }
         assert!(
@@ -1902,14 +1982,8 @@ mod tests {
         // planner does not compile the pattern, so it too reports this error on evaluation.
         let old_fallback = arrow_regex_expr(&expr, &schema);
         assert!(old_fallback.evaluate(&batch).is_err());
-        let predicate = Predicate::new(vec![expr]);
-        let physical_exprs = predicate.to_physical_exprs(&schema).unwrap();
-        assert_eq!(
-            1,
-            physical_exprs.len(),
-            "construction must retain the invalid regex"
-        );
-        let physical = &physical_exprs[0];
+        let physical = Predicate::to_physical_expr(&expr, &schema)
+            .expect("construction must retain the invalid regex");
         let regex = physical.downcast_ref::<PrecompiledRegexExpr>().unwrap();
         assert!(format!("{:?}", regex.filter).contains("initialized: false"));
         let error = physical
@@ -1928,7 +2002,7 @@ mod tests {
         assert!(physical.evaluate(&batch).is_err());
         assert!(format!("{:?}", regex.filter).contains("initialized: true"));
         println!(
-            "invalid regex: 0 initializations after to_physical_exprs; first evaluate returned an error"
+            "invalid regex: 0 initializations after to_physical_expr; first evaluate returned an error"
         );
     }
 
