@@ -3009,6 +3009,7 @@ mod tests {
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
+    use common_meta::instruction::{CacheIdent, CreateFlow};
     use common_meta::node_manager::{
         Datanode, DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef,
     };
@@ -3029,6 +3030,14 @@ mod tests {
         create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
     };
     use crate::write_dispatcher::{TrackedWrite, WriteRetryOptions};
+
+    async fn cache_test_flow(cache: &TableFlownodeSetCacheRef, flow: CreateFlow) {
+        cache.get_many(&flow.source_table_ids).await.unwrap();
+        cache
+            .invalidate(&[CacheIdent::CreateFlow(flow)])
+            .await
+            .unwrap();
+    }
 
     fn make_table_ref_with_schema(
         ts_name: &str,
@@ -4369,7 +4378,6 @@ mod tests {
     async fn test_logical_batcher_eligibility() {
         use catalog::RegisterTableRequest;
         use catalog::memory::MemoryCatalogManager;
-        use common_meta::instruction::{CacheIdent, CreateFlow};
         use common_meta::kv_backend::KvBackendRef;
         use common_meta::kv_backend::memory::MemoryKvBackend;
         use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
@@ -4458,15 +4466,15 @@ mod tests {
                 kv_backend,
             ));
             if case == "flow" {
-                inserter
-                    .table_flownode_set_cache
-                    .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                cache_test_flow(
+                    &inserter.table_flownode_set_cache,
+                    CreateFlow {
                         flow_id: 1,
                         source_table_ids: vec![1],
                         partition_to_peer_mapping: vec![(0, Peer::empty(1))],
-                    })])
-                    .await
-                    .unwrap();
+                    },
+                )
+                .await;
             }
             assert_eq!(
                 inserter
@@ -4746,17 +4754,15 @@ mod tests {
             true,
         );
         let peer = flownode_peer();
-        inserter
-            .table_flownode_set_cache
-            .invalidate(&[common_meta::instruction::CacheIdent::CreateFlow(
-                common_meta::instruction::CreateFlow {
-                    flow_id: 1,
-                    source_table_ids: vec![1, 2],
-                    partition_to_peer_mapping: vec![(0, peer)],
-                },
-            )])
-            .await
-            .unwrap();
+        cache_test_flow(
+            &inserter.table_flownode_set_cache,
+            CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![1, 2],
+                partition_to_peer_mapping: vec![(0, peer)],
+            },
+        )
+        .await;
         let mut normal_info = new_test_table_info(1, "normal_table", [1].into_iter());
         normal_info.catalog_name = DEFAULT_CATALOG_NAME.to_string();
         normal_info.schema_name = DEFAULT_SCHEMA_NAME.to_string();
@@ -4874,8 +4880,6 @@ mod tests {
 
     #[tokio::test]
     async fn flow_mirror_new_counts_regions_and_peer_clones() {
-        use common_meta::instruction::{CacheIdent, CreateFlow};
-
         let peer1 = flownode_peer();
         let peer2 = Peer {
             id: 2,
@@ -4887,14 +4891,15 @@ mod tests {
             Cache::new(10),
             cache_backend,
         ));
-        cache
-            .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+        cache_test_flow(
+            &cache,
+            CreateFlow {
                 flow_id: 1,
                 source_table_ids: vec![1],
                 partition_to_peer_mapping: vec![(0, peer1), (1, peer2)],
-            })])
-            .await
-            .unwrap();
+            },
+        )
+        .await;
         let request = |region_id| RegionInsertRequest {
             region_id,
             rows: Some(Rows {

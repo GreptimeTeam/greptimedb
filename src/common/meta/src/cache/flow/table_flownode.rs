@@ -118,7 +118,11 @@ async fn handle_create_flow(
     for table_id in source_table_ids {
         cache
             .compute(table_id, |entry| {
-                let mut map = entry.unwrap_or_default();
+                let Some(mut map) = entry else {
+                    // CreateFlow carries only the new flow. A cold lookup must load
+                    // all flows that use this source table.
+                    return Op::Nop;
+                };
                 Arc::make_mut(&mut map).extend(
                     flow_part2nodes
                         .iter()
@@ -273,20 +277,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_flow() {
-        let mem_kv = Arc::new(MemoryKvBackend::default());
-        let cache = CacheBuilder::new(128).build();
-        let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
-        let ident = vec![CacheIdent::CreateFlow(CreateFlow {
-            flow_id: 2001,
-            source_table_ids: vec![1024, 1025],
-            partition_to_peer_mapping: (1..=5).map(|i| (i as u32, Peer::empty(i + 1))).collect(),
-        })];
-        cache.invalidate(&ident).await.unwrap();
-        let set = cache.get(1024).await.unwrap().unwrap();
-        assert_eq!(set.len(), 5);
-        let set = cache.get(1025).await.unwrap().unwrap();
-        assert_eq!(set.len(), 5);
+    async fn test_create_flow_updates_warm_table_and_reloads_cold_table() {
+        use crate::key::flow::table_flow::{TableFlowManager, TableFlowValue};
+        use crate::kv_backend::TxnService;
+
+        let backend = Arc::new(MemoryKvBackend::default());
+        let manager = TableFlowManager::new(backend.clone());
+        let cache = new_table_flownode_set_cache(
+            "test".into(),
+            CacheBuilder::new(8).build(),
+            backend.clone(),
+        );
+        let tables = [1024, 1025];
+        let create_flow = |flow_id, peer_id| {
+            manager
+                .build_create_txn(
+                    flow_id,
+                    vec![(
+                        0,
+                        TableFlowValue {
+                            peer: Peer::empty(peer_id),
+                        },
+                    )],
+                    &tables,
+                )
+                .unwrap()
+        };
+        backend.txn(create_flow(1, 10)).await.unwrap();
+        // Both tables feed the old flow, but only the first mapping is cached.
+        assert_eq!(1, cache.get(tables[0]).await.unwrap().unwrap().len());
+        backend.txn(create_flow(2, 20)).await.unwrap();
+
+        cache
+            .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                flow_id: 2,
+                source_table_ids: tables.to_vec(),
+                partition_to_peer_mapping: vec![(0, Peer::empty(20))],
+            })])
+            .await
+            .unwrap();
+
+        assert!(cache.contains_key(&tables[0]));
+        assert!(!cache.contains_key(&tables[1]));
+        let expected = HashMap::from([
+            (FlowIdent::new(1, 0), Peer::empty(10)),
+            (FlowIdent::new(2, 0), Peer::empty(20)),
+        ]);
+        for id in tables {
+            assert_eq!(&expected, cache.get(id).await.unwrap().unwrap().as_ref());
+        }
     }
 
     #[tokio::test]
@@ -318,9 +357,9 @@ mod tests {
         resume.send(()).unwrap();
         assert!(read.await.unwrap().unwrap().is_empty());
         update.await.unwrap();
-        for set in cache.get_many(&[1, 2]).await.unwrap() {
-            assert_eq!(set.unwrap()[&FlowIdent::new(3, 0)], Peer::empty(7));
-        }
+        let set = cache.get(1).await.unwrap().unwrap();
+        assert_eq!(set[&FlowIdent::new(3, 0)], Peer::empty(7));
+        assert!(!cache.contains_key(&2));
         cache
             .invalidate(&[CacheIdent::FlowNodeAddressChange(7)])
             .await
@@ -334,6 +373,9 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let cache = CacheBuilder::new(128).build();
         let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
+        for id in [1024, 1025, 1026, 1027] {
+            assert!(cache.get(id).await.unwrap().unwrap().is_empty());
+        }
         let ident = vec![CacheIdent::CreateFlow(CreateFlow {
             flow_id: 2001,
             source_table_ids: vec![1024, 1025],
@@ -382,6 +424,9 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let cache = CacheBuilder::new(128).build();
         let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
+        for id in [1024, 1025] {
+            assert!(cache.get(id).await.unwrap().unwrap().is_empty());
+        }
         let ident = vec![
             CacheIdent::CreateFlow(CreateFlow {
                 flow_id: 2001,
