@@ -3606,6 +3606,8 @@ mod tests {
         cache.record_refresh(
             &SourceTable::new("greptime", "public", "cpu"),
             BTreeMap::from([(1, 1)]),
+            // No test moves the schema under a table it proves.
+            0,
             DirtySpan::Nothing,
             Instant::now(),
         );

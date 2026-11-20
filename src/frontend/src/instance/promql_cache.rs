@@ -584,6 +584,10 @@ mod tests {
         crate::query_cache::SourceTable::from(&identity("cpu"))
     }
 
+    /// The metadata version every test round reports: no test moves the schema under a
+    /// table it is filling.
+    const SOURCE_VERSION: u64 = 0;
+
     /// Admits the test table and opens it, as a background round that proved nothing
     /// changed would, so the request may serve what an earlier one filled.
     fn admission(cache: &RollupCache) -> crate::query_cache::Admission {
@@ -593,6 +597,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             std::collections::BTreeMap::from([(1, 1)]),
+            SOURCE_VERSION,
             crate::query_cache::DirtySpan::Nothing,
             Instant::now(),
         );
@@ -632,6 +637,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             std::collections::BTreeMap::from([(1, 2)]),
+            SOURCE_VERSION,
             crate::query_cache::DirtySpan::Hull(hull),
             Instant::now(),
         );

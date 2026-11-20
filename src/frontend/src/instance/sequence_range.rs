@@ -217,8 +217,9 @@ impl Instance {
             match self.refresh_source_table(cache, &table).await {
                 // A round that cannot commit its vector leaves the cursors where they were:
                 // the next round sees the same delta and retries.
-                Some((cursors, dirty)) => {
-                    if !cache.record_refresh(&table, cursors, dirty, Instant::now()) {
+                Some((cursors, source_version, dirty)) => {
+                    if !cache.record_refresh(&table, cursors, source_version, dirty, Instant::now())
+                    {
                         debug!("Rollup cache could not commit a round of {table}");
                     }
                 }
@@ -227,12 +228,19 @@ impl Instance {
         }
     }
 
-    /// Probes one source table and answers its new cursors and what the probe found
-    /// changed.
+    /// Probes one source table and answers its new cursors, the metadata version it read
+    /// them at, and what the probe found changed.
     ///
     /// [`None`] means the round proved nothing, and the caller must close the
     /// table's readiness. A round never advances a cursor without a proof: a removed
     /// row may advance a sequence without leaving a timestamp to invalidate by.
+    ///
+    /// The version is part of the proof, not a detail of it: a schema change moves the
+    /// table's version without moving any sequence, and it can change what an already
+    /// stored row means — a column dropped and added back with a default answers its
+    /// default for timestamps that were written before the change — so the cache cannot
+    /// keep serving what it read under another version. [`RollupCache::record_refresh`]
+    /// therefore compares it with the version its cursors were committed at.
     ///
     /// The probe asks about the table's own regions — the logical ones of a metric
     /// logical table — while the cursors it starts from, and the ones it answers, are
@@ -242,7 +250,7 @@ impl Instance {
         &self,
         cache: &RollupCache,
         table: &SourceTable,
-    ) -> Option<(BTreeMap<u64, u64>, DirtySpan)> {
+    ) -> Option<(BTreeMap<u64, u64>, u64, DirtySpan)> {
         let table_name = TableName::new(table.catalog(), table.schema(), table.table());
         // The probe is not a request: it runs as the frontend, under the catalog and
         // schema the table lives in, and reads nothing that depends on who asked.
@@ -257,7 +265,12 @@ impl Instance {
             )
             .await
             .ok()??;
-        let table_id = resolved.table_info().table_id();
+        let info = resolved.table_info();
+        let table_id = info.table_id();
+        // Taken before the probe and not after: a schema change that lands while the probe
+        // runs then shows up as a version change in the next round, whereas a version read
+        // after it would commit the new schema against rows read under the old one.
+        let source_version = info.ident.version;
         let (_physical_table_id, route) = self
             .partition_manager()
             .find_physical_table_route_with_id(table_id)
@@ -305,7 +318,7 @@ impl Instance {
             // A half hull is not a proof.
             _ => DirtySpan::Everything,
         };
-        Some((high, dirty))
+        Some((high, source_version, dirty))
     }
 }
 

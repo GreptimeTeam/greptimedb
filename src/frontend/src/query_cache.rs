@@ -89,14 +89,22 @@
 //! - [`Entry::read_through`] is the source sequence the read behind a payload reported,
 //!   again per region.
 //!
-//! A fill publishes only when its own read is at least as far as the watermark on every
-//! region the invalidation covers, and at least as far as whatever is resident with at
-//! least one region strictly further — an entry past its age bound is the one exception, and
-//! a read of the same sequence may refresh it. A payload materialized before an invalidation
-//! can therefore never be published after it, and a read that finished later but got less far
-//! cannot replace a newer payload. A read that cannot report its sequence, or whose regions
-//! are a different set, is not published at all. A fill that loses is still returned to the
-//! request that read it.
+//! A fill publishes only when its own read reports exactly the regions the watermark covers —
+//! the same key set, neither a subset nor a superset — and is at least as far as the
+//! watermark in every one of them, equality allowed. A different set of regions is not a
+//! comparison at all: a read that saw fewer regions cannot be shown to describe the same data,
+//! and one that saw more cannot be ordered against the invalidation either. A query whose
+//! watermark is still empty is the exception, because the table had no proved domain when the
+//! fill registered: there is nothing to compare, and the read's own vector is the only bound
+//! there is. Whatever is resident is the second bound: a read replaces it only when it reports
+//! the same regions, is at least as far everywhere, and is strictly further somewhere — an
+//! entry past its age bound is the one exception, and a read of the same sequence may refresh
+//! it.
+//!
+//! A payload materialized before an invalidation can therefore never be published after it,
+//! and a read that finished later but got less far cannot replace a newer payload. A read that
+//! cannot report its sequence is not published at all. A fill that loses is still returned to
+//! the request that read it.
 //!
 //! The watermark is written only by the rounds. A round that found a dirty hull drops the
 //! entries the hull reaches and moves the watermark of every query of the table to the
@@ -107,6 +115,23 @@
 //! [`QueryState::version`] counts the changes to a query's cache: every published payload
 //! and every committed invalidation advances it once. Nothing admits or refuses a fill by
 //! it; it is what tells an observer how many times the cache changed.
+//!
+//! # Round proofs
+//!
+//! A round's vector is compared with the cursors the table committed before anything is
+//! committed, whatever the round found — a quiet round included. The key sets have to be the
+//! same and no region may go back: a region that went back is a vector of something the cache
+//! cannot describe, so the table stops being served and neither the cursors, the watermarks nor
+//! the version move.
+//!
+//! A route that gained or lost a region re-keys the cursors, which makes the round's vector and
+//! everything committed under the old domain incomparable. The table then forgets its entries,
+//! its queries and its cursors and starts again from the round's vector as its baseline, so a
+//! chunk of the old route can never be served for the new one and a fill that was reading
+//! across the change is refused when it tries to publish. The same happens when the table's
+//! metadata version moved, because a schema change can change the value of rows already stored
+//! without moving any sequence: a column dropped and added back with a default answers
+//! differently for the same timestamps.
 //!
 //! Nothing on either side waits for the other.
 //!
@@ -436,6 +461,43 @@ fn may_replace(
         further |= now > *previous;
     }
     further || resident_expired
+}
+
+/// How one round's `high` vector relates to the cursors a table committed.
+///
+/// The two vectors describe regions, so they can only be compared when they name the same
+/// ones. A route that gained or lost a region changes the keys, and a vector has to be
+/// renamed rather than merged: a region the table no longer has would keep a bound of
+/// another route, and a region it gained would hide behind the others' progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Domain {
+    /// The table has committed no cursors yet, so the round is its baseline.
+    Baseline,
+    /// The round names the committed regions and none of them went back.
+    Same,
+    /// The round names another set of regions: the route moved.
+    Rekeyed,
+    /// The round names the committed regions but one of them went back, so it is not a
+    /// later round of this table at all.
+    Regressed,
+}
+
+/// The [`Domain`] a round's `high` vector sits in, seen from the committed `cursors`.
+fn domain_of(committed: &BTreeMap<u64, u64>, high: &BTreeMap<u64, u64>) -> Domain {
+    if committed.is_empty() {
+        return Domain::Baseline;
+    }
+    // Equal lengths and a subset of the committed keys is the same key set.
+    if committed.len() != high.len() || committed.keys().any(|region| !high.contains_key(region)) {
+        return Domain::Rekeyed;
+    }
+    if committed
+        .iter()
+        .any(|(region, cursor)| high[region] < *cursor)
+    {
+        return Domain::Regressed;
+    }
+    Domain::Same
 }
 
 /// Whether `left` and `right` share at least one millisecond.
@@ -793,9 +855,10 @@ pub enum Lookup {
 pub enum Insert {
     /// The payload became the entry of the chunk.
     Stored,
-    /// The fill was not published: the table was invalidated after it was admitted,
-    /// or its state was reclaimed and replaced, so the read behind the payload may
-    /// answer with data nothing vouches for.
+    /// The fill was not published: the table was invalidated after it was admitted, the
+    /// region domain or the metadata version it read moved under it, or its state was
+    /// reclaimed and replaced, so the read behind the payload may answer with data nothing
+    /// vouches for. A read whose region set is not the committed one is refused here too.
     Rejected,
     /// The chunk is empty, so nothing was written.
     Bypassed,
@@ -833,7 +896,18 @@ pub(crate) struct TableState {
 #[derive(Debug, Default)]
 struct TableStateInner {
     /// The per-region sequence the background refresher has proved up to.
+    ///
+    /// Its keys are the table's committed region domain: every round's vector is compared
+    /// with this one, and a query that registers while it is non-empty starts its own
+    /// watermark here instead of starting cold.
     cursors: BTreeMap<u64, u64>,
+    /// The metadata version of the source table these cursors were committed against.
+    ///
+    /// A schema change moves it without moving any sequence, and a schema change can change
+    /// the value of rows that are already stored — a column dropped and added back under the
+    /// same name and type answers its default for the same timestamps — so a round of another
+    /// version empties the table exactly like a change it cannot bound.
+    source_version: Option<u64>,
     /// Whether a background round has proved this table since it was registered.
     ///
     /// A lookup is answered only for a ready table: an unproved table's entries may
@@ -882,9 +956,10 @@ struct QueryState {
     ///
     /// It is the round's high watermark, a complete vector rather than one number: a
     /// region that fell behind must not be hidden by another region's progress. A fill
-    /// publishes only when the sequence its own read reported is strictly past this, so a
-    /// payload materialized before the invalidation cannot be published after it. Only a
-    /// round writes it.
+    /// publishes only when its read reported the same regions and is at least as far in
+    /// every one of them, so a payload materialized before the invalidation cannot be
+    /// published after it. It starts at the table's committed cursors — or empty while the
+    /// table has no domain yet — and only a round moves it.
     invalidated_watermark: BTreeMap<u64, u64>,
     /// How many times this query's cache changed.
     ///
@@ -894,16 +969,23 @@ struct QueryState {
 }
 
 impl QueryState {
-    /// Whether a read that reported `read_through` is at least as far as this query's last
-    /// invalidation on every region the invalidation covers.
+    /// Whether a read that reported `read_through` may be published over this query's last
+    /// invalidation.
     ///
-    /// The comparison is component by component and allows equality: a read that opened
-    /// exactly at the invalidated sequence saw everything that invalidation described. A
-    /// read that reports a different set of regions cannot be compared at all, so it is not
-    /// publishable.
+    /// The read has to report exactly the regions the invalidation covers — the same key set,
+    /// not a subset and not a superset — and be at least as far in every one of them: a read
+    /// that opened exactly at the invalidated sequence saw everything that invalidation
+    /// described, so equality is enough. A different set of regions cannot be compared at all,
+    /// because a read that saw fewer regions proves less and one that saw more may have read
+    /// regions this table never committed. An empty watermark is the cold case: the table had
+    /// no proved domain when the fill registered, so the read's own vector is the only bound
+    /// there is.
     fn is_past_watermark(&self, read_through: &BTreeMap<u64, u64>) -> bool {
         let watermark = &self.invalidated_watermark;
-        read_through.len() >= watermark.len()
+        if watermark.is_empty() {
+            return !read_through.is_empty();
+        }
+        read_through.len() == watermark.len()
             && watermark.iter().all(|(region, sequence)| {
                 read_through
                     .get(region)
@@ -1352,6 +1434,11 @@ impl RollupCache {
     ///
     /// The returned [`FillGuard`] is registered with the query, so a round that invalidates
     /// while the fill runs moves the watermark the publication is judged against.
+    ///
+    /// A query that registers while the table already has a committed domain starts its
+    /// watermark at the table's cursors rather than at nothing: the table is not cold, so a
+    /// read of a new identity has no more right to publish an unproved sequence than one of
+    /// an identity that was already reading it.
     pub fn begin_fill(
         &self,
         admission: &Admission,
@@ -1359,16 +1446,19 @@ impl RollupCache {
         dependency: TimeChunk,
         captured_at: SystemTime,
     ) -> FillGuard {
-        // Registered before the read: the identity a round has to move the watermark of
-        // exists while this fill runs.
-        admission
-            .state
-            .inner
-            .lock()
-            .unwrap()
-            .queries
-            .entry(key.identity().clone())
-            .or_default();
+        {
+            let mut inner = admission.state.inner.lock().unwrap();
+            let watermark = inner.cursors.clone();
+            // Registered before the read: the identity a round has to move the watermark of
+            // exists while this fill runs.
+            inner
+                .queries
+                .entry(key.identity().clone())
+                .or_insert_with(|| QueryState {
+                    invalidated_watermark: watermark,
+                    version: 0,
+                });
+        }
         FillGuard {
             state: Arc::clone(&admission.state),
             identity: key.identity().clone(),
@@ -1380,12 +1470,13 @@ impl RollupCache {
 
     /// Stores `payload` as the whole result of the chunk `fill` was registered for.
     ///
-    /// The payload is published only when the source sequence its own read reported is at
-    /// least as far as the query's invalidated watermark, and at least as far as whatever the
-    /// chunk holds with at least one region strictly further. A payload a round overtook is
-    /// therefore refused, and so is one that would replace a newer payload; an entry past its
-    /// age bound may still be refreshed by a read of the same sequence. The request that read
-    /// a refused payload still gets it; the cache just does not keep it.
+    /// The payload is published only when its read reported exactly the regions the query's
+    /// invalidated watermark covers and is at least as far in every one of them, and at least
+    /// as far as whatever the chunk holds with at least one region strictly further. A payload
+    /// a round overtook is therefore refused, and so is one of another region domain and one
+    /// that would replace a newer payload; an entry past its age bound may still be refreshed
+    /// by a read of the same sequence. The request that read a refused payload still gets it;
+    /// the cache just does not keep it.
     ///
     /// A publication is a cache change, so it advances the query's version counter, which
     /// admits nothing and only records that the cache changed.
@@ -1504,15 +1595,29 @@ impl RollupCache {
     /// Nothing here waits for a fill: a fill that is still reading is refused when it tries
     /// to publish.
     ///
+    /// Every round, a quiet one included, is first compared with the cursors the table
+    /// committed: its vector has to name the same regions and go back in none of them. A
+    /// region that went back is a vector of something the cache cannot describe, so the round
+    /// proves nothing, the table stops being served, and nothing at all is advanced.
+    ///
     /// A table's first round starts from zero cursors, so its delta covers every row the
     /// table has ever had, including whatever a request filled before the table was
     /// proved. Applying that delta is therefore enough to open the table; there is no
     /// separate baseline eviction, and one is only used when the probe cannot bound the
-    /// change at all.
+    /// change at all or when a round restarts the table below. That round is also what
+    /// commits the table's `source_version` as its baseline.
+    ///
+    /// Two rounds cannot be applied to what is committed and instead restart the table from
+    /// their own vector: one whose regions are of another domain — a route that gained or
+    /// lost a region re-keys the cursors — and one that read another metadata version, because
+    /// a schema change can answer differently for rows that are already stored even when no
+    /// sequence moved. Both drop every entry, forget every query, and are then the new
+    /// baseline, so nothing read before them can be published or served after them.
     pub fn record_refresh(
         &self,
         table: &SourceTable,
         cursors: BTreeMap<u64, u64>,
+        source_version: u64,
         dirty: DirtySpan,
         now: Instant,
     ) -> bool {
@@ -1521,6 +1626,31 @@ impl RollupCache {
         };
         let high = cursors.clone();
         let mut inner = state.inner.lock().unwrap();
+        // A vector that names no region is not a domain: it cannot be committed over anything,
+        // and it is not a domain change to restart from either.
+        if high.is_empty() {
+            inner.ready = false;
+            return false;
+        }
+        match domain_of(&inner.cursors, &high) {
+            Domain::Regressed => {
+                // The round's vector cannot replace what is committed — a region went back — so
+                // the table proves nothing: it stops being served, nothing is committed, and the
+                // cursors stay where they were so the next round sees the same delta.
+                inner.ready = false;
+                return false;
+            }
+            Domain::Rekeyed => {
+                self.reset_table(table, &mut inner, cursors, source_version, now);
+                return true;
+            }
+            Domain::Baseline | Domain::Same => {}
+        }
+        // A version change moves no sequence, so it would otherwise pass as a quiet round.
+        if !inner.cursors.is_empty() && inner.source_version != Some(source_version) {
+            self.reset_table(table, &mut inner, cursors, source_version, now);
+            return true;
+        }
         if !matches!(dirty, DirtySpan::Nothing) && !self.can_commit(&inner, &high) {
             // The round's vector cannot replace what is committed — it is empty, of another
             // domain, or behind a region — so the table proves nothing: it stops being served,
@@ -1536,8 +1666,42 @@ impl RollupCache {
         }
         inner.cursors = cursors;
         inner.ready = true;
+        inner.source_version = Some(source_version);
         inner.last_success = Some(now);
         true
+    }
+
+    /// Forgets everything `table` committed and restarts it from the round's `cursors`.
+    ///
+    /// This is what a round that cannot be applied to the committed state does: one of another
+    /// region domain, and one of another metadata version. The entries go because their
+    /// payloads were materialized from data the new domain or the new version may describe
+    /// differently, and the queries go because a fill that is reading right now would otherwise
+    /// publish against a watermark that no longer bounds it — the next [`RollupCache::insert`]
+    /// of such a fill finds no query state and refuses it.
+    ///
+    /// The round's own vector becomes the new baseline, so the round is committed like any
+    /// other successful one and the next round is compared with it. A region this round saw for
+    /// the first time was probed from zero, so its whole history is part of this round's delta;
+    /// the entries of the other regions are already gone, so nothing of theirs is wanted.
+    fn reset_table(
+        &self,
+        table: &SourceTable,
+        inner: &mut TableStateInner,
+        cursors: BTreeMap<u64, u64>,
+        source_version: u64,
+        now: Instant,
+    ) {
+        inner.queries.clear();
+        let dropped = self.invalidate_table(table);
+        inner.cursors = cursors;
+        inner.source_version = Some(source_version);
+        inner.ready = true;
+        inner.last_success = Some(now);
+        debug!(
+            "Rollup cache restarted table {table} on {} regions of version {source_version} and dropped {dropped} entries",
+            inner.cursors.len(),
+        );
     }
 
     /// Whether the round's `high` may be committed over every query's watermark of `table`.
@@ -1785,6 +1949,10 @@ mod tests {
         RollupCache::new(config())
     }
 
+    /// The metadata version every test round reports, so a round only empties a table when
+    /// the test says the version moved.
+    const SOURCE_VERSION: u64 = 1;
+
     /// Admits `identity`'s table and opens it, as a background round that proved nothing
     /// changed would.
     ///
@@ -1795,6 +1963,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION,
             DirtySpan::Nothing,
             Instant::now(),
         );
@@ -2008,6 +2177,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION,
             DirtySpan::Nothing,
             Instant::now(),
         );
@@ -2062,6 +2232,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 12)]),
+            SOURCE_VERSION,
             DirtySpan::Hull(TimeChunk::new(HEAD_MS, HEAD_MS + 1)),
             Instant::now(),
         );
@@ -2114,6 +2285,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 12)]),
+            SOURCE_VERSION,
             DirtySpan::Everything,
             Instant::now(),
         );
@@ -2217,12 +2389,21 @@ mod tests {
     fn a_read_that_misses_a_region_the_resident_one_covered_does_not_replace_it() {
         let cache = cache();
         let admission = opened(&cache);
+        // A second region joins the table's domain, so a read of both regions is what the
+        // table's watermark covers.
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11), (2, 11)]),
+            SOURCE_VERSION,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
         let key = chunk_key();
         let both = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
         assert_eq!(
             cache.insert(
                 &both,
-                &BTreeMap::from([(1, 10), (2, 10)]),
+                &BTreeMap::from([(1, 20), (2, 20)]),
                 payload(),
                 Arc::default()
             ),
@@ -2250,6 +2431,70 @@ mod tests {
             Insert::Rejected
         );
         assert_eq!(cache.entry_count(), 0);
+    }
+
+    #[test]
+    fn a_read_of_another_region_domain_is_not_published() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        // The table committed region 1 alone, so a read of another set of regions cannot be
+        // ordered against the invalidation: neither a superset, which may have read regions
+        // the table never committed, nor a subset, which proves less than the invalidation
+        // covers.
+        for read in [
+            BTreeMap::from([(1, 100), (2, 100)]),
+            BTreeMap::from([(2, 100)]),
+        ] {
+            let guard = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+            assert_eq!(
+                cache.insert(&guard, &read, payload(), Arc::default()),
+                Insert::Rejected,
+                "{read:?} is not the committed domain"
+            );
+        }
+        assert_eq!(cache.entry_count(), 0);
+        // A read of exactly the committed domain publishes.
+        assert_eq!(fill(&cache, &admission, &key, at(LATER_MS)), Insert::Stored);
+    }
+
+    #[test]
+    fn a_new_identity_cannot_publish_an_unproved_sequence() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = TimeChunkKey::new(other_identity(), chunk_key().chunk());
+        // The identity is new, but the table it reads is not cold: its watermark starts where
+        // the table committed, so neither another domain nor a read behind that sequence is
+        // published.
+        for (read, expected) in [
+            (BTreeMap::from([(2, 100)]), Insert::Rejected),
+            (BTreeMap::from([(1, 5)]), Insert::Rejected),
+            (BTreeMap::from([(1, 11)]), Insert::Stored),
+        ] {
+            let guard = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+            assert_eq!(
+                cache.insert(&guard, &read, payload(), Arc::default()),
+                expected,
+                "{read:?}"
+            );
+        }
+        // A table no round has established a domain for is the one place an unproved read is
+        // published — there is nothing for it to be unproved against — which is what
+        // [`an_unproved_table_never_serves`] states from the other side.
+    }
+
+    #[test]
+    fn a_cold_table_keeps_the_unproved_reads_of_a_new_identity() {
+        let cache = cache();
+        let admission = cache.admit(&table(), Instant::now());
+        let key = TimeChunkKey::new(other_identity(), chunk_key().chunk());
+        // No round has established a domain yet, so the query starts with an empty watermark
+        // and its read is the only bound there is.
+        let guard = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(&guard, &BTreeMap::from([(9, 1)]), payload(), Arc::default()),
+            Insert::Stored
+        );
     }
 
     #[test]
@@ -2326,6 +2571,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 12)]),
+            SOURCE_VERSION,
             DirtySpan::Hull(TimeChunk::new(HEAD_MS + STEP_MS, HEAD_MS + STEP_MS + 1)),
             Instant::now(),
         );
@@ -2353,6 +2599,7 @@ mod tests {
         cache.record_refresh(
             &other_table(),
             BTreeMap::from([(1, 3)]),
+            SOURCE_VERSION,
             DirtySpan::Everything,
             Instant::now(),
         );
@@ -2372,6 +2619,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 12)]),
+            SOURCE_VERSION,
             DirtySpan::Everything,
             Instant::now(),
         );
@@ -2387,6 +2635,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION,
             DirtySpan::Nothing,
             Instant::now(),
         );
@@ -2402,6 +2651,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION,
             DirtySpan::Nothing,
             Instant::now(),
         );
@@ -2409,6 +2659,151 @@ mod tests {
             cache.insert(&slow, &read_through(), payload(), Arc::default()),
             Insert::Stored
         );
+    }
+
+    #[test]
+    fn a_quiet_round_that_cannot_extend_the_cursors_proves_nothing() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        fill(&cache, &admission, &key, at(LATER_MS));
+
+        // A quiet round is compared with what is committed like any other: a region that went
+        // back is a vector of some other history, so the round proves nothing.
+        assert!(!cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 10)]),
+            SOURCE_VERSION,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(
+            cache.cursors(&table()),
+            BTreeMap::from([(1, 11)]),
+            "the cursor stays where the last proved round left it"
+        );
+        assert_eq!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Miss(MissReason::TableNotProved),
+            "a round that proves nothing closes the table"
+        );
+        // Nor does a round of no regions at all: an empty vector is not a domain.
+        assert!(!cache.record_refresh(
+            &table(),
+            BTreeMap::new(),
+            SOURCE_VERSION,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(cache.cursors(&table()), BTreeMap::from([(1, 11)]));
+        assert_eq!(cache.entry_count(), 1, "nothing was dropped either");
+    }
+
+    #[test]
+    fn a_round_of_another_region_domain_restarts_the_table() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        fill(&cache, &admission, &key, at(LATER_MS));
+        // A fill that is still reading when the route moves.
+        let slow = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+
+        // The route gained a region. The round's vector and everything committed under the old
+        // one are of different domains, so the table starts again instead of committing a mix
+        // of the two.
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11), (2, 4)]),
+            SOURCE_VERSION,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(cache.entry_count(), 0, "the entries of the old route go");
+        assert_eq!(cache.cursors(&table()), BTreeMap::from([(1, 11), (2, 4)]));
+        assert_eq!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Miss(MissReason::NotFound),
+            "a chunk of the old route is never served for the new one"
+        );
+        assert_eq!(
+            cache.insert(&slow, &read_through(), payload(), Arc::default()),
+            Insert::Rejected,
+            "a fill of the old domain is not published into the new one"
+        );
+
+        // A read of the new domain publishes, and the route losing a region drops it again.
+        let guard = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+        assert_eq!(
+            cache.insert(
+                &guard,
+                &BTreeMap::from([(1, 100), (2, 100)]),
+                payload(),
+                Arc::default()
+            ),
+            Insert::Stored
+        );
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 12)]),
+            SOURCE_VERSION,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(cache.entry_count(), 0, "a shrunken route drops them too");
+        assert_eq!(cache.cursors(&table()), BTreeMap::from([(1, 12)]));
+    }
+
+    #[test]
+    fn a_round_of_another_table_version_restarts_the_table() {
+        let cache = cache();
+        let admission = opened(&cache);
+        let key = chunk_key();
+        fill(&cache, &admission, &key, at(LATER_MS));
+        let slow = cache.begin_fill(&admission, &key, key.chunk(), at(LATER_MS));
+
+        // The schema moved while no sequence did. A column dropped and added back with a default
+        // answers differently for rows that are already stored, so the same quiet vector is no
+        // longer a proof.
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION + 1,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(cache.entry_count(), 0, "a version change drops every entry");
+        assert_eq!(
+            cache.lookup(&admission, &key, at(LATER_MS)),
+            Lookup::Miss(MissReason::NotFound)
+        );
+        assert_eq!(
+            cache.insert(&slow, &read_through(), payload(), Arc::default()),
+            Insert::Rejected,
+            "a fill that read the old schema is never published"
+        );
+        assert_eq!(
+            cache.cursors(&table()),
+            BTreeMap::from([(1, 11)]),
+            "the round of the new version is the new baseline"
+        );
+
+        // The next round of that version is quiet, and the one after it keeps the entry.
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION + 1,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(fill(&cache, &admission, &key, at(LATER_MS)), Insert::Stored);
+        assert!(cache.record_refresh(
+            &table(),
+            BTreeMap::from([(1, 11)]),
+            SOURCE_VERSION + 1,
+            DirtySpan::Nothing,
+            Instant::now(),
+        ));
+        assert_eq!(cache.entry_count(), 1, "the same version keeps it");
     }
 
     #[test]
@@ -2484,6 +2879,7 @@ mod tests {
         cache.record_refresh(
             &elsewhere,
             BTreeMap::from([(1, 2)]),
+            SOURCE_VERSION,
             DirtySpan::Everything,
             Instant::now(),
         );
@@ -2513,6 +2909,7 @@ mod tests {
         cache.record_refresh(
             &table(),
             BTreeMap::from([(1, 12)]),
+            SOURCE_VERSION,
             DirtySpan::Hull(TimeChunk::new(HEAD_MS, HEAD_MS + 1)),
             Instant::now(),
         );
