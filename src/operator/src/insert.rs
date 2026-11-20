@@ -4923,7 +4923,7 @@ mod tests {
     #[tokio::test]
     async fn flow_mirror_bounds_and_deduplicates_cold_lookups() {
         let (started, mut loads) = tokio::sync::mpsc::unbounded_channel();
-        let cache = Arc::new(common_meta::cache::CacheContainer::new_coordinated(
+        let cache = Arc::new(common_meta::cache::CacheContainer::new(
             "test".into(),
             Cache::new(32),
             Arc::new(move |&id| {

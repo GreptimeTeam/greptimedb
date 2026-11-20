@@ -645,7 +645,7 @@ mod tests {
         // Only the partition lookup reads the ordinary table's route. Hold the physical
         // read until then, so an enumerator that prefetched it must be polled to finish.
         let gate = Arc::new(Notify::new());
-        let routes = TableRouteCache::new_coordinated(
+        let routes = TableRouteCache::new(
             "test_routes".into(),
             moka::future::Cache::new(256),
             Arc::new(move |&id| {

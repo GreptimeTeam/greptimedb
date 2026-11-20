@@ -38,8 +38,8 @@ pub fn new_view_info_cache(
     let view_info_manager = Arc::new(ViewInfoManager::new(kv_backend));
     let init = init_factory(view_info_manager.clone());
 
-    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_id_key)
-        .with_batch_initializer(Arc::new(move |ids| {
+    CacheContainer::new(name, cache, init, CacheIdent::table_id_key).with_batch_initializer(
+        Arc::new(move |ids| {
             let manager = view_info_manager.clone();
             Box::pin(async move {
                 manager
@@ -47,7 +47,8 @@ pub fn new_view_info_cache(
                     .await
                     .map(crate::cache::share_batch_values)
             })
-        }))
+        }),
+    )
 }
 
 fn init_factory(view_info_manager: ViewInfoManagerRef) -> Initializer<TableId, Arc<ViewInfoValue>> {

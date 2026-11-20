@@ -159,69 +159,34 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-    use moka::future::{Cache, CacheBuilder};
+    use moka::future::Cache;
 
+    use crate::cache::container::EventHandler;
     use crate::cache::registry::CacheRegistryBuilder;
     use crate::cache::*;
     use crate::cache_invalidator::{CacheInvalidator, Context};
     use crate::error::Result;
     use crate::instruction::CacheIdent;
 
-    fn always_true_filter(_: &CacheIdent) -> bool {
-        true
-    }
-
-    fn test_cache(
+    fn test_cache<K: Clone + Eq + std::hash::Hash + Send + Sync + 'static>(
         name: &str,
-        invalidator: Invalidator<String, String, CacheIdent>,
-    ) -> CacheContainer<String, String, CacheIdent> {
-        let cache: Cache<String, String> = CacheBuilder::new(128).build();
-        let counter = Arc::new(AtomicI32::new(0));
-        let moved_counter = counter.clone();
-        let init: Initializer<String, String> = Arc::new(move |_| {
-            moved_counter.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { Ok(Some("hi".to_string())) })
-        });
-
-        CacheContainer::new(
+        handler: EventHandler<K, String, CacheIdent>,
+    ) -> CacheContainer<K, String, CacheIdent> {
+        CacheContainer::with_event_handler(
             name.to_string(),
-            cache,
-            invalidator,
-            init,
-            always_true_filter,
-        )
-    }
-
-    fn test_i32_cache(
-        name: &str,
-        invalidator: Invalidator<i32, String, CacheIdent>,
-    ) -> CacheContainer<i32, String, CacheIdent> {
-        let cache: Cache<i32, String> = CacheBuilder::new(128).build();
-        let counter = Arc::new(AtomicI32::new(0));
-        let moved_counter = counter.clone();
-        let init: Initializer<i32, String> = Arc::new(move |_| {
-            moved_counter.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { Ok(Some("foo".to_string())) })
-        });
-
-        CacheContainer::new(
-            name.to_string(),
-            cache,
-            invalidator,
-            init,
-            always_true_filter,
+            Cache::new(128),
+            Arc::new(|_| Box::pin(async { Ok(Some("hi".to_string())) })),
+            handler,
         )
     }
 
     #[tokio::test]
     async fn test_register() {
         let builder = CacheRegistryBuilder::default();
-        let invalidator: Invalidator<_, String, CacheIdent> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
-        let i32_cache = Arc::new(test_i32_cache("i32_cache", invalidator));
-        let invalidator: Invalidator<_, String, CacheIdent> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
-        let cache = Arc::new(test_cache("string_cache", invalidator));
+        let invalidator: EventHandler<_, String, CacheIdent> = Box::new(|_, _| Box::pin(async {}));
+        let i32_cache = Arc::new(test_cache::<i32>("i32_cache", invalidator));
+        let invalidator: EventHandler<_, String, CacheIdent> = Box::new(|_, _| Box::pin(async {}));
+        let cache = Arc::new(test_cache::<String>("string_cache", invalidator));
         let registry = builder.add_cache(i32_cache).add_cache(cache).build();
 
         let cache = registry
@@ -241,31 +206,34 @@ mod tests {
         // 1st layer
         let counter = Arc::new(AtomicBool::new(false));
         let moved_counter = counter.clone();
-        let invalidator: Invalidator<String, String, CacheIdent> = Box::new(move |_, _| {
+        let invalidator: EventHandler<String, String, CacheIdent> = Box::new(move |_, _| {
             let counter = moved_counter.clone();
             Box::pin(async move {
                 assert!(!counter.load(Ordering::Relaxed));
                 counter.store(true, Ordering::Relaxed);
-                Ok(())
             })
         });
-        let cache = Arc::new(test_cache("string_cache", invalidator));
+        let cache = Arc::new(test_cache::<String>("string_cache", invalidator));
         let builder =
             builder.add_cache_registry(CacheRegistryBuilder::default().add_cache(cache).build());
         // 2nd layer
         let moved_counter = counter.clone();
-        let invalidator: Invalidator<i32, String, CacheIdent> = Box::new(move |_, _| {
+        let invalidator: EventHandler<i32, String, CacheIdent> = Box::new(move |_, _| {
             let counter = moved_counter.clone();
             Box::pin(async move {
                 assert!(counter.load(Ordering::Relaxed));
-                Ok(())
             })
         });
-        let i32_cache = Arc::new(test_i32_cache("i32_cache", invalidator));
+        let i32_cache = Arc::new(test_cache::<i32>("i32_cache", invalidator));
         let builder = builder
             .add_cache_registry(CacheRegistryBuilder::default().add_cache(i32_cache).build());
 
         let registry = builder.build();
+        registry
+            .invalidate(&Context::default(), &[CacheIdent::TableId(1)])
+            .await
+            .unwrap();
+        assert!(counter.load(Ordering::Relaxed));
         let cache = registry
             .get::<Arc<CacheContainer<i32, String, CacheIdent>>>()
             .unwrap();
@@ -278,12 +246,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_invalidate_all() {
-        let invalidator: Invalidator<_, String, CacheIdent> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
-        let i32_cache = Arc::new(test_i32_cache("i32_cache", invalidator));
-        let invalidator: Invalidator<_, String, CacheIdent> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
-        let string_cache = Arc::new(test_cache("string_cache", invalidator));
+        let invalidator: EventHandler<_, String, CacheIdent> = Box::new(|_, _| Box::pin(async {}));
+        let i32_cache = Arc::new(test_cache::<i32>("i32_cache", invalidator));
+        let invalidator: EventHandler<_, String, CacheIdent> = Box::new(|_, _| Box::pin(async {}));
+        let string_cache = Arc::new(test_cache::<String>("string_cache", invalidator));
 
         i32_cache.get(1).await.unwrap();
         string_cache.get_by_ref("foo").await.unwrap();
@@ -322,9 +288,8 @@ mod tests {
     #[tokio::test]
     async fn test_layered_registry_invalidate_all() {
         let order = Arc::new(AtomicI32::new(0));
-        let invalidator: Invalidator<_, String, CacheIdent> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
-        let first_layer_cache = Arc::new(test_cache("first_layer_cache", invalidator));
+        let invalidator: EventHandler<_, String, CacheIdent> = Box::new(|_, _| Box::pin(async {}));
+        let first_layer_cache = Arc::new(test_cache::<String>("first_layer_cache", invalidator));
         let first_layer_order = Arc::new(LayerOrderInvalidator {
             expected_order: 0,
             order: order.clone(),
@@ -334,9 +299,8 @@ mod tests {
             .add_cache(first_layer_cache.clone())
             .build();
 
-        let invalidator: Invalidator<_, String, CacheIdent> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
-        let second_layer_cache = Arc::new(test_i32_cache("second_layer_cache", invalidator));
+        let invalidator: EventHandler<_, String, CacheIdent> = Box::new(|_, _| Box::pin(async {}));
+        let second_layer_cache = Arc::new(test_cache::<i32>("second_layer_cache", invalidator));
         let second_layer_order = Arc::new(LayerOrderInvalidator {
             expected_order: 1,
             order: order.clone(),

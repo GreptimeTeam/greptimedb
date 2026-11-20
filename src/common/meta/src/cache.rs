@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-pub use container::{BatchInitializer, CacheContainer, Initializer, Invalidator, TokenFilter};
+pub use container::{BatchInitializer, CacheContainer, Initializer};
 pub use flow::{
     FlowInfoCache, FlowInfoCacheRef, TableFlownodeSetCache, TableFlownodeSetCacheRef,
     load_shared_flow_infos, new_flow_info_cache, new_table_flownode_set_cache,
