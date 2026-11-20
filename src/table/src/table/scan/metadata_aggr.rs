@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use datafusion::config::ConfigOptions;
 use datafusion::execution::context::TaskContext;
+use datafusion::functions_aggregate::count::Count;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
 use datafusion::physical_plan::execution_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
@@ -31,14 +32,16 @@ use datafusion::physical_plan::expressions::{Column, Literal};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    SendableRecordBatchStream,
 };
 use datafusion_common::arrow::array::{ArrayRef, Int64Array};
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::arrow::record_batch::RecordBatch;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result};
-use datafusion_physical_expr::PhysicalExpr;
+use datafusion_expr::AggregateUDF;
+use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr};
 use futures::{StreamExt, stream};
 
 use crate::table::scan::RegionScanExec;
@@ -55,9 +58,29 @@ use crate::table::scan::RegionScanExec;
 pub struct MetadataAggrExec {
     input: Arc<dyn ExecutionPlan>,
     exact_rows: usize,
+    properties: Arc<PlanProperties>,
 }
 
 impl MetadataAggrExec {
+    fn new(input: Arc<dyn ExecutionPlan>, exact_rows: usize) -> Self {
+        let input_properties = input.properties();
+        // The extra state row can differ from the input's rows, so the input's
+        // ordering, equivalent values, uniqueness and partition keys do not hold.
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(input.schema()),
+            Partitioning::UnknownPartitioning(
+                input_properties.output_partitioning().partition_count(),
+            ),
+            input_properties.emission_type,
+            input_properties.boundedness,
+        ));
+        Self {
+            input,
+            exact_rows,
+            properties,
+        }
+    }
+
     /// Rows counted from metadata.
     pub fn exact_rows(&self) -> usize {
         self.exact_rows
@@ -83,7 +106,7 @@ impl ExecutionPlan for MetadataAggrExec {
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
-        self.input.properties()
+        &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -108,10 +131,7 @@ impl ExecutionPlan for MetadataAggrExec {
         let [input] = <[_; 1]>::try_from(children).map_err(|_| {
             DataFusionError::Internal("MetadataAggrExec requires exactly one child".to_string())
         })?;
-        Ok(Arc::new(Self {
-            input,
-            exact_rows: self.exact_rows,
-        }))
+        Ok(Arc::new(Self::new(input, self.exact_rows)))
     }
 
     fn execute(
@@ -141,14 +161,14 @@ impl ExecutionPlan for MetadataAggrExec {
 /// plan, or a scan without a split, is left unchanged.
 #[derive(Debug, Default)]
 pub struct PartialAggrRule {
-    count_state_function: Option<String>,
+    is_count_state: Option<fn(&AggregateUDF) -> bool>,
 }
 
 impl PartialAggrRule {
-    /// Recognizes an engine COUNT-state wrapper without depending on its implementation.
-    pub fn with_count_state(function: String) -> Self {
+    /// Uses the engine's predicate for a state wrapper around the builtin COUNT.
+    pub fn with_count_state(is_count_state: fn(&AggregateUDF) -> bool) -> Self {
         Self {
-            count_state_function: Some(function),
+            is_count_state: Some(is_count_state),
         }
     }
 
@@ -163,9 +183,10 @@ impl PartialAggrRule {
             return false;
         }
         let expr = &aggregate.aggr_expr()[0];
-        let name = expr.fun().name();
+        let function = expr.fun();
         if expr.is_distinct()
-            || (name != "count" && self.count_state_function.as_deref() != Some(name))
+            || !(function.inner().is::<Count>()
+                || self.is_count_state.is_some_and(|matches| matches(function)))
         {
             return false;
         }
@@ -236,10 +257,10 @@ impl PartialAggrRule {
                 ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
             )?
         };
-        let wrapped: Arc<dyn ExecutionPlan> = Arc::new(MetadataAggrExec {
-            input: Self::partial(aggregate, input)?,
+        let wrapped: Arc<dyn ExecutionPlan> = Arc::new(MetadataAggrExec::new(
+            Self::partial(aggregate, input)?,
             exact_rows,
-        });
+        ));
         if aggregate.mode() == &AggregateMode::Partial {
             return Ok(Transformed::yes(wrapped));
         }
@@ -302,10 +323,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let plan = Arc::new(MetadataAggrExec {
-            input,
-            exact_rows: 10,
-        });
+        let plan = Arc::new(MetadataAggrExec::new(input, 10));
         let ctx = SessionContext::new();
         let mut states = Vec::new();
         for partition in 0..3 {
