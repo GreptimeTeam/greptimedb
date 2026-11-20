@@ -1,0 +1,25 @@
+version = 1
+
+# Target source paths come directly from tests-fuzz/Cargo.toml. Only these
+# additional paths have a narrow mapping; everything else runs the full set.
+[[rules]]
+paths = ["tests-fuzz/src/generator/alter_expr.rs", "tests-fuzz/src/translator/mysql/alter_expr.rs"]
+targets = ["fuzz_alter_table", "fuzz_alter_logical_table"]
+
+[[rules]]
+paths = ["tests-fuzz/src/generator/repartition_expr.rs", "tests-fuzz/src/translator/mysql/repartition_expr.rs"]
+targets = ["fuzz_repartition_table", "fuzz_repartition_metric_table", "fuzz_repartition_table_chaos"]
+
+# Ordinary table targets explicitly use the Mito engine. Metric-engine changes
+# still exercise every logical/physical metric operation and every service mode.
+[[rules]]
+paths = ["src/metric-engine/src/**"]
+targets = [
+    "fuzz_create_logical_table",
+    "fuzz_alter_logical_table",
+    "fuzz_insert_logical_table",
+    "fuzz_repartition_metric_table",
+    "fuzz_migrate_metric_regions",
+    "fuzz_failover_metric_regions",
+    "fuzz_remote_wal_logical_prune",
+]
