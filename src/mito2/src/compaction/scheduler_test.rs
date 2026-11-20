@@ -1262,12 +1262,16 @@ async fn test_pick_result_local_submission_failure_releases_and_notifies_once() 
 }
 
 #[rstest::rstest]
-#[case::truncate(DdlRequest::Truncate(RegionTruncateRequest::All))]
+#[case::truncate(DdlRequest::Truncate(RegionTruncateRequest::All), false)]
+#[case::pause_then_truncate(DdlRequest::Truncate(RegionTruncateRequest::All), true)]
 #[case::enter_staging(DdlRequest::EnterStaging(EnterStagingRequest {
     partition_directive: StagingPartitionDirective::RejectAllWrites,
-}))]
+}), false)]
 #[tokio::test]
-async fn test_cancelled_queued_unit_releases_fenced_ddl(#[case] ddl_request: DdlRequest) {
+async fn test_cancelled_queued_unit_releases_fenced_ddl(
+    #[case] ddl_request: DdlRequest,
+    #[case] pause_first: bool,
+) {
     let executor = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(executor.clone());
     let (tx, mut rx) = mpsc::channel(4);
@@ -1310,6 +1314,12 @@ async fn test_cancelled_queued_unit_releases_fenced_ddl(#[case] ddl_request: Ddl
     assert!(!selected.is_empty());
     assert!(selected.iter().all(FileHandle::compacting));
 
+    let pause_waiters = pause_first.then(|| {
+        let first = pending_pause(&mut scheduler, region_id);
+        let second = pending_pause(&mut scheduler, region_id);
+        [first, second]
+    });
+
     let expected_ddl = std::mem::discriminant(&ddl_request);
     let (ddl_tx, mut ddl_rx) = oneshot::channel();
     assert!(
@@ -1343,6 +1353,14 @@ async fn test_cancelled_queued_unit_releases_fenced_ddl(#[case] ddl_request: Ddl
     let CompactionTransition::DdlReady(mut ddls) = transition else {
         panic!("cancelled queued work must hand off its fenced DDL");
     };
+    if let Some([mut first, mut second]) = pause_waiters {
+        let first = first.try_recv().unwrap().unwrap();
+        let second = second.try_recv().unwrap().unwrap();
+        drop(first);
+        assert!(scheduler.region_status[&region_id].is_paused());
+        drop(second);
+        assert!(!scheduler.region_status[&region_id].is_paused());
+    }
     assert_eq!(1, ddls.len());
     let ddl = ddls.pop().unwrap();
     assert_eq!(region_id, ddl.region_id);
@@ -2413,6 +2431,49 @@ async fn test_add_ddl_request_to_pending() {
     assert!(scheduler.has_pending_ddls(region_id));
 }
 
+fn pending_pause(
+    scheduler: &mut CompactionScheduler,
+    region_id: RegionId,
+) -> oneshot::Receiver<Result<CompactionGuard>> {
+    let (sender, mut receiver) = oneshot::channel();
+    scheduler.pause_compaction(region_id, sender);
+    assert_matches!(
+        receiver.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    receiver
+}
+
+#[tokio::test]
+async fn test_failed_compaction_notifies_all_pause_waiters() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let id = version.region_id();
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
+    scheduler
+        .region_status
+        .get_mut(&id)
+        .unwrap()
+        .start_picking(7);
+
+    let first = pending_pause(&mut scheduler, id);
+    let second = pending_pause(&mut scheduler, id);
+    let error = Arc::new(InvalidSchedulerStateSnafu.build());
+    scheduler.on_compaction_failed(id, error.clone());
+
+    for mut receiver in [first, second] {
+        assert_matches!(
+            receiver.try_recv().unwrap(),
+            Err(Error::CompactRegion { region_id, source, .. })
+                if region_id == id && Arc::ptr_eq(&error, &source)
+        );
+    }
+    assert!(!scheduler.is_compacting(id));
+    assert!(!scheduler.region_status[&id].is_paused());
+}
+
 #[rstest::rstest]
 #[case::picking(false)]
 #[case::uncancellable_remote(true)]
@@ -2461,12 +2522,7 @@ async fn test_pause_compaction_drains_active_cycle_and_blocks_new_triggers(#[cas
             None,
         )
         .unwrap();
-    let (tx, mut first) = oneshot::channel();
-    scheduler.pause_compaction(id, tx);
-    assert!(matches!(
-        first.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
+    let mut first = pending_pause(&mut scheduler, id);
     assert!(!schedule(&mut scheduler));
     assert_matches!(
         pending.try_recv().unwrap(),
