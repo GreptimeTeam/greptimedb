@@ -1978,7 +1978,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S> RegionWorkerLoop<S> {
     /// Cleans up the worker.
-    async fn clean(&self) {
+    async fn clean(&mut self) {
         for state in self.tail_replays.values() {
             let _ = state.request_cancel();
         }
@@ -2001,6 +2001,7 @@ impl<S> RegionWorkerLoop<S> {
         self.regions.clear();
         for region in regions {
             self.granted_leases.remove(region.region_id);
+            self.lease_deferred_index_retries.remove(&region.region_id);
         }
     }
 

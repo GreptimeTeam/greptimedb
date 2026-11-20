@@ -221,9 +221,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   index build retries the wait refused and persist backfilled metadata.
 - The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
   region instance, so a reopen during catchup keeps it. Every path that removes a region from
-  a worker's region map must also remove its record: `RegionWorkerLoop::remove_region`
-  (`worker/handle_close.rs`, also used after a close-time flush), `drop_region`
-  (`worker/handle_drop.rs`) and `RegionWorkerLoop::clean` (`worker.rs`).
+  a worker's region map must also remove its record and its kept index build retries:
+  `RegionWorkerLoop::remove_region` (`worker/handle_close.rs`, also used after a close-time
+  flush), `drop_region` (`worker/handle_drop.rs`) and `RegionWorkerLoop::clean` (`worker.rs`).
 
 ## Maintenance contract
 
