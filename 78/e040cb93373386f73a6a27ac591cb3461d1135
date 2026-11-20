@@ -1,0 +1,64 @@
+src/mito2/src/worker.rs
+  s_e01d8d83ef4b5f::t_18a4ff3cc55c62 1620-1623
+src/mito2/src/compaction/scheduler.rs
+  s_e01d8d83ef4b5f::t_18a4ff3cc55c62 39,232-243,591-594,788
+src/metric-engine/src/engine/sync/region.rs
+  s_e01d8d83ef4b5f::t_470bf599e26143 230-283
+  s_e01d8d83ef4b5f::t_c7a5ba0767ffb0 227-229
+  s_e01d8d83ef4b5f::t_b07b24948c7aa5 284-286
+  s_73ffd99b40acbd::t_17b3edb7cb036d 56-65,144,221-226,287-288
+src/mito2/src/engine.rs
+  s_e01d8d83ef4b5f::t_18a4ff3cc55c62 559-562,564-569,571-575
+  s_17057bba187655::t_6501ac811dc0bf 563,570
+src/mito2/src/compaction/scheduler/state.rs
+  s_e01d8d83ef4b5f::t_18a4ff3cc55c62 367-369,397-403,405-437,445,494-495,538,637-641,679,700
+  s_c311425adc0214::t_e4e1a9769e209b 16,27,40
+src/mito2/src/request.rs
+  s_e01d8d83ef4b5f::t_18a4ff3cc55c62 796-801
+src/metric-engine/src/metadata_region.rs
+  s_17057bba187655::t_53f6f75d50b340 487-497
+src/mito2/src/compaction.rs
+  s_17057bba187655::t_edd71f210d7044 48
+src/mito2/src/compaction/scheduler_test.rs
+  s_c311425adc0214::t_ede3f0e9b09346 2416-2499
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "78e040cb93373386f73a6a27ac591cb3461d1135",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_73ffd99b40acbd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f369-b1fa-7ba3-8bac-556d0fffcfa1",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_e01d8d83ef4b5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f31d-fdd6-7a43-8e0a-128aa635c7c9",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
