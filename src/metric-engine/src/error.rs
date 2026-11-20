@@ -149,6 +149,14 @@ pub enum Error {
         target_region_id: RegionId,
     },
 
+    #[snafu(display("Failed to pause compaction for region {}", region_id))]
+    MitoPauseCompactionOperation {
+        region_id: RegionId,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Mito edit region operation fails, region id: {}", region_id))]
     MitoEditRegion {
         region_id: RegionId,
@@ -488,6 +496,7 @@ impl ErrorExt for Error {
             | BatchOpenMitoRegion { source, .. }
             | BatchCatchupMitoRegion { source, .. }
             | MitoCopyRegionFromOperation { source, .. }
+            | MitoPauseCompactionOperation { source, .. }
             | MitoEditRegion { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
@@ -527,6 +536,7 @@ impl ErrorExt for Error {
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | MitoCopyRegionFromOperation { source, .. }
+            | MitoPauseCompactionOperation { source, .. }
             | MitoEditRegion { source, .. } => source.retry_hint(),
 
             EncodePrimaryKey { source, .. } => source.retry_hint(),

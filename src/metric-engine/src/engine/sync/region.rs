@@ -24,7 +24,7 @@ use store_api::storage::RegionId;
 use crate::engine::MetricEngineInner;
 use crate::error::{
     MissingFilesSnafu, MitoCopyRegionFromOperationSnafu, MitoEditRegionSnafu,
-    PhysicalRegionNotFoundSnafu, Result,
+    MitoPauseCompactionOperationSnafu, PhysicalRegionNotFoundSnafu, Result,
 };
 use crate::utils;
 
@@ -59,9 +59,8 @@ impl MetricEngineInner {
             .pause_compaction(target_metadata_region_id)
             .await
             .map_err(BoxedError::new)
-            .context(MitoCopyRegionFromOperationSnafu {
-                source_region_id: source_metadata_region_id,
-                target_region_id: target_metadata_region_id,
+            .context(MitoPauseCompactionOperationSnafu {
+                region_id: target_metadata_region_id,
             })?;
         let res = self
             .mito
@@ -216,6 +215,32 @@ mod tests {
             .collect::<Vec<_>>();
         columns.sort_unstable();
         assert_eq!(columns, expected_columns);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_sync_pause_on_missing_target() {
+        let env = TestEnv::new().await;
+        let source = env.default_physical_region_id();
+        let target = RegionId::new(source.table_id(), source.region_number() + 1);
+        let target_metadata = crate::utils::to_metadata_region_id(target);
+        let err = env
+            .metric()
+            .inner
+            .sync_region_from_region(target, source, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::RegionNotFound, err.status_code());
+        let crate::error::Error::MitoPauseCompactionOperation {
+            region_id, source, ..
+        } = err
+        else {
+            panic!("unexpected sync error: {err:?}");
+        };
+        assert_eq!(target_metadata, region_id);
+        assert!(matches!(
+            source.into_inner().as_any().downcast_ref::<mito2::error::Error>(),
+            Some(mito2::error::Error::RegionNotFound { region_id, .. }) if *region_id == target_metadata
+        ));
     }
 
     #[tokio::test]
