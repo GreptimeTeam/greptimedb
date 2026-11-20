@@ -54,6 +54,50 @@ fn metadata() -> RegionMetadataRef {
         .data_type = ConcreteDataType::float64_datatype();
     Arc::new(m)
 }
+
+#[test]
+fn test_narthex_requires_one_value_field() {
+    use crate::region::options::RegionOptions;
+    use crate::sst::FormatType;
+
+    for field_count in [0, 1, 2] {
+        let mut metadata = metadata().as_ref().clone();
+        let field = metadata.field_columns().next().unwrap().clone();
+        metadata
+            .column_metadatas
+            .retain(|column| column.semantic_type != api::v1::SemanticType::Field);
+        for i in 0..field_count {
+            let mut column = field.clone();
+            column.column_id = 100 + i;
+            column.column_schema.name = format!("value_{i}");
+            metadata.column_metadatas.push(column);
+        }
+        let metadata = store_api::metadata::RegionMetadataBuilder::from_existing(metadata)
+            .build()
+            .unwrap();
+        let options = RegionOptions {
+            sst_format: Some(FormatType::Narthex),
+            ..Default::default()
+        };
+        let result = options.validate_schema(&metadata);
+        if field_count == 1 {
+            result.unwrap();
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("exactly one value field")
+            );
+        }
+        let parquet_options = RegionOptions {
+            sst_format: Some(FormatType::Flat),
+            ..Default::default()
+        };
+        parquet_options.validate_schema(&metadata).unwrap();
+    }
+}
+
 fn store() -> ObjectStore {
     ObjectStore::new(object_store::services::Memory::default()).unwrap()
 }

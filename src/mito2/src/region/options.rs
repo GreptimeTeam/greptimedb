@@ -213,6 +213,15 @@ impl RegionOptions {
     /// The caller must resolve the SST format before validation.
     pub(crate) fn validate_schema(&self, metadata: &RegionMetadata) -> Result<()> {
         if self.sst_format == Some(FormatType::Narthex) {
+            // Authoritative Narthex storage currently targets Prometheus metrics with one
+            // value field. Supporting multiple fields also requires schema compatibility
+            // for older artifacts during reads, compaction and import, including filling
+            // added fields with their declared defaults. Keep this restriction here so
+            // the shared samples codec can still handle multi-field sidecars.
+            crate::series_index::columnar::require(
+                metadata.field_columns().count() == 1,
+                "Narthex storage requires exactly one value field",
+            )?;
             crate::series_index::samples::validate_narthex_metadata(metadata)?;
         }
         if self.sst_format == Some(FormatType::Flat)
