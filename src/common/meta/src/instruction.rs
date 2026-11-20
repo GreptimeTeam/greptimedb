@@ -1022,22 +1022,15 @@ impl Display for ApplyStagingManifest {
     }
 }
 
-/// Identifies one attempt to sync a physical metric region's metadata.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct MetadataSyncAttempt {
-    pub region_id: RegionId,
-    pub attempt_id: uuid::Uuid,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MetadataCompaction {
     /// Wait for compaction to drain, then hold the pause for the remaining sync budget.
     Pause {
-        attempt: MetadataSyncAttempt,
+        region_id: RegionId,
         remaining: Duration,
     },
-    /// Drop only the pause acquired by this attempt.
-    Release(MetadataSyncAttempt),
+    /// Release only if the latest Pause has this mailbox message ID.
+    Release { region_id: RegionId, pause_id: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
@@ -1481,20 +1474,25 @@ mod tests {
 
     #[test]
     fn test_metadata_compaction_mailbox_wire() {
-        let wire: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../tests/compatibility/wire/metadata_compaction/instructions.json"
-        ))
-        .unwrap();
-        let attempt = MetadataSyncAttempt {
-            region_id: RegionId::new(1, 2),
-            attempt_id: "00112233-4455-6677-8899-aabbccddeeff".parse().unwrap(),
-        };
+        let wire = serde_json::json!([
+            {"MetadataCompaction": {"Pause": {
+                "region_id": 4294967298_u64,
+                "remaining": {"secs": 19, "nanos": 500000000}
+            }}},
+            {"MetadataCompaction": {"Release": {
+                "region_id": 4294967298_u64, "pause_id": 42
+            }}}
+        ]);
+        let region_id = RegionId::new(1, 2);
         let expected = vec![
             Instruction::MetadataCompaction(MetadataCompaction::Pause {
-                attempt,
+                region_id,
                 remaining: Duration::from_millis(19_500),
             }),
-            Instruction::MetadataCompaction(MetadataCompaction::Release(attempt)),
+            Instruction::MetadataCompaction(MetadataCompaction::Release {
+                region_id,
+                pause_id: 42,
+            }),
         ];
         assert_eq!(
             expected,
