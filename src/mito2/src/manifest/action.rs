@@ -282,6 +282,35 @@ impl RegionManifest {
         self.files.values().chain(self.series_indexes.values())
     }
 
+    /// Returns whether the manifest still references `file_id`, as an SST file or as
+    /// a series index file.
+    pub(crate) fn contains_file(&self, file_id: FileId) -> bool {
+        self.files.contains_key(&file_id) || self.series_indexes.contains_key(&file_id)
+    }
+
+    /// Returns the index version the manifest records for `file_id`.
+    ///
+    /// The outer `Option` is `None` if the manifest does not reference the file; the
+    /// inner one is [`FileMeta::index_version`] of the entry. A file that appears in
+    /// both maps reports the `series_indexes` entry, because that is the entry
+    /// [`RegionManifest::all_files`] yields last for the same id.
+    pub(crate) fn index_version_of(&self, file_id: FileId) -> Option<Option<IndexVersion>> {
+        self.series_indexes
+            .get(&file_id)
+            .or_else(|| self.files.get(&file_id))
+            .map(|file| file.index_version())
+    }
+
+    /// Returns the number of distinct file ids the manifest references.
+    pub(crate) fn file_count(&self) -> usize {
+        let shared = self
+            .series_indexes
+            .keys()
+            .filter(|file_id| self.files.contains_key(file_id))
+            .count();
+        self.files.len() + self.series_indexes.len() - shared
+    }
+
     /// Returns the entry id after which node `node_id` replays its WAL when it opens
     /// the region. Entries up to it are flushed, discarded, left to the pending tails,
     /// or below the handoff floor of the node.
@@ -1877,6 +1906,84 @@ mod tests {
         assert_eq!(manifest.wal_replay_start(Some(3)), 40);
         assert_eq!(manifest.wal_replay_start(Some(4)), 10);
         assert_eq!(manifest.wal_replay_start(None), 10);
+    }
+
+    /// Builds a manifest that references `files` as SST files and `series_indexes`
+    /// as series index files, each entry reporting the given index version.
+    fn manifest_with_files(
+        files: impl IntoIterator<Item = (FileId, Option<IndexVersion>)>,
+        series_indexes: impl IntoIterator<Item = (FileId, Option<IndexVersion>)>,
+    ) -> RegionManifest {
+        let mut manifest = manifest_builder().try_build().unwrap();
+        manifest.files = file_metas(files);
+        manifest.series_indexes = file_metas(series_indexes);
+        manifest
+    }
+
+    /// Maps `(file_id, index_version)` pairs to manifest entries reporting that version.
+    fn file_metas(
+        files: impl IntoIterator<Item = (FileId, Option<IndexVersion>)>,
+    ) -> HashMap<FileId, FileMetaRef> {
+        files
+            .into_iter()
+            .map(|(file_id, index_version)| {
+                let meta = match index_version {
+                    Some(index_version) => FileMeta {
+                        file_id,
+                        available_indexes: smallvec::smallvec![file::IndexType::InvertedIndex],
+                        index_version,
+                        ..Default::default()
+                    },
+                    None => FileMeta {
+                        file_id,
+                        ..Default::default()
+                    },
+                };
+                (file_id, meta.into())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_file_lookup_helpers() {
+        let sst_only = FileId::random();
+        let index_only = FileId::random();
+        let shared = FileId::random();
+        let missing = FileId::random();
+        let manifest = manifest_with_files(
+            [(sst_only, Some(1)), (shared, Some(2))],
+            [(index_only, None), (shared, Some(3))],
+        );
+
+        assert!(manifest.contains_file(sst_only));
+        assert!(manifest.contains_file(index_only));
+        assert!(manifest.contains_file(shared));
+        assert!(!manifest.contains_file(missing));
+
+        assert_eq!(manifest.index_version_of(sst_only), Some(Some(1)));
+        // Present without an index, which is not the same result as absent.
+        assert_eq!(manifest.index_version_of(index_only), Some(None));
+        // `all_files` yields `files` before `series_indexes`, so the series index wins.
+        assert_eq!(manifest.index_version_of(shared), Some(Some(3)));
+        assert_eq!(manifest.index_version_of(missing), None);
+
+        // The helpers answer exactly like the merged map they replace.
+        let merged: HashMap<_, _> = manifest
+            .all_files()
+            .map(|file| (file.file_id, file.index_version()))
+            .collect();
+        for file_id in [sst_only, index_only, shared, missing] {
+            assert_eq!(
+                manifest.contains_file(file_id),
+                merged.contains_key(&file_id)
+            );
+            assert_eq!(
+                manifest.index_version_of(file_id),
+                merged.get(&file_id).copied()
+            );
+        }
+        assert_eq!(manifest.file_count(), merged.len());
+        assert_eq!(manifest_builder().try_build().unwrap().file_count(), 0);
     }
 
     #[test]

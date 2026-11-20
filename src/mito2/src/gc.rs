@@ -552,9 +552,10 @@ impl LocalGcWorker {
         let all_entries = if let Some(manifest) = &manifest
             && self.full_file_listing
         {
-            // Observation only: the manifest file count is the size of the reference set
-            // this pass builds in memory, so it can be compared with the listed entries.
-            GC_MANIFEST_FILE_CNT.observe(manifest.files.len() as f64);
+            // Observation only: the number of distinct file ids the manifest references is
+            // the size of the reference set this pass checks entries against, so it can be
+            // compared with the number of listed entries.
+            GC_MANIFEST_FILE_CNT.observe(manifest.file_count() as f64);
             // do the time consuming listing only when full_file_listing is true(and region is open)
             // and do it first to make sure we have the latest manifest etc.
             self.list_from_object_store(region_id, manifest.files.len())
@@ -600,15 +601,10 @@ impl LocalGcWorker {
             .map(|s| s.len())
             .sum::<usize>();
 
-        let in_manifest = manifest
-            .as_ref()
-            .map(|manifest| {
-                manifest
-                    .all_files()
-                    .map(|file| (file.file_id, file.index_version()))
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
+        // The manifest snapshot itself answers the lookups below, so this pass does not
+        // copy its file ids. `None` (a dropped region) references no file, exactly like
+        // an empty set would.
+        let in_manifest = manifest.as_deref();
 
         let is_region_dropped = region.is_none();
 
@@ -620,7 +616,7 @@ impl LocalGcWorker {
         let (mut deletable_files, deferred_unknown_files) = self
             .list_to_be_deleted_files(
                 region_id,
-                &in_manifest,
+                in_manifest,
                 &in_tmp_ref,
                 recently_removed_files,
                 all_entries,
@@ -651,7 +647,7 @@ impl LocalGcWorker {
             } else {
                 ""
             },
-            in_manifest.len(),
+            in_manifest.map_or(0, |manifest| manifest.file_count()),
             tmp_ref_files.len(),
             removed_file_cnt,
             deletable_files.len(),
@@ -1101,7 +1097,7 @@ impl LocalGcWorker {
     fn filter_deletable_files(
         &self,
         entries: Vec<Entry>,
-        in_manifest: &HashMap<FileId, Option<IndexVersion>>,
+        manifest: Option<&RegionManifest>,
         in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
         may_linger_files: &HashSet<&RemovedFile>,
         eligible_for_delete: &HashSet<&RemovedFile>,
@@ -1133,7 +1129,7 @@ impl LocalGcWorker {
         let mut narthex_eligibility: HashMap<FileId, bool> = HashMap::new();
         for entry in entries {
             if let Some(file_id) = crate::sst::location::parse_narthex_file_id(entry.path()) {
-                let in_manifest = in_manifest.contains_key(&file_id);
+                let in_manifest = manifest.is_some_and(|manifest| manifest.contains_file(file_id));
                 let in_tmp_ref = referenced_ssts.contains(&file_id);
                 let linger = may_linger_files.contains_key(&file_id);
                 let eligible = eligible_for_delete.contains_key(&file_id);
@@ -1173,7 +1169,8 @@ impl LocalGcWorker {
 
             let should_delete = match file_type {
                 FileType::Parquet => {
-                    let is_in_manifest = in_manifest.contains_key(&file_id);
+                    let is_in_manifest =
+                        manifest.is_some_and(|manifest| manifest.contains_file(file_id));
                     let is_in_tmp_ref = referenced_ssts.contains(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
                     let is_eligible_for_delete = eligible_for_delete.contains_key(&file_id);
@@ -1196,7 +1193,9 @@ impl LocalGcWorker {
                     )
                 }
                 FileType::Puffin(version) => {
-                    let is_in_manifest = in_manifest.get(&file_id) == Some(&Some(version));
+                    let is_in_manifest = manifest
+                        .and_then(|manifest| manifest.index_version_of(file_id))
+                        == Some(Some(version));
                     let is_in_tmp_ref = in_tmp_ref.contains(&(file_id, Some(version)));
                     let is_linger = may_linger_files
                         .get(&file_id)
@@ -1258,10 +1257,13 @@ impl LocalGcWorker {
     /// improves performance. When `full_file_listing` is true, it read from `all_entries` to find
     /// and delete orphan files (files not tracked in the manifest).
     ///
+    /// `manifest` is the region manifest snapshot the candidates are checked against, or
+    /// `None` for a dropped region, which references no file.
+    ///
     pub async fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
-        in_manifest: &HashMap<FileId, Option<IndexVersion>>,
+        manifest: Option<&RegionManifest>,
         in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<RemovedFile>>,
         all_entries: Vec<Entry>,
@@ -1321,10 +1323,12 @@ impl LocalGcWorker {
                 .filter(|file| {
                     let in_use = match file {
                         RemovedFile::File(file_id, _) | RemovedFile::Narthex(file_id) => {
-                            in_manifest.contains_key(file_id) || referenced_ssts.contains(file_id)
+                            manifest.is_some_and(|manifest| manifest.contains_file(*file_id))
+                                || referenced_ssts.contains(file_id)
                         }
                         RemovedFile::Index(file_id, version) => {
-                            in_manifest.get(file_id) == Some(&Some(*version))
+                            manifest.and_then(|manifest| manifest.index_version_of(*file_id))
+                                == Some(Some(*version))
                                 || in_tmp_ref.contains(&(*file_id, Some(*version)))
                         }
                     };
@@ -1347,7 +1351,7 @@ impl LocalGcWorker {
         // Step 3: Filter files to determine which ones can be deleted
         let all_unused_files_ready_for_delete = self.filter_deletable_files(
             all_entries,
-            in_manifest,
+            manifest,
             in_tmp_ref,
             &all_may_linger_files,
             &eligible_for_removal,

@@ -41,16 +41,69 @@ use crate::engine::pending_tail_test::{set_pending_tails, tail};
 use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef};
 use crate::error::UnexpectedSnafu;
 use crate::gc::{GcConfig, LocalGcWorker, should_delete_file};
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList, RemovedFile};
+use crate::manifest::action::{
+    RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList, RemovedFile,
+    RemovedFilesRecord,
+};
 use crate::manifest::storage::{delta_file, gen_path};
 use crate::metrics::{GC_ERRORS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES};
 use crate::region::{MitoRegionRef, RegionLeaderState};
-use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, IndexType, RegionIndexId};
+use crate::sst::file::{
+    ColumnIndexMetadata, FileHandle, FileMeta, FileMetaRef, IndexType, RegionIndexId,
+};
 use crate::sst::location;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
 };
 use crate::worker::DROPPING_MARKER_FILE;
+
+/// Builds a manifest that references `files` as SST files and `series_indexes` as
+/// series index files, each entry reporting the given index version.
+fn manifest_with_files(
+    files: impl IntoIterator<Item = (FileId, Option<IndexVersion>)>,
+    series_indexes: impl IntoIterator<Item = (FileId, Option<IndexVersion>)>,
+) -> RegionManifest {
+    RegionManifest {
+        metadata: crate::test_util::memtable_util::metadata_for_test(),
+        files: file_metas(files),
+        series_indexes: file_metas(series_indexes),
+        removed_files: RemovedFilesRecord::default(),
+        flushed_entry_id: 0,
+        flushed_sequence: 0,
+        committed_sequence: None,
+        manifest_version: 0,
+        truncated_entry_id: None,
+        compaction_time_window: None,
+        sst_format: Default::default(),
+        append_mode: None,
+        pending_tails: Vec::new(),
+        handoff_floors: Default::default(),
+    }
+}
+
+/// Maps `(file_id, index_version)` pairs to manifest entries reporting that version.
+fn file_metas(
+    files: impl IntoIterator<Item = (FileId, Option<IndexVersion>)>,
+) -> HashMap<FileId, FileMetaRef> {
+    files
+        .into_iter()
+        .map(|(file_id, index_version)| {
+            let meta = match index_version {
+                Some(index_version) => FileMeta {
+                    file_id,
+                    available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+                    index_version,
+                    ..Default::default()
+                },
+                None => FileMeta {
+                    file_id,
+                    ..Default::default()
+                },
+            };
+            (file_id, meta.into())
+        })
+        .collect()
+}
 
 async fn create_gc_worker(
     mito_engine: &MitoEngine,
@@ -223,7 +276,7 @@ async fn test_gc_keeps_sst_across_index_versions(
             .worker
             .list_to_be_deleted_files(
                 region_id,
-                &HashMap::new(),
+                None,
                 &tmp_refs,
                 env.removed_files.clone(),
                 env.entries.clone(),
@@ -257,16 +310,17 @@ async fn test_gc_reference_protects_parquet_and_only_its_index(
 ) {
     let env = IndexGcTestEnv::new(full_file_listing).await;
     let file_id = env.meta.file_id;
-    let (manifest_refs, tmp_refs) = if in_manifest {
-        (HashMap::from([(file_id, index_version)]), HashSet::new())
+    let manifest = in_manifest.then(|| manifest_with_files([(file_id, index_version)], []));
+    let tmp_refs = if in_manifest {
+        HashSet::new()
     } else {
-        (HashMap::new(), HashSet::from([(file_id, index_version)]))
+        HashSet::from([(file_id, index_version)])
     };
     let (deleted, _deferred_unknown) = env
         .worker
         .list_to_be_deleted_files(
             env.meta.region_id,
-            &manifest_refs,
+            manifest.as_ref(),
             &tmp_refs,
             env.removed_files.clone(),
             env.entries.clone(),
@@ -1942,13 +1996,14 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
     assert_eq!(entries.len(), 3);
     let removed = RemovedFile::Narthex(id);
     let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+    let manifest = manifest_with_files([(id, None)], []);
     for (manifest, readers) in [
-        (HashMap::from([(id, None)]), HashSet::new()),
-        (HashMap::new(), HashSet::from([(id, None)])),
+        (Some(&manifest), HashSet::new()),
+        (None, HashSet::from([(id, None)])),
     ] {
         let (delete, _) = env.worker.filter_deletable_files(
             entries.clone(),
-            &manifest,
+            manifest,
             &readers,
             &HashSet::new(),
             &HashSet::from([&removed]),
@@ -1958,7 +2013,7 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
     }
     let (delete, _) = env.worker.filter_deletable_files(
         entries,
-        &HashMap::new(),
+        None,
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::from([&removed]),
@@ -1990,7 +2045,7 @@ async fn test_narthex_artifact_gc_requires_age_for_every_object() {
     ));
     let (delete, deferred) = env.worker.filter_deletable_files(
         vec![old, unknown],
-        &HashMap::new(),
+        None,
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
