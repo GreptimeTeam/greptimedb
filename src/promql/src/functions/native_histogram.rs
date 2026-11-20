@@ -1038,7 +1038,17 @@ impl NativeHistogramAggregateAccumulator {
             return Ok(());
         }
         let combined_count = self.combined_count(count)?;
-        let sample = float_histogram(&histogram)?;
+        // A histogram this crate cannot read - its spans or buckets disagree about the layout - is
+        // dropped along with the position, which is what the accumulator this replaced did with
+        // `legacy_bridge::add`'s `None`. The query answers as it did before: a group holding one is
+        // removed with the warning below, and the samples around it still count.
+        let sample = match float_histogram(&histogram) {
+            Ok(sample) => sample,
+            Err(_) => {
+                self.record_incompatible();
+                return Ok(());
+            }
+        };
         let recorded = self.evidence;
         // The first sample of a position *is* the fold's value, so it is not added into it.
         let vacant = self.fold.is_none();
@@ -3695,6 +3705,47 @@ mod tests {
         assert_eq!(histogram.quantile(0.0), 0.5);
         assert!(histogram.quantile(0.5) > 1.0);
         assert!(histogram.quantile(0.5) < 2.0);
+    }
+
+    #[test]
+    fn an_illegally_shaped_histogram_drops_its_position_rather_than_failing_the_query() {
+        // The spans claim two buckets and the row carries one, which is a layout this crate cannot
+        // read: the accumulator this replaced met the same disagreement through
+        // `legacy_bridge::add`'s `None` and dropped the position with the warning below. A query
+        // over a table holding one answers what it answered before, with the group removed.
+        let collector = PromqlAnnotationCollector::default();
+        for kind in [
+            NativeHistogramAggregateKind::Sum,
+            NativeHistogramAggregateKind::Avg,
+        ] {
+            let mut aggregate =
+                NativeHistogramAggregateAccumulator::new(kind, Some(collector.clone()));
+            let mut invalid = sample_histogram(2.0, 3.0, vec![2.0]);
+            invalid.positive_spans = vec![Span {
+                offset: 0,
+                length: 2,
+            }];
+
+            aggregate.push_histogram(invalid, 1).expect(
+                "a histogram this crate cannot read drops its position, it does not fail the query",
+            );
+
+            assert!(aggregate.evidence.poisoned, "{}: poisoned", kind.name());
+            assert!(
+                aggregate.state_histogram().unwrap().is_none(),
+                "{}: the position answers nothing",
+                kind.name()
+            );
+            let warnings = collected_warnings(&collector);
+            assert!(
+                warnings.contains(&format!(
+                    "{}: dropped native histogram aggregate with incompatible schemas",
+                    kind.name()
+                )),
+                "{}: {warnings:?}",
+                kind.name()
+            );
+        }
     }
 
     #[test]
