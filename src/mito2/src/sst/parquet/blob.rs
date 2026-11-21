@@ -433,9 +433,8 @@ impl BlobResolver {
     }
 }
 
-/// Merges the ranges of `refs` (sorted by offset) into requests. A gap joins two ranges only
-/// when it is no larger than the wanted bytes already in the request, so sparse selections read
-/// at most about twice the bytes they need.
+/// Merges the ranges of `refs` (sorted by offset) into requests. A request never spans more
+/// than twice the wanted bytes in it, so sparse selections read at most twice what they need.
 fn coalesce_ranges(refs: &[BlobRef]) -> Vec<Range<u64>> {
     // (range, wanted bytes in the range)
     let mut ranges: Vec<(Range<u64>, u64)> = Vec::new();
@@ -443,8 +442,9 @@ fn coalesce_ranges(refs: &[BlobRef]) -> Vec<Range<u64>> {
         let range = r.range();
         match ranges.last_mut() {
             Some((last, wanted))
-                if range.start <= last.end + COALESCE_GAP.min(*wanted)
-                    && range.end.saturating_sub(last.start) <= MAX_REQUEST_BYTES =>
+                if range.start <= last.end + COALESCE_GAP
+                    && range.end.saturating_sub(last.start)
+                        <= MAX_REQUEST_BYTES.min(2 * (*wanted + r.compressed_len)) =>
             {
                 last.end = last.end.max(range.end);
                 *wanted += r.compressed_len;
@@ -519,7 +519,8 @@ fn decode_rows(
     targets: Vec<(usize, Vec<Option<BlobRef>>)>,
     fetched: &[(Range<u64>, Bytes)],
 ) -> Result<RecordBatch> {
-    let value_of = |r: &BlobRef| -> Result<Vec<u8>> {
+    // Locates the compressed frame of `r` and checks that it decodes to `r.len` bytes.
+    let frame_of = |r: &BlobRef| -> Result<&[u8]> {
         let corrupted = || {
             UnexpectedSnafu {
                 reason: format!(
@@ -538,21 +539,31 @@ fn decode_rows(
         let compressed = data
             .get(begin..begin + r.compressed_len as usize)
             .ok_or_else(corrupted)?;
-        // `decompress` allocates `r.len` up front; a corrupt reference must not size it.
         let content_size = zstd::zstd_safe::get_frame_content_size(compressed)
             .ok()
             .flatten();
         if content_size != Some(r.len) {
             return Err(corrupted());
         }
-        let value = zstd::bulk::decompress(compressed, r.len as usize).map_err(|e| {
+        Ok(compressed)
+    };
+    let value_of = |r: &BlobRef| -> Result<Vec<u8>> {
+        let value = zstd::bulk::decompress(frame_of(r)?, r.len as usize).map_err(|e| {
             UnexpectedSnafu {
                 reason: format!("failed to decompress blob value at {}: {e}", r.offset),
             }
             .build()
         })?;
         if value.len() as u64 != r.len {
-            return Err(corrupted());
+            return UnexpectedSnafu {
+                reason: format!(
+                    "blob value at {} decompressed to {} bytes, expected {}",
+                    r.offset,
+                    value.len(),
+                    r.len
+                ),
+            }
+            .fail();
         }
         Ok(value)
     };
@@ -560,13 +571,18 @@ fn decode_rows(
     let mut arrays = batch.columns().to_vec();
     for (index, refs) in targets {
         let column = batch.column(index);
-        let external_bytes: usize = refs.iter().flatten().map(|r| r.len as usize).sum();
-        let inline_bytes = column.get_buffer_memory_size();
-        let mut builder = ByteBuilder::new(
-            column.data_type(),
-            refs.len(),
-            external_bytes + inline_bytes,
-        );
+        // Reference lengths size the builder, so check them against their frames first.
+        let mut data_bytes = 0;
+        for (value, blob_ref) in byte_values(column)?.zip(&refs) {
+            data_bytes += match blob_ref {
+                Some(blob_ref) => {
+                    frame_of(blob_ref)?;
+                    blob_ref.len as usize
+                }
+                None => value.map_or(0, <[u8]>::len),
+            };
+        }
+        let mut builder = ByteBuilder::new(column.data_type(), refs.len(), data_bytes);
         for (value, blob_ref) in byte_values(column)?.zip(&refs) {
             match blob_ref {
                 Some(blob_ref) => builder.append(Some(&value_of(blob_ref)?))?,
@@ -673,6 +689,20 @@ mod tests {
     }
 
     #[test]
+    fn test_reference_length_is_checked_before_allocation() {
+        let frame = Bytes::from(zstd::bulk::compress(b"value", 1).unwrap());
+        let blob_ref = BlobRef {
+            offset: 0,
+            compressed_len: frame.len() as u64,
+            len: 1 << 60,
+        };
+        let column: ArrayRef = Arc::new(BinaryArray::from(vec![blob_ref.encode().as_bytes()]));
+        let batch = RecordBatch::try_from_iter([("bin", column)]).unwrap();
+        let fetched = [(blob_ref.range(), frame)];
+        assert!(decode_rows(batch, vec![(0, vec![Some(blob_ref)])], &fetched).is_err());
+    }
+
+    #[test]
     fn test_sparse_values_are_not_coalesced_across_large_gaps() {
         let refs = |offsets: &[u64], len: u64| -> Vec<BlobRef> {
             offsets
@@ -691,6 +721,17 @@ mod tests {
             vec![0..100, 1000..1100],
             coalesce_ranges(&refs(&[0, 1000], 100))
         );
+        // Gaps add up: each one is small next to the wanted bytes so far, but the request
+        // still reads at most twice the wanted bytes.
+        let mut offsets = vec![0];
+        for gap in (1..16).map(|i| i * 100) {
+            offsets.push(offsets.last().unwrap() + 100 + gap);
+        }
+        let read: u64 = coalesce_ranges(&refs(&offsets, 100))
+            .iter()
+            .map(|r| r.end - r.start)
+            .sum();
+        assert!(read <= 2 * 16 * 100, "read {read} bytes");
     }
 
     #[test]

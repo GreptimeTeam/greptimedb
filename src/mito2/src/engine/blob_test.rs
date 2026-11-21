@@ -24,7 +24,7 @@ use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::StorageOptions;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{MitoCopyRegionFromRequest, RegionEngine};
 use store_api::region_request::{RegionCreateRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -240,4 +240,45 @@ async fn test_large_values_survive_flush_filter_and_compaction() {
         blobs = blob_files(&env).await;
     }
     assert_eq!(ssts, blobs);
+}
+
+#[tokio::test]
+async fn test_copy_region_requires_declared_sidecars() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source_id = RegionId::new(1, 1);
+    let request = create_request(true);
+    let schema = rows_schema(&request);
+    for id in [source_id, RegionId::new(1, 2), RegionId::new(1, 3)] {
+        engine
+            .handle_request(id, RegionRequest::Create(request.clone()))
+            .await
+            .unwrap();
+    }
+    put(&engine, source_id, &schema, &[0, 1, 2, 3], 0).await;
+    flush_region(&engine, source_id, None).await;
+    let copy = |target_id| {
+        engine.copy_region_from(
+            target_id,
+            MitoCopyRegionFromRequest {
+                source_region_id: source_id,
+                parallelism: 1,
+            },
+        )
+    };
+
+    copy(RegionId::new(1, 2)).await.unwrap();
+    let expected: Vec<_> = (0..4).map(|i| (i as i64 * 1000, payload(i, 0))).collect();
+    assert_eq!(
+        expected,
+        scan(&engine, RegionId::new(1, 2), ScanRequest::default()).await
+    );
+
+    let store = env.get_object_store().unwrap();
+    for entry in store.list_with("").recursive(true).await.unwrap() {
+        if entry.path().contains("1_0000000001") && entry.path().ends_with(".blob") {
+            store.delete(entry.path()).await.unwrap();
+        }
+    }
+    copy(RegionId::new(1, 3)).await.unwrap_err();
 }
