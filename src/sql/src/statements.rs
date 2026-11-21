@@ -36,7 +36,7 @@ pub mod truncate;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::column_def::options_from_compression;
+use api::v1::column_def::{options_from_compression, options_from_storage};
 use api::v1::{ColumnOptions, SemanticType};
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
@@ -247,6 +247,13 @@ pub fn sql_col_to_grpc_col_def(
             .get_or_insert_with(ColumnOptions::default)
             .options
             .extend(compression.options);
+    }
+    if let Some(storage) = column.extensions.build_storage_options()? {
+        let storage = options_from_storage(&storage).context(ConvertToGrpcDataTypeSnafu)?;
+        options
+            .get_or_insert_with(ColumnOptions::default)
+            .options
+            .extend(storage.options);
     }
 
     Ok(api::v1::ColumnDef {
