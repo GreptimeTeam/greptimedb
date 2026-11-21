@@ -68,6 +68,7 @@ use crate::request::{
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileMeta, UncommittedSsts};
+use crate::sst::parquet::blob::external_columns;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
@@ -680,10 +681,6 @@ impl MemtableSstWriter {
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
             float_field_encoding: version.options.float_field_encoding,
-            blob_threshold: version
-                .options
-                .sst_blob_threshold
-                .map(|size| size.as_bytes() as usize),
             ..Default::default()
         };
         if let Some(row_group_size) = self.row_group_size {
@@ -1122,7 +1119,7 @@ fn memtable_flat_sources(
         encoded: SmallVec::new(),
     };
     // Encoded parts are uploaded as they are, which would keep large values inside the SST.
-    let upload_encoded = options.sst_blob_threshold.is_none();
+    let upload_encoded = external_columns(metadata)?.is_empty();
     let is_uploaded_as_is = |component: &Vec<MemtableRange>| {
         upload_encoded && component.len() == 1 && component[0].encoded().is_some()
     };

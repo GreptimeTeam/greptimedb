@@ -1014,10 +1014,6 @@ impl<M: SstMerger> DefaultCompactor<M> {
                             context.region_options.row_group_size(),
                         ),
                         float_field_encoding: context.region_options.float_field_encoding,
-                        blob_threshold: context
-                            .region_options
-                            .sst_blob_threshold
-                            .map(|size| size.as_bytes() as usize),
                         encode_parallelism: context
                             .region_options
                             .compaction_output_parallelism_or(
@@ -1101,10 +1097,6 @@ where
                     compaction_region.region_options.row_group_size(),
                 ),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
-                blob_threshold: compaction_region
-                    .region_options
-                    .sst_blob_threshold
-                    .map(|size| size.as_bytes() as usize),
                 encode_parallelism: compaction_region
                     .region_options
                     .compaction_output_parallelism_or(

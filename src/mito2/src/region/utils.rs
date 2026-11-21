@@ -34,6 +34,7 @@ use crate::region::options::RegionOptions;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::file_metadata::FileMetadataInternerRef;
 use crate::sst::location;
+use crate::sst::parquet::blob::blob_path;
 
 /// A loader for loading metadata from a region dir.
 #[derive(Debug, Clone)]
@@ -234,6 +235,23 @@ impl RegionFileCopier {
                             |e| error!(e; "Failed to copy file {} to {}", source_path, target_path),
                         )
                         .context(error::OpenDalSnafu)?;
+                    // An SST with external values reads them from its sidecar.
+                    if let FileDescriptor::Data { .. } = file_desc {
+                        let source_blob = blob_path(&source_path);
+                        if object_store
+                            .exists(&source_blob)
+                            .await
+                            .context(error::OpenDalSnafu)?
+                        {
+                            object_store
+                                .copy(&source_blob, &blob_path(&target_path))
+                                .await
+                                .inspect_err(
+                                    |e| error!(e; "Failed to copy file {} to {}", source_blob, target_path),
+                                )
+                                .context(error::OpenDalSnafu)?;
+                        }
+                    }
                     let file_size = ReadableSize(file_desc.size());
                     info!(
                         "Copied file {} to {}, file size: {}, elapsed: {:?}",
@@ -264,8 +282,12 @@ impl RegionFileCopier {
         let object_store = self.access_layer.object_store();
         let delete_file_path = file_ids
             .into_iter()
-            .map(|file_descriptor| {
-                build_delete_file_path(target_region_id, file_descriptor, table_dir, path_type)
+            .flat_map(|file_descriptor| {
+                let path =
+                    build_delete_file_path(target_region_id, file_descriptor, table_dir, path_type);
+                let blob = matches!(file_descriptor, FileDescriptor::Data { .. })
+                    .then(|| blob_path(&path));
+                std::iter::once(path).chain(blob)
             })
             .collect::<Vec<_>>();
         debug!(

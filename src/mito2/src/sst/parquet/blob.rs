@@ -12,14 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Out-of-line storage for large string and binary field values.
+//! External storage of large string and binary field values.
 //!
-//! A column is stored out of line in one SST when the region sets
-//! `experimental_sst_blob_threshold` and the SST's first written batch holds a value of at least
-//! that many bytes. Every value of that column in the SST is then appended,
-//! zstd compressed, to a sidecar blob object next to the SST, and the parquet column holds
-//! `offset:compressed_len:len` references instead. Each such column has a footer key
-//! [BLOB_COLUMN_KEY_PREFIX] followed by its name. The sidecar shares the SST's file id and is deleted with it.
+//! A field column with `STORAGE WITH (type = 'external', threshold = ...)` keeps short values in
+//! the parquet column. Each value at least `threshold` long is zstd compressed and appended to a
+//! sidecar blob object next to the SST, and the parquet column holds a reference to it instead:
+//! [REF_PREFIX] followed by `offset:compressed_len:len`. Values that start with [REF_PREFIX] are
+//! stored externally regardless of their size, so a value is a reference if and only if it
+//! starts with the prefix.
+//!
+//! An SST with a sidecar lists its external columns in footer keys starting with
+//! [BLOB_COLUMN_KEY_PREFIX] and records the sidecar size under [BLOB_FILE_SIZE_KEY]. The sidecar
+//! shares the SST's file id and is deleted with it.
 //!
 //! Readers resolve references right after decoding a row group, so filters, merges and
 //! compaction see the original values.
@@ -29,25 +33,24 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use common_runtime::spawn_blocking_global;
-use datatypes::arrow::array::{
-    Array, ArrayRef, AsArray, BinaryArray, BinaryBuilder, GenericByteArray, StringArray,
-    StringBuilder,
-};
-use datatypes::arrow::datatypes::{ByteArrayType, DataType};
+use datatypes::arrow::array::{ArrayRef, AsArray, BinaryBuilder, StringBuilder};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::schema::StorageType;
 use object_store::ObjectStore;
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadata;
 
 use crate::error::{Error, JoinSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result, UnexpectedSnafu};
 
-/// Prefix of footer keys that mark a column as stored out of line; the column name follows it.
+/// Prefix of footer keys that mark a column as stored externally; the column name follows it.
 /// One key per column keeps any column name intact.
 pub(crate) const BLOB_COLUMN_KEY_PREFIX: &str = "greptime:blob_column:";
-/// Footer key holding the uncompressed bytes of all out-of-line values, written when the file
-/// finishes. Size estimates of row groups must include these bytes: the parquet column only
-/// holds references.
-pub(crate) const BLOB_BYTES_KEY: &str = "greptime:blob_bytes";
+/// Footer key holding the size of the sidecar object in bytes.
+pub(crate) const BLOB_FILE_SIZE_KEY: &str = "greptime:blob_file_size";
+/// Marks a value as a reference into the sidecar. Valid UTF-8, so string columns can hold it.
+const REF_PREFIX: &str = "\0greptime-blob:";
 /// Upper bound of resolved value bytes in one output batch; keeps i32 offsets valid.
 const MAX_RESOLVED_BATCH_BYTES: usize = 128 * 1024 * 1024;
 /// Neighboring values closer than this are fetched in one request.
@@ -62,7 +65,7 @@ pub(crate) fn blob_path(sst_path: &str) -> String {
     format!("{stem}.blob")
 }
 
-/// Returns the out-of-line columns recorded in the footer.
+/// Returns the external columns recorded in the footer.
 pub(crate) fn blob_columns(meta: &ParquetMetaData) -> Vec<String> {
     meta.file_metadata()
         .key_value_metadata()
@@ -73,52 +76,49 @@ pub(crate) fn blob_columns(meta: &ParquetMetaData) -> Vec<String> {
         .collect()
 }
 
-/// Returns `(num_rows, uncompressed_bytes)` of each row group, with out-of-line values spread
-/// over row groups by row count.
-pub(crate) fn row_group_sizes(meta: &ParquetMetaData) -> impl Iterator<Item = (u64, u64)> + '_ {
-    let blob_bytes = meta
-        .file_metadata()
-        .key_value_metadata()
-        .and_then(|kvs| kvs.iter().find(|kv| kv.key == BLOB_BYTES_KEY))
-        .and_then(|kv| kv.value.as_deref())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
-    let total_rows = meta.file_metadata().num_rows().max(1) as u64;
-    meta.row_groups().iter().map(move |rg| {
-        let rows = rg.num_rows() as u64;
-        let bytes: u64 = rg
-            .columns()
-            .iter()
-            .map(|c| c.uncompressed_size() as u64)
-            .sum();
-        (rows, bytes + blob_bytes * rows / total_rows)
-    })
+/// Returns the sidecar size recorded in the footer, or `None` when the SST has no sidecar.
+pub(crate) fn blob_file_size(meta: &ParquetMetaData) -> Option<u64> {
+    meta.file_metadata()
+        .key_value_metadata()?
+        .iter()
+        .find(|kv| kv.key == BLOB_FILE_SIZE_KEY)?
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
 }
 
-/// Returns the names of string and binary columns among `candidates` whose longest value in
-/// `batch` reaches `threshold` bytes.
-pub(crate) fn pick_blob_columns<'a>(
-    candidates: impl Iterator<Item = &'a str>,
-    batch: &RecordBatch,
-    threshold: usize,
-) -> Vec<String> {
-    candidates
-        .filter(|name| {
-            batch.column_by_name(name).is_some_and(|array| {
-                let offsets: Vec<usize> = match array.data_type() {
-                    DataType::Binary => offsets(array.as_binary::<i32>()),
-                    DataType::Utf8 => offsets(array.as_string::<i32>()),
-                    _ => return false,
-                };
-                offsets.windows(2).any(|w| w[1] - w[0] >= threshold)
-            })
-        })
-        .map(str::to_string)
-        .collect()
+/// A field column that stores long values externally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalColumn {
+    pub(crate) name: String,
+    pub(crate) threshold: usize,
 }
 
-fn offsets<T: ByteArrayType<Offset = i32>>(array: &GenericByteArray<T>) -> Vec<usize> {
-    array.value_offsets().iter().map(|o| *o as usize).collect()
+/// Returns the field columns of `metadata` with external storage.
+pub(crate) fn external_columns(metadata: &RegionMetadata) -> Result<Vec<ExternalColumn>> {
+    let mut columns = Vec::new();
+    for column in metadata.field_columns() {
+        let schema = &column.column_schema;
+        let options = schema.storage_options().map_err(|e| {
+            UnexpectedSnafu {
+                reason: format!(
+                    "invalid storage options of column {} in region {}: {e}",
+                    schema.name, metadata.region_id
+                ),
+            }
+            .build()
+        })?;
+        if let Some(options) = options
+            && options.storage_type == StorageType::External
+        {
+            columns.push(ExternalColumn {
+                name: schema.name.clone(),
+                threshold: options.threshold().as_bytes() as usize,
+            });
+        }
+    }
+    Ok(columns)
 }
 
 /// Location of one value in a blob object.
@@ -131,27 +131,34 @@ struct BlobRef {
 
 impl BlobRef {
     fn encode(&self) -> String {
-        format!("{}:{}:{}", self.offset, self.compressed_len, self.len)
+        format!(
+            "{REF_PREFIX}{}:{}:{}",
+            self.offset, self.compressed_len, self.len
+        )
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self> {
+    /// Decodes `value`, or returns `None` when it is an inline value.
+    fn decode(value: &[u8]) -> Result<Option<Self>> {
+        let Some(body) = value.strip_prefix(REF_PREFIX.as_bytes()) else {
+            return Ok(None);
+        };
         let invalid = || {
             UnexpectedSnafu {
                 reason: format!(
                     "invalid blob reference {:?}",
-                    String::from_utf8_lossy(bytes)
+                    String::from_utf8_lossy(value)
                 ),
             }
             .build()
         };
-        let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+        let text = std::str::from_utf8(body).map_err(|_| invalid())?;
         let mut parts = text.split(':').map(|p| p.parse::<u64>());
         let mut next = || parts.next().and_then(|p| p.ok()).ok_or_else(invalid);
-        Ok(Self {
+        Ok(Some(Self {
             offset: next()?,
             compressed_len: next()?,
             len: next()?,
-        })
+        }))
     }
 
     fn range(&self) -> Range<u64> {
@@ -159,39 +166,68 @@ impl BlobRef {
     }
 }
 
+/// A value to store externally, compressed.
+pub(crate) struct CompressedValue {
+    data: Vec<u8>,
+    len: u64,
+}
+
+/// Compresses the values of `array` that must be stored externally: values at least
+/// `threshold` long and values that look like references. Other positions are `None`.
+pub(crate) async fn compress_external_values(
+    array: ArrayRef,
+    threshold: usize,
+) -> Result<Vec<Option<CompressedValue>>> {
+    // Compressing multi-MiB values is CPU-bound; keep it off the async workers.
+    spawn_blocking_global(move || {
+        byte_values(&array)?
+            .map(|value| match value {
+                Some(v) if v.len() >= threshold || v.starts_with(REF_PREFIX.as_bytes()) => {
+                    let data = zstd::bulk::compress(v, ZSTD_LEVEL).map_err(|e| {
+                        UnexpectedSnafu {
+                            reason: format!("failed to compress blob value: {e}"),
+                        }
+                        .build()
+                    })?;
+                    Ok(Some(CompressedValue {
+                        data,
+                        len: v.len() as u64,
+                    }))
+                }
+                _ => Ok(None),
+            })
+            .collect()
+    })
+    .await
+    .context(JoinSnafu)?
+}
+
 /// Appends values of one SST to its blob object.
 pub(crate) struct BlobFileWriter {
-    /// Uncompressed bytes of values appended so far.
-    value_bytes: u64,
     writer: object_store::Writer,
     offset: u64,
+    /// Bytes the uploader can buffer.
+    buffer_bytes: usize,
 }
 
 impl BlobFileWriter {
-    pub(crate) async fn new(store: &ObjectStore, path: String) -> Result<Self> {
+    pub(crate) async fn new(
+        store: &ObjectStore,
+        path: &str,
+        chunk: usize,
+        concurrency: usize,
+    ) -> Result<Self> {
         let writer = store
-            .writer_with(&path)
-            .chunk(8 * 1024 * 1024)
-            .concurrent(4)
+            .writer_with(path)
+            .chunk(chunk)
+            .concurrent(concurrency)
             .await
             .context(OpenDalSnafu)?;
         Ok(Self {
-            value_bytes: 0,
             writer,
             offset: 0,
+            buffer_bytes: chunk.saturating_mul(concurrency),
         })
-    }
-
-    async fn append(&mut self, compressed: Vec<u8>, len: u64) -> Result<BlobRef> {
-        let blob_ref = BlobRef {
-            offset: self.offset,
-            compressed_len: compressed.len() as u64,
-            len,
-        };
-        self.offset += blob_ref.compressed_len;
-        self.value_bytes += len;
-        self.writer.write(compressed).await.context(OpenDalSnafu)?;
-        Ok(blob_ref)
     }
 
     /// Bytes written to the blob object so far.
@@ -199,43 +235,61 @@ impl BlobFileWriter {
         self.offset
     }
 
-    /// Replaces values of `columns` in `batch` with references to values appended to the blob.
-    pub(crate) async fn externalize(
-        &mut self,
-        batch: RecordBatch,
-        columns: &[String],
-    ) -> Result<RecordBatch> {
-        let mut arrays = batch.columns().to_vec();
-        for name in columns {
-            let Some((index, _)) = batch.schema().column_with_name(name) else {
-                continue;
-            };
-            let array = batch.column(index).clone();
-            let is_string = *array.data_type() == DataType::Utf8;
-            // Compressing multi-MiB values is CPU-bound; keep it off the async workers.
-            let compressed = spawn_blocking_global(move || compress_values(&array))
-                .await
-                .context(JoinSnafu)??;
-            let mut refs = Vec::with_capacity(compressed.len());
-            for value in compressed {
-                refs.push(match value {
-                    Some(value) => Some(self.append(value.data, value.len).await?.encode()),
-                    None => None,
-                });
-            }
-            arrays[index] = if is_string {
-                Arc::new(StringArray::from(refs)) as ArrayRef
-            } else {
-                Arc::new(BinaryArray::from_iter(refs)) as ArrayRef
-            };
-        }
-        RecordBatch::try_new(batch.schema(), arrays).context(NewRecordBatchSnafu)
+    /// Upper bound of bytes held by the uploader.
+    pub(crate) fn buffer_bytes(&self) -> usize {
+        self.buffer_bytes
     }
 
-    /// Completes the object and returns the uncompressed bytes of its values.
-    pub(crate) async fn finish(mut self) -> Result<u64> {
+    /// Appends the compressed `values` and returns `array` with each appended value replaced
+    /// by its reference.
+    pub(crate) async fn externalize(
+        &mut self,
+        array: &ArrayRef,
+        values: Vec<Option<CompressedValue>>,
+    ) -> Result<ArrayRef> {
+        let mut refs = Vec::with_capacity(values.len());
+        for value in values {
+            refs.push(match value {
+                Some(value) => {
+                    let blob_ref = BlobRef {
+                        offset: self.offset,
+                        compressed_len: value.data.len() as u64,
+                        len: value.len,
+                    };
+                    self.offset += blob_ref.compressed_len;
+                    self.writer.write(value.data).await.context(OpenDalSnafu)?;
+                    Some(blob_ref.encode())
+                }
+                None => None,
+            });
+        }
+        let mut builder = ByteBuilder::new(array.data_type(), refs.len());
+        for (value, blob_ref) in byte_values(array)?.zip(&refs) {
+            match blob_ref {
+                Some(blob_ref) => builder.append(Some(blob_ref.as_bytes()))?,
+                None => builder.append(value)?,
+            }
+        }
+        Ok(builder.finish())
+    }
+
+    /// Completes the object and returns its footer entries.
+    pub(crate) async fn finish(mut self, columns: &[ExternalColumn]) -> Result<Vec<KeyValue>> {
         self.writer.close().await.context(OpenDalSnafu)?;
-        Ok(self.value_bytes)
+        let mut entries: Vec<_> = columns
+            .iter()
+            .map(|column| {
+                KeyValue::new(
+                    format!("{BLOB_COLUMN_KEY_PREFIX}{}", column.name),
+                    String::new(),
+                )
+            })
+            .collect();
+        entries.push(KeyValue::new(
+            BLOB_FILE_SIZE_KEY.to_string(),
+            self.offset.to_string(),
+        ));
+        Ok(entries)
     }
 
     pub(crate) async fn abort(mut self) -> Result<()> {
@@ -250,7 +304,7 @@ pub(crate) struct PendingBatch {
     next_row: usize,
 }
 
-/// Resolves references of an SST's out-of-line columns.
+/// Resolves references of an SST's external columns.
 pub(crate) struct BlobResolver {
     store: ObjectStore,
     path: String,
@@ -266,15 +320,17 @@ impl BlobResolver {
         }
     }
 
-    /// Parses references in `batch`. Returns `None` when the batch has no out-of-line column.
+    /// Parses references in `batch`. Returns `None` when the batch holds no reference.
     pub(crate) fn prepare(&self, batch: RecordBatch) -> Result<Option<PendingBatch>> {
         let mut targets = Vec::new();
         for name in &self.columns {
             if let Some((index, _)) = batch.schema().column_with_name(name) {
                 let refs = byte_values(batch.column(index))?
-                    .map(|v| v.map(BlobRef::decode).transpose())
+                    .map(|v| Ok(v.map(BlobRef::decode).transpose()?.flatten()))
                     .collect::<Result<Vec<_>>>()?;
-                targets.push((index, refs));
+                if refs.iter().any(Option::is_some) {
+                    targets.push((index, refs));
+                }
             }
         }
         Ok((!targets.is_empty()).then_some(PendingBatch {
@@ -285,7 +341,7 @@ impl BlobResolver {
     }
 
     /// Resolves the next rows of `pending`, holding at most [MAX_RESOLVED_BATCH_BYTES] of
-    /// values (or one row). Values of later rows are not fetched until asked for.
+    /// external values (or one row). Values of later rows are not fetched until asked for.
     pub(crate) async fn next_chunk(
         &self,
         pending: &mut PendingBatch,
@@ -366,7 +422,7 @@ impl BlobResolver {
     }
 }
 
-/// Returns the values of a string or binary blob column as bytes.
+/// Returns the values of a string or binary column as bytes.
 fn byte_values(array: &ArrayRef) -> Result<Box<dyn Iterator<Item = Option<&[u8]>> + '_>> {
     match array.data_type() {
         DataType::Binary => Ok(Box::new(array.as_binary::<i32>().iter())),
@@ -377,36 +433,50 @@ fn byte_values(array: &ArrayRef) -> Result<Box<dyn Iterator<Item = Option<&[u8]>
                 .map(|v| v.map(str::as_bytes)),
         )),
         other => UnexpectedSnafu {
-            reason: format!("blob column has unsupported type {other}"),
+            reason: format!("external storage does not support type {other}"),
         }
         .fail(),
     }
 }
 
-struct CompressedValue {
-    data: Vec<u8>,
-    len: u64,
+/// Builds a string or binary array from bytes.
+enum ByteBuilder {
+    Binary(BinaryBuilder),
+    String(StringBuilder),
 }
 
-fn compress_values(array: &ArrayRef) -> Result<Vec<Option<CompressedValue>>> {
-    byte_values(array)?
-        .map(|value| {
-            value
-                .map(|v| {
-                    let compressed = zstd::bulk::compress(v, ZSTD_LEVEL).map_err(|e| {
-                        UnexpectedSnafu {
-                            reason: format!("failed to compress blob value: {e}"),
-                        }
-                        .build()
-                    })?;
-                    Ok(CompressedValue {
-                        data: compressed,
-                        len: v.len() as u64,
-                    })
-                })
-                .transpose()
-        })
-        .collect()
+impl ByteBuilder {
+    fn new(data_type: &DataType, capacity: usize) -> Self {
+        match data_type {
+            DataType::Utf8 => ByteBuilder::String(StringBuilder::with_capacity(capacity, 0)),
+            _ => ByteBuilder::Binary(BinaryBuilder::with_capacity(capacity, 0)),
+        }
+    }
+
+    fn append(&mut self, value: Option<&[u8]>) -> Result<()> {
+        match (self, value) {
+            (ByteBuilder::Binary(builder), Some(value)) => builder.append_value(value),
+            (ByteBuilder::Binary(builder), None) => builder.append_null(),
+            (ByteBuilder::String(builder), Some(value)) => {
+                let value = std::str::from_utf8(value).map_err(|e| {
+                    UnexpectedSnafu {
+                        reason: format!("blob value is not UTF-8: {e}"),
+                    }
+                    .build()
+                })?;
+                builder.append_value(value)
+            }
+            (ByteBuilder::String(builder), None) => builder.append_null(),
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> ArrayRef {
+        match self {
+            ByteBuilder::Binary(mut builder) => Arc::new(builder.finish()),
+            ByteBuilder::String(mut builder) => Arc::new(builder.finish()),
+        }
+    }
 }
 
 /// Replaces references of `targets` in `batch` with values from `fetched`, which holds
@@ -445,37 +515,35 @@ fn decode_rows(
 
     let mut arrays = batch.columns().to_vec();
     for (index, refs) in targets {
-        let total: usize = refs.iter().flatten().map(|r| r.len as usize).sum();
-        arrays[index] = match batch.column(index).data_type() {
-            DataType::Binary => {
-                let mut builder = BinaryBuilder::with_capacity(refs.len(), total);
-                for r in &refs {
-                    match r {
-                        Some(r) => builder.append_value(value_of(r)?),
-                        None => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish()) as ArrayRef
+        let column = batch.column(index);
+        let mut builder = ByteBuilder::new(column.data_type(), refs.len());
+        for (value, blob_ref) in byte_values(column)?.zip(&refs) {
+            match blob_ref {
+                Some(blob_ref) => builder.append(Some(&value_of(blob_ref)?))?,
+                None => builder.append(value)?,
             }
-            _ => {
-                let mut builder = StringBuilder::with_capacity(refs.len(), total);
-                for r in &refs {
-                    match r {
-                        Some(r) => {
-                            let value = String::from_utf8(value_of(r)?).map_err(|e| {
-                                UnexpectedSnafu {
-                                    reason: format!("blob value is not UTF-8: {e}"),
-                                }
-                                .build()
-                            })?;
-                            builder.append_value(value)
-                        }
-                        None => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish()) as ArrayRef
-            }
-        };
+        }
+        arrays[index] = builder.finish();
     }
     RecordBatch::try_new(batch.schema(), arrays).context(NewRecordBatchSnafu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_only_prefixed_values_are_references() {
+        let blob_ref = BlobRef {
+            offset: 7,
+            compressed_len: 3,
+            len: 5,
+        };
+        assert_eq!(
+            Some(blob_ref),
+            BlobRef::decode(blob_ref.encode().as_bytes()).unwrap()
+        );
+        assert_eq!(None, BlobRef::decode(b"7:3:5").unwrap());
+        assert!(BlobRef::decode(b"\0greptime-blob:7:x").is_err());
+    }
 }

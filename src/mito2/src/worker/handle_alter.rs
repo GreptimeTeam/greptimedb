@@ -216,7 +216,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Err(e));
             return;
         }
-        if let Err(e) = options.validate_column_compression(&new_meta) {
+        if let Err(e) = options
+            .validate_column_compression(&new_meta)
+            .and_then(|_| RegionOptions::validate_column_storage(&new_meta))
+        {
             sender.send(Err(e));
             return;
         }

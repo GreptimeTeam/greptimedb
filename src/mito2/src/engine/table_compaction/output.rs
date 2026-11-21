@@ -23,6 +23,7 @@ use crate::error::{InvalidRequestSnafu, OpenDalSnafu, Result};
 use crate::region::MitoRegionRef;
 use crate::sst::file::FileMeta;
 use crate::sst::location;
+use crate::sst::parquet::blob::{blob_columns, blob_file_size, blob_path};
 use crate::sst::parquet::max_row_group_decoded_size;
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 
@@ -92,6 +93,25 @@ async fn verify_file(
     );
     let footer = cached.parquet_metadata();
     verify_statistics(&footer, metadata, file)?;
+    if !blob_columns(&footer).is_empty() {
+        let expected = blob_file_size(&footer).context(InvalidRequestSnafu {
+            region_id,
+            reason: "Output declares external columns without a sidecar size",
+        })?;
+        let blob_size = access
+            .object_store()
+            .stat(&blob_path(&path))
+            .await
+            .context(OpenDalSnafu)?
+            .content_length();
+        ensure!(
+            blob_size == expected,
+            InvalidRequestSnafu {
+                region_id,
+                reason: "Output sidecar size mismatch"
+            }
+        );
+    }
     if file.index_file_size > 0 {
         let path =
             location::index_file_path(access.table_dir(), file.index_id(), access.path_type());

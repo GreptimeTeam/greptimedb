@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for out-of-line storage of large field values.
+//! Tests for external storage of large field values.
 
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ use common_recordbatch::RecordBatches;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::StorageOptions;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCreateRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
@@ -35,8 +36,14 @@ use crate::test_util::{
     rows_schema,
 };
 
+/// Long values on even rows go to the sidecar; odd rows stay inline, and one of them looks
+/// like a reference.
 fn payload(i: usize, version: usize) -> String {
-    format!("{i:06}-{version}-").repeat(16 * 1024)
+    match i % 4 {
+        1 => format!("short-{i}-{version}"),
+        3 => format!("\0greptime-blob:{i}:{version}:0"),
+        _ => format!("{i:06}-{version}-").repeat(16 * 1024),
+    }
 }
 
 async fn put(
@@ -103,27 +110,33 @@ async fn blob_files(env: &TestEnv) -> usize {
         .count()
 }
 
-fn create_request(blob_threshold: Option<&str>) -> RegionCreateRequest {
-    let mut builder = CreateRequestBuilder::new().tag_num(1).field_num(1);
-    if let Some(threshold) = blob_threshold {
-        builder = builder.insert_option("experimental_sst_blob_threshold", threshold);
+fn create_request(external: bool) -> RegionCreateRequest {
+    let mut request = CreateRequestBuilder::new()
+        .tag_num(1)
+        .field_num(1)
+        .field_datatype(ConcreteDataType::string_datatype())
+        .build();
+    if external {
+        let field = request
+            .column_metadatas
+            .iter_mut()
+            .find(|c| c.semantic_type == SemanticType::Field)
+            .unwrap();
+        field.column_schema = field
+            .column_schema
+            .clone()
+            .with_storage_options(StorageOptions::default())
+            .unwrap();
     }
-    let mut request = builder.build();
-    let field = request
-        .column_metadatas
-        .iter_mut()
-        .find(|c| c.semantic_type == SemanticType::Field)
-        .unwrap();
-    field.column_schema.data_type = ConcreteDataType::string_datatype();
     request
 }
 
 #[tokio::test]
-async fn test_large_values_stay_in_sst_without_threshold() {
+async fn test_large_values_stay_in_sst_without_external_storage() {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
-    let request = create_request(None);
+    let request = create_request(false);
     let schema = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
@@ -140,7 +153,7 @@ async fn test_large_values_survive_flush_filter_and_compaction() {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
-    let request = create_request(Some("64KiB"));
+    let request = create_request(true);
     let schema = rows_schema(&request);
     let delete_schema = delete_rows_schema(&request);
     engine
@@ -154,6 +167,7 @@ async fn test_large_values_survive_flush_filter_and_compaction() {
     flush_region(&engine, region_id, None).await;
     assert_eq!(2, blob_files(&env).await);
     // Size estimates (compaction batch size and memory) must count values in the sidecar.
+    // Each file holds two long values.
     {
         // Scoped: the version holds file handles, which would block the purge checked below.
         let version = engine.get_region(region_id).unwrap().version();
@@ -161,7 +175,7 @@ async fn test_large_values_survive_flush_filter_and_compaction() {
             for file in level.files.values() {
                 assert!(
                     file.meta_ref().max_row_group_uncompressed_size
-                        >= 4 * payload(0, 0).len() as u64
+                        >= 2 * payload(0, 0).len() as u64
                 );
             }
         }
@@ -178,12 +192,12 @@ async fn test_large_values_survive_flush_filter_and_compaction() {
         &engine,
         region_id,
         ScanRequest {
-            filters: vec![col("field_0").eq(lit(payload(5, 0)))],
+            filters: vec![col("field_0").eq(lit(payload(4, 0)))],
             ..Default::default()
         },
     )
     .await;
-    assert_eq!(vec![(5000, payload(5, 0))], filtered);
+    assert_eq!(vec![(4000, payload(4, 0))], filtered);
 
     // Overwrite and delete across files, then merge everything.
     put(&engine, region_id, &schema, &[1, 6], 1).await;

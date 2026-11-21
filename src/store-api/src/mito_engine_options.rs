@@ -107,9 +107,6 @@ pub const MAX_ROW_GROUP_ROW_COUNT_LIMIT: usize = 10 * 1024 * 1024;
 pub const PRESERVE_ROW_SEQUENCE: &str = "preserve_row_sequence";
 /// Option key for experimental Parquet float field encoding.
 pub const EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING: &str = "experimental_sst_float_field_encoding";
-/// Option key for the experimental value size that moves string and binary field columns out
-/// of SSTs into blob sidecars.
-pub const EXPERIMENTAL_SST_BLOB_THRESHOLD: &str = "experimental_sst_blob_threshold";
 
 /// Encoding policy for direct floating-point field columns in Parquet SSTs.
 #[derive(
@@ -192,7 +189,6 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
             MAX_ROW_GROUP_ROW_COUNT,
             PRESERVE_ROW_SEQUENCE,
             EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
-            EXPERIMENTAL_SST_BLOB_THRESHOLD,
         ]
         .contains(&key)
 }
@@ -261,7 +257,6 @@ mod tests {
         assert!(is_mito_engine_option_key(
             EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING
         ));
-        assert!(is_mito_engine_option_key(EXPERIMENTAL_SST_BLOB_THRESHOLD));
         assert!(!is_mito_engine_option_key("foo"));
     }
 

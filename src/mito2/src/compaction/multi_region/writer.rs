@@ -152,11 +152,6 @@ impl<'a> TargetWriter<'a> {
                     .min(memory::MAX_ROW_GROUP_SIZE),
             ),
             float_field_encoding: self.target.options.float_field_encoding,
-            blob_threshold: self
-                .target
-                .options
-                .sst_blob_threshold
-                .map(|size| size.as_bytes() as usize),
             // Every resident encoder and its finish workspace are admitted together.
             encode_parallelism: 1,
             encode_runtime: EncodeRuntime::Compact,

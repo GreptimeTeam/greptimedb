@@ -374,7 +374,6 @@ mod tests {
                 write_buffer_size: None,
                 preserve_row_sequence: false,
                 float_field_encoding: Default::default(),
-                sst_blob_threshold: None,
             },
             compaction_time_window: None,
         }
