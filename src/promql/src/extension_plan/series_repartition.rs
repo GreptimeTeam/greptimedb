@@ -114,6 +114,7 @@
 //! partition can still claim its queue; the execution going away as a whole, which no later `execute`
 //! can reach, is the other point at which everything is released.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Formatter};
 use std::hash::{Hash, Hasher};
@@ -2479,11 +2480,15 @@ impl Stream for RepartitionStream {
                             (key, RoutedChain::Raw(chain))
                         }
                     };
-                    if !this.groups.contains_key(&key) {
-                        let metadata =
-                            MemoryConsumer::new("SeriesRepartitionIdentity").register(&this.pool);
-                        let key_bytes =
-                            match &key {
+                    // One tree search answers all three questions a message asks of the identity
+                    // tree: whether the identity is present, creating it if it is not, and which
+                    // group the pieces join. A vacant entry charges the identity before it inserts
+                    // it, and the key moves in rather than being cloned in beside the search.
+                    let admission = match this.groups.entry(key) {
+                        Entry::Vacant(vacant) => {
+                            let metadata = MemoryConsumer::new("SeriesRepartitionIdentity")
+                                .register(&this.pool);
+                            let key_bytes = match vacant.key() {
                                 OwnerKey::Evaluated((name, tags)) => {
                                     std::mem::size_of::<ExactIdentity>()
                                         .saturating_add(name.as_ref().map_or(0, |name| name.len()))
@@ -2498,67 +2503,88 @@ impl Stream for RepartitionStream {
                                 }
                                 OwnerKey::Raw(key) => key.capacity(),
                             };
-                        let bytes = std::mem::size_of::<PendingGroup>()
-                            .saturating_add(std::mem::size_of::<OwnerKey>())
-                            .saturating_add(key_bytes)
-                            .saturating_add(this.eof.len().saturating_mul(2));
-                        if let Err(error) = metadata.try_grow(bytes) {
-                            this.lease.fail(Arc::new(error));
+                            let bytes = std::mem::size_of::<PendingGroup>()
+                                .saturating_add(std::mem::size_of::<OwnerKey>())
+                                .saturating_add(key_bytes)
+                                .saturating_add(this.eof.len().saturating_mul(2));
+                            // The entry borrows the identity tree, so a refused charge reports
+                            // itself after that borrow ends: the identity it could not pay for is
+                            // never inserted.
+                            match metadata.try_grow(bytes) {
+                                Ok(()) => Ok(vacant.insert_entry(PendingGroup {
+                                    fragments: Vec::new(),
+                                    raw_chunks: Vec::new(),
+                                    charges: Vec::new(),
+                                    received: vec![false; this.eof.len()],
+                                    metadata,
+                                })),
+                                Err(error) => Err(Arc::new(error)),
+                            }
+                        }
+                        Entry::Occupied(occupied) => Ok(occupied),
+                    };
+                    // The entry borrows the identity tree, so it lives only inside this block:
+                    // publishing takes the whole stream, and a refused charge reports itself with no
+                    // entry left alive.
+                    let ready = {
+                        let mut entry = match admission {
+                            Ok(entry) => entry,
+                            Err(error) => {
+                                this.lease.fail(error);
+                                continue;
+                            }
+                        };
+                        if input >= entry.get().received.len()
+                            || (entry.get().received[input]
+                                && !(this.ordering == SeriesOrdering::Interleaved
+                                    && matches!(entry.key(), OwnerKey::Raw(_))))
+                        {
+                            this.lease.fail(Arc::new(DataFusionError::Execution(
+                                "input repeated an exact series identity".into(),
+                            )));
                             continue;
                         }
-                        this.groups.insert(
-                            key.clone(),
-                            PendingGroup {
-                                fragments: Vec::new(),
-                                raw_chunks: Vec::new(),
-                                charges: Vec::new(),
-                                received: vec![false; this.eof.len()],
-                                metadata,
-                            },
-                        );
-                    }
-                    let Some(group) = this.groups.get_mut(&key) else {
-                        this.lease.fail(Arc::new(DataFusionError::Internal(
-                            "series identity group was not retained".into(),
-                        )));
-                        continue;
+                        {
+                            let group = entry.get_mut();
+                            group.received[input] = true;
+                            match pieces {
+                                RoutedChain::Evaluated(chain) => {
+                                    for (series, _, charge) in chain {
+                                        group.fragments.push(series);
+                                        group.charges.push(charge);
+                                    }
+                                }
+                                RoutedChain::Raw(chain) => {
+                                    for (chunk, charge) in chain {
+                                        group.raw_chunks.push(chunk);
+                                        group.charges.push(charge);
+                                    }
+                                }
+                            }
+                        }
+                        // Key-then-time publishes through the ordered rescan above; any other
+                        // ordering publishes this identity as soon as it is ready. The identity
+                        // `finish_group` removes is copied out only when this group is the one being
+                        // published.
+                        if this.ordering == SeriesOrdering::KeyThenTime {
+                            this.rescan = true;
+                            this.resume_after = None;
+                            None
+                        } else if group_ready(
+                            entry.get(),
+                            &this.eof,
+                            &this.last_key_from,
+                            this.ordering,
+                            this.identity_completion,
+                            entry.key(),
+                        ) {
+                            Some(entry.key().clone())
+                        } else {
+                            None
+                        }
                     };
-                    if input >= group.received.len()
-                        || (group.received[input]
-                            && !(this.ordering == SeriesOrdering::Interleaved
-                                && matches!(&key, OwnerKey::Raw(_))))
-                    {
-                        this.lease.fail(Arc::new(DataFusionError::Execution(
-                            "input repeated an exact series identity".into(),
-                        )));
-                        continue;
-                    }
-                    group.received[input] = true;
-                    match pieces {
-                        RoutedChain::Evaluated(chain) => {
-                            for (series, _, charge) in chain {
-                                group.fragments.push(series);
-                                group.charges.push(charge);
-                            }
-                        }
-                        RoutedChain::Raw(chain) => {
-                            for (chunk, charge) in chain {
-                                group.raw_chunks.push(chunk);
-                                group.charges.push(charge);
-                            }
-                        }
-                    }
-                    if this.ordering == SeriesOrdering::KeyThenTime {
-                        this.rescan = true;
-                        this.resume_after = None;
-                    } else if group_ready(
-                        group,
-                        &this.eof,
-                        &this.last_key_from,
-                        this.ordering,
-                        this.identity_completion,
-                        &key,
-                    ) && let Err(error) = this.finish_group(&key)
+                    if let Some(key) = ready
+                        && let Err(error) = this.finish_group(&key)
                     {
                         this.lease.fail(Arc::new(error));
                     }
