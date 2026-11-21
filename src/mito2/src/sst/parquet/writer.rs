@@ -63,9 +63,9 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
-    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo, WriteOptions,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
-    large_value_fields, max_row_group_decoded_size, skip_statistics, var_len_value_bytes,
+    large_value_fields, max_row_group_decoded_size, skip_statistics,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -182,6 +182,13 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
         }
     }
 
+    fn append_key_value_metadata(&mut self, kv: KeyValue) {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.append_key_value_metadata(kv),
+            SstArrowWriter::Parallel(writer) => writer.append_key_value_metadata(kv),
+        }
+    }
+
     async fn finish(&mut self) -> parquet::errors::Result<ParquetMetaData> {
         match self {
             SstArrowWriter::Serial(writer) => writer.finish().await,
@@ -256,6 +263,8 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     memory: WriteMemory,
     /// Field columns of the current file that skip min/max statistics, picked from its first batch.
     large_value_columns: Vec<String>,
+    /// Decoded value bytes per row group of the current file.
+    row_group_value_bytes: Option<RowGroupValueBytes>,
 }
 
 /// Registers output ownership before either an SST or its index is created in storage.
@@ -455,6 +464,7 @@ where
             write_guard: None,
             cancellation: None,
             large_value_columns: Vec::new(),
+            row_group_value_bytes: None,
         }
     }
 
@@ -548,15 +558,17 @@ where
             self.check_cancelled()?;
             // Keep the upload owned until finalization succeeds, so an error
             // still reaches the common abort path.
-            let parquet_metadata = self
-                .writer
-                .as_mut()
-                .context(UnexpectedSnafu {
-                    reason: "Missing SST writer during finalization",
-                })?
-                .finish()
-                .await
-                .map_err(map_write_error)?;
+            let writer = self.writer.as_mut().context(UnexpectedSnafu {
+                reason: "Missing SST writer during finalization",
+            })?;
+            if let Some(value_bytes) = self
+                .row_group_value_bytes
+                .take()
+                .and_then(RowGroupValueBytes::into_key_value)
+            {
+                writer.append_key_value_metadata(value_bytes);
+            }
+            let parquet_metadata = writer.finish().await.map_err(map_write_error)?;
             self.writer.take();
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
             if self.memory.limits.is_some() {
@@ -572,8 +584,7 @@ where
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            let max_row_group_uncompressed_size =
-                max_row_group_decoded_size(&parquet_metadata, stats.var_len_bytes);
+            let max_row_group_uncompressed_size = max_row_group_decoded_size(&parquet_metadata);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
@@ -761,6 +772,9 @@ where
                 .write(&arrow_batch)
                 .await
                 .map_err(map_write_error)?;
+            if let Some(value_bytes) = &mut self.row_group_value_bytes {
+                value_bytes.update(&arrow_batch);
+            }
             self.metrics.write_batch += start.elapsed();
 
             self.check_cancelled()?;
@@ -835,6 +849,7 @@ where
             let props_builder = apply_internal_column_encoding(props_builder, &self.metadata);
             let props_builder =
                 skip_statistics(props_builder, &mem::take(&mut self.large_value_columns));
+            self.row_group_value_bytes = Some(RowGroupValueBytes::new(opts.row_group_size));
             let props_builder = apply_float_field_encoding(
                 props_builder,
                 &self.metadata,
@@ -936,8 +951,6 @@ struct SourceStats {
     last_primary_key: Option<Bytes>,
     /// Series estimator for computing num_series.
     series_estimator: SeriesEstimator,
-    /// Decoded bytes of string and binary values.
-    var_len_bytes: u64,
 }
 
 impl SourceStats {
@@ -947,7 +960,6 @@ impl SourceStats {
         }
 
         self.num_rows += record_batch.num_rows();
-        self.var_len_bytes += var_len_value_bytes(record_batch);
         self.series_estimator.update_flat(record_batch);
         let (keys, values) = encoded_primary_keys(record_batch)?;
         let key = keys.value(record_batch.num_rows() - 1);

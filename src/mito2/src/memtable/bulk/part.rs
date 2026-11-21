@@ -74,9 +74,9 @@ use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
 use crate::sst::parquet::{
-    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, apply_column_compression,
-    apply_float_field_encoding, apply_internal_column_encoding, large_value_fields,
-    max_row_group_decoded_size, skip_statistics, var_len_value_bytes,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo,
+    apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
+    large_value_fields, max_row_group_decoded_size, skip_statistics, var_len_value_bytes,
 };
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -1316,10 +1316,8 @@ impl EncodedBulkPart {
     /// Returns a `SstInfo` instance with information derived from this bulk part's metadata
     pub(crate) fn to_sst_info(&self, file_id: FileId) -> SstInfo {
         let unit = self.metadata.region_metadata.time_index_type().unit();
-        let max_row_group_uncompressed_size = max_row_group_decoded_size(
-            &self.metadata.parquet_metadata,
-            self.metadata.var_len_bytes,
-        );
+        let max_row_group_uncompressed_size =
+            max_row_group_decoded_size(&self.metadata.parquet_metadata);
         SstInfo {
             file_id,
             time_range: (
@@ -1444,6 +1442,16 @@ impl BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
+    /// Returns a tracker cutting row groups like a writer using `props`.
+    fn row_group_value_bytes(props: &Option<WriterProperties>) -> RowGroupValueBytes {
+        RowGroupValueBytes::new(
+            props
+                .as_ref()
+                .and_then(WriterProperties::max_row_group_row_count)
+                .unwrap_or(usize::MAX),
+        )
+    }
+
     /// Returns writer properties for a part whose first batch is `batch`.
     fn writer_props_for(&self, batch: &RecordBatch) -> Option<WriterProperties> {
         let large_value_columns = large_value_fields(&self.metadata, batch);
@@ -1479,12 +1487,10 @@ impl BulkPartEncoder {
             }
         };
         let mut buf = Vec::with_capacity(4096);
-        let mut writer = ArrowWriter::try_new(
-            &mut buf,
-            arrow_schema.clone(),
-            self.writer_props_for(&first),
-        )
-        .context(EncodeMemtableSnafu)?;
+        let props = self.writer_props_for(&first);
+        let mut row_group_value_bytes = Self::row_group_value_bytes(&props);
+        let mut writer = ArrowWriter::try_new(&mut buf, arrow_schema.clone(), props)
+            .context(EncodeMemtableSnafu)?;
         let mut total_rows = 0;
         let mut var_len_bytes = 0;
         let mut series_estimator = SeriesEstimator::default();
@@ -1498,6 +1504,7 @@ impl BulkPartEncoder {
 
             series_estimator.update_flat(&batch);
             var_len_bytes += var_len_value_bytes(&batch);
+            row_group_value_bytes.update(&batch);
             metrics.raw_size += record_batch_estimated_size(&batch);
             let write_start = Instant::now();
             writer.write(&batch).context(EncodeMemtableSnafu)?;
@@ -1508,6 +1515,9 @@ impl BulkPartEncoder {
         metrics.iter_cost += iter_start.elapsed();
 
         let close_start = Instant::now();
+        if let Some(kv) = row_group_value_bytes.into_key_value() {
+            writer.append_key_value_metadata(kv);
+        }
         let file_metadata = writer.close().context(EncodeMemtableSnafu)?;
         metrics.write_cost += close_start.elapsed();
         metrics.encoded_size += buf.len();
@@ -1544,13 +1554,15 @@ impl BulkPartEncoder {
         let arrow_schema = part.batch.schema();
 
         let file_metadata = {
-            let mut writer = ArrowWriter::try_new(
-                &mut buf,
-                arrow_schema.clone(),
-                self.writer_props_for(&part.batch),
-            )
-            .context(EncodeMemtableSnafu)?;
+            let props = self.writer_props_for(&part.batch);
+            let mut row_group_value_bytes = Self::row_group_value_bytes(&props);
+            let mut writer = ArrowWriter::try_new(&mut buf, arrow_schema.clone(), props)
+                .context(EncodeMemtableSnafu)?;
             writer.write(&part.batch).context(EncodeMemtableSnafu)?;
+            row_group_value_bytes.update(&part.batch);
+            if let Some(kv) = row_group_value_bytes.into_key_value() {
+                writer.append_key_value_metadata(kv);
+            }
             writer.finish().context(EncodeMemtableSnafu)?
         };
 

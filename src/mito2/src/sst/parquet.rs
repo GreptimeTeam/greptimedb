@@ -25,7 +25,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::json::JsonSettings;
 use datatypes::schema::ColumnEncoding;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use parquet::file::properties::{
     DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT, EnabledStatistics, WriterPropertiesBuilder,
 };
@@ -175,21 +175,86 @@ pub(crate) fn var_len_value_bytes(batch: &RecordBatch) -> u64 {
         .sum()
 }
 
+/// Footer key holding the decoded bytes of string and binary values in each row group, in
+/// row group order and separated by commas.
+pub(crate) const ROW_GROUP_VALUE_BYTES_KEY: &str = "greptime:row_group_value_bytes";
+
+/// Accumulates [var_len_value_bytes] per row group, cutting row groups every
+/// `row_group_rows` rows from the start of the file like the parquet writers do.
+#[derive(Debug)]
+pub(crate) struct RowGroupValueBytes {
+    row_group_rows: usize,
+    rows_in_current: usize,
+    current: u64,
+    finished: Vec<u64>,
+}
+
+impl RowGroupValueBytes {
+    pub(crate) fn new(row_group_rows: usize) -> Self {
+        Self {
+            row_group_rows: row_group_rows.max(1),
+            rows_in_current: 0,
+            current: 0,
+            finished: Vec::new(),
+        }
+    }
+
+    /// Adds the next batch written to the file.
+    pub(crate) fn update(&mut self, batch: &RecordBatch) {
+        let mut offset = 0;
+        while offset < batch.num_rows() {
+            let len = (self.row_group_rows - self.rows_in_current).min(batch.num_rows() - offset);
+            self.current += var_len_value_bytes(&batch.slice(offset, len));
+            self.rows_in_current += len;
+            offset += len;
+            if self.rows_in_current == self.row_group_rows {
+                self.finished.push(std::mem::take(&mut self.current));
+                self.rows_in_current = 0;
+            }
+        }
+    }
+
+    /// Returns the footer entry, or `None` when the file has no such values.
+    pub(crate) fn into_key_value(mut self) -> Option<KeyValue> {
+        if self.rows_in_current > 0 {
+            self.finished.push(self.current);
+        }
+        self.finished.iter().any(|bytes| *bytes > 0).then(|| {
+            KeyValue::new(
+                ROW_GROUP_VALUE_BYTES_KEY.to_string(),
+                self.finished
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        })
+    }
+}
+
 /// Returns the size of the largest row group of `metadata`, counting string and binary values
-/// at their decoded size. `var_len_bytes` is the decoded size of those values in the whole
-/// file, spread over row groups by row count.
-pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData, var_len_bytes: u64) -> u64 {
-    let total_rows = metadata.file_metadata().num_rows().max(1) as u64;
+/// at their decoded size when the footer records it under [ROW_GROUP_VALUE_BYTES_KEY].
+///
+/// Writers and the verifier of compaction outputs must both use this to agree on the value.
+pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
+    let value_bytes: Vec<u64> = metadata
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|kvs| kvs.iter().find(|kv| kv.key == ROW_GROUP_VALUE_BYTES_KEY))
+        .and_then(|kv| kv.value.as_deref())
+        .and_then(|value| value.split(',').map(|v| v.parse().ok()).collect())
+        .unwrap_or_default();
     metadata
         .row_groups()
         .iter()
-        .map(|row_group| {
+        .enumerate()
+        .map(|(i, row_group)| {
             let encoded: u64 = row_group
                 .columns()
                 .iter()
                 .map(|column| column.uncompressed_size() as u64)
                 .sum();
-            encoded.max(var_len_bytes * row_group.num_rows() as u64 / total_rows)
+            encoded.max(value_bytes.get(i).copied().unwrap_or(0))
         })
         .max()
         .unwrap_or(0)
@@ -433,8 +498,8 @@ mod tests {
     use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
-    use crate::sst::parquet::flat_format::FlatWriteFormat;
-    use crate::sst::parquet::metadata::extract_primary_key_range;
+    use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
+    use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::row_selection::RowGroupSelection;
     use crate::sst::parquet::writer::ParquetWriter;
@@ -1484,9 +1549,10 @@ mod tests {
         // 2048 copies of one 64 KiB value decode to 128 MiB but dictionary-encode to one value.
         let values = vec![vec![7u8; 64 * 1024]; 2048];
         let batch = new_record_batch_with_binary_values("a", &values);
+        let sst_path = file_path.build_sst_file_path(handle.file_id());
         let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
-            object_store,
+            object_store.clone(),
             metadata,
             IndexConfig::default(),
             NoopIndexBuilder,
@@ -1510,6 +1576,58 @@ mod tests {
             .unwrap();
         assert!(parquet_meta.row_group(0).column(field).uncompressed_size() < 1024 * 1024);
         assert!(info.max_row_group_uncompressed_size >= 2048 * 64 * 1024);
+        // Compaction outputs are verified by recomputing the size from the stored footer.
+        let footer = MetadataLoader::new(object_store, &sst_path, info.file_size)
+            .load(&mut Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            info.max_row_group_uncompressed_size,
+            max_row_group_decoded_size(&footer)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_row_group_size_counts_wide_rows_in_their_own_row_group() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = FixedPathProvider {
+            region_file_id: handle.file_id(),
+        };
+        let metadata = build_test_binary_test_region_metadata();
+        // Nine row groups of short values, then one of repeated 64 KiB values that
+        // dictionary-encode to a single value.
+        let short = new_record_batch_with_binary_values("a", &vec![b"short".to_vec(); 72]);
+        let wide = new_record_batch_with_binary_values("a", &vec![vec![7u8; 64 * 1024]; 8]);
+        let ts_index = time_index_column_index(wide.num_columns());
+        let mut columns = wide.columns().to_vec();
+        columns[ts_index] = Arc::new(TimestampMillisecondArray::from_iter_values(72..80));
+        let wide = RecordBatch::try_new(wide.schema(), columns).unwrap();
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            file_path,
+            &mut metrics,
+        )
+        .await;
+        let info = writer
+            .write_all_flat_as_primary_key(
+                new_flat_source_from_record_batches(vec![short, wide]),
+                None,
+                &WriteOptions {
+                    row_group_size: 8,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(10, info.num_row_groups);
+        assert!(info.max_row_group_uncompressed_size >= 8 * 64 * 1024);
     }
 
     #[rstest::rstest]
