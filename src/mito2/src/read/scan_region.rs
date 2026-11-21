@@ -3334,6 +3334,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_manifest_pruning_topk_disjoint_ssts() {
+        use api::v1::Rows;
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::execution::context::TaskContext;
+        use datafusion::physical_expr::PhysicalSortExpr;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+        use datafusion::physical_plan::{ExecutionPlan, collect};
+        use datatypes::arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
+        use datatypes::arrow::compute::SortOptions;
+        use datatypes::arrow::record_batch::RecordBatch;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::config::MitoConfig;
+        use crate::test_util::{
+            CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+        };
+
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                min_compaction_interval: std::time::Duration::from_secs(60 * 60),
+                schedule_compaction_after_edit: false,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(123, 456);
+        let request = CreateRequestBuilder::new()
+            .insert_option("append_mode", "true")
+            .insert_option("compaction.type", "twcs")
+            .insert_option("compaction.twcs.trigger_file_num", "100")
+            .build();
+        let row_schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        for (start, end) in [(0, 2), (10, 11), (20, 22)] {
+            let mut rows = build_rows(start, end);
+            if start == 0 {
+                rows[0].values[1].value_data = None;
+            }
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: row_schema.clone(),
+                    rows,
+                },
+            )
+            .await;
+            flush_region(&engine, region_id, None).await;
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version();
+        let mut files = version.ssts.levels()[0]
+            .files
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        files.sort_by_key(|file| file.meta_ref().time_range.0);
+        assert_eq!(files.len(), 3, "three disjoint flushed SSTs");
+        for (file, (min, max)) in files
+            .iter()
+            .zip([(0, 1_000), (10_000, 10_000), (20_000, 21_000)])
+        {
+            assert_eq!(
+                file.time_range(),
+                (
+                    Timestamp::new_millisecond(min),
+                    Timestamp::new_millisecond(max)
+                )
+            );
+        }
+        let access_layer = region.access_layer();
+        for file in &files {
+            let path = file.file_path(access_layer.table_dir(), access_layer.path_type());
+            assert!(access_layer.object_store().exists(&path).await.unwrap());
+        }
+        let metadata = version.metadata.clone();
+        let arrow_schema = metadata.schema.arrow_schema();
+        let ts_expr = physical_col("ts", arrow_schema.as_ref()).unwrap();
+        let value_expr = physical_col("field_0", arrow_schema.as_ref()).unwrap();
+        let sort_options = SortOptions {
+            descending: true,
+            nulls_first: false,
+        };
+        // Fill the real TopK heap with (10s, 100). The oldest SST contains a
+        // NULL field_0; the manifest has no statistics for that field.
+        let seed = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![Some("seed")])),
+                Arc::new(Float64Array::from(vec![Some(100.0)])),
+                Arc::new(TimestampMillisecondArray::from(vec![10_000])),
+            ],
+        )
+        .unwrap();
+        let source =
+            MemorySourceConfig::try_new_exec(&[vec![seed]], arrow_schema.clone(), None).unwrap();
+        let sort = SortExec::new(
+            [
+                PhysicalSortExpr {
+                    expr: ts_expr,
+                    options: sort_options,
+                },
+                PhysicalSortExpr {
+                    expr: value_expr,
+                    options: sort_options,
+                },
+            ]
+            .into(),
+            source,
+        )
+        .with_fetch(Some(1));
+        let expr = sort
+            .dynamic_expressions_produced()
+            .into_iter()
+            .next()
+            .unwrap();
+        let dynamic_filter = (expr as Arc<dyn std::any::Any + Send + Sync>)
+            .downcast::<DynamicFilterPhysicalExpr>()
+            .unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        predicate_group.add_dyn_filters(vec![dynamic_filter]);
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 1, 2]).unwrap();
+        let input = ScanInput::builder(region.access_layer(), mapper)
+            .with_predicate(predicate_group)
+            .with_files(files.clone())
+            .build();
+        assert!(
+            !input.can_manifest_prune_file(&files[0]),
+            "uninitialized TopK keeps every SST"
+        );
+        collect(Arc::new(sort), Arc::new(TaskContext::default()))
+            .await
+            .unwrap();
+        assert!(
+            input.can_manifest_prune_file(&files[0]),
+            "a disjoint SST must be pruned despite unknown nullable secondary statistics"
+        );
+        let mut metrics = ReaderMetrics::default();
+        let builder = input
+            .prune_file(&files[0], PreFilterMode::SkipFields, &mut metrics)
+            .await
+            .unwrap();
+        let mut ranges = SmallVec::new();
+        builder.build_ranges(-1, &mut ranges);
+        assert!(ranges.is_empty());
+        assert_eq!(metrics.filter_metrics.files_time_range_pruned, 1);
+        assert!(
+            !input.can_manifest_prune_file(&files[1]),
+            "same-prefix SST must be kept for better suffixes"
+        );
+        assert!(
+            !input.can_manifest_prune_file(&files[2]),
+            "better timestamp SST must be kept"
+        );
+    }
+
+    #[tokio::test]
     async fn test_manifest_pruning_observes_dynamic_filter_update() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
