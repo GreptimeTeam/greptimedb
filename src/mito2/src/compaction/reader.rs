@@ -162,6 +162,12 @@ impl CompactionSstReaderBuilder<'_> {
         let reads: Vec<_> = self
             .inputs
             .iter()
+            .filter(|file| {
+                matches!(
+                    file.meta_ref().format,
+                    crate::sst::file::FileFormat::Parquet
+                )
+            })
             .map(|file_handle| self.read_parquet_metadata(file_handle))
             .collect();
         let metadata: Vec<_> = futures::stream::iter(reads)

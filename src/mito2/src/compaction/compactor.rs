@@ -858,7 +858,11 @@ impl DefaultSstMerger {
                     // their effective sequences here could promote old rows above
                     // versions in SSTs that were not part of this merge.
                     max_sequence: None,
-                    sst_write_format: if flat_format {
+                    sst_write_format: if context.region_options.sst_format
+                        == Some(FormatType::Narthex)
+                    {
+                        FormatType::Narthex
+                    } else if flat_format {
                         FormatType::Flat
                     } else {
                         FormatType::PrimaryKey

@@ -35,13 +35,12 @@ use crate::series_index::format::FormatWriter;
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding, decode_series_id};
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
-    self, Block, Column, KeyRef, Page, PageReference, Trailer, pack,
+    self, Block, Column, KeyRef, Page, PageReference, PayloadLimit, Trailer, pack,
 };
 use crate::series_index::samples::{
     ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part, TimestampColumn,
     TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
 };
-use crate::series_index::writer::validate_metadata;
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
@@ -190,10 +189,10 @@ impl SamplesWriter {
         source_file_id: FileId,
         generation: FileId,
     ) -> Result<Self> {
-        validate_metadata(&metadata)?;
+        super::validate_narthex_metadata(&metadata)?;
         require(
             (1..=super::MAX_ROWS).contains(&options.block_rows)
-                && (1..=metadata::ROOT_CAPACITY).contains(&options.root_capacity)
+                && (1..=metadata::MAX_LEAF_COUNT).contains(&options.max_leaves_per_part)
                 && (188..=metadata::PAGE_LIMIT).contains(&options.page_bytes)
                 && options.part_bytes > 0
                 && options.metadata_bytes > 0,
@@ -220,6 +219,7 @@ impl SamplesWriter {
             })
             .collect::<Result<Vec<_>>>()?;
         let manifest = Manifest {
+            prefix: Some(prefix.to_string()),
             format: ArtifactFormat::ColumnarSamples,
             version: VERSION,
             identity_encoding: IdentityEncoding::CURRENT_SAMPLES,
@@ -236,8 +236,8 @@ impl SamplesWriter {
         };
         manifest.validate_schema()?;
         require(
-            prefix == manifest.prefix(),
-            "samples output prefix mismatch",
+            prefix.ends_with('/') && !prefix.split('/').any(|part| part == ".."),
+            "invalid samples output prefix",
         )?;
         let manifest_bytes = serde_json::to_vec(&manifest).context(SerdeJsonSnafu)?.len();
         require(
@@ -426,7 +426,7 @@ impl SamplesWriter {
         )?;
         if !self.leaves.is_empty()
             && self.leaf_bytes + size > self.options.page_bytes
-            && self.leaves.len() == self.options.root_capacity
+            && self.leaves.len() >= self.options.max_leaves_per_part
         {
             self.finish_part().await?;
         }
@@ -477,9 +477,9 @@ impl SamplesWriter {
         }
         Ok(())
     }
-    async fn write_page(&mut self, page: Page) -> Result<PageReference> {
+    async fn write_page(&mut self, page: Page, limit: PayloadLimit) -> Result<PageReference> {
         let bounds = page.bounds()?;
-        let (payload, bytes) = pack(&page.encode(), self.position, 1, true)?;
+        let (payload, bytes) = pack(&page.encode(), self.position, 1, limit)?;
         self.position = payload.end()?;
         self.output_buffer.write(&mut self.outputs, &bytes).await?;
         Ok(PageReference { bounds, payload })
@@ -507,13 +507,19 @@ impl SamplesWriter {
         let key_end = self.position;
         let mut children = Vec::new();
         for leaf in leaves {
-            children.push(self.write_page(Page::Leaf(leaf)).await?);
+            children.push(
+                self.write_page(Page::Leaf(leaf), PayloadLimit::Page)
+                    .await?,
+            );
         }
         let depth = if children.len() == 1 { 1 } else { 2 };
         let root = if depth == 1 {
             children.remove(0)
         } else {
-            self.write_page(Page::Internal(children)).await?
+            // The root names every leaf of the part, so it is the one page packed against the
+            // root limit. A single-leaf part keeps depth one and its leaf-page bytes.
+            self.write_page(Page::Internal(children), PayloadLimit::Root)
+                .await?
         };
         let bounds = root.bounds;
         let file_length = self
@@ -660,7 +666,7 @@ fn encode_block(
     };
     let mut chunks = Vec::new();
     let mut push = |role, id, encoding, bytes: Vec<u8>, nulls| -> Result<()> {
-        let (payload, bytes) = pack(&bytes, 0, encoding, false)?;
+        let (payload, bytes) = pack(&bytes, 0, encoding, PayloadLimit::Chunk)?;
         block.columns.push(Column {
             role,
             id,

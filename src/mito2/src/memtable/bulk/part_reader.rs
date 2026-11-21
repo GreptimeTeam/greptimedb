@@ -60,8 +60,16 @@ impl EncodedBulkPartIter {
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> error::Result<Self> {
-        let parquet_meta = encoded_part.metadata().parquet_metadata.clone();
-        let data = encoded_part.data().clone();
+        let parquet_meta = encoded_part
+            .parquet_metadata()
+            .ok_or_else(|| {
+                crate::series_index::columnar::invalid("expected Parquet bulk metadata")
+            })?
+            .clone();
+        let data = encoded_part
+            .data()
+            .ok_or_else(|| crate::series_index::columnar::invalid("expected Parquet bulk bytes"))?
+            .clone();
         let series_count = encoded_part.metadata().num_series as usize;
 
         // TODO(fys): Nested projection pushdown to the memtable layer is not supported yet.

@@ -37,7 +37,7 @@ use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::purger::series_index_channel;
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
-    self, KeyRef, MAGIC, Page, PayloadReference, TRAILER_SIZE, Trailer,
+    self, KeyRef, MAGIC, Page, PayloadLimit, PayloadReference, TRAILER_SIZE, Trailer,
 };
 use crate::series_index::samples::{ColumnarSamplesFormat, Manifest};
 use crate::series_index::{TABLE_ID_COLUMN, TSID_COLUMN};
@@ -317,7 +317,8 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
                 &trailer.root,
                 trailer.depth,
                 trailer.areas(),
-                &manifest
+                &manifest,
+                PayloadLimit::Page
             )
             .is_err(),
             "{bad:?} must not decode"
@@ -640,6 +641,7 @@ async fn part_root(
         trailer.depth,
         trailer.areas(),
         &manifest,
+        PayloadLimit::Page,
     )
     .unwrap();
     (trailer, page, bytes)
@@ -1026,114 +1028,10 @@ async fn unpayable_key_prefetch_issues_no_key_read() {
     assert_eq!(0, pool.reserved());
 }
 
-/// A cached part answers a key from the payload cache, never from the key area.
-///
-/// Keys use the same aligned blocks as column chunks, so a part that is already cached must not
-/// pay a key-area read - including when the scan pool shapes how the read is issued.
-///
-/// This is a cache-behaviour guard, not a proof of the key-fetch budget: it passes without the
-/// peak reservation too, because a warm part issues no read either way. The budget itself is
-/// pinned by `unpayable_key_prefetch_issues_no_key_read` and
-/// `per_key_fallback_reserves_the_aligned_peak`.
-#[ignore = "TODO(narthex-merge): native payload byte cache is disabled after the merge; re-enable with a dedicated page-cache budget"]
-#[tokio::test]
-async fn cached_parts_need_no_key_read() {
-    use crate::cache::{CacheManager, CacheStrategy};
-    use crate::series_index::format::SamplesFormatReader;
-    use crate::series_index::samples::reader;
-    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
-    use store_api::storage::FileId;
-
-    let store = store();
-    let meta = super::metadata();
-    let format = ColumnarSamplesFormat::default();
-    let keys = (0..4u64)
-        .map(|tsid| new_sparse_primary_key(&["a", "b"], &meta, 1, tsid))
-        .collect::<Vec<_>>();
-    let handle = build(
-        &format,
-        &store,
-        meta.clone(),
-        &[keyed_batch(&meta, &keys, &[100, 100, 100, 100], false)],
-    )
-    .await;
-    let strategy = CacheStrategy::EnableAll(Arc::new(
-        CacheManager::builder()
-            .page_cache_size(16 * 1024 * 1024)
-            .build(),
-    ));
-    let cache = strategy.columnar_payload(FileId::random());
-    let open = |store: &ObjectStore| {
-        let store = store.clone();
-        let handle = handle.clone();
-        let cache = cache.clone();
-        async move {
-            reader::SamplesReader::open(store, handle)
-                .await
-                .unwrap()
-                .with_payload_cache(cache)
-        }
-    };
-    // Warm every aligned block of the part, keys included.
-    let warm = open(&store).await;
-    warm.read(super::full_request())
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    let reads = Arc::new(Mutex::new(Vec::new()));
-    let observed = reads.clone();
-    let layer = object_store::layers::mock::MockLayerBuilder::default()
-        .reader_factory(Arc::new(
-            move |path, _, inner: object_store::layers::mock::oio::Reader| {
-                Box::new(RecordingRead {
-                    inner,
-                    path: path.into(),
-                    reads: observed.clone(),
-                })
-            },
-        ))
-        .build()
-        .unwrap();
-    let layered = store.clone().layer(layer);
-    let reader = open(&layered).await;
-    reads.lock().unwrap().clear();
-    let pool = Arc::new(GreedyMemoryPool::new(1024 * 1024));
-    let mut query = super::full_request();
-    query.memory_pool = Some(pool.clone());
-    // One selected series still needs its key, which this part already has cached.
-    query.keys = Some(BTreeSet::from([exact(&meta, &["a", "b"], 1, 2)]));
-    let batches = reader
-        .read(query)
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_eq!(vec![(1, 2, 100)], collect_times(&batches));
-    // Counting any read that intersects the key area, so an aligned read starting before it is
-    // counted too: a warm part must answer the key from the payload cache either way.
-    let (_, trailer, _, _) = root_page(&store, &handle).await;
-    let area = trailer.keys();
-    let reads = reads.lock().unwrap();
-    let key_reads = reads
-        .iter()
-        .filter(|(_, range)| {
-            let start = range.offset();
-            let end = start + range.size().unwrap();
-            start < end && start < area.end && end > area.start
-        })
-        .count();
-    assert_eq!(
-        0, key_reads,
-        "{key_reads} key-area reads on a part whose blocks are already cached"
-    );
-    assert_eq!(0, pool.reserved());
-}
-
 /// One writer over one long-keyed series, returning the accounting after the second block flushes
 /// plus the size of one key copy.
 ///
-/// `root_capacity` is one and `page_bytes` admits exactly one maximal descriptor per leaf, so the
+/// `max_leaves_per_part` is one and `page_bytes` admits exactly one maximal descriptor per leaf, so the
 /// second block starts a new part while the series continues into it.
 async fn cross_rollover_accounting(part_bytes: u64) -> ((u64, u64, u64, usize), u64) {
     use crate::series_index::format::FormatWriter;
@@ -1149,7 +1047,7 @@ async fn cross_rollover_accounting(part_bytes: u64) -> ((u64, u64, u64, usize), 
         block_rows: 1,
         part_bytes,
         page_bytes: 244,
-        root_capacity: 1,
+        max_leaves_per_part: 1,
         ..Default::default()
     };
     let generation = FileId::random();
@@ -1364,21 +1262,12 @@ impl object_store::layers::mock::Read for PeekingRead {
     }
 }
 
-/// A key the page-level window leaves over is read one at a time, and that path must charge the
-/// same peak as the page-level one.
-///
-/// The aligned payload cache turns one key into a whole aligned block plus whatever assembling it
-/// needs. Reserving only the key entry and then reading through the cache over-commits the pool by
-/// more than an order of magnitude: every key-area read must be covered by what the key
-/// reservation already holds when the read is issued, whichever path serves it.
 #[tokio::test]
-async fn per_key_fallback_reserves_the_aligned_peak() {
-    use crate::cache::{CacheManager, CacheStrategy};
+async fn per_key_fallback_reserves_fetch_and_retained_key() {
     use crate::series_index::format::SamplesFormatReader;
     use crate::series_index::samples::reader;
     use datafusion::execution::memory_pool::MemoryPool;
     use object_store::layers::mock::MockLayerBuilder;
-    use store_api::storage::FileId;
 
     let store = store();
     let meta = super::metadata();
@@ -1401,12 +1290,6 @@ async fn per_key_fallback_reserves_the_aligned_peak() {
     .await;
     let (_, trailer, _, _) = root_page(&store, &handle).await;
     let area = trailer.keys();
-    let strategy = CacheStrategy::EnableAll(Arc::new(
-        CacheManager::builder()
-            .page_cache_size(16 * 1024 * 1024)
-            .build(),
-    ));
-    let cache = strategy.columnar_payload(FileId::random());
     // What the reader charges for one retained key, plus room for one block's payload buffers.
     let entry = std::mem::size_of::<ExactSeriesKey>() + 64;
     let limit = rows as usize * (key_len + entry) + 8 * 1024;
@@ -1427,8 +1310,7 @@ async fn per_key_fallback_reserves_the_aligned_peak() {
         .unwrap();
     let reader = reader::SamplesReader::open(store.clone().layer(layer), handle.clone())
         .await
-        .unwrap()
-        .with_payload_cache(cache);
+        .unwrap();
     let mut query = super::full_request();
     query.memory_pool = Some(pool.clone());
     reads.lock().unwrap().clear();
@@ -1474,8 +1356,7 @@ async fn per_key_fallback_reserves_the_aligned_peak() {
     );
     assert_eq!(0, pool.reserved());
 
-    // A pool that cannot pay for one key's peak must fail before any key-area read, even with the
-    // aligned cache enabled.
+    // A pool that cannot pay for one key's peak must fail before any key-area read, including a one-key fallback.
     let pool = Arc::new(WatchingPool::new(key_len));
     let mut query = super::full_request();
     query.memory_pool = Some(pool.clone());
@@ -1638,7 +1519,7 @@ async fn pruned_block_does_not_hide_the_boundary_key() {
     let format = ColumnarSamplesFormat {
         block_rows: 1,
         page_bytes: 476,
-        root_capacity: 1,
+        max_leaves_per_part: 1,
         ..Default::default()
     };
     let first = new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 7);

@@ -495,6 +495,15 @@ impl ScanRegion {
     /// Returns true if the region can use series scan for current request.
     fn use_series_scan(&self) -> bool {
         self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
+            || self.version.options.sst_format == Some(crate::sst::FormatType::Narthex)
+            || self.version.ssts.levels().iter().any(|level| {
+                level.files.values().any(|file| {
+                    matches!(
+                        file.meta_ref().format,
+                        crate::sst::file::FileFormat::NarthexSamples(_)
+                    )
+                })
+            })
     }
 
     /// Creates a scan input.
@@ -623,6 +632,17 @@ impl ScanRegion {
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
             .with_files(files)
+            .with_narthex_format(
+                self.version.options.sst_format == Some(crate::sst::FormatType::Narthex),
+            )
+            .with_narthex_series_indexes(
+                self.version
+                    .ssts
+                    .series_indexes()
+                    .values()
+                    .cloned()
+                    .collect(),
+            )
             .with_time_pruned_files(time_pruned_files)
             .with_primary_key_mapper(self.version.ssts.primary_key_mapper())
             .with_cache(self.cache_strategy)
@@ -964,7 +984,7 @@ pub struct ScanInput {
     /// Whether to ignore range indexes while retaining series-index candidate discovery.
     ignore_range_index: bool,
     /// Region SST access layer.
-    access_layer: AccessLayerRef,
+    pub(crate) access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
     pub(crate) mapper: Arc<FlatProjectionMapper>,
     /// The columns to read from memtables and SSTs.
@@ -983,6 +1003,9 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
+    pub(crate) narthex_series_indexes: Vec<FileHandle>,
+    /// Narthex regions require prepared reads, even before the first flush.
+    pub(crate) narthex_format: bool,
     /// Visible sources excluded solely by the query time range.
     pub(crate) time_pruned_files: HashSet<store_api::storage::FileId>,
     /// Shares the pinned schema's encoded defaults across parallel range readers.
@@ -1073,6 +1096,8 @@ impl ScanInput {
                 region_partition_expr: None,
                 memtables: Vec::new(),
                 files: Vec::new(),
+                narthex_series_indexes: Vec::new(),
+                narthex_format: false,
                 time_pruned_files: HashSet::new(),
                 primary_key_mapper: OnceLock::new(),
                 batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
@@ -1304,8 +1329,19 @@ impl ScanInputBuilder {
         self
     }
 
-    /// Sets files to read.
+    /// Requires prepared reads even when this narthex region has no SSTs yet.
     #[must_use]
+    pub(crate) fn with_narthex_format(mut self, narthex_format: bool) -> Self {
+        self.input.narthex_format = narthex_format;
+        self
+    }
+
+    /// Sets the pinned authoritative series indexes.
+    fn with_narthex_series_indexes(mut self, indexes: Vec<FileHandle>) -> Self {
+        self.input.narthex_series_indexes = indexes;
+        self
+    }
+
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.input.files = files;
         self
@@ -1487,6 +1523,16 @@ impl ScanInputBuilder {
 }
 
 impl ScanInput {
+    pub(crate) fn requires_narthex_preparation(&self) -> bool {
+        self.narthex_format
+            || self.files.iter().any(|file| {
+                matches!(
+                    file.meta_ref().format,
+                    crate::sst::file::FileFormat::NarthexSamples(_)
+                )
+            })
+    }
+
     pub(crate) fn uses_scan_memory_limit(&self) -> bool {
         let covered = self
             .scan_memory_tracker

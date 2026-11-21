@@ -24,7 +24,15 @@ pub(super) const MAGIC: &[u8; 8] = b"GTSAMPLE";
 pub(super) const HEADER_SIZE: u64 = 16;
 pub(super) const TRAILER_SIZE: u64 = 120;
 pub(super) const PAGE_LIMIT: usize = 65536;
-pub(super) const ROOT_CAPACITY: usize = (PAGE_LIMIT - 12) / 72;
+/// Largest decoded root page this part may hold.
+///
+/// Every page but the root is one leaf, and a part can always add another leaf, so leaves stay
+/// at [`PAGE_LIMIT`]. The root is the one page a part cannot subdivide: it names every leaf, so
+/// a root bounded by [`PAGE_LIMIT`] would cap a part at `PAGE_LIMIT / 72` leaves however large
+/// the part is meant to be. It is the only page measured against this limit instead.
+pub(super) const MAX_ROOT_BYTES: usize = 16 * 1024 * 1024;
+/// Leaves one part may hold: the most children a root page within [`MAX_ROOT_BYTES`] can name.
+pub(super) const MAX_LEAF_COUNT: usize = MAX_ROOT_BYTES / 72;
 /// Largest decoded block payload, and therefore the largest frame a decoder has to decompress.
 const CHUNK_LIMIT: usize = 1024 * 1024;
 /// Fixed part of a block descriptor, before its 44-byte column descriptors.
@@ -45,6 +53,32 @@ pub(super) fn descriptor_bytes(columns: usize) -> usize {
     BLOCK_FIXED_BYTES + 44 * columns
 }
 
+/// The size limit a payload is written and read against.
+///
+/// The limit belongs to what the payload is - a column chunk, a leaf page, or a part's root page.
+/// It is checked when the payload is packed and again on every decode, so no stored reference
+/// can name more bytes than a decoder is willing to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PayloadLimit {
+    /// One metadata page that is not a part's root, at most [`PAGE_LIMIT`] decoded bytes.
+    Page,
+    /// One encoded column chunk, at most [`CHUNK_LIMIT`] decoded bytes.
+    Chunk,
+    /// One part's root page, at most [`MAX_ROOT_BYTES`] decoded bytes.
+    Root,
+}
+
+impl PayloadLimit {
+    /// Decoded bytes this limit allows.
+    fn bytes(self) -> usize {
+        match self {
+            Self::Page => PAGE_LIMIT,
+            Self::Chunk => CHUNK_LIMIT,
+            Self::Root => MAX_ROOT_BYTES,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PayloadReference {
     pub offset: u64,
@@ -60,8 +94,8 @@ impl PayloadReference {
             .checked_add(u64::from(self.stored))
             .ok_or_else(|| invalid("sample payload offset overflow"))
     }
-    pub fn validate(&self, start: u64, end: u64, page: bool) -> Result<()> {
-        let limit = if page { PAGE_LIMIT } else { CHUNK_LIMIT };
+    pub fn validate(&self, start: u64, end: u64, limit: PayloadLimit) -> Result<()> {
+        let limit = limit.bytes();
         require(
             self.stored > 0
                 && self.decoded > 0
@@ -77,6 +111,11 @@ impl PayloadReference {
             require(self.stored == self.decoded, "raw samples length mismatch")?;
         }
         Ok(())
+    }
+    /// Validates a part's root page reference, which is measured against [`MAX_ROOT_BYTES`]
+    /// rather than against a leaf page.
+    pub fn validate_root(&self, start: u64, end: u64) -> Result<()> {
+        self.validate(start, end, PayloadLimit::Root)
     }
     fn encode(&self, out: &mut Vec<u8>) {
         put_u64(out, self.offset);
@@ -122,10 +161,10 @@ pub(super) fn pack(
     bytes: &[u8],
     offset: u64,
     encoding: u16,
-    page: bool,
+    limit: PayloadLimit,
 ) -> Result<(PayloadReference, Vec<u8>)> {
     require(
-        !bytes.is_empty() && bytes.len() <= if page { PAGE_LIMIT } else { CHUNK_LIMIT },
+        !bytes.is_empty() && bytes.len() <= limit.bytes(),
         "sample encoded payload exceeds limit",
     )?;
     let compressed =
@@ -143,7 +182,7 @@ pub(super) fn pack(
         encoding,
         compression,
     };
-    reference.validate(offset, reference.end()?, page)?;
+    reference.validate(offset, reference.end()?, limit)?;
     Ok((reference, stored))
 }
 
@@ -526,7 +565,7 @@ impl Block {
                 };
                 require(valid, "sample codec role mismatch")?;
             }
-            payload.validate(*previous_end, areas.payload_end, false)?;
+            payload.validate(*previous_end, areas.payload_end, PayloadLimit::Chunk)?;
             *previous_end = payload.end()?;
             columns.push(Column {
                 role,
@@ -606,14 +645,19 @@ impl Page {
     /// `areas` bounds what the page may reference: column payloads end where the key area
     /// starts, keys live in their own area, and the page area starts at `areas.metadata_start`
     /// so every child page must lie after it and before its parent.
+    ///
+    /// `limit` is the size this page is measured against: a part's root passes
+    /// [`PayloadLimit::Root`] so its children are not capped by [`PAGE_LIMIT`], while every
+    /// other page passes the limit its writer packed it with.
     pub fn decode(
         bytes: &[u8],
         reference: &PageReference,
         depth: u32,
         areas: Areas,
         manifest: &Manifest,
+        limit: PayloadLimit,
     ) -> Result<Self> {
-        require(bytes.len() <= PAGE_LIMIT, "sample page exceeds limit")?;
+        require(bytes.len() <= limit.bytes(), "sample page exceeds limit")?;
         let mut c = Cursor::new(bytes);
         let kind = c.u32()?;
         let count = c.length()?;
@@ -636,17 +680,18 @@ impl Page {
                 Self::Leaf(blocks)
             }
             (1, 2) => {
-                require(
-                    count <= ROOT_CAPACITY && count <= c.remaining() / 72,
-                    "sample root exceeds capacity",
-                )?;
+                // The root names every leaf of the part, so its child count grows with the part
+                // and is bounded only by `limit`, through the bytes it needs. The count is read
+                // from untrusted bytes, so the reservation it drives is bounded by how many
+                // entries the remaining bytes can hold.
+                require(count <= c.remaining() / 72, "sample root exceeds capacity")?;
                 let mut children: Vec<PageReference> = Vec::with_capacity(count);
                 let mut end = areas.metadata_start;
                 for _ in 0..count {
                     let child = PageReference::decode(&mut c)?;
                     child
                         .payload
-                        .validate(end, reference.payload.offset, true)?;
+                        .validate(end, reference.payload.offset, PayloadLimit::Page)?;
                     end = child.payload.end()?;
                     if let Some(previous) = children.last() {
                         require(
@@ -738,8 +783,16 @@ impl Trailer {
                 && file_length >= HEADER_SIZE + TRAILER_SIZE,
             "invalid sample framing",
         )?;
-        root.payload
-            .validate(key_end, file_length - TRAILER_SIZE, true)?;
+        // The root is the one page a part cannot subdivide. A depth-one root is itself the only
+        // leaf, so it stays a leaf page; a depth-two root is the internal page naming every
+        // leaf, and only it may grow past `PAGE_LIMIT`.
+        if depth == 2 {
+            root.payload
+                .validate_root(key_end, file_length - TRAILER_SIZE)?;
+        } else {
+            root.payload
+                .validate(key_end, file_length - TRAILER_SIZE, PayloadLimit::Page)?;
+        }
         require(
             root.payload.end()? == file_length - TRAILER_SIZE,
             "sample root must end at trailer",

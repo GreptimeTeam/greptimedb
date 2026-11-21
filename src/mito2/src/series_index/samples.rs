@@ -14,6 +14,7 @@
 
 //! Columnar samples sidecars. Wire contract: `docs/formats/mito-samples.md`.
 
+pub(crate) mod bulk;
 mod codec;
 mod metadata;
 pub(crate) mod reader;
@@ -26,6 +27,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use datatypes::data_type::DataType as _;
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
@@ -37,6 +39,32 @@ use crate::series_index::columnar::{invalid, require, unsupported};
 use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
 use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::{MetricSeriesId, TABLE_ID_COLUMN, TSID_COLUMN};
+
+/// Reject unsupported narthex schemas before accepting mutations that cannot flush.
+pub(crate) fn validate_narthex_metadata(
+    metadata: &store_api::metadata::RegionMetadata,
+) -> Result<()> {
+    crate::series_index::writer::validate_metadata(metadata)?;
+    require(
+        matches!(
+            metadata
+                .time_index_column()
+                .column_schema
+                .data_type
+                .as_arrow_type(),
+            DataType::Timestamp(_, None)
+        ),
+        "narthex samples require a timestamp time index",
+    )?;
+    for column in metadata.field_columns() {
+        require(
+            column.column_schema.data_type.as_arrow_type() == DataType::Float64
+                && column.column_schema.is_nullable(),
+            "Narthex samples require nullable Float64 fields",
+        )?;
+    }
+    Ok(())
+}
 
 const VERSION: u32 = 1;
 const MANIFEST_LIMIT: usize = 64 * 1024 * 1024;
@@ -55,7 +83,12 @@ pub(crate) struct ColumnarSamplesFormat {
     pub(crate) part_bytes: u64,
     pub(crate) metadata_bytes: usize,
     pub(crate) page_bytes: usize,
-    pub(crate) root_capacity: usize,
+    /// Leaves after which the writer closes a part, ahead of the root's own size limit.
+    ///
+    /// A part's root names every leaf, so a part that keeps adding leaves ends with a root
+    /// that is large to decode and useless to prune. Rolling at a leaf count keeps both bounded
+    /// even when a part's byte target is far from reached.
+    pub(crate) max_leaves_per_part: usize,
 }
 impl Default for ColumnarSamplesFormat {
     fn default() -> Self {
@@ -64,7 +97,7 @@ impl Default for ColumnarSamplesFormat {
             part_bytes: 512 * 1024 * 1024,
             metadata_bytes: 8 * 1024 * 1024,
             page_bytes: metadata::PAGE_LIMIT,
-            root_capacity: metadata::ROOT_CAPACITY,
+            max_leaves_per_part: metadata::MAX_LEAF_COUNT,
         }
     }
 }
@@ -152,6 +185,9 @@ struct Part {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
+    /// Resolved from the owning file, not persisted in the codec manifest.
+    #[serde(skip)]
+    prefix: Option<String>,
     format: ArtifactFormat,
     version: u32,
     /// Mandatory discriminator; see [`IdentityEncoding`]. Never defaulted on read.
@@ -166,6 +202,7 @@ struct Manifest {
 impl Manifest {
     fn retained_size(&self) -> usize {
         std::mem::size_of::<Self>()
+            + self.prefix.as_ref().map_or(0, String::capacity)
             + self.timestamp.name.capacity()
             + self.files.capacity() * std::mem::size_of::<Part>()
             + self.fields.capacity() * std::mem::size_of::<ValueColumn>()
@@ -177,7 +214,9 @@ impl Manifest {
     }
 
     fn prefix(&self) -> String {
-        samples_prefix(self.region_id, self.generation)
+        self.prefix
+            .clone()
+            .unwrap_or_else(|| samples_prefix(self.region_id, self.generation))
     }
     fn path(&self) -> String {
         format!("{}manifest.json", self.prefix())

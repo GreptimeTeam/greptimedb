@@ -259,6 +259,11 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
 #[async_trait::async_trait]
 pub trait SstWriteGuard: Send + Sync {
     async fn before_create(&self, file_id: RegionFileId) -> Result<()>;
+
+    /// Registers a multi-object output before its first object is created.
+    async fn before_create_narthex(&self, file_id: RegionFileId) -> Result<()> {
+        self.before_create(file_id).await
+    }
 }
 
 /// Optional ownership, cancellation, and resource limits for an SST write.
@@ -1319,6 +1324,7 @@ mod tests {
         .await;
         let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
         let converter = match format {
+            FormatType::Narthex => unreachable!("Parquet writer test"),
             FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
                 metadata.clone(),
                 &FlatSchemaOptions::default(),
@@ -1354,6 +1360,7 @@ mod tests {
         let source =
             FlatSource::new_stream(batch.schema(), Box::pin(futures::stream::iter([Ok(batch)])));
         let error = match format {
+            FormatType::Narthex => unreachable!("Parquet writer test"),
             FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
             FormatType::PrimaryKey => {
                 writer
@@ -1413,6 +1420,7 @@ mod tests {
         };
         let mut write = Box::pin(async {
             match format {
+                FormatType::Narthex => unreachable!("Parquet writer test"),
                 FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
                 FormatType::PrimaryKey => {
                     writer
@@ -1474,6 +1482,7 @@ mod tests {
                 ..Default::default()
             };
             let result = match format {
+                FormatType::Narthex => unreachable!("Parquet writer test"),
                 FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
                 FormatType::PrimaryKey => {
                     writer
@@ -1529,6 +1538,7 @@ mod tests {
         let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
         let retained_field = Arc::downgrade(batch.column(2));
         let converter = match format {
+            FormatType::Narthex => unreachable!("Parquet writer test"),
             FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
                 metadata.clone(),
                 &FlatSchemaOptions::default(),
@@ -1594,6 +1604,7 @@ mod tests {
         let mut write = Box::pin(async {
             let _budget = budget;
             match format {
+                FormatType::Narthex => unreachable!("Parquet writer test"),
                 FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
                 FormatType::PrimaryKey => {
                     writer

@@ -1,4 +1,28 @@
-# Mito columnar samples format
+# Narthex format: samples
+
+The **Narthex format**, selected by `sst_format = 'narthex'`, is optimized
+for Prometheus-style metric data. It separates series identities and string tags
+from timestamped numeric samples.
+
+The format has two artifact roles: `NarthexSamples` owns sample data, and
+`NarthexSeriesIndex` indexes series and references the samples it covers.
+Region manifests serialize these roles as `narthex_samples` and
+`narthex_series_index`.
+
+## Authoritative storage and derived sidecars
+
+With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
+`<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
+`part-<n>.series` objects. The region manifest records the manifest size and a `parts` array in part-ID order.
+Each part record contains its encoded `file_size` in bytes. Series indexes reference region-qualified sample file IDs without owning those
+samples. Both artifact types use ordinary SST lifetimes and reclamation.
+
+The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
+paths, source-SST coverage, daily consolidation, and local-cache rollout described
+below apply to that sidecar mode. They do not make authoritative Narthex samples
+rebuildable or subject them to local-cache eviction.
+
+## Wire specification
 
 This document specifies the version 1 on-disk layout, encodings, ordering rules,
 and validation limits for samples artifacts. The version number stays 1: the
@@ -17,7 +41,7 @@ applies to an artifact of the earlier layout of this format, whose keys sat insi
 the block descriptors: its `identity_encoding` value is the older
 `exact-sparse-key`, so it is refused when the manifest is opened rather than when a
 part is first read. It shares artifact conventions with
-[Mito columnar series format](mito-series.md).
+[Narthex series-index format](mito-series.md).
 
 Samples store nullable Float64 fields, timestamps, sequences, and operation types
 in single-series blocks bounded by rows and decoded bytes.
@@ -290,11 +314,13 @@ Leaf (kind 0):                     Internal root (kind 1):
   block descriptor N-1              page reference N-1   72 bytes
 ```
 
-Pages are nonempty and limited to 65,536 decoded bytes, including the 12-byte
-prefix. Descriptors never straddle pages, and every descriptor is fixed-width because
-the key it names is not stored in it. The writer requires the 12-byte leaf prefix and
-one descriptor to fit in a configured page, which for the 1,024-field maximum is
-`12 + 56 + 44 * 1,027 = 45,256` decoded bytes. The page limit is a bound on
+Leaf pages are nonempty and limited to 65,536 decoded bytes, including the 12-byte
+prefix. The depth-two root is the one page measured against a larger limit, 16 MiB,
+because a part cannot subdivide it; see [payload limits](#payload-limits). Descriptors
+never straddle pages, and every descriptor is fixed-width because the key it names is
+not stored in it. The writer requires the 12-byte leaf prefix and one descriptor to fit
+in a configured leaf page, which for the 1,024-field maximum is
+`12 + 56 + 44 * 1,027 = 45,256` decoded bytes. The leaf limit is a bound on
 descriptors only: it no longer bounds the length of a series key.
 
 #### Block descriptor
@@ -375,10 +401,49 @@ and time bounds against its reference. At depth 2 all children must be leaves;
 reject an internal child. Child byte ranges are ordered, disjoint, within the
 metadata area, and precede the parent. The root ends immediately before the trailer.
 
-An internal root has `12 + 72 * N` decoded bytes, so it holds at most
-`floor((65536 - 12) / 72) = 910` leaf references. The writer must account for the
-next descriptor's leaf placement before writing its block. If the descriptor
-would require a 911th leaf, finish this part and start the block in a new part.
+An internal root has `12 + 72 * N` decoded bytes and is the only page measured
+against `MAX_ROOT_BYTES = 16 MiB`, so one root holds at most
+`floor((16777216 - 12) / 72) = 233,016` leaf references. A root held to the leaf page
+limit would name `floor((65536 - 12) / 72) = 910` leaves, and a part larger than that
+would need a third level, which version 1 does not have. The writer accounts for the
+next descriptor's leaf placement before writing its block: if that descriptor would
+require a 233,017th leaf, it finishes this part and starts the block in a new part.
+
+#### Payload limits
+
+Version 1 measures three kinds of decoded payload. Each is validated when the payload
+is written and again on every decode:
+
+| Limit | Payload | Decoded | Stored |
+| --- | --- | ---: | ---: |
+| `Chunk` | One encoded column chunk | 1 MiB | 1 MiB + 64 KiB |
+| `Page` | A leaf page, which a depth-1 root also is | 65,536 | 131,072 |
+| `Root` | The depth-2 internal root naming every leaf | 16 MiB | 16 MiB + 64 KiB |
+
+The chunk and leaf page limits are unchanged. The root is the only payload whose limit
+grew, and only a depth-2 root validates against `Root`: a depth-1 root is itself the
+part's single leaf, so it stays within `Page` and a one-leaf part keeps exactly the
+bytes it had before a root could be an internal page.
+
+#### Part capacity
+
+A part's block count is not bounded by the leaf page limit. Each leaf holds whatever
+descriptors fit in 65,536 bytes and the part keeps adding leaves to its root, so the
+caps that apply are the writer's own budgets:
+
+- `metadata_bytes` (default 8 MiB) counts one part's block descriptors. At the
+  232-byte four-column descriptor that is about 36,000 blocks, and the writer finishes
+  the part once the running total reaches it.
+- The root's 16 MiB allows 233,016 leaves, and that cap binds only when
+  `metadata_bytes` is raised past the descriptors those leaves need — at least
+  41.8 MiB at the 188-byte smallest descriptor — because every leaf holds at least one
+  block.
+- `part_bytes` (default 512 MiB) is a soft target for column payloads, key copies, and
+  metadata: the writer finishes the part when the bytes written so far plus the key
+  area reach it. No reader enforces it; the trailer alone frames a part.
+
+None of the three is a wire limit. A reader accepts any part whose root and leaves are
+within their payload limits, whatever the part's total size or block count is.
 
 #### Navigation and equal-timestamp example
 
@@ -530,11 +595,12 @@ field values.
 
 ### Limits and evolution
 
-An individual chunk has at most 1 MiB of encoded bytes after decompression and
-1 MiB plus 64 KiB of stored bytes. Pages have at most 65,536 decoded and 131,072
-stored bytes. Series keys are stored in the key area rather than in a page or a
-chunk, so a key's length is bounded by the part and by its `u32` reference length,
-not by `PAGE_LIMIT`; a key longer than a page is a supported part of this version. Bound sizes before allocating, fetching, or decompressing. Validate
+A chunk, a leaf page, and a part's root page are each measured against the limit
+listed in [payload limits](#payload-limits): 1 MiB for chunks, 65,536 bytes for leaf
+pages, and 16 MiB for the depth-2 root. Series keys are stored in the key area rather
+than in a page or a chunk, so a key's length is bounded by the part and by its `u32`
+reference length, not by `PAGE_LIMIT`; a key longer than a leaf page is a supported
+part of this version. Bound sizes before allocating, fetching, or decompressing. Validate
 counts against enclosing bytes before allocating descriptor vectors; row counts
 must also satisfy the decoded-block formula. Null output materialization remains
 subject to the same block bound even when chunks are omitted.

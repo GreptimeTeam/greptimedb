@@ -1,12 +1,29 @@
 # Mito columnar samples version 1
 
-This fixture freezes the version-1 sample wire contract in
-[`mito-samples.md`](../../../../docs/formats/mito-samples.md). It is exercised by
-the owning Mito Rust test, not SQLness discovery:
+These fixtures freeze the version-1 sample wire contract in
+[`mito-samples.md`](../../../../docs/formats/mito-samples.md). They are exercised by
+the owning Mito Rust tests, not SQLness discovery:
 
 ```shell
 cargo nextest run -p mito2 frozen_v1_samples_fixture_is_rejected
+cargo nextest run -p mito2 frozen_v2_multi_leaf_fixture_is_readable
 ```
+
+## Fixture generations
+
+The `vN` prefix names a fixture generation, not a wire version: every fixture in this
+directory packs version 1.
+
+| Fixture | Expectation |
+| --- | --- |
+| [`v1-part.hex`](v1-part.hex), [`v1-manifest.json`](v1-manifest.json) | Negative: written under hash-only identity, rejected while its manifest is opened, then rebuilt from SSTs |
+| [`v2-multi-leaf/`](v2-multi-leaf/README.md) | Positive: a part the current writer emits, with three leaves under a depth-two internal root, read back row for row |
+
+`v1` freezes what must stay refused; `v2` freezes what the current writer emits and the
+current reader must accept. Adding a generation does not retire an older one, and
+neither is a cross-binary upgrade/downgrade test.
+
+## `v1-part.hex`: hash-only identity, rejected
 
 `v1-manifest.json` and `v1-part.hex` describe a 397-byte part with raw compression,
 one leaf/root, and two samples for `(table_id=7, tsid=42)` at timestamp 100 ms.
@@ -49,6 +66,22 @@ bytes for future reader compatibility; introduce a separate versioned fixture
 when the approved format changes. This is a frozen-byte compatibility check,
 not a cross-binary upgrade/downgrade test. Older binaries are not promised to
 understand the new opt-in `columnar-samples` catalog identifier.
+
+## `v2-multi-leaf/`: multi-leaf root, readable
+
+[`v2-multi-leaf/`](v2-multi-leaf/README.md) is the readable counterpart: the ignored
+regenerator writes it with the real writer, and the non-ignored test opens those stored
+bytes and checks every row. It covers what the v1 bytes cannot — a part whose root is
+an internal page, one leaf limit for the leaves and a separate root limit for the root
+— so a change that silently stops reading multi-leaf parts fails here instead of in
+production.
+
+Regenerate it only because the approved format changed, never to make a reader change
+pass: bytes a reader refuses are a reader regression, and a new generation gets its own
+directory instead of overwriting this one. Rejection and readability are therefore both
+frozen, and neither fixture is edited to follow a reader it was meant to check.
+
+## Catalog coverage fixtures
 
 `legacy-catalog-entry.json` and `daily-catalog-entry.json` freeze the optional
 source-coverage extension, exercised by `frozen_sample_catalog_coverage`. Empty

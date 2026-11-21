@@ -21,7 +21,7 @@ use store_api::storage::FileId;
 
 use crate::cache::{CacheStrategy, ColumnarMetaCache};
 use crate::error::Result;
-use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_LOAD, CACHE_MISS};
+use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 
 const COLUMNAR_META: &str = "columnar_metadata";
 
@@ -67,54 +67,6 @@ impl CacheStrategy {
     }
 }
 
-// Native payload blocks used to share the page-cache budget through the shared
-// `PageRangeCache`, which main replaced with `ParquetPageCache`. That cache serves
-// uniform-size blocks fetched through a reader, so it cannot hold these aligned blocks
-// clipped to the payload area.
-// TODO(narthex-merge): re-attach native payload byte caching to a dedicated page-cache
-// budget in `CacheManager`; until then payload reads stay uncached.
-/// Placeholder for the disabled native payload byte cache.
-#[allow(dead_code)]
-#[derive(Clone)]
-pub(crate) struct PayloadCache {
-    namespace: FileId,
-}
-
-impl CacheStrategy {
-    pub(crate) fn columnar_payload(&self, _namespace: FileId) -> Option<PayloadCache> {
-        None
-    }
-}
-
-/// Placeholder for one cached payload block; lookups always miss.
-#[allow(dead_code)]
-pub(crate) struct PayloadPartCache {
-    namespace: FileId,
-    generation: FileId,
-    part: u32,
-    file_size: u64,
-}
-
-impl PayloadCache {
-    pub(crate) fn part(&self, generation: FileId, part: u32, file_size: u64) -> PayloadPartCache {
-        PayloadPartCache {
-            namespace: self.namespace,
-            generation,
-            part,
-            file_size,
-        }
-    }
-}
-
-impl PayloadPartCache {
-    pub(crate) fn get(&self, _range: &std::ops::Range<u64>) -> Option<bytes::Bytes> {
-        CACHE_MISS.with_label_values(&["columnar_payload"]).inc();
-        None
-    }
-
-    pub(crate) fn insert(&self, _range: &std::ops::Range<u64>, _bytes: &bytes::Bytes) {}
-}
-
 /// Loads only validated immutable structures. Identities include the generation path,
 /// object length, and the complete reference/codec context used to validate the value.
 /// Oversized entries bypass admission; disabled caches perform the same validation.
@@ -143,8 +95,9 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
         return Ok(value);
     }
     CACHE_MISS.with_label_values(&[COLUMNAR_META]).inc();
-    CACHE_LOAD.with_label_values(&[COLUMNAR_META]).inc();
-    let value = Arc::new(loader.await?);
+    static METRICS: std::sync::LazyLock<Arc<common_cache::metrics::CacheMetrics>> =
+        std::sync::LazyLock::new(|| crate::metrics::cache_loading_metrics(COLUMNAR_META));
+    let value = Arc::new(METRICS.loads.observe(loader).await?);
     // A caller may flush buffered output while its loader is Pending, then stop
     // polling it under downstream backpressure. Never hold a shared lock across
     // that await: another stream may need the lock to finish the current series.
@@ -179,24 +132,6 @@ mod tests {
     use super::*;
     use crate::cache::CacheManager;
     use std::hash::{DefaultHasher, Hash, Hasher};
-
-    // TODO(narthex-merge): restore payload-block assertions once the byte cache gets a budget.
-    #[test]
-    fn payload_cache_stays_disabled_without_a_page_budget() {
-        let manager = Arc::new(CacheManager::builder().page_cache_size(4096).build());
-        let strategy = CacheStrategy::EnableAll(manager);
-        assert!(strategy.columnar_payload(FileId::random()).is_none());
-        assert!(
-            CacheStrategy::EnableAll(Arc::new(CacheManager::default()))
-                .columnar_payload(FileId::random())
-                .is_none()
-        );
-        assert!(
-            CacheStrategy::Disabled
-                .columnar_payload(FileId::random())
-                .is_none()
-        );
-    }
 
     #[rstest::rstest]
     #[case::same_key(false)]
