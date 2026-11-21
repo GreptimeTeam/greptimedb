@@ -44,7 +44,7 @@ use store_api::mito_engine_options::FloatFieldEncoding;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber, SequenceRange};
 use tokio::sync::Semaphore;
 
-use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
+use crate::batch_size::{estimate_batch_size, widest_row_group_statistic};
 use crate::compaction::{
     Json2RewritePlans, collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema,
 };
@@ -1176,7 +1176,7 @@ impl PartToMerge {
                 Some((part.num_rows() as u64, part.estimated_size() as u64))
             }
             PartToMerge::Encoded { part, .. } => {
-                largest_row_group_statistic(&part.metadata().parquet_metadata)
+                widest_row_group_statistic(&part.metadata().parquet_metadata)
             }
         }
     }
@@ -3260,7 +3260,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encoded_part_batch_size_uses_largest_uncompressed_row_group() {
+    fn test_encoded_part_batch_size_uses_widest_row_group() {
         const NUM_ROWS: usize = 14;
         const ROW_GROUP_SIZE: usize = 4;
 
@@ -3273,25 +3273,21 @@ mod tests {
             create_bulk_part_with_converter("key", 0, timestamps, field_values, 0).unwrap();
         let encoder = BulkPartEncoder::new(metadata, ROW_GROUP_SIZE).unwrap();
         let encoded_part = encoder.encode_part(&bulk_part).unwrap().unwrap();
-        let max_row_group = encoded_part
+        let expected = encoded_part
             .metadata()
             .parquet_metadata
             .row_groups()
             .iter()
-            .max_by_key(|row_group| {
-                row_group
+            .map(|row_group| {
+                let bytes: u64 = row_group
                     .columns()
                     .iter()
                     .map(|column| column.uncompressed_size() as u64)
-                    .sum::<u64>()
+                    .sum();
+                (row_group.num_rows() as u64, bytes)
             })
+            .max_by_key(|(rows, bytes)| bytes.div_ceil(*rows))
             .unwrap();
-        let max_uncompressed_size = max_row_group
-            .columns()
-            .iter()
-            .map(|column| column.uncompressed_size() as u64)
-            .sum();
-        let expected = (max_row_group.num_rows() as u64, max_uncompressed_size);
         let part = PartToMerge::Encoded {
             part: encoded_part,
             file_id: FileId::random(),

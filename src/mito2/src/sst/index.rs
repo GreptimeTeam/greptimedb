@@ -56,7 +56,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
-use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
+use crate::batch_size::{estimate_batch_size, widest_row_group_statistic};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
@@ -677,7 +677,7 @@ pub(crate) async fn build_index_from_parquet_bytes(
         return IndexOutput::default();
     }
     // Follow the batch size the flush reads use, so wide rows are not decoded 8192 at a time.
-    let batch_size = estimate_batch_size(largest_row_group_statistic(reader_builder.metadata()));
+    let batch_size = estimate_batch_size(widest_row_group_statistic(reader_builder.metadata()));
 
     // TODO(dennis): decode only the columns the enabled indexers need, including the encoded
     // primary key for tag indexes. This needs the indexer to stop locating columns by position.

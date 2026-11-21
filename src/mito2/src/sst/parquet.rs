@@ -515,7 +515,7 @@ mod tests {
 
     use super::*;
     use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
-    use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
+    use crate::batch_size::{estimate_batch_size, widest_row_group_statistic};
     use crate::cache::index::result_cache::PredicateKey;
     use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy};
@@ -1618,7 +1618,7 @@ mod tests {
         // Readers size batches by the decoded 64 KiB values, not the dictionary-encoded size.
         assert_eq!(
             1024,
-            estimate_batch_size(largest_row_group_statistic(&footer))
+            estimate_batch_size(widest_row_group_statistic(&footer))
         );
     }
 
@@ -1667,7 +1667,7 @@ mod tests {
         let footer = info.file_metadata.as_ref().unwrap();
         assert_eq!(
             1024,
-            estimate_batch_size(largest_row_group_statistic(footer))
+            estimate_batch_size(widest_row_group_statistic(footer))
         );
     }
 
