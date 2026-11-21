@@ -23,6 +23,14 @@ ALTER TABLE blobs ADD COLUMN extra STRING STORAGE WITH (threshold = '4KiB');
 
 ALTER TABLE blobs ADD COLUMN region STRING PRIMARY KEY STORAGE WITH (threshold = '4KiB');
 
+ALTER TABLE blobs ADD COLUMN n BIGINT STORAGE WITH (threshold = '4KiB');
+
+CREATE TABLE blobs_like LIKE blobs;
+
+SHOW CREATE TABLE blobs_like;
+
+DROP TABLE blobs_like;
+
 SHOW CREATE TABLE blobs;
 
 DROP TABLE blobs;
