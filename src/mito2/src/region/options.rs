@@ -24,7 +24,7 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_time::TimeToLive;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
-use datatypes::schema::{COMPRESSION_KEY, STORAGE_KEY};
+use datatypes::schema::COMPRESSION_KEY;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -231,32 +231,6 @@ impl RegionOptions {
                     ),
                 }
             );
-        }
-        Ok(())
-    }
-
-    /// Rejects storage options on columns other than string and binary fields.
-    pub(crate) fn validate_column_storage(metadata: &RegionMetadata) -> Result<()> {
-        for column in &metadata.column_metadatas {
-            let schema = &column.column_schema;
-            if !schema.metadata().contains_key(STORAGE_KEY) {
-                continue;
-            }
-            ensure!(
-                column.semantic_type == SemanticType::Field,
-                InvalidRegionOptionsSnafu {
-                    reason: format!(
-                        "STORAGE is only supported on field columns, but {} is not",
-                        schema.name
-                    ),
-                }
-            );
-            schema.storage_options().map_err(|e| {
-                InvalidRegionOptionsSnafu {
-                    reason: e.to_string(),
-                }
-                .build()
-            })?;
         }
         Ok(())
     }

@@ -395,7 +395,6 @@ impl RegionOpener {
         };
         ensure_json2_uses_flat_format(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
-        RegionOptions::validate_column_storage(&metadata)?;
         // Validate explicit new-region configuration before creating its manifest.
         // Opening an existing manifest above does not require its optional providers.
         if let Some(registry) = &self.index_registry {

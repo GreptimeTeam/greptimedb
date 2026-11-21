@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use common_runtime::spawn_blocking_global;
-use datatypes::arrow::array::{ArrayRef, AsArray, BinaryBuilder, StringBuilder};
+use datatypes::arrow::array::{Array, ArrayRef, AsArray, BinaryBuilder, StringBuilder};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::StorageType;
@@ -275,7 +275,7 @@ impl BlobFileWriter {
                 None => None,
             });
         }
-        let mut builder = ByteBuilder::new(array.data_type(), refs.len());
+        let mut builder = ByteBuilder::new(array.data_type(), refs.len(), 0);
         for (value, blob_ref) in byte_values(array)?.zip(&refs) {
             match blob_ref {
                 Some(blob_ref) => builder.append(Some(blob_ref.as_bytes()))?,
@@ -287,7 +287,13 @@ impl BlobFileWriter {
 
     /// Completes the object and returns its footer entries.
     pub(crate) async fn finish(mut self, columns: &[ExternalColumn]) -> Result<Vec<KeyValue>> {
-        self.writer.close().await.context(OpenDalSnafu)?;
+        if let Err(error) = self.writer.close().await {
+            // Nothing else holds the writer, so a failed close must not leave the upload behind.
+            if let Err(abort_error) = self.writer.abort().await {
+                common_telemetry::warn!(abort_error; "Failed to abort blob writer after close failed");
+            }
+            return Err(error).context(OpenDalSnafu);
+        }
         let mut entries: Vec<_> = columns
             .iter()
             .map(|column| {
@@ -321,6 +327,8 @@ pub(crate) struct BlobResolver {
     store: ObjectStore,
     path: String,
     columns: Vec<String>,
+    /// Upper bound of resolved value bytes in one output batch.
+    chunk_bytes: usize,
 }
 
 impl BlobResolver {
@@ -329,6 +337,7 @@ impl BlobResolver {
             store,
             path: blob_path(sst_path),
             columns,
+            chunk_bytes: MAX_RESOLVED_BATCH_BYTES,
         }
     }
 
@@ -352,7 +361,7 @@ impl BlobResolver {
         }))
     }
 
-    /// Resolves the next rows of `pending`, holding at most [MAX_RESOLVED_BATCH_BYTES] of
+    /// Resolves the next rows of `pending`, holding at most `chunk_bytes` of
     /// external values (or one row). Values of later rows are not fetched until asked for.
     pub(crate) async fn next_chunk(
         &self,
@@ -370,7 +379,7 @@ impl BlobResolver {
                 .iter()
                 .map(|(_, refs)| refs[end].map_or(0, |r| r.len as usize))
                 .sum();
-            if end > start && bytes + row_bytes > MAX_RESOLVED_BATCH_BYTES {
+            if end > start && bytes + row_bytes > self.chunk_bytes {
                 break;
             }
             bytes += row_bytes;
@@ -470,10 +479,10 @@ enum ByteBuilder {
 }
 
 impl ByteBuilder {
-    fn new(data_type: &DataType, capacity: usize) -> Self {
+    fn new(data_type: &DataType, items: usize, data_bytes: usize) -> Self {
         match data_type {
-            DataType::Utf8 => ByteBuilder::String(StringBuilder::with_capacity(capacity, 0)),
-            _ => ByteBuilder::Binary(BinaryBuilder::with_capacity(capacity, 0)),
+            DataType::Utf8 => ByteBuilder::String(StringBuilder::with_capacity(items, data_bytes)),
+            _ => ByteBuilder::Binary(BinaryBuilder::with_capacity(items, data_bytes)),
         }
     }
 
@@ -529,6 +538,13 @@ fn decode_rows(
         let compressed = data
             .get(begin..begin + r.compressed_len as usize)
             .ok_or_else(corrupted)?;
+        // `decompress` allocates `r.len` up front; a corrupt reference must not size it.
+        let content_size = zstd::zstd_safe::get_frame_content_size(compressed)
+            .ok()
+            .flatten();
+        if content_size != Some(r.len) {
+            return Err(corrupted());
+        }
         let value = zstd::bulk::decompress(compressed, r.len as usize).map_err(|e| {
             UnexpectedSnafu {
                 reason: format!("failed to decompress blob value at {}: {e}", r.offset),
@@ -544,7 +560,13 @@ fn decode_rows(
     let mut arrays = batch.columns().to_vec();
     for (index, refs) in targets {
         let column = batch.column(index);
-        let mut builder = ByteBuilder::new(column.data_type(), refs.len());
+        let external_bytes: usize = refs.iter().flatten().map(|r| r.len as usize).sum();
+        let inline_bytes = column.get_buffer_memory_size();
+        let mut builder = ByteBuilder::new(
+            column.data_type(),
+            refs.len(),
+            external_bytes + inline_bytes,
+        );
         for (value, blob_ref) in byte_values(column)?.zip(&refs) {
             match blob_ref {
                 Some(blob_ref) => builder.append(Some(&value_of(blob_ref)?))?,
@@ -588,6 +610,66 @@ mod tests {
                 .collect();
             assert_eq!(vec![true, false, false, true], external);
         }
+    }
+
+    #[tokio::test]
+    async fn test_resolver_restores_values_across_chunks() {
+        let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+        let sst_path = "region/sst.parquet";
+        let columns = vec![
+            ExternalColumn {
+                name: "bin".to_string(),
+                threshold: 16,
+            },
+            ExternalColumn {
+                name: "str".to_string(),
+                threshold: 16,
+            },
+        ];
+        let long = |i: usize| format!("{i:02}-").repeat(20);
+        let binary: ArrayRef = Arc::new(BinaryArray::from_iter((0..12).map(|i| match i % 3 {
+            0 => Some(long(i).into_bytes()),
+            1 => None,
+            _ => Some(b"short".to_vec()),
+        })));
+        let string: ArrayRef = Arc::new(StringArray::from_iter((0..12).map(|i| match i % 4 {
+            0 => None,
+            1 => Some("tiny".to_string()),
+            _ => Some(long(i)),
+        })));
+        let original =
+            RecordBatch::try_from_iter([("bin", binary.clone()), ("str", string.clone())]).unwrap();
+
+        let mut writer = BlobFileWriter::new(&store, &blob_path(sst_path), 1024, 1)
+            .await
+            .unwrap();
+        let mut stored = Vec::new();
+        for (array, column) in [binary, string].iter().zip(&columns) {
+            let values = compress_external_values(array.clone(), column.threshold)
+                .await
+                .unwrap();
+            stored.push(writer.externalize(array, values).await.unwrap());
+        }
+        writer.finish(&columns).await.unwrap();
+        let stored = RecordBatch::try_new(original.schema(), stored).unwrap();
+        assert_ne!(original, stored);
+
+        let mut resolver = BlobResolver::new(
+            store,
+            sst_path,
+            columns.iter().map(|c| c.name.clone()).collect(),
+        );
+        // Each long value is 60 bytes, so a chunk holds at most two rows of them.
+        resolver.chunk_bytes = 130;
+        let mut pending = resolver.prepare(stored).unwrap().unwrap();
+        let mut chunks = Vec::new();
+        while let Some(chunk) = resolver.next_chunk(&mut pending).await.unwrap() {
+            chunks.push(chunk);
+        }
+        assert!(chunks.len() > 2, "{}", chunks.len());
+        let resolved =
+            datatypes::arrow::compute::concat_batches(&original.schema(), &chunks).unwrap();
+        assert_eq!(original, resolved);
     }
 
     #[test]

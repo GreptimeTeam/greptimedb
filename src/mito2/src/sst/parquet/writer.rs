@@ -928,7 +928,13 @@ where
         {
             common_telemetry::warn!(error; "Failed to abort blob writer, file: {}", self.current_file);
         }
-        if let Some((store, paths)) = &self.blob_target {
+        // A sidecar may already be complete when the SST fails to finish.
+        if let Some((store, paths)) = &self.blob_target
+            && self
+                .external_columns
+                .as_ref()
+                .is_some_and(|columns| !columns.is_empty())
+        {
             let sst_path = paths.build_sst_file_path(RegionFileId::new(
                 self.metadata.region_id,
                 self.current_file,
