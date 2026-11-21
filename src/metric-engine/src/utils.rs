@@ -15,15 +15,32 @@
 use std::collections::HashMap;
 
 use common_telemetry::{info, warn};
+use datatypes::schema::{COMPRESSION_KEY, ColumnSchema, STORAGE_KEY};
 use mito2::engine::MitoEngine;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, METRIC_DATA_REGION_GROUP, METRIC_METADATA_REGION_GROUP,
 };
 use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionStatistic};
 use store_api::storage::RegionId;
 
-use crate::error::{Result, SerializeRegionManifestInfoSnafu};
+use crate::error::{Result, SerializeRegionManifestInfoSnafu, UnexpectedRequestSnafu};
+
+/// Rejects per-column SST options on a logical table column. Logical tables share
+/// the physical data region's SSTs, so these options would have no effect.
+pub(crate) fn ensure_no_logical_sst_column_options(column_schema: &ColumnSchema) -> Result<()> {
+    for (key, option) in [(COMPRESSION_KEY, "COMPRESSION"), (STORAGE_KEY, "STORAGE")] {
+        ensure!(
+            !column_schema.metadata().contains_key(key),
+            UnexpectedRequestSnafu {
+                reason: format!(
+                    "{option} is not supported on logical tables; configure it on the physical table"
+                ),
+            }
+        );
+    }
+    Ok(())
+}
 
 /// Change the given [RegionId]'s region group to [METRIC_METADATA_REGION_GROUP].
 pub fn to_metadata_region_id(region_id: RegionId) -> RegionId {
