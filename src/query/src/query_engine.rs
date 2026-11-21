@@ -34,7 +34,7 @@ use datafusion::dataframe::DataFrame;
 use datafusion_expr::{AggregateUDF, LogicalPlan, WindowUDF};
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
 use partition::manager::PartitionRuleManagerRef;
-use session::context::QueryContextRef;
+use session::context::{QueryContextRef, QueryMemoryScope};
 use table::TableRef;
 
 use crate::datafusion::DatafusionQueryEngine;
@@ -45,7 +45,7 @@ pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::runtime::{
     DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider, QueryRuntimeProviderRef,
 };
-pub use crate::query_engine::state::QueryEngineState;
+pub use crate::query_engine::state::{QueryEngineState, new_flow_memory_pool};
 use crate::region_query::RegionQueryHandlerRef;
 
 /// Describe statement result
@@ -98,6 +98,68 @@ pub trait QueryEngine: Send + Sync {
 
     /// Create a [`QueryEngineContext`].
     fn engine_context(&self, query_ctx: QueryContextRef) -> Result<QueryEngineContext>;
+
+    /// Resolves the process-local memory scope `query_ctx` runs under.
+    ///
+    /// Returns the scope the context already carries when there is one, so
+    /// resolving is idempotent, and otherwise derives one from the query
+    /// extensions (a Flow's declared budget, clamped to the node-wide limit).
+    /// The default declares no scope: only engines that bound memory per unit
+    /// of work override this.
+    ///
+    /// Call this (or [`QueryEngine::with_flow_memory_scope_fallible`]) at the
+    /// request entry, before anything captures the context, so every execution
+    /// that re-enters the engine under it shares one budget instead of deriving
+    /// one budget each.
+    fn flow_memory_scope_for(&self, _query_ctx: &QueryContextRef) -> Option<QueryMemoryScope> {
+        None
+    }
+
+    /// Returns `query_ctx` with the memory scope it resolves to recorded on it.
+    ///
+    /// The context is forked rather than mutated: [`QueryContextRef`] is shared
+    /// with the caller and, for a request that fans out into nested executions,
+    /// with every one of them, so mutating it in place is not an option. The
+    /// input is returned unchanged when it already carries a scope (an explicit
+    /// scope always wins) or when the query declares no budget, which keeps
+    /// ordinary queries byte-for-byte unaffected.
+    ///
+    /// Recording the scope early matters because parts of the engine capture the
+    /// context *before* `engine_context` runs - the computed semantic-graph
+    /// tables capture it while resolving the table, and re-enter the engine
+    /// later with that captured context. A scope attached only in
+    /// `engine_context` never reaches such a captured context, which would then
+    /// derive an independent full budget.
+    fn with_flow_memory_scope(&self, query_ctx: QueryContextRef) -> QueryContextRef {
+        if query_ctx.memory_scope().is_some() {
+            return query_ctx;
+        }
+        let Some(scope) = self.flow_memory_scope_for(&query_ctx) else {
+            return query_ctx;
+        };
+        let mut forked = query_ctx.fork();
+        forked.set_memory_scope(scope);
+        Arc::new(forked)
+    }
+
+    /// Fallible [`QueryEngine::with_flow_memory_scope`]: the same resolution, but
+    /// a budget this build does not support is returned as an error instead of
+    /// being dropped.
+    ///
+    /// The request entry points call this one, because the entry is the last
+    /// place every request goes through: a statement dispatched without ever
+    /// building an engine context - a plain `INSERT ... VALUES` is written
+    /// through the fast path of the statement executor - would otherwise run
+    /// under a budget that is not enforced.
+    ///
+    /// The default cannot fail: an engine that resolves no scope has nothing to
+    /// reject.
+    fn with_flow_memory_scope_fallible(
+        &self,
+        query_ctx: QueryContextRef,
+    ) -> Result<QueryContextRef> {
+        Ok(self.with_flow_memory_scope(query_ctx))
+    }
 
     /// Retrieve the query engine state [`QueryEngineState`]
     fn engine_state(&self) -> &QueryEngineState;

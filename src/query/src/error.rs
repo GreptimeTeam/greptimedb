@@ -382,6 +382,16 @@ pub enum Error {
         location: Location,
     },
 
+    /// A `Flow` declared a memory budget that this build does not support: the
+    /// `max_memory` flow option is an enterprise feature, so the query is refused
+    /// instead of silently running without the limit it asked for.
+    #[snafu(display("{}", reason))]
+    UnsupportedFlowMemoryBudget {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(transparent)]
     Datatypes {
         source: datatypes::error::Error,
@@ -416,6 +426,8 @@ impl ErrorExt for Error {
             | TryIntoDuration { .. }
             | InvalidQueryContextExtension { .. }
             | ConflictingSnapshotSequence { .. } => StatusCode::InvalidArguments,
+
+            UnsupportedFlowMemoryBudget { .. } => StatusCode::Unsupported,
 
             BuildBackend { source, .. } => source.status_code(),
             ListObjects { .. } => StatusCode::StorageUnavailable,
