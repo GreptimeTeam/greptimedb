@@ -1515,7 +1515,7 @@ impl BulkPartEncoder {
         metrics.iter_cost += iter_start.elapsed();
 
         let close_start = Instant::now();
-        if let Some(kv) = row_group_value_bytes.into_key_value() {
+        for kv in row_group_value_bytes.into_key_values() {
             writer.append_key_value_metadata(kv);
         }
         let file_metadata = writer.close().context(EncodeMemtableSnafu)?;
@@ -1560,7 +1560,7 @@ impl BulkPartEncoder {
                 .context(EncodeMemtableSnafu)?;
             writer.write(&part.batch).context(EncodeMemtableSnafu)?;
             row_group_value_bytes.update(&part.batch);
-            if let Some(kv) = row_group_value_bytes.into_key_value() {
+            for kv in row_group_value_bytes.into_key_values() {
                 writer.append_key_value_metadata(kv);
             }
             writer.finish().context(EncodeMemtableSnafu)?

@@ -178,15 +178,20 @@ pub(crate) fn var_len_value_bytes(batch: &RecordBatch) -> u64 {
 /// Footer key holding the decoded bytes of string and binary values in the row group with the
 /// most such bytes.
 pub(crate) const MAX_ROW_GROUP_VALUE_BYTES_KEY: &str = "greptime:max_row_group_value_bytes";
+/// Footer key holding the largest average decoded bytes of string and binary values per row
+/// within one row group.
+pub(crate) const MAX_ROW_VALUE_WIDTH_KEY: &str = "greptime:max_row_value_width";
 
-/// Tracks the largest [var_len_value_bytes] of a row group, cutting row groups every
-/// `row_group_rows` rows from the start of the file like the parquet writers do.
+/// Tracks, over the row groups of a file, the largest [var_len_value_bytes] of a row group and
+/// the largest of those bytes per row. Row groups are cut every `row_group_rows` rows from the
+/// start of the file like the parquet writers do; the last one may be shorter.
 #[derive(Debug)]
 pub(crate) struct RowGroupValueBytes {
     row_group_rows: usize,
     rows_in_current: usize,
     current: u64,
-    max: u64,
+    max_bytes: u64,
+    max_width: u64,
 }
 
 impl RowGroupValueBytes {
@@ -195,7 +200,8 @@ impl RowGroupValueBytes {
             row_group_rows: row_group_rows.max(1),
             rows_in_current: 0,
             current: 0,
-            max: 0,
+            max_bytes: 0,
+            max_width: 0,
         }
     }
 
@@ -205,24 +211,41 @@ impl RowGroupValueBytes {
         while offset < batch.num_rows() {
             let len = (self.row_group_rows - self.rows_in_current).min(batch.num_rows() - offset);
             self.current += var_len_value_bytes(&batch.slice(offset, len));
-            self.max = self.max.max(self.current);
             self.rows_in_current += len;
             offset += len;
             if self.rows_in_current == self.row_group_rows {
-                self.current = 0;
-                self.rows_in_current = 0;
+                self.finish_row_group();
             }
         }
     }
 
-    /// Returns the footer entry, or `None` when the file has no such values.
-    pub(crate) fn into_key_value(self) -> Option<KeyValue> {
-        (self.max > 0).then(|| {
+    fn finish_row_group(&mut self) {
+        if self.rows_in_current > 0 {
+            self.max_bytes = self.max_bytes.max(self.current);
+            self.max_width = self
+                .max_width
+                .max(self.current.div_ceil(self.rows_in_current as u64));
+        }
+        self.current = 0;
+        self.rows_in_current = 0;
+    }
+
+    /// Returns the footer entries, or nothing when the file has no such values.
+    pub(crate) fn into_key_values(mut self) -> Vec<KeyValue> {
+        self.finish_row_group();
+        if self.max_bytes == 0 {
+            return Vec::new();
+        }
+        vec![
             KeyValue::new(
                 MAX_ROW_GROUP_VALUE_BYTES_KEY.to_string(),
-                self.max.to_string(),
-            )
-        })
+                self.max_bytes.to_string(),
+            ),
+            KeyValue::new(
+                MAX_ROW_VALUE_WIDTH_KEY.to_string(),
+                self.max_width.to_string(),
+            ),
+        ]
     }
 }
 
@@ -248,13 +271,19 @@ pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
 
 /// Returns the [MAX_ROW_GROUP_VALUE_BYTES_KEY] value of the footer, or 0 when it is absent.
 pub(crate) fn max_row_group_value_bytes(metadata: &ParquetMetaData) -> u64 {
+    footer_u64(metadata, MAX_ROW_GROUP_VALUE_BYTES_KEY)
+}
+
+/// Returns the [MAX_ROW_VALUE_WIDTH_KEY] value of the footer, or 0 when it is absent.
+pub(crate) fn max_row_value_width(metadata: &ParquetMetaData) -> u64 {
+    footer_u64(metadata, MAX_ROW_VALUE_WIDTH_KEY)
+}
+
+fn footer_u64(metadata: &ParquetMetaData, key: &str) -> u64 {
     metadata
         .file_metadata()
         .key_value_metadata()
-        .and_then(|kvs| {
-            kvs.iter()
-                .find(|kv| kv.key == MAX_ROW_GROUP_VALUE_BYTES_KEY)
-        })
+        .and_then(|kvs| kvs.iter().find(|kv| kv.key == key))
         .and_then(|kv| kv.value.as_deref())
         .and_then(|value| value.parse().ok())
         .unwrap_or(0)
@@ -1594,7 +1623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_row_group_size_counts_wide_rows_in_their_own_row_group() {
+    async fn test_row_group_statistics_follow_a_short_wide_tail_row_group() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
@@ -1602,13 +1631,13 @@ mod tests {
             region_file_id: handle.file_id(),
         };
         let metadata = build_test_binary_test_region_metadata();
-        // Nine row groups of short values, then one of repeated 64 KiB values that
+        // Nine row groups of short values, then a two-row tail of repeated 64 KiB values that
         // dictionary-encode to a single value.
         let short = new_record_batch_with_binary_values("a", &vec![b"short".to_vec(); 72]);
-        let wide = new_record_batch_with_binary_values("a", &vec![vec![7u8; 64 * 1024]; 8]);
+        let wide = new_record_batch_with_binary_values("a", &vec![vec![7u8; 64 * 1024]; 2]);
         let ts_index = time_index_column_index(wide.num_columns());
         let mut columns = wide.columns().to_vec();
-        columns[ts_index] = Arc::new(TimestampMillisecondArray::from_iter_values(72..80));
+        columns[ts_index] = Arc::new(TimestampMillisecondArray::from_iter_values(72..74));
         let wide = RecordBatch::try_new(wide.schema(), columns).unwrap();
         let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
@@ -1633,7 +1662,13 @@ mod tests {
             .unwrap()
             .remove(0);
         assert_eq!(10, info.num_row_groups);
-        assert!(info.max_row_group_uncompressed_size >= 8 * 64 * 1024);
+        assert!(info.max_row_group_uncompressed_size >= 2 * 64 * 1024);
+        // The tail holds 64 KiB rows although the full row groups have eight rows.
+        let footer = info.file_metadata.as_ref().unwrap();
+        assert_eq!(
+            1024,
+            estimate_batch_size(largest_row_group_statistic(footer))
+        );
     }
 
     #[rstest::rstest]
