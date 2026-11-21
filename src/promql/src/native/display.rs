@@ -35,8 +35,8 @@ use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::native::metrics::NodeMetricsSnapshot;
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
+    AggregateKind, AggregateStage, BoundAggregate, BoundVectorOp, BoundWindow, Grouping,
+    InstantValue, MapOp, NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 use crate::range_eval::RangeFunction;
 use crate::select::{MatchOp, SortOrder};
@@ -217,21 +217,12 @@ fn describe(node: &NativeNode) -> String {
                 format!("count_values {label:?} {}", grouping(group))
             }
         },
-        NativeExpr::Aggregate { op, .. } => format!(
-            "{} {} [{}] {}",
-            aggregate_kind(op.kind),
-            match &op.group {
-                Grouping::By(_) => "by",
-                Grouping::Without(_) => "without",
-            },
-            label_list(match &op.group {
-                Grouping::By(labels) | Grouping::Without(labels) => labels,
-            }),
-            match op.stage {
-                AggregateStage::Complete => "complete",
-                AggregateStage::Partial => "partial",
-                AggregateStage::Final => "final",
-            }
+        NativeExpr::Aggregate { op, .. } => describe_aggregate(op, &aggregate_kind(op.kind)),
+        // The `φ` this fold reads is not on its binding, so the line leaves the constant out and
+        // says where the value comes from instead.
+        NativeExpr::ParameterizedAggregate { op, .. } => format!(
+            "{}, parameter per point",
+            describe_aggregate(op, aggregate_name(op.kind))
         ),
         NativeExpr::Binary { matching, .. } => format!(
             "{}{} {} {}{}",
@@ -300,18 +291,49 @@ fn fill(values: FillValues) -> String {
     )
 }
 
+/// An aggregate: what it folds, how its groups are identified and which stage it reports.
+///
+/// `folded` is how the kind is named: with the constant it bound, for a fold that reads one, and
+/// without it for a fold whose argument is read per point.
+fn describe_aggregate(op: &BoundAggregate, folded: &str) -> String {
+    format!(
+        "{} {} [{}] {}",
+        folded,
+        match &op.group {
+            Grouping::By(_) => "by",
+            Grouping::Without(_) => "without",
+        },
+        label_list(match &op.group {
+            Grouping::By(labels) | Grouping::Without(labels) => labels.as_ref(),
+        }),
+        match op.stage {
+            AggregateStage::Complete => "complete",
+            AggregateStage::Partial => "partial",
+            AggregateStage::Final => "final",
+        }
+    )
+}
+
 /// The PromQL name of an aggregate, with the constant argument it was bound to.
 fn aggregate_kind(kind: AggregateKind) -> String {
     match kind {
-        AggregateKind::Sum => "sum".to_string(),
-        AggregateKind::Avg => "avg".to_string(),
-        AggregateKind::Count => "count".to_string(),
-        AggregateKind::Min => "min".to_string(),
-        AggregateKind::Max => "max".to_string(),
-        AggregateKind::Group => "group".to_string(),
-        AggregateKind::Stddev => "stddev".to_string(),
-        AggregateKind::Stdvar => "stdvar".to_string(),
         AggregateKind::Quantile { quantile } => format!("quantile {quantile}"),
+        other => aggregate_name(other).to_string(),
+    }
+}
+
+/// The PromQL name of an aggregate, without the argument it may have bound.
+fn aggregate_name(kind: AggregateKind) -> &'static str {
+    match kind {
+        AggregateKind::Sum => "sum",
+        AggregateKind::Avg => "avg",
+        AggregateKind::Count => "count",
+        AggregateKind::Min => "min",
+        AggregateKind::Max => "max",
+        AggregateKind::Group => "group",
+        AggregateKind::Stddev => "stddev",
+        AggregateKind::Stdvar => "stdvar",
+        AggregateKind::Quantile { .. } => "quantile",
     }
 }
 
@@ -472,6 +494,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::ScalarOf { .. } => "ScalarOf",
         NativeExpr::ParameterizedMap { .. } => "ParameterizedMap",
         NativeExpr::ParameterizedTopK { .. } => "ParameterizedTopK",
+        NativeExpr::ParameterizedAggregate { .. } => "ParameterizedAggregate",
         NativeExpr::ParameterizedHistogram { .. } => "ParameterizedHistogram",
         NativeExpr::Set { .. } => "Set",
         NativeExpr::Info { .. } => "Info",
@@ -504,6 +527,12 @@ fn child_segments(node: &NativeNode) -> Vec<(&NativeNode, Cow<'static, str>)> {
         | NativeExpr::VectorOf { input }
         | NativeExpr::ScalarOf { input } => child(&mut children, "input", input),
         NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => {
+            child(&mut children, "input", input);
+            child(&mut children, "parameter", parameter);
+        }
+        NativeExpr::ParameterizedAggregate {
             input, parameter, ..
         } => {
             child(&mut children, "input", input);

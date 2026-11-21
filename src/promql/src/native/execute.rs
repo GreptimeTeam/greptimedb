@@ -2780,6 +2780,13 @@ enum RuntimeOp {
         vector: VectorRuntime,
         state: NodeState,
     },
+    ParameterizedAggregate {
+        input: Box<RuntimeNode>,
+        // Taken and dropped once the fold holds the series it answers with.
+        parameter: Option<Box<RuntimeNode>>,
+        aggregate: AggregateRuntime,
+        state: NodeState,
+    },
     ParameterizedHistogram {
         input: Box<RuntimeNode>,
         // Each parameter is taken and dropped after its scalar values are installed.
@@ -2851,8 +2858,24 @@ impl LeafKind {
 struct InputSlot {
     source_index: usize,
     kind: LeafKind,
+    /// Whether the series whose chunk this leaf most recently handed over is still open.
     open_source_series: bool,
+    /// Whether the series whose chunk the caller most recently queued here is still open.
+    ///
+    /// Finality is a property of what the caller sent and not of what the tree has pulled: a node
+    /// that decides nothing before its whole input is there, such as an aggregate waiting for its
+    /// parameter, can end a run with a chunk still queued, and that chunk is what says whether the
+    /// input was closed. Following the handovers alone would read the queued chunk as never having
+    /// arrived, and the truncated input it holds as a closed one.
+    open_queued_series: bool,
     state: NodeState,
+}
+
+impl InputSlot {
+    /// Whether an input the caller ended here left a series open, handed over or still queued.
+    fn ends_open(&self) -> bool {
+        self.open_source_series || self.open_queued_series
+    }
 }
 
 /// State for one execution of a bound tree. The live tree and input slots are dropped together
@@ -2954,6 +2977,7 @@ impl RuntimeNode {
                     source_index: bound.source_index,
                     kind: LeafKind::of(&node.output)?,
                     open_source_series: false,
+                    open_queued_series: false,
                     state: NodeState::new(
                         format!(
                             "native.input at {location} (source_index={})",
@@ -3454,6 +3478,53 @@ impl RuntimeNode {
                     state,
                 }
             }
+            NativeExpr::ParameterizedAggregate {
+                input,
+                op,
+                parameter,
+            } => {
+                let schema = node
+                    .output
+                    .samples()
+                    .or_else(|| input.output.samples())
+                    .cloned()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "a parameterized aggregate does not produce samples".into(),
+                        )
+                    })?;
+                let mut state = NodeState::new(
+                    format!("native.aggregate at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
+                let aggregate =
+                    AggregateRuntime::new_parameterized(op.clone(), schema, &mut state.buffer)?;
+                let child = Self::build(
+                    input,
+                    pool,
+                    inputs,
+                    binary_before,
+                    format!("{location}.input"),
+                    duplicate_evidence.clone(),
+                )?;
+                // The input is built before the parameter, the order the selector walk binds the
+                // two sources in.
+                let parameter = Self::build(
+                    parameter,
+                    pool,
+                    inputs,
+                    binary_before,
+                    format!("{location}.parameter"),
+                    duplicate_evidence.clone(),
+                )?;
+                RuntimeOp::ParameterizedAggregate {
+                    input: Box::new(child),
+                    parameter: Some(Box::new(parameter)),
+                    aggregate,
+                    state,
+                }
+            }
             NativeExpr::ParameterizedTopK {
                 input,
                 op,
@@ -3633,6 +3704,9 @@ impl RuntimeNode {
             }
             RuntimeOp::ParameterizedTopK {
                 input, parameter, ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
+                input, parameter, ..
             } => {
                 input.register_metrics(&format!("{name}.input"), set, partition);
                 if let Some(parameter) = parameter {
@@ -3708,6 +3782,12 @@ impl RuntimeNode {
                 |n, p| n.saturating_add(p.as_ref().map_or(0, RuntimeNode::reserved_bytes)),
             ),
             RuntimeOp::ParameterizedTopK {
+                input,
+                parameter,
+                state,
+                ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
                 input,
                 parameter,
                 state,
@@ -3790,6 +3870,20 @@ impl RuntimeNode {
                 // collector as well as its child.
                 aggregate.set_annotations(collector.clone());
                 input.set_annotations(collector);
+            }
+            RuntimeOp::ParameterizedAggregate {
+                input,
+                parameter,
+                aggregate,
+                ..
+            } => {
+                // The fold reports skipped samples exactly as the bound one does, so it needs the
+                // collector too; a parameter is a scalar expression and reads none of them.
+                aggregate.set_annotations(collector.clone());
+                input.set_annotations(collector.clone());
+                if let Some(parameter) = parameter {
+                    parameter.set_annotations(collector);
+                }
             }
             RuntimeOp::Timestamp { input, .. } => input.set_annotations(collector),
             RuntimeOp::Vector { input, vector, .. } => {
@@ -4306,6 +4400,58 @@ impl RuntimeNode {
                 // are counted rather than read as its positions, as a binary result's are.
                 state.pop_queued(evaluated_values)
             }
+            RuntimeOp::ParameterizedAggregate {
+                input,
+                parameter,
+                aggregate,
+                state,
+            } => {
+                let fold = aggregate;
+                // The φ is read at every point the fold answers, so it is drained whole before the
+                // fold reads any input: a point's answer is decided from the group's samples and the
+                // φ the statement evaluated there, and the fold keeps the group's samples rather
+                // than a per-point state, so it cannot be handed the φ later.
+                if let Some(parameter_node) = parameter.as_mut() {
+                    let mut slot = None;
+                    let mut held = 0usize;
+                    while let Some(chunk) = parameter_node.pull(inputs, inputs_finished)? {
+                        state
+                            .hold_scalar(&mut held, &mut slot, chunk)
+                            .map_err(|error| state.context(error))?;
+                    }
+                    let series = {
+                        // A parameter that folds its own input (a `scalar()` over a selector) has
+                        // nothing to hand over until that input ends, so its absence is a reason to
+                        // be pulled again rather than a failure.
+                        if !parameter_node.settled(inputs) {
+                            return Ok(None);
+                        }
+                        slot.ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "the quantile parameter produced no scalar".into(),
+                            )
+                        })?
+                    };
+                    fold.hold_parameter(series, &mut state.buffer)
+                        .map_err(|error| state.context(error))?;
+                    // Finish windows before dropping the consumed subtree; its children may still
+                    // hold charged emitted history or scalar series even after the scalar was read.
+                    parameter_node.finish_windows()?;
+                    *parameter = None;
+                }
+                while let Some(chunk) = input.pull(inputs, inputs_finished)? {
+                    state
+                        .retain_aggregate(fold, chunk)
+                        .map_err(|error| state.context(error))?;
+                }
+                if !inputs_finished || !input.settled(inputs) {
+                    return Ok(None);
+                }
+                state
+                    .compute_aggregate(fold)
+                    .map_err(|error| state.context(error))?;
+                state.pop_queued(evaluated_values)
+            }
             RuntimeOp::ParameterizedTopK {
                 input,
                 parameter,
@@ -4612,6 +4758,14 @@ impl RuntimeNode {
                 aggregate,
                 state,
             } => state.queued.is_empty() && aggregate.computed && input.settled(inputs),
+            // The same fold, with its parameter released after the fold holds it: `computed` already
+            // implies the parameter was consumed.
+            RuntimeOp::ParameterizedAggregate {
+                input,
+                aggregate,
+                state,
+                ..
+            } => state.queued.is_empty() && aggregate.computed && input.settled(inputs),
             RuntimeOp::Vector {
                 input,
                 vector,
@@ -4672,6 +4826,9 @@ impl RuntimeNode {
                 Ok(flushed)
             }
             RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
                 input, parameter, ..
             } => {
                 let mut flushed = input.flush_ready_merges(inputs)?;
@@ -4745,6 +4902,9 @@ impl RuntimeNode {
             }
             RuntimeOp::ParameterizedTopK {
                 input, parameter, ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
+                input, parameter, ..
             } => {
                 input.any_merge_pending()
                     || parameter.as_ref().is_some_and(|p| p.any_merge_pending())
@@ -4799,6 +4959,17 @@ impl RuntimeNode {
                     .input
                     .ensure_closed(Reader::Vector)
                     .map_err(|e| state.context(e))?;
+                input.unclosed()?;
+                if let Some(parameter) = parameter {
+                    parameter.unclosed()?;
+                }
+                Ok(())
+            }
+            // The fold keeps its input rather than folding it away, so a series that ended inside
+            // the fold's input is exactly what this checks for; the parameter is one scalar series.
+            RuntimeOp::ParameterizedAggregate {
+                input, parameter, ..
+            } => {
                 input.unclosed()?;
                 if let Some(parameter) = parameter {
                     parameter.unclosed()?;
@@ -4876,6 +5047,9 @@ impl RuntimeNode {
             | RuntimeOp::VectorOf { input, .. }
             | RuntimeOp::Merge { input, .. } => input.finish_windows(),
             RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
                 input, parameter, ..
             } => {
                 let first = input.finish_windows();
@@ -5036,7 +5210,7 @@ impl LiveExecution {
     /// only then the nodes, because a node that retains its whole input reports the same truncation in
     /// its own terms.
     fn unclosed(&self) -> Result<()> {
-        if let Some(index) = self.inputs.iter().position(|slot| slot.open_source_series) {
+        if let Some(index) = self.inputs.iter().position(InputSlot::ends_open) {
             let slot = &self.inputs[index];
             return Err(slot.state.context(truncated_input(InputId::new(index))));
         }
@@ -6026,9 +6200,16 @@ impl InputSlot {
                 chunk.describe(),
             ))));
         }
+        // Finality is recorded on receipt as well as on handover: a chunk the tree has not pulled
+        // yet is still a chunk the caller sent, and whether it closes its series says so whether or
+        // not anything above this leaf ever reads it. A chunk the pool refuses never arrived, so
+        // the flag follows the queue.
+        let closing = chunk.is_last();
         self.state
             .enqueue(chunk)
-            .map_err(|error| self.state.context(error))
+            .map_err(|error| self.state.context(error))?;
+        self.open_queued_series = !closing;
+        Ok(())
     }
 
     /// Hands over the next queued source chunk, if there is one.

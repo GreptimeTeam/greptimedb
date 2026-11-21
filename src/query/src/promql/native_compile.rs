@@ -46,7 +46,7 @@
 //!                                                  e.g. avg by(job)(rate(x[5m]) * 100)
 //!   <aggregator> (<expression>) [(by|without)(<labels>)]
 //!                                                  e.g. count (x) by(job)
-//!   quantile(<constant>, <expression>) [(by|without)(<labels>)]
+//!   quantile(<scalar>, <expression>) [(by|without)(<labels>)]
 //!                                                  e.g. quantile(0.9, x) by(job)
 //!   <selector aggregator>(<constant>, <expression>) [(by|without)(<labels>)]
 //!                                                  e.g. topk(3, x) by(job), limit_ratio(0.5, x)
@@ -57,7 +57,8 @@
 //!           | <expression>[<range>:<step>]<modifiers>
 //!                                                  a subquery: <expression> evaluated on a grid;
 //!                                                  the step may be omitted as `[<range>:]`
-//! <scalar>    <constant> | time() | <scalar> <operator> <scalar>
+//! <scalar>    <constant> | time() | scalar(<expression>)
+//!           | <scalar> <operator> <scalar>
 //! <modifiers>                                      nothing, `offset <duration>`, `@ <anchor>`, or
 //!                                                  both, in either order — e.g. `x[5m] @ 1234
 //!                                                  offset 1m`
@@ -257,14 +258,15 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
                          operation between one of them and a scalar (`2 / (x + 1)`, \
                          `x > bool time()`, `time() - timestamp(x)`), a scalar — a constant, \
-                         `time()` or a binary operation between scalars — \
+                         `time()`, `scalar(<expression>)` or a binary operation between \
+                         scalars — \
                          `vector(<scalar>)`, a date function without an argument (`hour()`), a \
                          negation of one of them (`-x`), a set operation between two of them \
                          (`x and on(job) y`, `x or y`, `x unless y`), `info` over any of them with \
                          one info metric (`info(x, {version=~\".+\"})`), or one of the \
                          aggregators that folds a group's values into one value per grid point — \
                          `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
-                         `quantile(<constant>, <expression>)` — over any of them, optionally \
+                         `quantile(<scalar>, <expression>)` — over any of them, optionally \
                          grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
                          `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
                          them, as in `topk(3, x) by(job)` and `count_values(\"v\", x)`; a \
@@ -938,6 +940,11 @@ fn binary_op(op: &TokenType) -> Option<BinaryOp> {
 /// "no modifier": every label is dropped, `__name__` included, and every series of the input falls
 /// into one group.
 ///
+/// `quantile` is the one kind that takes an argument at run time, so it has two shapes: a number the
+/// statement decides is bound on the fold ([`NativeExpr::Aggregate`]), and a scalar the query
+/// evaluates is bound beside it as the fold's second operand
+/// ([`NativeExpr::ParameterizedAggregate`]), because Prometheus reads it at every step.
+///
 /// The stage is [`AggregateStage::Complete`], which says that every contribution to each group is in
 /// this execution's input. The module documentation says what keeping that claim costs a caller.
 fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<NativeNode> {
@@ -947,6 +954,11 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
         param,
         modifier,
     } = aggregate;
+    // The one aggregate whose argument is read per point rather than bound as a number, when the
+    // query wrote it as something only the statement decides: `quantile(scalar(foo), v)` reads `foo`
+    // at every step, as Prometheus does. It is bound below, beside the fold, because that is what
+    // its subtree is: a second operand of this node.
+    let mut per_point = None;
     let kind = match op.id() {
         token::T_SUM => AggregateKind::Sum,
         token::T_AVG => AggregateKind::Avg,
@@ -959,16 +971,33 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
         token::T_QUANTILE => {
             // `quantile` is the only one of the nine with a parameter, and the parser always gives
             // it one: a `quantile` with no quantile written is refused before the compiler sees it.
-            // The quantile is the call's first argument, so a parameter that is not a constant is
-            // refused under that name rather than answered from a number bound too early.
+            // The quantile is the call's first argument, so a parameter this compiler cannot bind -
+            // more than one value at a point, or a number it must not fold - is refused under that
+            // name rather than answered from a number bound too early.
             let param = param.as_ref().ok_or_else(|| {
                 not_implemented(&format!(
                     "the aggregate `{op}` in `{aggregate}`, which takes its quantile as its first \
                      argument"
                 ))
             })?;
+            // A parameter the statement itself decides stays on the constant path, folded by
+            // `constant_argument` below: `quantile(0.25 + 0.1 + 0.15, v)` is one number, and binding
+            // the expression it was written as would answer nothing else. What is left is a scalar
+            // the query evaluates - `scalar(foo)`, `time()`, an arithmetic expression of them -
+            // which is one value per grid point, exactly what the kernel reads `q` as.
+            //
+            // A vector is neither: Prometheus refuses `quantile(foo, v)` at type check, and leaving
+            // it to `constant_argument` keeps that refusal where and what it was.
+            if constant_value(param).is_none() && param.value_type() == ValueType::Scalar {
+                per_point = Some(param);
+            }
             AggregateKind::Quantile {
-                quantile: constant_argument(&op.to_string(), param, 0)?,
+                // Unused by a fold that reads its φ per point, exactly as a parameterized `topk`
+                // ignores the `k` its own binding carries.
+                quantile: match per_point {
+                    Some(_) => 0.0,
+                    None => constant_argument(&op.to_string(), param, 0)?,
+                },
             }
         }
         // A ranking aggregate keeps some of the input's series, and `count_values` writes one
@@ -1020,18 +1049,26 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
     // A complete aggregate folds each group's values and reports them on its input's grid, one value
     // per input field, so its layout is its input's.
     let output = input.output.clone();
-    Ok(NativeNode {
-        expr: NativeExpr::Aggregate {
+    let op = BoundAggregate {
+        kind,
+        group: grouping(modifier.as_ref()),
+        stage: AggregateStage::Complete,
+        field_kind,
+    };
+    // The input is compiled before the parameter: the parameter is the second operand this node
+    // reads, and the selector walk binds the scans in that order.
+    let expr = match per_point {
+        Some(parameter) => NativeExpr::ParameterizedAggregate {
             input: Box::new(input),
-            op: BoundAggregate {
-                kind,
-                group: grouping(modifier.as_ref()),
-                stage: AggregateStage::Complete,
-                field_kind,
-            },
+            op,
+            parameter: Box::new(compile_expr(context, parameter)?),
         },
-        output,
-    })
+        None => NativeExpr::Aggregate {
+            input: Box::new(input),
+            op,
+        },
+    };
+    Ok(NativeNode { expr, output })
 }
 
 /// Binds `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` as a vector operation over
