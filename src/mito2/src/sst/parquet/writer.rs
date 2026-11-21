@@ -600,12 +600,13 @@ where
             let writer = self.writer.as_mut().context(UnexpectedSnafu {
                 reason: "Missing SST writer during finalization",
             })?;
-            if let Some(value_bytes) = self
+            for kv in self
                 .row_group_value_bytes
                 .take()
-                .and_then(RowGroupValueBytes::into_key_value)
+                .map(RowGroupValueBytes::into_key_values)
+                .unwrap_or_default()
             {
-                writer.append_key_value_metadata(value_bytes);
+                writer.append_key_value_metadata(kv);
             }
             let parquet_metadata = writer.finish().await.map_err(map_write_error)?;
             self.writer.take();
