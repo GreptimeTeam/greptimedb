@@ -1612,7 +1612,9 @@ impl Instance {
     /// - a request that demands ordered rows: the original path, because only its
     ///   own plan knows the global ordering;
     /// - a request with a snapshot, an SST bound, a Flow extension, or a `__schema__`
-    ///   override: the original path, since the cache key encodes none of them.
+    ///   override: the original path, since the cache key encodes none of them;
+    /// - a bare top-level selector: the original path, see
+    ///   [`Instance::windowed_expr_is_bare_selector`].
     ///
     /// The request path never probes a source sequence: whether the table may be
     /// served comes from [`RollupCache::admit`], which is bookkeeping only.
@@ -1663,6 +1665,11 @@ impl Instance {
             return Ok(None);
         }
         if Self::windowed_source_has_schema_override(&eval_stmt.expr) {
+            return Ok(None);
+        }
+        // Checked before the identity and before admission, so a bare selector is never
+        // registered for the refresher, never fills, and never hits.
+        if Self::windowed_expr_is_bare_selector(&eval_stmt.expr) {
             return Ok(None);
         }
         let Some(identity) =
@@ -1759,6 +1766,28 @@ impl Instance {
             // The caller only reaches this after admission; an unknown shape is
             // not provably about the current schema.
             _ => true,
+        }
+    }
+
+    /// Whether `expr` is a bare top-level selector, however it is parenthesised.
+    ///
+    /// Such a statement would be served by the cache, but it would be slower that way: a
+    /// selector over many series is dominated by the scan and by serializing the rows, so a
+    /// chunk served from memory trades that for a copy and a merge of the cached payload
+    /// (and the fill pays for both), which measured ~23% slower on a 2048-series selector.
+    /// The window shapes the cache does help — `sum(rate(x[5m]))` and `rate(x[5m])` —
+    /// separate the scan from the answer enough for the reuse to win, and keep the cached
+    /// path.
+    ///
+    /// The bypass is an admission decision only: the statement is as valid as any other
+    /// windowable one and runs its original plan, it just does not use the cache.
+    fn windowed_expr_is_bare_selector(expr: &promql_parser::parser::Expr) -> bool {
+        use promql_parser::parser::Expr;
+
+        match expr {
+            Expr::Paren(paren) => Self::windowed_expr_is_bare_selector(&paren.expr),
+            Expr::VectorSelector(_) => true,
+            _ => false,
         }
     }
 
@@ -3576,6 +3605,14 @@ mod tests {
         rows.pretty_print().unwrap()
     }
 
+    /// How many rows a result holds.
+    ///
+    /// A test that compares two answers states with it that the answer they agree on is
+    /// not empty, which two empty answers would satisfy vacuously.
+    fn row_count(rows: &RecordBatches) -> usize {
+        rows.iter().map(|batch| batch.num_rows()).sum()
+    }
+
     /// A range cache whose chunk is five minutes of a one-minute query, with no
     /// tail, so a request over whole chunks is cacheable in a test that runs at
     /// wall-clock time.
@@ -3725,11 +3762,13 @@ mod tests {
         // A chunk is publishable only when the read reports the region sequence it
         // reached, because that is what orders it against a background invalidation. The
         // test table's plan reports none, so the request answers from its own read and
-        // keeps nothing: a payload nothing can order is never served.
+        // keeps nothing: a payload nothing can order is never served. The expression is a
+        // cacheable `rate` rather than a bare selector, which bypasses the cache before
+        // admission (`windowed_expr_is_bare_selector`) and would publish nothing anyway.
         let cached = metric_instance(Some(test_rollup_cache())).await?;
         let cache = cached.rollup_cache().unwrap().clone();
         let plain = metric_instance(None).await?;
-        let query = metric_range_query("cpu");
+        let query = metric_range_query("rate(cpu[5m])");
 
         let cold = promql_rows(&cached, &query, test_query_ctx(1)).await?;
         let repeated = promql_rows(&cached, &query, test_query_ctx(2)).await?;
@@ -3743,10 +3782,11 @@ mod tests {
             "an unordered read publishes nothing"
         );
         assert_eq!(0, cache.hit_count(), "nothing was served from the cache");
-        // The gap is in the answer: the points inside it have no sample within the
-        // one-minute lookback, so the range query holds fewer rows than the thirty
-        // grid points it evaluates.
-        let rows = repeated.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        // The gap is in the answer: the points inside it have no pair of samples the
+        // `rate` can fold, so the range query holds fewer rows than the thirty grid points
+        // it evaluates. The rows are also more than none, which is what keeps the
+        // comparisons above from holding between two empty answers.
+        let rows = row_count(&repeated);
         assert!(
             rows > 0 && rows < 30,
             "the gap leaves points unanswered: {rows}"
@@ -3758,7 +3798,8 @@ mod tests {
     #[tokio::test]
     async fn a_range_query_of_an_unproved_table_never_serves_from_the_cache() -> TestResult<()> {
         // No background round has proved `cpu`, so the cache may not answer with it,
-        // however many requests have filled it.
+        // however many requests have filled it. The expression is a cacheable `rate`, not a
+        // bare selector, which bypasses the cache before admission.
         let cache = Arc::new(crate::query_cache::RollupCache::new(
             crate::query_cache::RollupCacheConfig::new(
                 1 << 20,
@@ -3771,12 +3812,13 @@ mod tests {
         ));
         let cached = metric_instance(Some(cache.clone())).await?;
         let plain = metric_instance(None).await?;
-        let query = metric_range_query("cpu");
+        let query = metric_range_query("rate(cpu[5m])");
 
         let answer = promql_rows(&cached, &query, test_query_ctx(1)).await?;
         let repeated = promql_rows(&cached, &query, test_query_ctx(2)).await?;
         let uncached = promql_rows(&plain, &query, test_query_ctx(3)).await?;
 
+        assert!(row_count(&answer) > 0, "the answers compared are not empty");
         assert_eq!(printed(&uncached), printed(&answer));
         assert_eq!(printed(&uncached), printed(&repeated));
         assert_eq!(0, cache.entry_count());
@@ -3799,10 +3841,12 @@ mod tests {
         let plain = metric_instance(None).await?;
 
         // `__schema__` makes the planner read another schema; the cache key and
-        // source probe only name the current one.
-        let overridden = metric_range_query(r#"cpu{__schema__="public"}"#);
+        // source probe only name the current one. The expression is a cacheable `rate` so
+        // the override, and not the bare-selector heuristic, is what bypasses.
+        let overridden = metric_range_query(r#"rate(cpu{__schema__="public"}[5m])"#);
         let answer = promql_rows(&cached, &overridden, test_query_ctx(1)).await?;
         let uncached = promql_rows(&plain, &overridden, test_query_ctx(2)).await?;
+        assert!(row_count(&answer) > 0, "the answers compared are not empty");
         assert_eq!(printed(&uncached), printed(&answer));
         assert_eq!(0, cache.entry_count(), "schema override fills nothing");
 
@@ -3810,8 +3854,22 @@ mod tests {
         // share the ordinary entries.
         let snapshot = QueryContext::with_db_name(None);
         snapshot.set_snapshot(1, 42);
-        let bounded = promql_rows(&cached, &metric_range_query("cpu"), Arc::new(snapshot)).await?;
-        let uncached = promql_rows(&plain, &metric_range_query("cpu"), test_query_ctx(3)).await?;
+        let bounded = promql_rows(
+            &cached,
+            &metric_range_query("rate(cpu[5m])"),
+            Arc::new(snapshot),
+        )
+        .await?;
+        let uncached = promql_rows(
+            &plain,
+            &metric_range_query("rate(cpu[5m])"),
+            test_query_ctx(3),
+        )
+        .await?;
+        assert!(
+            row_count(&bounded) > 0,
+            "the answers compared are not empty"
+        );
         assert_eq!(printed(&uncached), printed(&bounded));
         assert_eq!(0, cache.entry_count(), "snapshot request fills nothing");
 
@@ -3819,8 +3877,12 @@ mod tests {
         let sst_bounded = QueryContextBuilder::default()
             .sst_min_sequences(Arc::new(std::sync::RwLock::new(HashMap::from([(1, 90)]))))
             .build();
-        let bounded =
-            promql_rows(&cached, &metric_range_query("cpu"), Arc::new(sst_bounded)).await?;
+        let bounded = promql_rows(
+            &cached,
+            &metric_range_query("rate(cpu[5m])"),
+            Arc::new(sst_bounded),
+        )
+        .await?;
         assert_eq!(printed(&uncached), printed(&bounded));
         assert_eq!(0, cache.entry_count(), "SST-bounded request fills nothing");
         Ok(())
@@ -3831,14 +3893,60 @@ mod tests {
         let cached = metric_instance(Some(test_rollup_cache())).await?;
         let cache = cached.rollup_cache().unwrap().clone();
         let plain = metric_instance(None).await?;
-        let mut query = metric_range_query("cpu");
+        // A cacheable `rate`, so the instant condition is what bypasses rather than the
+        // bare-selector heuristic. The point is inside the fixture's data, so the answer
+        // the two instances are compared on is not empty.
+        let mut query = metric_range_query("rate(cpu[5m])");
+        query.start = "36300".to_string();
         query.end = query.start.clone();
 
         let instant = promql_rows(&cached, &query, test_query_ctx(1)).await?;
         let uncached = promql_rows(&plain, &query, test_query_ctx(2)).await?;
 
+        assert!(
+            row_count(&instant) > 0,
+            "the answers compared are not empty"
+        );
         assert_eq!(printed(&uncached), printed(&instant));
         assert_eq!(0, cache.entry_count(), "an instant query fills nothing");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_bare_selector_range_query_bypasses_the_rollup_cache() -> TestResult<()> {
+        // A bare selector is scan- and serialize-dominated, so a chunk served from memory
+        // costs a copy and a merge of the cached payload (and the fill pays for both) on
+        // top of a read that was already cheap: the cached path measured ~23% slower on a
+        // 2048-series selector. Such a request therefore keeps its original plan, and the
+        // bypass is before admission, so its table is never registered for the refresher
+        // and nothing is filled or served. Parentheses only group, so they do not make a
+        // selector cacheable again.
+        let cached = metric_instance(Some(test_rollup_cache())).await?;
+        let cache = cached.rollup_cache().unwrap().clone();
+        let plain = metric_instance(None).await?;
+
+        for expr in ["cpu", "((cpu))"] {
+            let query = metric_range_query(expr);
+            let cold = promql_rows(&cached, &query, test_query_ctx(1)).await?;
+            let repeated = promql_rows(&cached, &query, test_query_ctx(2)).await?;
+            let uncached = promql_rows(&plain, &query, test_query_ctx(3)).await?;
+
+            assert_eq!(printed(&uncached), printed(&cold), "{expr}");
+            assert_eq!(printed(&uncached), printed(&repeated), "{expr}");
+            assert!(
+                row_count(&cold) > 0,
+                "{expr}: the answers compared are not empty"
+            );
+        }
+        assert_eq!(0, cache.entry_count(), "a bare selector fills nothing");
+        assert_eq!(0, cache.hit_count(), "a bare selector is never served");
+        // No admission either: `tables_to_refresh` lists exactly the tables some request
+        // has registered, so an empty list is the table never having been admitted.
+        assert!(
+            cache.tables_to_refresh(Instant::now()).is_empty(),
+            "a bare selector never admits its table"
+        );
 
         Ok(())
     }
