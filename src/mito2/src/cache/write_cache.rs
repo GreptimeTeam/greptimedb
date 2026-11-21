@@ -39,6 +39,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
+use crate::sst::parquet::blob::{blob_file_size, blob_path};
 use crate::sst::parquet::writer::{ParquetWriter, SstWriteContext};
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::upload::{self, UploadError};
@@ -365,6 +366,22 @@ impl WriteCache {
         let mut err = None;
         let op_type = write_request.op_type;
         let remote_store = &upload_request.remote_store;
+        // Sidecars go to the remote store while the SST is written, so a failed upload must
+        // remove them as well.
+        for sst in &sst_info {
+            if sst
+                .file_metadata
+                .as_deref()
+                .and_then(blob_file_size)
+                .is_some()
+            {
+                upload_tracker.push_uploaded_file(blob_path(
+                    &upload_request
+                        .dest_path_provider
+                        .build_sst_file_path(RegionFileId::new(region_id, sst.file_id)),
+                ));
+            }
+        }
         for sst in &sst_info {
             if context
                 .cancellation

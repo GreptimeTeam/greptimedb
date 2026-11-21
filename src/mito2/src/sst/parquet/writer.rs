@@ -801,7 +801,6 @@ where
             self.check_cancelled()?;
             let arrow_batch = converter.convert_batch(batch)?;
             self.check_cancelled()?;
-            let stored_batch = self.store_external_values(&arrow_batch, opts).await?;
             let start = Instant::now();
             if self.writer.is_none() {
                 // The first non-empty batch of a file decides which columns skip statistics.
@@ -810,8 +809,18 @@ where
                 }
                 self.large_value_columns = large_value_fields(&self.metadata, &arrow_batch);
             }
-            self.maybe_init_writer(stored_batch.schema_ref(), opts)
-                .await?
+            if self.external_columns.is_none() {
+                self.external_columns = Some(external_columns(&self.metadata)?);
+            }
+            // Creating the SST registers its ownership, which must precede its sidecar.
+            self.maybe_init_writer(arrow_batch.schema_ref(), opts)
+                .await?;
+            let stored_batch = self.store_external_values(&arrow_batch, opts).await?;
+            self.writer
+                .as_mut()
+                .context(UnexpectedSnafu {
+                    reason: "Missing SST writer after initialization",
+                })?
                 .write(&stored_batch)
                 .await
                 .map_err(map_write_error)?;
@@ -863,9 +872,6 @@ where
         batch: &RecordBatch,
         opts: &WriteOptions,
     ) -> Result<RecordBatch> {
-        if self.external_columns.is_none() {
-            self.external_columns = Some(external_columns(&self.metadata)?);
-        }
         let columns = self.external_columns.as_deref().unwrap_or_default();
         if columns.is_empty() {
             return Ok(batch.clone());

@@ -37,6 +37,7 @@ use datatypes::arrow::array::{ArrayRef, AsArray, BinaryBuilder, StringBuilder};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::StorageType;
+use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use snafu::ResultExt;
@@ -52,11 +53,13 @@ pub(crate) const BLOB_FILE_SIZE_KEY: &str = "greptime:blob_file_size";
 /// Marks a value as a reference into the sidecar. Valid UTF-8, so string columns can hold it.
 const REF_PREFIX: &str = "\0greptime-blob:";
 /// Upper bound of resolved value bytes in one output batch; keeps i32 offsets valid.
-const MAX_RESOLVED_BATCH_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const MAX_RESOLVED_BATCH_BYTES: usize = 128 * 1024 * 1024;
 /// Neighboring values closer than this are fetched in one request.
 const COALESCE_GAP: u64 = 1024 * 1024;
 /// Upper bound of one coalesced request.
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+/// Requests in flight for one chunk of values.
+const FETCH_CONCURRENCY: usize = 8;
 const ZSTD_LEVEL: i32 = 1;
 
 /// Returns the sidecar path of the SST at `sst_path`.
@@ -154,11 +157,20 @@ impl BlobRef {
         let text = std::str::from_utf8(body).map_err(|_| invalid())?;
         let mut parts = text.split(':').map(|p| p.parse::<u64>());
         let mut next = || parts.next().and_then(|p| p.ok()).ok_or_else(invalid);
-        Ok(Some(Self {
+        let blob_ref = Self {
             offset: next()?,
             compressed_len: next()?,
             len: next()?,
-        }))
+        };
+        if parts.next().is_some()
+            || blob_ref
+                .offset
+                .checked_add(blob_ref.compressed_len)
+                .is_none()
+        {
+            return Err(invalid());
+        }
+        Ok(Some(blob_ref))
     }
 
     fn range(&self) -> Range<u64> {
@@ -396,20 +408,7 @@ impl BlobResolver {
 
     /// Fetches `refs` (sorted by offset) with coalesced range requests.
     async fn fetch(&self, refs: &[BlobRef]) -> Result<Vec<(Range<u64>, Bytes)>> {
-        let mut ranges: Vec<Range<u64>> = Vec::new();
-        for r in refs {
-            let range = r.range();
-            match ranges.last_mut() {
-                Some(last)
-                    if range.start <= last.end + COALESCE_GAP
-                        && range.end - last.start <= MAX_REQUEST_BYTES =>
-                {
-                    last.end = last.end.max(range.end);
-                }
-                _ => ranges.push(range),
-            }
-        }
-        let reads = ranges.into_iter().map(|range| async move {
+        let reads = coalesce_ranges(refs).into_iter().map(|range| async move {
             let data = self
                 .store
                 .read_with(&self.path)
@@ -418,8 +417,33 @@ impl BlobResolver {
                 .context(OpenDalSnafu)?;
             Ok::<_, Error>((range, data.to_bytes()))
         });
-        futures::future::try_join_all(reads).await
+        futures::stream::iter(reads)
+            .buffered(FETCH_CONCURRENCY)
+            .try_collect()
+            .await
     }
+}
+
+/// Merges the ranges of `refs` (sorted by offset) into requests. A gap joins two ranges only
+/// when it is no larger than the wanted bytes already in the request, so sparse selections read
+/// at most about twice the bytes they need.
+fn coalesce_ranges(refs: &[BlobRef]) -> Vec<Range<u64>> {
+    // (range, wanted bytes in the range)
+    let mut ranges: Vec<(Range<u64>, u64)> = Vec::new();
+    for r in refs {
+        let range = r.range();
+        match ranges.last_mut() {
+            Some((last, wanted))
+                if range.start <= last.end + COALESCE_GAP.min(*wanted)
+                    && range.end.saturating_sub(last.start) <= MAX_REQUEST_BYTES =>
+            {
+                last.end = last.end.max(range.end);
+                *wanted += r.compressed_len;
+            }
+            _ => ranges.push((range, r.compressed_len)),
+        }
+    }
+    ranges.into_iter().map(|(range, _)| range).collect()
 }
 
 /// Returns the values of a string or binary column as bytes.
@@ -505,12 +529,16 @@ fn decode_rows(
         let compressed = data
             .get(begin..begin + r.compressed_len as usize)
             .ok_or_else(corrupted)?;
-        zstd::bulk::decompress(compressed, r.len as usize).map_err(|e| {
+        let value = zstd::bulk::decompress(compressed, r.len as usize).map_err(|e| {
             UnexpectedSnafu {
                 reason: format!("failed to decompress blob value at {}: {e}", r.offset),
             }
             .build()
-        })
+        })?;
+        if value.len() as u64 != r.len {
+            return Err(corrupted());
+        }
+        Ok(value)
     };
 
     let mut arrays = batch.columns().to_vec();
@@ -530,7 +558,58 @@ fn decode_rows(
 
 #[cfg(test)]
 mod tests {
+    use datatypes::arrow::array::{BinaryArray, StringArray};
+
     use super::*;
+
+    #[tokio::test]
+    async fn test_values_at_threshold_or_prefixed_are_external() {
+        let at_threshold = vec![1u8; 8];
+        let below = vec![1u8; 7];
+        let prefixed = format!("{REF_PREFIX}x");
+        let binary: ArrayRef = Arc::new(BinaryArray::from(vec![
+            Some(at_threshold.as_slice()),
+            Some(below.as_slice()),
+            None,
+            Some(prefixed.as_bytes()),
+        ]));
+        let string: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("12345678"),
+            Some("1234567"),
+            None,
+            Some(prefixed.as_str()),
+        ]));
+        for array in [binary, string] {
+            let external: Vec<_> = compress_external_values(array, 8)
+                .await
+                .unwrap()
+                .iter()
+                .map(Option::is_some)
+                .collect();
+            assert_eq!(vec![true, false, false, true], external);
+        }
+    }
+
+    #[test]
+    fn test_sparse_values_are_not_coalesced_across_large_gaps() {
+        let refs = |offsets: &[u64], len: u64| -> Vec<BlobRef> {
+            offsets
+                .iter()
+                .map(|offset| BlobRef {
+                    offset: *offset,
+                    compressed_len: len,
+                    len,
+                })
+                .collect()
+        };
+        // Adjacent values share one request.
+        assert_eq!(vec![0..300], coalesce_ranges(&refs(&[0, 100, 200], 100)));
+        // A gap wider than the wanted bytes starts a new request.
+        assert_eq!(
+            vec![0..100, 1000..1100],
+            coalesce_ranges(&refs(&[0, 1000], 100))
+        );
+    }
 
     #[test]
     fn test_only_prefixed_values_are_references() {
@@ -544,6 +623,15 @@ mod tests {
             BlobRef::decode(blob_ref.encode().as_bytes()).unwrap()
         );
         assert_eq!(None, BlobRef::decode(b"7:3:5").unwrap());
-        assert!(BlobRef::decode(b"\0greptime-blob:7:x").is_err());
+        for corrupted in [
+            "\0greptime-blob:7:x".to_string(),
+            "\0greptime-blob:7:3:5:1".to_string(),
+            format!("\0greptime-blob:{}:1:1", u64::MAX),
+        ] {
+            assert!(
+                BlobRef::decode(corrupted.as_bytes()).is_err(),
+                "{corrupted:?}"
+            );
+        }
     }
 }
