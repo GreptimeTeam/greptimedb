@@ -558,6 +558,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to resolve the WAL provider, region_id: {}", region_id))]
+    ResolveWalProvider {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     // Shared error for each writer in the write group.
     #[snafu(display("Failed to write region"))]
     WriteGroup { source: Arc<Error> },
@@ -616,6 +624,14 @@ pub enum Error {
 
     #[snafu(display("Failed to merge candidate series"))]
     MergeCandidateSeries {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
+    #[snafu(display("Scan memory exhausted"))]
+    ScanMemoryExhausted {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -780,6 +796,16 @@ pub enum Error {
 
     #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
     RegionLeaseExpired {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} has not received a leader lease since a catchup made it writable",
+        region_id
+    ))]
+    RegionLeaseNotReceived {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -1620,6 +1646,7 @@ impl Error {
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
             | Error::RegionLeaseExpired { .. }
+            | Error::RegionLeaseNotReceived { .. }
             | Error::EndStagingPending { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
@@ -1663,6 +1690,7 @@ impl ErrorExt for Error {
             | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
+            | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
@@ -1765,7 +1793,9 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
+            RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
+            | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
             RegionPendingTails { .. } => StatusCode::RegionNotReady,
             RemoteWalUnsupported { .. } => StatusCode::Unsupported,
             TailEntryMissing { .. } => StatusCode::StorageUnavailable,
@@ -1831,6 +1861,8 @@ impl ErrorExt for Error {
             // issue a new request after the running one finishes.
             ManualCompactionAlreadyRunning { .. } => StatusCode::RegionBusy,
 
+            ScanMemoryExhausted { .. } => StatusCode::RuntimeResourcesExhausted,
+
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
@@ -1868,6 +1900,7 @@ impl ErrorExt for Error {
             | RegionClosed { .. }
             | RejectWriteInStaging { .. }
             | RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
             | UnacknowledgedWrite { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
@@ -1901,6 +1934,7 @@ impl ErrorExt for Error {
             | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
+            | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
@@ -2122,6 +2156,12 @@ mod tests {
         // A commit refused before its PUT because the Leader deadline has passed.
         let error = RegionLeaseExpiredSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
+
+        // A commit refused before its PUT because no Leader lease has confirmed the catchup.
+        let error = RegionLeaseNotReceivedSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+        assert!(error.retry_hint().is_retryable());
 
         // This can be raised while applying an edit after its manifest file was saved.
         let error = RegionMetadataNotFoundSnafu {}.build();

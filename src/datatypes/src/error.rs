@@ -343,6 +343,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid series: {reason}"))]
+    InvalidSeries {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("unexpected: {reason}"))]
     Unexpected {
         reason: String,
@@ -376,7 +383,8 @@ impl ErrorExt for Error {
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
             | InvalidSkippingIndexOption { .. }
-            | InvalidCompressionOption { .. } => StatusCode::InvalidArguments,
+            | InvalidCompressionOption { .. }
+            | InvalidSeries { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             InvalidSketchOption { .. } => StatusCode::InvalidArguments,

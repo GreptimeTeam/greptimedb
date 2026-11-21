@@ -30,6 +30,8 @@ use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::ddl::allocator::wal_options::WalOptionsAllocator;
+#[cfg(feature = "enterprise")]
+use crate::error::InvalidObjectStoreWalPrefixSnafu;
 use crate::error::{InvalidTopicNamePrefixSnafu, Result};
 use crate::key::topic_name::TopicNameKey;
 use crate::key::{TOPIC_NAME_PATTERN_REGEX, TableMetadataManagerRef};
@@ -286,7 +288,10 @@ impl WalProvider {
 
     /// Returns true if it's the remote WAL.
     pub fn is_remote_wal(&self) -> bool {
-        matches!(&self, WalProvider::Kafka(_))
+        matches!(
+            &self,
+            WalProvider::Kafka(_) | WalProvider::ObjectStore { .. }
+        )
     }
 }
 
@@ -312,6 +317,19 @@ pub async fn build_wal_provider(
 ) -> Result<WalProvider> {
     match config {
         MetasrvWalConfig::RaftEngine => Ok(WalProvider::RaftEngine),
+        #[cfg(feature = "enterprise")]
+        MetasrvWalConfig::ObjectStore(config) => {
+            config.validate_prefix().map_err(|reason| {
+                InvalidObjectStoreWalPrefixSnafu {
+                    prefix: &config.prefix,
+                    reason,
+                }
+                .build()
+            })?;
+            Ok(WalProvider::ObjectStore {
+                prefix: config.prefix.clone(),
+            })
+        }
         MetasrvWalConfig::Kafka(kafka_config) => {
             let prefix = &kafka_config.kafka_topic.topic_name_prefix;
             ensure!(
@@ -541,6 +559,61 @@ mod tests {
             serde_json::to_string(&none).unwrap(),
             r#"{"region_wal_options":null}"#
         );
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_build_object_store_provider() {
+        let config =
+            MetasrvWalConfig::ObjectStore(common_wal::config::object_store::ObjectStoreWalConfig {
+                prefix: "cluster/wal".to_string(),
+                // Metasrv only validates the prefix, not writer settings.
+                flush_interval: std::time::Duration::ZERO,
+                ..Default::default()
+            });
+        let provider = build_wal_provider(&config, Arc::new(MemoryKvBackend::new()))
+            .await
+            .unwrap();
+        assert!(provider.is_remote_wal());
+        let options = provider.allocate(&[1, 2], false).await.unwrap();
+        assert_eq!(
+            options,
+            HashMap::from([
+                (
+                    1,
+                    WalOptions::ObjectStore(ObjectStoreWalOptions::new("cluster/wal".into()))
+                ),
+                (
+                    2,
+                    WalOptions::ObjectStore(ObjectStoreWalOptions::new("cluster/wal".into()))
+                ),
+            ])
+        );
+        assert!(remote_wal_topics(&options).is_empty());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_build_object_store_provider_rejects_invalid_prefix() {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
+        use common_wal::config::object_store::ObjectStoreWalConfig;
+
+        for prefix in [
+            "", "   ", "/wal", "wal/", "wal//a", "wal/../a", ".", "wal/./a",
+        ] {
+            let config = MetasrvWalConfig::ObjectStore(ObjectStoreWalConfig {
+                prefix: prefix.to_string(),
+                ..Default::default()
+            });
+            let error = build_wal_provider(&config, Arc::new(MemoryKvBackend::new()))
+                .await
+                .unwrap_err();
+            assert_eq!(StatusCode::InvalidArguments, error.status_code());
+            assert!(
+                matches!(error, crate::error::Error::InvalidObjectStoreWalPrefix { prefix: actual, .. } if actual == prefix)
+            );
+        }
     }
 
     #[tokio::test]

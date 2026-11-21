@@ -33,6 +33,7 @@ pub(in crate::batcher) async fn mock_table_flownode_cache(
         Arc::new(MemoryKvBackend::default()),
     ));
     if !partition_to_peer_mapping.is_empty() {
+        cache.get(table_id).await.unwrap();
         cache
             .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
                 flow_id: 1,

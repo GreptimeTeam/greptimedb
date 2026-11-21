@@ -15,8 +15,8 @@
 pub use opendal::raw::{Service, ServiceInfo, Servicer};
 pub use opendal::{
     Buffer, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, FuturesAsyncReader,
-    FuturesAsyncWriter, HttpTransporter, Lister, OperationContext, Operator as ObjectStore, Reader,
-    Result, Writer, services,
+    FuturesAsyncWriter, HttpTransporter, Lister, Metadata, OperationContext,
+    Operator as ObjectStore, Reader, Result, Writer, services,
 };
 
 pub mod config;

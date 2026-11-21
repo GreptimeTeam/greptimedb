@@ -31,8 +31,11 @@ use common_base::secrets::ExposeSecret;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use opentelemetry_proto::tonic::logs::v1::ResourceLogs;
 use pgwire::api::Type;
 use postgres_types::FromSql;
+use prost::Message;
 use rand::Rng;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Error, SignatureScheme};
@@ -40,6 +43,7 @@ use rustls_pki_types::{CertificateDer, ServerName};
 use servers::error::Result;
 use servers::install_default_crypto_provider;
 use servers::postgres::PostgresServer;
+use servers::query_handler::OpenTelemetryProtocolHandlerRef;
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::TableRef;
@@ -229,13 +233,14 @@ fn create_postgres_server_with_user_provider(
     tls: TlsOption,
     user_provider: Option<UserProviderRef>,
 ) -> Result<Box<dyn Server>> {
-    create_postgres_server_inner(table, tls, user_provider).map(|(server, _)| server)
+    create_postgres_server_inner(table, tls, user_provider, None).map(|(server, _)| server)
 }
 
 fn create_postgres_server_inner(
     table: TableRef,
     tls: TlsOption,
     user_provider: Option<UserProviderRef>,
+    otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
 ) -> Result<(Box<dyn Server>, Arc<crate::RecordingCopyInHandler>)> {
     let instance = Arc::new(create_testing_instance(table));
     let copy_in_handler = Arc::new(crate::RecordingCopyInHandler::new(
@@ -252,19 +257,21 @@ fn create_postgres_server_inner(
             .expect("Failed to load certificates and keys"),
     );
 
-    Ok((
-        Box::new(PostgresServer::new(
-            instance,
-            copy_in_handler.clone(),
-            tls.should_force_tls(),
-            tls_server_config,
-            0,
-            io_runtime,
-            user_provider,
-            None,
-        )),
-        copy_in_handler,
-    ))
+    let mut server = PostgresServer::new(
+        instance,
+        copy_in_handler.clone(),
+        tls.should_force_tls(),
+        tls_server_config,
+        0,
+        io_runtime,
+        user_provider,
+        None,
+    );
+    if let Some(otlp_handler) = otlp_handler {
+        server = server.with_otlp_handler(otlp_handler, false);
+    }
+
+    Ok((Box::new(server), copy_in_handler))
 }
 
 async fn start_test_server_with_user_provider(
@@ -1331,7 +1338,8 @@ async fn start_copy_in_test_server(
 ) -> Result<(Box<dyn Server>, u16, Arc<crate::RecordingCopyInHandler>)> {
     common_telemetry::init_default_ut_logging();
     let _ = install_default_crypto_provider();
-    let (mut server, handler) = create_postgres_server_inner(table, Default::default(), None)?;
+    let (mut server, handler) =
+        create_postgres_server_inner(table, Default::default(), None, None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     server.start(listening).await.unwrap();
     let port = server.bind_addr().unwrap().port();
@@ -1366,6 +1374,80 @@ async fn feed_copy_in(
         sink.as_mut().send(chunk).await?;
     }
     sink.as_mut().finish().await
+}
+
+/// A scoped provider denies every COPY target outside `greptime.public`:
+/// qualified OTLP targets must be rejected before any data transfers,
+/// without reaching the OTLP handler and without disturbing the
+/// session's scope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_otlp_target_authorization() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    let _ = install_default_crypto_provider();
+
+    let otlp_handler = Arc::new(crate::CountingOtlpHandler::new());
+    let table = MemTable::default_numbers_table();
+    let (server, server_port) = {
+        let mut postgres_server = create_postgres_server_inner(
+            table,
+            Default::default(),
+            // The mock provider authorizes only greptime.public for
+            // user greptime, exactly like a scoped login database.
+            Some(Arc::new(MockUserProvider::default())),
+            Some(otlp_handler.clone()),
+        )?
+        .0;
+        let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+        postgres_server.start(listening).await.unwrap();
+        let port = postgres_server.bind_addr().unwrap().port();
+        (postgres_server, port)
+    };
+
+    let client = create_plain_connection_with_credentials(server_port, "greptime", "greptime")
+        .await
+        .unwrap();
+
+    // Both cross-schema and cross-catalog targets are denied — the
+    // table_name override keeps the target's scope, so it is denied too.
+    for sql in [
+        "COPY denied_schema.dest FROM STDIN WITH (FORMAT otlp, signal 'logs')",
+        "COPY other_catalog.public.dest FROM STDIN WITH (FORMAT otlp, signal 'traces')",
+        "COPY denied_schema.ignored FROM STDIN WITH (FORMAT otlp, signal 'logs', table_name 'override')",
+    ] {
+        let error = client.simple_query(sql).await.unwrap_err();
+        let db_error = error
+            .as_db_error()
+            .unwrap_or_else(|| panic!("{sql}: {error}"));
+        // The authorization failure surfaces as insufficient privilege
+        // (SQLSTATE 42501), not an internal error.
+        assert_eq!(
+            db_error.code(),
+            &SqlState::INSUFFICIENT_PRIVILEGE,
+            "{sql}: {}",
+            db_error.message()
+        );
+    }
+    // Denied before ingestion: the handler was never reached.
+    assert_eq!(otlp_handler.calls(), 0);
+
+    // The session scope is untouched: a table-less copy in the session's
+    // own scope still ingests afterwards.
+    let payload = ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs::default()],
+    }
+    .encode_to_vec();
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp, signal 'logs')",
+        vec![bytes::Bytes::from(payload)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 0);
+    assert_eq!(otlp_handler.calls(), 1);
+
+    server.shutdown().await.unwrap();
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

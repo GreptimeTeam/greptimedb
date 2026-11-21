@@ -22,6 +22,7 @@ futures.workspace = true
 jsonb.workspace = true
 pin-project.workspace = true
 regex.workspace = true
+regex-automata.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true

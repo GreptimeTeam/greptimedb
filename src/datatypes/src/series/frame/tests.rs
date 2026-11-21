@@ -1,0 +1,7014 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::Arc;
+
+use arrow::array::{
+    Array, BinaryArray, BooleanArray, Float64Array, Int64Array, ListArray, StringArray,
+    StructArray, UInt32Array,
+};
+use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
+use arrow::compute::concat_batches;
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
+
+use super::*;
+use crate::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchBuilder};
+use crate::series::samples::{
+    DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema,
+};
+use crate::series::time::GridRange;
+use crate::series::{Label, SeriesLabels};
+
+fn test_schema(names: &[&str]) -> SeriesSchema {
+    SeriesSchema {
+        fields: names
+            .iter()
+            .map(|name| FieldSpec {
+                name: Arc::from(*name),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        eval_grid: None,
+    }
+}
+
+fn metric(name: Option<&str>, labels: &[(&str, &str)]) -> SeriesLabels {
+    SeriesLabels::try_new(
+        name.map(Arc::from),
+        labels
+            .iter()
+            .map(|(name, value)| Label {
+                name: Arc::from(*name),
+                value: Arc::from(*value),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+fn float_chunk(
+    schema: &SeriesSchema,
+    key: &[u8],
+    metric: Option<SeriesLabels>,
+    times: Vec<i64>,
+    values: Vec<Option<f64>>,
+    is_last: bool,
+) -> RawSeriesChunk {
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from(key.to_vec()),
+        metric,
+        RawTimestamps::try_new(times.into()).unwrap(),
+        SeriesFields::one(Samples::from_float(Float64Array::from(values))),
+        is_last,
+    )
+    .unwrap()
+}
+
+fn histogram_batch() -> Arc<crate::series::histogram::HistogramBatch> {
+    histogram_batch_with_sum(-9.5)
+}
+
+fn histogram_batch_with_sum(sum: f64) -> Arc<crate::series::histogram::HistogramBatch> {
+    let custom = [1.5, 4.5];
+    let positive_offsets = [1];
+    let positive_lengths = [2];
+    let positive_buckets = [3.25, 7.5];
+    let negative_offsets = [-2];
+    let negative_lengths = [1];
+    let negative_buckets = [0.75];
+    let view = |sum, start_timestamp| crate::series::histogram::HistogramView {
+        schema: -7,
+        zero_threshold: 0.125,
+        sum,
+        count: 17.25,
+        zero_count: 2.5,
+        reset_hint: CounterResetHint::Unrecognized(37),
+        start_timestamp,
+        custom_values: &custom,
+        positive: BucketSideView {
+            span_offsets: &positive_offsets,
+            span_lengths: &positive_lengths,
+            buckets: &positive_buckets,
+        },
+        negative: BucketSideView {
+            span_offsets: &negative_offsets,
+            span_lengths: &negative_lengths,
+            buckets: &negative_buckets,
+        },
+    };
+    let mut builder = HistogramBatchBuilder::new();
+    builder.push(view(sum, Some(-123))).unwrap();
+    builder.push(view(sum + 100.0, None)).unwrap();
+    builder.finish().unwrap()
+}
+
+fn hist_schema_frame_field(schema: &SeriesSchema) -> DataType {
+    series_frame_schema(schema, FrameLabelMode::Key, Some(&dense_description()))
+        .unwrap()
+        .field(3)
+        .data_type()
+        .clone()
+}
+
+fn with_timestamp_values(
+    batch: &arrow::record_batch::RecordBatch,
+    values: Vec<i64>,
+) -> arrow::record_batch::RecordBatch {
+    let time = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let timestamp_item = match batch.schema().field(2).data_type() {
+        DataType::Struct(fields) => match fields[0].data_type() {
+            DataType::List(item) => item.clone(),
+            _ => panic!("timestamp field is not a List"),
+        },
+        _ => panic!("time field is not a Struct"),
+    };
+    let list = ListArray::try_new(
+        timestamp_item,
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, values.len() as i32])),
+        Arc::new(Int64Array::from(values)),
+        None,
+    )
+    .unwrap();
+    let time = StructArray::try_new(time.fields().clone(), vec![Arc::new(list)], None).unwrap();
+    let mut columns = batch.columns().to_vec();
+    columns[2] = Arc::new(time);
+    arrow::record_batch::RecordBatch::try_new(batch.schema(), columns).unwrap()
+}
+
+fn frame_field_payload(batch: &arrow::record_batch::RecordBatch, field: usize) -> &StructArray {
+    let fields = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    fields
+        .column(field)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap()
+}
+
+fn frame_histogram_table(batch: &arrow::record_batch::RecordBatch, field: usize) -> StructArray {
+    let histogram = frame_field_payload(batch, field)
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let tables = histogram
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    tables
+        .value(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap()
+        .clone()
+}
+
+fn assert_histogram(histogram: crate::series::histogram::HistogramView<'_>, sum: f64) {
+    assert_histogram_with_start(histogram, sum, Some(-123));
+}
+
+fn assert_histogram_with_start(
+    histogram: crate::series::histogram::HistogramView<'_>,
+    sum: f64,
+    start_timestamp: Option<i64>,
+) {
+    assert_eq!(histogram.schema, -7);
+    assert_eq!(histogram.zero_threshold.to_bits(), 0.125_f64.to_bits());
+    assert_eq!(histogram.sum.to_bits(), sum.to_bits());
+    assert_eq!(histogram.count.to_bits(), 17.25_f64.to_bits());
+    assert_eq!(histogram.zero_count.to_bits(), 2.5_f64.to_bits());
+    assert_eq!(histogram.reset_hint, CounterResetHint::Unrecognized(37));
+    assert_eq!(histogram.start_timestamp, start_timestamp);
+    assert_eq!(
+        histogram
+            .custom_values
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
+        [1.5_f64.to_bits(), 4.5_f64.to_bits()]
+    );
+    assert_eq!(histogram.positive.span_offsets, [1]);
+    assert_eq!(histogram.positive.span_lengths, [2]);
+    assert_eq!(
+        histogram
+            .positive
+            .buckets
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
+        [3.25_f64.to_bits(), 7.5_f64.to_bits()]
+    );
+    assert_eq!(histogram.negative.span_offsets, [-2]);
+    assert_eq!(histogram.negative.span_lengths, [1]);
+    assert_eq!(
+        histogram
+            .negative
+            .buckets
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
+        [0.75_f64.to_bits()]
+    );
+}
+
+fn assert_float_bits(actual: &Samples, expected: &[Option<f64>]) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, expected) in expected.iter().enumerate() {
+        match (actual.sample(index), expected) {
+            (SampleRef::Missing, None) => {}
+            (SampleRef::Float(actual), Some(expected)) => {
+                assert_eq!(actual.to_bits(), expected.to_bits(), "position {index}");
+            }
+            _ => panic!("unexpected sample at position {index}"),
+        }
+    }
+}
+
+fn assert_evaluated_sample_equal(actual: SampleRef<'_>, expected: SampleRef<'_>, index: usize) {
+    match (actual, expected) {
+        (SampleRef::Missing, SampleRef::Missing) => {}
+        (SampleRef::Float(actual), SampleRef::Float(expected)) => {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "position {index}");
+        }
+        (SampleRef::Histogram(actual), SampleRef::Histogram(expected)) => {
+            assert_eq!(
+                actual.sum.to_bits(),
+                expected.sum.to_bits(),
+                "position {index}"
+            );
+            assert_eq!(
+                actual.count.to_bits(),
+                expected.count.to_bits(),
+                "position {index}"
+            );
+        }
+        _ => panic!("sample kind changed at position {index}"),
+    }
+}
+
+/// Packs one owned chunk through the public cursor/builder pair, mirroring the explicit
+/// single-chunk wrapper: every batch the walk produces, then the final flush.
+fn pack_chunk_with_budget(
+    schema: &SeriesSchema,
+    mode: FrameLabelMode,
+    chunk: &RawSeriesChunk,
+    max_rows: usize,
+    max_bytes: usize,
+) -> crate::error::Result<Vec<RecordBatch>> {
+    // Only a key frame declares a label decode description; explicit frames carry their labels.
+    let decode = (mode == FrameLabelMode::Key).then(dense_description);
+    let mut builder =
+        SeriesFrameBuilder::try_new(schema, mode, decode.as_ref(), max_rows, max_bytes)?;
+    let mut cursor = SeriesFrameCursor::try_new_raw(schema, mode, chunk.clone())?;
+    let mut batches = Vec::new();
+    while let Some(batch) = cursor.append_to(&mut builder)? {
+        batches.push(batch);
+    }
+    if let Some(batch) = builder.flush()? {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+/// Advances one owned chunk through an existing builder. A partially filled buffer stays buffered
+/// instead of becoming a batch of its own, which is what makes cross-chunk grouping observable.
+fn append_chunk(
+    builder: &mut SeriesFrameBuilder,
+    schema: &SeriesSchema,
+    mode: FrameLabelMode,
+    chunk: &RawSeriesChunk,
+) -> crate::error::Result<Vec<RecordBatch>> {
+    let mut cursor = SeriesFrameCursor::try_new_raw(schema, mode, chunk.clone())?;
+    let mut batches = Vec::new();
+    while let Some(batch) = cursor.append_to(builder)? {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+/// Decodes every batch with one reused decoder, so repeated calls exercise the cached schema.
+fn decode_batches(
+    schema: &SeriesSchema,
+    mode: FrameLabelMode,
+    batches: &[RecordBatch],
+) -> Vec<RawSeriesChunk> {
+    let decode = (mode == FrameLabelMode::Key).then(dense_description);
+    let decoder = SeriesFrameDecoder::try_new(schema, mode, decode.as_ref()).unwrap();
+    batches
+        .iter()
+        .flat_map(|batch| decoder.decode_raw(batch).unwrap())
+        .collect()
+}
+
+/// Row-local histogram index and table lists of one field payload of a frame batch.
+fn frame_histogram_lists(batch: &RecordBatch, field: usize) -> (ListArray, ListArray) {
+    let histogram = frame_field_payload(batch, field)
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let indices = histogram
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .clone();
+    let tables = histogram
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .clone();
+    (indices, tables)
+}
+
+/// Each row's referenced histogram is preserved in its compact row-local table.
+fn assert_row_local_histogram_rows(rows: &[RawSeriesChunk]) {
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].time.as_buffer().as_ref(), &[1_i64, 2]);
+    assert_eq!(rows[1].time.as_buffer().as_ref(), &[3_i64, 4]);
+
+    let DenseSamplesRef::Histogram(first) = rows[0].fields.get(0).unwrap().dense().unwrap() else {
+        panic!("expected histogram samples");
+    };
+    assert_eq!(first.batch().len(), 1);
+    assert_eq!(first.indices().len(), 2);
+    assert_eq!(first.indices().value(0), 0);
+    assert!(!first.indices().is_valid(1));
+    assert_histogram(first.view_at(0).unwrap(), -9.5);
+
+    let DenseSamplesRef::Histogram(second) = rows[1].fields.get(0).unwrap().dense().unwrap() else {
+        panic!("expected histogram samples");
+    };
+    assert_eq!(second.batch().len(), 1);
+    assert_eq!(second.indices().len(), 2);
+    assert!(!second.indices().is_valid(0));
+    assert_eq!(second.indices().value(1), 0);
+    assert_histogram(second.view_at(1).unwrap(), 42.25);
+}
+
+#[test]
+fn sliced_histogram_frames_keep_the_shared_table_per_row() {
+    let schema = test_schema(&["histogram"]);
+    let source_table = histogram_batch();
+    let source_samples =
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0); 64]), source_table).unwrap();
+    let samples = Samples::try_from_chunks(
+        (0..64)
+            .map(|position| source_samples.slice(position, 1).unwrap())
+            .collect(),
+    )
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x42_u8]),
+        None,
+        RawTimestamps::try_new((0_i64..64).collect::<Vec<_>>().into()).unwrap(),
+        SeriesFields::one(samples),
+        true,
+    )
+    .unwrap();
+
+    // One row per batch keeps the original segment-boundary granularity, so the shared-table fast
+    // paths below stay observable; the default budget coalesces the same rows later on.
+    let frames = pack_chunk_with_budget(
+        &schema,
+        FrameLabelMode::Key,
+        &chunk,
+        1,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+    .unwrap();
+    assert_eq!(frames.len(), 64);
+    let mut decoded_chunks = Vec::with_capacity(frames.len());
+    for frame in &frames {
+        let decoded = unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            frame,
+        )
+        .unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].time.len(), 1);
+        decoded_chunks.push(decoded.into_iter().next().unwrap());
+    }
+
+    let first_table = match decoded_chunks[0].fields.get(0).unwrap().dense().unwrap() {
+        DenseSamplesRef::Histogram(histograms) => histograms.batch().clone(),
+        _ => panic!("expected histogram samples"),
+    };
+    let second_table = match decoded_chunks[1].fields.get(0).unwrap().dense().unwrap() {
+        DenseSamplesRef::Histogram(histograms) => histograms.batch(),
+        _ => panic!("expected histogram samples"),
+    };
+    assert_eq!(first_table.len(), 1);
+    assert_eq!(second_table.len(), 1);
+    assert_histogram(first_table.view(0).unwrap(), -9.5);
+    assert_histogram(second_table.view(0).unwrap(), -9.5);
+
+    // The default budget groups the same 64 rows into one multirow batch; every row still decodes
+    // to its own slice of the shared table with bit-exact values.
+    let coalesced = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
+    assert_eq!(coalesced.len(), 1);
+    assert_eq!(coalesced[0].num_rows(), 64);
+    let coalesced_rows = decode_batches(&schema, FrameLabelMode::Key, &coalesced);
+    assert_eq!(coalesced_rows.len(), 64);
+    for (position, row) in coalesced_rows.iter().enumerate() {
+        assert_eq!(row.primary_key.as_slice(), &[0x42]);
+        assert_eq!(row.time.timestamp(0), Some(position as i64));
+        let DenseSamplesRef::Histogram(histograms) = row.fields.get(0).unwrap().dense().unwrap()
+        else {
+            panic!("expected histogram samples");
+        };
+        assert_eq!(histograms.batch().len(), first_table.len());
+        assert_histogram(histograms.view_at(0).unwrap(), -9.5);
+    }
+
+    let samples = Samples::try_from_chunks(
+        decoded_chunks
+            .iter()
+            .map(|decoded| decoded.fields.get(0).unwrap().clone())
+            .collect(),
+    )
+    .unwrap();
+    drop(chunk);
+    drop(frames);
+    drop(decoded_chunks);
+    drop(source_samples);
+
+    // Each decoded row keeps its own one-row view of the shared table, so the retained descriptors
+    // still read the same row after the source owner drops.
+    assert_eq!(samples.len(), 64);
+    assert_eq!(samples.segments().len(), 64);
+    for segment in samples.segments() {
+        let DenseSamplesRef::Histogram(histograms) = segment.dense().unwrap() else {
+            panic!("expected histogram samples");
+        };
+        assert_eq!(histograms.len(), 1);
+        assert_histogram(histograms.view_at(0).unwrap(), -9.5);
+    }
+}
+
+#[test]
+fn raw_frame_field_names_bind_payloads_to_their_schema() {
+    let schema = test_schema(&["cpu_usage", "cpu_idle"]);
+    let fields = SeriesFields::try_from_vec(vec![
+        Samples::from_float(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+        Samples::from_float(Float64Array::from(vec![Some(10.0), Some(20.0)])),
+    ])
+    .unwrap();
+
+    for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+        let decode = (mode == FrameLabelMode::Key).then(dense_description);
+        let metric = (mode == FrameLabelMode::Explicit).then(|| metric(Some("host"), &[]));
+        let chunk = RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(vec![0xaa_u8]),
+            metric,
+            RawTimestamps::try_new(vec![100, 200].into()).unwrap(),
+            fields.clone(),
+            true,
+        )
+        .unwrap();
+        let batch = &pack_raw_series_chunk(&schema, mode, decode.as_ref(), &chunk).unwrap()[0];
+        let payloads = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            payloads
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            ["cpu_usage", "cpu_idle"]
+        );
+
+        let decoded = unpack_raw_series_frame(&schema, mode, decode.as_ref(), batch).unwrap();
+        assert_eq!(decoded[0].primary_key.as_slice(), &[0xaa]);
+        assert!(decoded[0].is_last);
+        let times = decoded[0].time.as_buffer();
+        assert_eq!(times.as_ref(), &[100, 200]);
+        assert_float_bits(decoded[0].fields.get(0).unwrap(), &[Some(1.0), Some(2.0)]);
+        assert_float_bits(decoded[0].fields.get(1).unwrap(), &[Some(10.0), Some(20.0)]);
+
+        assert!(
+            unpack_raw_series_frame(
+                &test_schema(&["cpu_idle", "cpu_usage"]),
+                mode,
+                decode.as_ref(),
+                batch
+            )
+            .is_err()
+        );
+        assert!(
+            unpack_raw_series_frame(
+                &test_schema(&["cpu_usage", "cpu_busy"]),
+                mode,
+                decode.as_ref(),
+                batch
+            )
+            .is_err()
+        );
+    }
+}
+
+/// A key frame declares the label decode description that makes its `read_key` readable, so its
+/// metadata carries that text; an explicit frame declares none, and its `read_key` column is
+/// nullable because an evaluated explicit row carries no storage key at all.
+#[test]
+fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
+    let schema = test_schema(&["value"]);
+    let key_schema =
+        series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
+    let explicit_schema = raw_series_frame_schema(&schema, FrameLabelMode::Explicit).unwrap();
+    let payload = DataType::Struct(
+        vec![
+            Field::new(
+                "float_values",
+                DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                true,
+            ),
+            Field::new(
+                "histogram",
+                DataType::Struct(
+                    vec![
+                        Field::new(
+                            "indices",
+                            DataType::List(Arc::new(Field::new("item", DataType::UInt32, true))),
+                            false,
+                        ),
+                        Field::new(
+                            "table",
+                            DataType::List(Arc::new(Field::new(
+                                "item",
+                                DataType::Struct(crate::series::histogram::fields()),
+                                false,
+                            ))),
+                            false,
+                        ),
+                    ]
+                    .into(),
+                ),
+                true,
+            ),
+        ]
+        .into(),
+    );
+    let mut expected_key_metadata = std::collections::HashMap::new();
+    expected_key_metadata.insert("greptime.series.layout".to_string(), "v1".to_string());
+    expected_key_metadata.insert("greptime.series.content".to_string(), "raw".to_string());
+    expected_key_metadata.insert("greptime.series.labels".to_string(), "key".to_string());
+    expected_key_metadata.insert("greptime.series.time".to_string(), "timestamps".to_string());
+    expected_key_metadata.insert(ORDERING.to_string(), "contiguous".to_string());
+    // A key frame also declares the description that decodes its labels. Its exact text is pinned by
+    // the metadata fixture, so it is spelled here by the same serializer the writer uses.
+    expected_key_metadata.insert(
+        LABEL_DECODE.to_string(),
+        serde_json::to_string(&dense_description()).unwrap(),
+    );
+    let expected_key = Schema::new_with_metadata(
+        vec![
+            Field::new("read_key", DataType::Binary, false),
+            Field::new("is_last", DataType::Boolean, false),
+            Field::new(
+                "time",
+                DataType::Struct(
+                    vec![Field::new(
+                        "timestamps",
+                        DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
+                        false,
+                    )]
+                    .into(),
+                ),
+                false,
+            ),
+            Field::new(
+                "fields",
+                DataType::Struct(vec![Field::new("value", payload, false)].into()),
+                false,
+            ),
+        ],
+        expected_key_metadata,
+    );
+    assert_eq!(key_schema.as_ref(), &expected_key);
+    // An explicit frame still has the key column, but only a raw explicit row carries a key: an
+    // evaluated one has none, so the column is nullable here while a key frame's is required.
+    let mut explicit_fields = expected_key.fields().iter().cloned().collect::<Vec<_>>();
+    explicit_fields[0] = Field::new("read_key", DataType::Binary, true).into();
+    explicit_fields.push(Field::new("name", DataType::Utf8, true).into());
+    explicit_fields.push(
+        Field::new(
+            "labels",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Struct(
+                    vec![
+                        Field::new("name", DataType::Utf8, false),
+                        Field::new("value", DataType::Utf8, false),
+                    ]
+                    .into(),
+                ),
+                false,
+            ))),
+            false,
+        )
+        .into(),
+    );
+    let mut explicit_metadata = expected_key.metadata().clone();
+    explicit_metadata.insert("greptime.series.labels".to_string(), "explicit".to_string());
+    // An explicit frame carries complete labels, so it declares no decode description.
+    explicit_metadata.remove(LABEL_DECODE);
+    let expected_explicit = Schema::new_with_metadata(explicit_fields, explicit_metadata);
+    assert_eq!(explicit_schema.as_ref(), &expected_explicit);
+
+    let nan = f64::from_bits(0x7ff8_0000_0000_0042);
+    let stale_nan = f64::from_bits(0x7ff0_0000_0000_0002);
+    let values = [Some(-0.0), None, Some(nan), Some(stale_nan)];
+    let native = float_chunk(
+        &schema,
+        &[0, 0xff, 0, 0x80],
+        None,
+        vec![10, 20, 30, 40],
+        values.to_vec(),
+        true,
+    );
+    let packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &native,
+    )
+    .unwrap();
+    assert_eq!(packed.len(), 1);
+    let decoded = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &packed[0],
+    )
+    .unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[0, 0xff, 0, 0x80]);
+    assert!(decoded[0].metric.is_none());
+    assert!(decoded[0].is_last);
+    assert_eq!(
+        (0..4)
+            .map(|i| decoded[0].time.timestamp(i).unwrap())
+            .collect::<Vec<_>>(),
+        [10, 20, 30, 40]
+    );
+    assert_float_bits(decoded[0].fields.get(0).unwrap(), &values);
+
+    let explicit = float_chunk(
+        &schema,
+        &[0x80, 0, 0xff],
+        Some(metric(None, &[("rack", ""), ("zone", "west")])),
+        vec![7],
+        vec![Some(1.25)],
+        false,
+    );
+    let packed = pack_raw_series_chunk(&schema, FrameLabelMode::Explicit, None, &explicit).unwrap();
+    let decoded =
+        unpack_raw_series_frame(&schema, FrameLabelMode::Explicit, None, &packed[0]).unwrap();
+    assert_eq!(decoded[0].primary_key.as_slice(), &[0x80, 0, 0xff]);
+    assert!(!decoded[0].is_last);
+    let labels = decoded[0].metric.as_ref().unwrap();
+    assert_eq!(labels.name(), None);
+    assert_eq!(labels.get("rack"), Some(""));
+    assert_eq!(labels.get("zone"), Some("west"));
+    assert!(
+        pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &explicit
+        )
+        .is_err()
+    );
+    assert!(pack_raw_series_chunk(&schema, FrameLabelMode::Explicit, None, &native).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &packed[0]
+        )
+        .is_err()
+    );
+
+    let key_packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &native,
+    )
+    .unwrap();
+    assert!(
+        unpack_raw_series_frame(&schema, FrameLabelMode::Explicit, None, &key_packed[0]).is_err()
+    );
+    for name in [None, Some(""), Some("cpu")] {
+        let named = float_chunk(
+            &schema,
+            &[0xff, 0, 0xfe],
+            Some(metric(name, &[("empty", "")])),
+            vec![9],
+            vec![Some(2.0)],
+            false,
+        );
+        let encoded =
+            pack_raw_series_chunk(&schema, FrameLabelMode::Explicit, None, &named).unwrap();
+        let restored =
+            unpack_raw_series_frame(&schema, FrameLabelMode::Explicit, None, &encoded[0]).unwrap();
+        assert_eq!(restored[0].metric.as_ref().unwrap().name(), name);
+        assert_eq!(restored[0].metric.as_ref().unwrap().get("empty"), Some(""));
+    }
+}
+
+#[test]
+fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
+    let schema = test_schema(&["first", "second"]);
+    let first_table = histogram_batch();
+    let second_table = histogram_batch_with_sum(42.25);
+    let first = Samples::try_from_chunks(vec![
+        Samples::from_float(Float64Array::from(vec![Some(1.0), None])),
+        Samples::try_from_mixed(
+            Float64Array::from(vec![Some(3.5), None]),
+            crate::series::samples::HistogramSamples::try_new(
+                UInt32Array::from(vec![None, Some(0)]),
+                first_table.clone(),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    let second = Samples::try_from_chunks(vec![
+        Samples::from_float(Float64Array::from(vec![Some(5.0)])),
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0), None]), second_table).unwrap(),
+        Samples::from_float(Float64Array::from(vec![Some(8.0)])),
+    ])
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0_u8, 0x91, 0xfe]),
+        None,
+        RawTimestamps::try_new(vec![10_i64, 20, 30, 40].into()).unwrap(),
+        SeriesFields::try_from_vec(vec![first, second]).unwrap(),
+        true,
+    )
+    .unwrap();
+    // Variable field boundaries now group every aligned interval into one multirow batch instead
+    // of one batch per boundary, so decode the actual rows that batch carries.
+    let frames = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].num_rows(), 4);
+    let mut observed_times = Vec::new();
+    let mut observed_first = Vec::new();
+    let mut observed_second = Vec::new();
+    let mut observed_keys = Vec::new();
+    let mut observed_markers = Vec::new();
+    let rows = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &frames[0],
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 4);
+    for (row_index, row) in rows.iter().enumerate() {
+        assert_eq!(row.is_last, row_index == rows.len() - 1);
+        observed_markers.push(row.is_last);
+        assert_eq!(row.primary_key.as_slice(), &[0, 0x91, 0xfe]);
+        observed_keys.push(row.primary_key.as_slice().to_vec());
+        for position in 0..row.time.len() {
+            observed_times.push(row.time.timestamp(position).unwrap());
+            match row.fields.get(0).unwrap().sample(position) {
+                SampleRef::Missing => observed_first.push(("m", 0.0_f64.to_bits())),
+                SampleRef::Float(value) => observed_first.push(("f", value.to_bits())),
+                SampleRef::Histogram(histogram) => {
+                    assert_histogram(histogram, -9.5);
+                    observed_first.push(("h", histogram.sum.to_bits()));
+                }
+            }
+            match row.fields.get(1).unwrap().sample(position) {
+                SampleRef::Missing => observed_second.push(("m", 0.0_f64.to_bits())),
+                SampleRef::Float(value) => observed_second.push(("f", value.to_bits())),
+                SampleRef::Histogram(histogram) => {
+                    assert_histogram(histogram, 42.25);
+                    observed_second.push(("h", histogram.sum.to_bits()));
+                }
+            }
+        }
+    }
+    assert_eq!(observed_times, [10, 20, 30, 40]);
+    assert_eq!(observed_keys, [[0, 0x91, 0xfe]; 4]);
+    assert_eq!(observed_markers, [false, false, false, true]);
+    assert_eq!(
+        observed_first,
+        [
+            ("f", 1.0_f64.to_bits()),
+            ("m", 0.0_f64.to_bits()),
+            ("f", 3.5_f64.to_bits()),
+            ("h", (-9.5_f64).to_bits())
+        ]
+    );
+    assert_eq!(
+        observed_second,
+        [
+            ("f", 5.0_f64.to_bits()),
+            ("h", 42.25_f64.to_bits()),
+            ("m", 0.0_f64.to_bits()),
+            ("f", 8.0_f64.to_bits())
+        ]
+    );
+
+    // Different chunk boundaries (A: 2+3, B: 1+4) yield aligned
+    // emitted intervals of 1, 1, and 3 positions.
+    let aligned_schema = test_schema(&["a", "b"]);
+    let a_owner = Float64Array::from(vec![Some(1.0), Some(2.0), Some(3.0), None, Some(5.0)]);
+    let b_owner = Float64Array::from(vec![Some(10.0), None, Some(30.0), Some(40.0), Some(50.0)]);
+    let a = Samples::try_from_chunks(vec![
+        Samples::from_float(a_owner.slice(0, 2)),
+        Samples::from_float(a_owner.slice(2, 3)),
+    ])
+    .unwrap();
+    let b = Samples::try_from_chunks(vec![
+        Samples::from_float(b_owner.slice(0, 1)),
+        Samples::from_float(b_owner.slice(1, 4)),
+    ])
+    .unwrap();
+    let aligned_chunk = RawSeriesChunk::try_new(
+        &aligned_schema,
+        Buffer::from(vec![0xa1_u8]),
+        None,
+        RawTimestamps::try_new(vec![101_i64, 102, 103, 104, 105].into()).unwrap(),
+        SeriesFields::try_from_vec(vec![a, b]).unwrap(),
+        true,
+    )
+    .unwrap();
+    let aligned_frames = pack_raw_series_chunk(
+        &aligned_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &aligned_chunk,
+    )
+    .unwrap();
+    assert_eq!(aligned_frames.len(), 1);
+    assert_eq!(aligned_frames[0].num_rows(), 3);
+    let aligned_rows = unpack_raw_series_frame(
+        &aligned_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &aligned_frames[0],
+    )
+    .unwrap();
+    assert_eq!(aligned_rows.len(), 3);
+    let mut interval_lengths = Vec::new();
+    let mut aligned_times = Vec::new();
+    let mut aligned_a = Vec::new();
+    let mut aligned_b = Vec::new();
+    for (i, row) in aligned_rows.iter().enumerate() {
+        assert_eq!(row.is_last, i == aligned_rows.len() - 1);
+        interval_lengths.push(row.time.len());
+        let start = aligned_times.len();
+        let DenseSamplesRef::Float(decoded_a) = row.fields.get(0).unwrap().dense().unwrap() else {
+            panic!("expected float field");
+        };
+        let DenseSamplesRef::Float(decoded_b) = row.fields.get(1).unwrap().dense().unwrap() else {
+            panic!("expected float field");
+        };
+        // Grouping several constituents into one row may copy their payloads, so compare values
+        // and validity bit-exactly instead of requiring the source buffers by pointer.
+        for (decoded_values, owner) in [(&decoded_a, &a_owner), (&decoded_b, &b_owner)] {
+            assert_eq!(decoded_values.len(), row.time.len());
+            for position in 0..decoded_values.len() {
+                match (
+                    decoded_values.is_valid(position),
+                    owner.is_valid(start + position),
+                ) {
+                    (true, true) => assert_eq!(
+                        decoded_values.value(position).to_bits(),
+                        owner.value(start + position).to_bits(),
+                        "grouping changed a value"
+                    ),
+                    (false, false) => {}
+                    _ => panic!("grouping changed validity representation"),
+                }
+            }
+        }
+        for position in 0..row.time.len() {
+            aligned_times.push(row.time.timestamp(position).unwrap());
+            aligned_a.push(match row.fields.get(0).unwrap().sample(position) {
+                SampleRef::Missing => None,
+                SampleRef::Float(value) => Some(value.to_bits()),
+                SampleRef::Histogram(_) => panic!("expected float field"),
+            });
+            aligned_b.push(match row.fields.get(1).unwrap().sample(position) {
+                SampleRef::Missing => None,
+                SampleRef::Float(value) => Some(value.to_bits()),
+                SampleRef::Histogram(_) => panic!("expected float field"),
+            });
+        }
+    }
+    assert_eq!(interval_lengths, [1, 1, 3]);
+    assert_eq!(aligned_times, [101, 102, 103, 104, 105]);
+    assert_eq!(
+        aligned_a,
+        [
+            Some(1.0_f64.to_bits()),
+            Some(2.0_f64.to_bits()),
+            Some(3.0_f64.to_bits()),
+            None,
+            Some(5.0_f64.to_bits())
+        ]
+    );
+    assert_eq!(
+        aligned_b,
+        [
+            Some(10.0_f64.to_bits()),
+            None,
+            Some(30.0_f64.to_bits()),
+            Some(40.0_f64.to_bits()),
+            Some(50.0_f64.to_bits())
+        ]
+    );
+    drop(aligned_chunk);
+    drop(aligned_frames);
+
+    let mut distinct_rows = frames.clone();
+    let alternate_schema = test_schema(&["first", "second"]);
+    let first_distinct = Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(0)]),
+        histogram_batch_with_sum(123.0),
+    )
+    .unwrap();
+    let second_distinct = Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(0)]),
+        histogram_batch_with_sum(456.0),
+    )
+    .unwrap();
+    let alternate = RawSeriesChunk::try_new(
+        &alternate_schema,
+        Buffer::from(vec![0xde_u8, 0xad]),
+        None,
+        RawTimestamps::try_new(vec![100_i64].into()).unwrap(),
+        SeriesFields::try_from_vec(vec![first_distinct, second_distinct]).unwrap(),
+        false,
+    )
+    .unwrap();
+    distinct_rows.push(
+        pack_raw_series_chunk(
+            &alternate_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &alternate,
+        )
+        .unwrap()
+        .remove(0),
+    );
+    let multirow = concat_batches(&frames[0].schema(), &distinct_rows).unwrap();
+    let decoded = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &multirow,
+    )
+    .unwrap();
+    assert_eq!(decoded.len(), 5);
+    assert_eq!(
+        decoded.iter().map(|row| row.is_last).collect::<Vec<_>>(),
+        [false, false, false, true, false]
+    );
+    assert_eq!(
+        decoded
+            .iter()
+            .map(|row| row.time.timestamp(0).unwrap())
+            .collect::<Vec<_>>(),
+        [10, 20, 30, 40, 100]
+    );
+    assert_eq!(decoded[4].primary_key.as_slice(), &[0xde, 0xad]);
+    assert!(
+        matches!(decoded[4].fields.get(0).unwrap().sample(0), SampleRef::Histogram(h) if h.sum.to_bits() == 123.0_f64.to_bits())
+    );
+    assert!(
+        matches!(decoded[4].fields.get(1).unwrap().sample(0), SampleRef::Histogram(h) if h.sum.to_bits() == 456.0_f64.to_bits())
+    );
+    let sliced = multirow.slice(1, 3);
+    let mut altered = sliced.columns().to_vec();
+    altered[0] = Arc::new(arrow::array::BinaryArray::from(vec![
+        Some(&[0xee][..]),
+        Some(&[0xef][..]),
+        Some(&[0xed][..]),
+    ]));
+    let sliced = arrow::record_batch::RecordBatch::try_new(sliced.schema(), altered).unwrap();
+    let sliced_rows = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &sliced,
+    )
+    .unwrap();
+    assert_eq!(
+        sliced_rows
+            .iter()
+            .map(|row| row.time.timestamp(0).unwrap())
+            .collect::<Vec<_>>(),
+        [20, 30, 40]
+    );
+    assert_eq!(
+        sliced_rows
+            .iter()
+            .map(|row| row.primary_key.as_slice())
+            .collect::<Vec<_>>(),
+        [&[0xee][..], &[0xef][..], &[0xed][..]]
+    );
+    assert!(matches!(
+        sliced_rows[0].fields.get(0).unwrap().sample(0),
+        SampleRef::Missing
+    ));
+    assert!(matches!(
+        sliced_rows[0].fields.get(1).unwrap().sample(0),
+        SampleRef::Histogram(h) if h.sum.to_bits() == 42.25_f64.to_bits()
+    ));
+    assert!(
+        matches!(sliced_rows[1].fields.get(0).unwrap().sample(0), SampleRef::Float(v) if v.to_bits() == 3.5_f64.to_bits())
+    );
+    assert!(matches!(
+        sliced_rows[1].fields.get(1).unwrap().sample(0),
+        SampleRef::Missing
+    ));
+    assert!(
+        matches!(sliced_rows[2].fields.get(0).unwrap().sample(0), SampleRef::Histogram(h) if h.sum.to_bits() == (-9.5_f64).to_bits())
+    );
+    assert!(
+        matches!(sliced_rows[2].fields.get(1).unwrap().sample(0), SampleRef::Float(v) if v.to_bits() == 8.0_f64.to_bits())
+    );
+
+    let not_last = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0_u8, 0x91, 0xfe]),
+        None,
+        RawTimestamps::try_new(vec![50_i64, 60, 70, 80].into()).unwrap(),
+        chunk.fields.clone(),
+        false,
+    )
+    .unwrap();
+    let not_last_frames = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &not_last,
+    )
+    .unwrap();
+    let markers = not_last_frames
+        .iter()
+        .flat_map(|frame| {
+            unpack_raw_series_frame(
+                &schema,
+                FrameLabelMode::Key,
+                Some(&dense_description()),
+                frame,
+            )
+            .unwrap()
+        })
+        .map(|row| row.is_last)
+        .collect::<Vec<_>>();
+    assert_eq!(markers, [false; 4]);
+}
+
+#[test]
+fn histogram_payload_and_present_all_null_representation_survive() {
+    let schema = test_schema(&["histogram", "missing_histogram", "missing_float"]);
+    let mut builder = HistogramBatchBuilder::new();
+    let custom = [1.5, 4.5];
+    let po = [1];
+    let pl = [2];
+    let pb = [3.25, 7.5];
+    let no = [-2];
+    let nl = [1];
+    let nb = [0.75];
+    for (sum, start_timestamp) in [(-9.5, Some(-123)), (90.5, None)] {
+        builder
+            .push(crate::series::histogram::HistogramView {
+                schema: -7,
+                zero_threshold: 0.125,
+                sum,
+                count: 17.25,
+                zero_count: 2.5,
+                reset_hint: CounterResetHint::Unrecognized(37),
+                start_timestamp,
+                custom_values: &custom,
+                positive: BucketSideView {
+                    span_offsets: &po,
+                    span_lengths: &pl,
+                    buckets: &pb,
+                },
+                negative: BucketSideView {
+                    span_offsets: &no,
+                    span_lengths: &nl,
+                    buckets: &nb,
+                },
+            })
+            .unwrap();
+    }
+    let table = builder.finish().unwrap();
+    let fields = SeriesFields::try_from_vec(vec![
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0), Some(0)]), table.clone())
+            .unwrap(),
+        Samples::try_from_histogram(UInt32Array::from(vec![None, None]), table.clone()).unwrap(),
+        Samples::from_float(Float64Array::new_null(2)),
+    ])
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x12_u8, 0x00]),
+        None,
+        RawTimestamps::try_new(vec![1_i64, 2].into()).unwrap(),
+        fields,
+        false,
+    )
+    .unwrap();
+    let frame = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
+    let decoded = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &frame[0],
+    )
+    .unwrap();
+    let DenseSamplesRef::Histogram(histograms) = decoded[0].fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("histogram representation was normalized");
+    };
+    assert_eq!(histograms.indices().len(), 2);
+    assert!(histograms.indices().is_valid(0));
+    assert!(histograms.indices().is_valid(1));
+    assert_histogram(histograms.view_at(0).unwrap(), -9.5);
+    assert_histogram(histograms.view_at(1).unwrap(), -9.5);
+
+    let DenseSamplesRef::Histogram(all_null_histograms) =
+        decoded[0].fields.get(1).unwrap().dense().unwrap()
+    else {
+        panic!("all-null histogram representation was normalized");
+    };
+    assert_eq!(all_null_histograms.indices().len(), 2);
+    assert!((0..2).all(|i| !all_null_histograms.indices().is_valid(i)));
+    let DenseSamplesRef::Float(all_null_float) = decoded[0].fields.get(2).unwrap().dense().unwrap()
+    else {
+        panic!("all-null float representation was normalized");
+    };
+    assert_eq!(all_null_float.len(), 2);
+    assert!((0..2).all(|i| all_null_float.is_null(i)));
+
+    let histogram = match decoded[0].fields.get(0).unwrap().sample(0) {
+        SampleRef::Histogram(histogram) => histogram,
+        _ => panic!("histogram was lost"),
+    };
+    assert_histogram(histogram, -9.5);
+
+    let mixed_schema = test_schema(&["mixed"]);
+    let table = histogram_batch();
+    let mixed = Samples::try_from_mixed(
+        Float64Array::new_null(2),
+        crate::series::samples::HistogramSamples::try_new(
+            UInt32Array::from(vec![None, None]),
+            table.clone(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mixed_chunk = RawSeriesChunk::try_new(
+        &mixed_schema,
+        Buffer::from(vec![0x42_u8]),
+        None,
+        RawTimestamps::try_new(vec![5_i64, 6].into()).unwrap(),
+        SeriesFields::one(mixed),
+        false,
+    )
+    .unwrap();
+    let mixed_frame = pack_raw_series_chunk(
+        &mixed_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &mixed_chunk,
+    )
+    .unwrap();
+    let mixed_decoded = unpack_raw_series_frame(
+        &mixed_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &mixed_frame[0],
+    )
+    .unwrap();
+    let DenseSamplesRef::Mixed(mixed) = mixed_decoded[0].fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("all-null mixed representation was normalized");
+    };
+    assert_eq!(mixed.floats().len(), 2);
+    assert_eq!(mixed.histograms().indices().len(), 2);
+    assert!(
+        (0..2).all(|i| !mixed.floats().is_valid(i) && !mixed.histograms().indices().is_valid(i))
+    );
+}
+
+fn evaluated_series(schema: &SeriesSchema, spans: Vec<GridSpan>, fields: SeriesFields) -> Series {
+    Series::try_new(
+        schema,
+        metric(Some("cpu"), &[("host", "a")]),
+        TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap(),
+        fields,
+    )
+    .unwrap()
+}
+
+#[test]
+fn evaluated_sparse_runs_share_row_preserve_gaps_and_finality() {
+    let base = test_schema(&["value"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 10, 10).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let values = Float64Array::from(vec![Some(1.0), None, Some(3.0), Some(4.0)]);
+    let series = evaluated_series(
+        &schema,
+        vec![GridSpan::new(0, 2), GridSpan::new(5, 2)],
+        SeriesFields::one(Samples::from_float(values.clone())),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 4096).unwrap();
+    assert!(cursor.append_to(&mut builder).unwrap().is_none());
+    let batch = builder.flush().unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(
+        batch.column(1).len(),
+        1,
+        "labels are encoded once for the row"
+    );
+    let decoded = SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+        .unwrap()
+        .decode_evaluated(&batch)
+        .unwrap();
+    assert_eq!(decoded.len(), 1);
+    let (decoded, last) = &decoded[0];
+    assert!(*last);
+    assert_eq!(
+        decoded
+            .time
+            .runs()
+            .map(|run| (run.position, run.len))
+            .collect::<Vec<_>>(),
+        vec![(0, 2), (5, 2)]
+    );
+    let values = decoded.fields.get(0).unwrap().dense().unwrap();
+    let DenseSamplesRef::Float(values) = values else {
+        panic!("expected float values")
+    };
+    assert_eq!(
+        values,
+        &Float64Array::from(vec![Some(1.0), None, Some(3.0), Some(4.0)])
+    );
+    assert_eq!(decoded.time.row_of(3), None);
+}
+
+#[test]
+fn evaluated_incremental_measure_matches_full_measure_at_exact_byte_budget() {
+    let base = test_schema(&["value"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 16).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let metric = metric(Some("cpu"), &[("host", "a")]);
+    let floats = Float64Array::from(
+        (0..9)
+            .map(|index| (index != 3 && index != 6).then_some(index as f64))
+            .collect::<Vec<_>>(),
+    );
+    let table = histogram_batch();
+    let indices = UInt32Array::from(
+        (0..9)
+            .map(|index| (index != 3 && index != 6).then_some(0))
+            .collect::<Vec<_>>(),
+    );
+    let mixed_indices = UInt32Array::from(
+        (0..9)
+            .map(|index| (index == 3 || index == 6).then_some(0))
+            .collect::<Vec<_>>(),
+    );
+    let cases = vec![
+        Samples::from_float(floats.clone()),
+        Samples::try_from_histogram(indices.clone(), table.clone()).unwrap(),
+        Samples::try_from_mixed(
+            floats,
+            crate::series::samples::HistogramSamples::try_new(mixed_indices, table).unwrap(),
+        )
+        .unwrap(),
+    ];
+    for samples in cases {
+        let whole = FrameRow {
+            key: None,
+            metric: Some(metric.clone()),
+            is_last: true,
+            time: RowTime::Spans(vec![GridSpan::new(0, 8), GridSpan::new(10, 1)]),
+            payload: RowPayload::Samples(vec![samples.clone()]),
+            bytes: 0,
+        };
+        let exact_budget = measure_row(&whole).unwrap();
+        for (budget, expected_rows) in [(exact_budget, 1), (exact_budget - 1, 2)] {
+            let series = evaluated_series(
+                &schema,
+                vec![GridSpan::new(0, 8), GridSpan::new(10, 1)],
+                SeriesFields::one(samples.clone()),
+            );
+            let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+            let mut builder =
+                SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, budget)
+                    .unwrap();
+            let mut batches = Vec::new();
+            while let Some(batch) = cursor.append_to(&mut builder).unwrap() {
+                batches.push(batch);
+            }
+            if let Some(batch) = builder.flush().unwrap() {
+                batches.push(batch);
+            }
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                expected_rows
+            );
+            let decoded = batches
+                .iter()
+                .flat_map(|batch| {
+                    SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                        .unwrap()
+                        .decode_evaluated(batch)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                decoded
+                    .iter()
+                    .map(|(series, _)| series.time.len())
+                    .sum::<usize>(),
+                9
+            );
+            assert_eq!(decoded.iter().filter(|(_, is_last)| *is_last).count(), 1);
+            assert!(decoded.last().unwrap().1);
+            assert_eq!(
+                decoded
+                    .iter()
+                    .flat_map(|(series, _)| series.time.runs())
+                    .map(|run| (run.position, run.len))
+                    .collect::<Vec<_>>(),
+                [(0, 8), (10, 1)]
+            );
+            let decoded_samples = decoded
+                .iter()
+                .flat_map(|(series, _)| {
+                    (0..series.time.len())
+                        .map(move |index| series.fields.get(0).unwrap().sample(index))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(decoded_samples.len(), 9);
+            for (index, actual) in decoded_samples.into_iter().enumerate() {
+                assert_evaluated_sample_equal(actual, samples.sample(index), index);
+            }
+        }
+    }
+}
+
+#[test]
+fn evaluated_many_sparse_runs_form_one_row_without_losing_positions() {
+    let base = test_schema(&["value"]);
+    let spans = (0..128)
+        .map(|run| GridSpan::new(run * 2, 1))
+        .collect::<Vec<_>>();
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 256).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let missing = |index| matches!(index, 7 | 8 | 63 | 64 | 127);
+    let floats = (0..128)
+        .map(|index| match index {
+            index if missing(index) => None,
+            0 => Some(f64::from_bits(0x7ff8_0000_dead_beef)),
+            1 => Some(-0.0),
+            _ => Some(index as f64),
+        })
+        .collect::<Vec<_>>();
+    let histograms = (0..128)
+        .map(|index| (!missing(index)).then_some(0))
+        .collect::<Vec<_>>();
+    let mixed_floats = (0..128)
+        .map(|index| (!missing(index) && index % 2 == 0).then(|| floats[index].unwrap()))
+        .collect::<Vec<_>>();
+    let mixed_histograms = (0..128)
+        .map(|index| (!missing(index) && index % 2 == 1).then_some(0))
+        .collect::<Vec<_>>();
+    let prefix_float = |values: Vec<Option<f64>>| {
+        Float64Array::from(
+            std::iter::once(Some(999.0))
+                .chain(values)
+                .collect::<Vec<_>>(),
+        )
+        .slice(1, 128)
+    };
+    let prefix_indices = |values: Vec<Option<u32>>| {
+        UInt32Array::from(std::iter::once(Some(999)).chain(values).collect::<Vec<_>>())
+            .slice(1, 128)
+    };
+    let table = histogram_batch();
+    let cases = vec![
+        Samples::from_float(prefix_float(floats)),
+        Samples::try_from_histogram(prefix_indices(histograms), table.clone()).unwrap(),
+        Samples::try_from_mixed(
+            prefix_float(mixed_floats),
+            crate::series::samples::HistogramSamples::try_new(
+                prefix_indices(mixed_histograms),
+                table,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    ];
+    for samples in cases {
+        let series = evaluated_series(&schema, spans.clone(), SeriesFields::one(samples.clone()));
+        let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+        let mut builder =
+            SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 1 << 20)
+                .unwrap();
+        while cursor.append_to(&mut builder).unwrap().is_some() {}
+        let batch = builder.flush().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let decoded = SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+            .unwrap()
+            .decode_evaluated(&batch)
+            .unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].1);
+        assert_eq!(
+            decoded[0]
+                .0
+                .time
+                .runs()
+                .map(|run| (run.position, run.len))
+                .collect::<Vec<_>>(),
+            spans
+                .iter()
+                .map(|span| (span.start(), span.len()))
+                .collect::<Vec<_>>()
+        );
+        let decoded_samples = decoded[0].0.fields.get(0).unwrap();
+        for index in 0..128 {
+            assert_evaluated_sample_equal(
+                decoded_samples.sample(index),
+                samples.sample(index),
+                index,
+            );
+        }
+    }
+}
+
+#[test]
+fn evaluated_rows_stop_at_earliest_field_segment_and_builder_bounds() {
+    let base = test_schema(&["a", "b"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 12).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let first = Samples::try_from_chunks(vec![
+        Samples::from_float(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+        Samples::from_float(Float64Array::from(vec![Some(3.0), Some(4.0)])),
+    ])
+    .unwrap();
+    let second = Samples::from_float(Float64Array::from(vec![Some(10.0); 4]));
+    let series = evaluated_series(
+        &schema,
+        vec![
+            GridSpan::new(0, 1),
+            GridSpan::new(3, 1),
+            GridSpan::new(6, 1),
+            GridSpan::new(9, 1),
+        ],
+        SeriesFields::try_from_vec(vec![first, second]).unwrap(),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 1, 4096).unwrap();
+    let mut rows = Vec::new();
+    while let Some(batch) = cursor.append_to(&mut builder).unwrap() {
+        rows.extend(
+            SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                .unwrap()
+                .decode_evaluated(&batch)
+                .unwrap(),
+        );
+    }
+    if let Some(batch) = builder.flush().unwrap() {
+        rows.extend(
+            SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                .unwrap()
+                .decode_evaluated(&batch)
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        rows.iter().map(|(s, _)| s.time.len()).collect::<Vec<_>>(),
+        vec![2, 2]
+    );
+    assert_eq!(
+        rows.iter()
+            .flat_map(|(s, _)| s.fields.get(0).unwrap().iter().map(|v| match v {
+                SampleRef::Float(v) => v,
+                _ => panic!(),
+            }))
+            .collect::<Vec<_>>(),
+        vec![1.0, 2.0, 3.0, 4.0]
+    );
+    assert!(rows.last().unwrap().1);
+}
+
+#[test]
+fn evaluated_available_bytes_preserve_pending_intersection_and_oversized_is_atomic() {
+    let base = test_schema(&["value"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 8).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let series = evaluated_series(
+        &schema,
+        vec![
+            GridSpan::new(0, 1),
+            GridSpan::new(2, 1),
+            GridSpan::new(4, 1),
+            GridSpan::new(6, 1),
+        ],
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+            Some(1.0),
+            Some(2.0),
+            Some(3.0),
+            Some(4.0),
+        ]))),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 190).unwrap();
+    let batches = {
+        let mut out = Vec::new();
+        while let Some(batch) = cursor.append_to(&mut builder).unwrap() {
+            out.push(batch);
+        }
+        if let Some(batch) = builder.flush().unwrap() {
+            out.push(batch);
+        }
+        out
+    };
+    let rows = batches
+        .iter()
+        .flat_map(|batch| {
+            SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                .unwrap()
+                .decode_evaluated(batch)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
+    assert_eq!(
+        rows.iter()
+            .flat_map(|(s, _)| s.fields.get(0).unwrap().iter().map(|v| match v {
+                SampleRef::Float(v) => v,
+                _ => panic!(),
+            }))
+            .collect::<Vec<_>>(),
+        vec![1.0, 2.0, 3.0, 4.0]
+    );
+    assert!(rows.last().unwrap().1);
+
+    let oversized = evaluated_series(
+        &schema,
+        vec![GridSpan::new(0, 1), GridSpan::new(2, 1)],
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+            Some(1.0),
+            Some(2.0),
+        ]))),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, oversized, true).unwrap();
+    let mut tiny =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 1).unwrap();
+    let first = cursor.append_to(&mut tiny).unwrap().unwrap();
+    assert_eq!(
+        first.num_rows(),
+        1,
+        "oversized atomic intersection cannot absorb another run"
+    );
+    let second = cursor.append_to(&mut tiny).unwrap().unwrap();
+    assert_eq!(second.num_rows(), 1);
+    assert!(cursor.append_to(&mut tiny).unwrap().is_none());
+    let decoded = [first, second]
+        .iter()
+        .flat_map(|batch| {
+            SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                .unwrap()
+                .decode_evaluated(batch)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decoded
+            .iter()
+            .flat_map(|(series, _)| series.fields.get(0).unwrap().iter().map(
+                |sample| match sample {
+                    SampleRef::Float(value) => value,
+                    _ => panic!(),
+                }
+            ))
+            .collect::<Vec<_>>(),
+        vec![1.0, 2.0]
+    );
+    assert!(decoded.last().unwrap().1);
+}
+
+#[test]
+fn evaluated_histogram_sparse_row_retains_full_table_and_indices() {
+    let base = test_schema(&["hist"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 8).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let table = histogram_batch();
+    let indices = UInt32Array::from(vec![Some(0), None, Some(1)]);
+    let samples = Samples::try_from_histogram(indices.clone(), table.clone()).unwrap();
+    let series = evaluated_series(
+        &schema,
+        vec![GridSpan::new(0, 1), GridSpan::new(3, 2)],
+        SeriesFields::one(samples),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 4096).unwrap();
+    while cursor.append_to(&mut builder).unwrap().is_some() {}
+    let batch = builder.flush().unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 1);
+    let decoded = SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+        .unwrap()
+        .decode_evaluated(&batch)
+        .unwrap();
+    let DenseSamplesRef::Histogram(hist) = decoded[0].0.fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("expected histogram")
+    };
+    assert_eq!(
+        hist.batch().len(),
+        table.len(),
+        "unused histogram table entries remain present"
+    );
+    assert_eq!(hist.indices(), &indices);
+    assert_eq!(
+        decoded[0]
+            .0
+            .time
+            .runs()
+            .map(|run| (run.position, run.len))
+            .collect::<Vec<_>>(),
+        vec![(0, 1), (3, 2)]
+    );
+}
+
+#[test]
+fn direct_decoder_validates_ordering_for_raw_and_evaluated_batches() {
+    let raw_schema = test_schema(&["value"]);
+    let raw_frame_schema =
+        series_frame_schema(&raw_schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
+    let raw_chunk = float_chunk(&raw_schema, &[1], None, vec![1], vec![Some(2.0)], true);
+    let raw_batch = pack_raw_series_chunk(
+        &raw_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &raw_chunk,
+    )
+    .unwrap()
+    .remove(0);
+    let raw_decoder =
+        SeriesFrameDecoder::try_new(&raw_schema, FrameLabelMode::Key, Some(&dense_description()))
+            .unwrap();
+
+    let evaluated_schema = SeriesSchema {
+        fields: raw_schema.fields.clone(),
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 10, 3).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let evaluated_frame_schema =
+        series_frame_schema(&evaluated_schema, FrameLabelMode::Explicit, None).unwrap();
+    let series = Series::try_new(
+        &evaluated_schema,
+        metric(Some("cpu"), &[]),
+        TimeAxis::from_grid_spans(
+            evaluated_schema.eval_grid.clone().unwrap(),
+            vec![crate::series::time::GridSpan::new(1, 1)],
+        )
+        .unwrap(),
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(3.0)]))),
+    )
+    .unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&evaluated_schema, FrameLabelMode::Explicit, None, 8, 1024)
+            .unwrap();
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&evaluated_schema, series, true).unwrap();
+    while cursor.append_to(&mut builder).unwrap().is_some() {}
+    let evaluated_batch = builder.flush().unwrap().unwrap();
+    let evaluated_decoder =
+        SeriesFrameDecoder::try_new(&evaluated_schema, FrameLabelMode::Explicit, None).unwrap();
+
+    let raw_empty = arrow::record_batch::RecordBatch::new_empty(raw_frame_schema);
+    let evaluated_empty = arrow::record_batch::RecordBatch::new_empty(evaluated_frame_schema);
+    for (content, empty, nonempty) in [
+        ("raw", &raw_empty, &raw_batch),
+        ("evaluated", &evaluated_empty, &evaluated_batch),
+    ] {
+        for (ordering, accepted) in [
+            (None, false),
+            (Some("future_value"), false),
+            (Some("interleaved"), content == "raw"),
+            (Some("interv"), false),
+            (Some("contiguous"), true),
+            (Some("read_key_then_time"), content == "raw"),
+        ] {
+            for batch in [empty, nonempty] {
+                let mut metadata = batch.schema().metadata().clone();
+                match ordering {
+                    Some(value) => {
+                        metadata.insert(ORDERING.to_string(), value.to_string());
+                    }
+                    None => {
+                        metadata.remove(ORDERING);
+                    }
+                }
+                let schema = Arc::new(Schema::new_with_metadata(
+                    batch.schema().fields().clone(),
+                    metadata,
+                ));
+                let batch = arrow::record_batch::RecordBatch::try_new(
+                    schema.clone(),
+                    batch.columns().to_vec(),
+                )
+                .unwrap();
+                let declaration = SeriesFrameDeclaration::parse(schema.as_ref());
+                if accepted {
+                    assert!(declaration.is_ok(), "{content} ordering {ordering:?}");
+                    if content == "raw" {
+                        let rows = raw_decoder.decode_raw(&batch).unwrap();
+                        assert_eq!(rows.len(), batch.num_rows());
+                        if !rows.is_empty() {
+                            assert!(rows[0].is_last);
+                            assert!(matches!(
+                                rows[0].fields.get(0).unwrap().sample(0),
+                                SampleRef::Float(value) if value == 2.0
+                            ));
+                        }
+                    } else {
+                        let rows = evaluated_decoder.decode_evaluated(&batch).unwrap();
+                        assert_eq!(rows.len(), batch.num_rows());
+                        if !rows.is_empty() {
+                            assert!(rows[0].1);
+                            assert!(matches!(
+                                rows[0].0.fields.get(0).unwrap().sample(0),
+                                SampleRef::Float(value) if value == 3.0
+                            ));
+                        }
+                    }
+                } else {
+                    assert!(
+                        declaration.unwrap_err().to_string().contains("ordering"),
+                        "{content} ordering {ordering:?}"
+                    );
+                    let result = if content == "raw" {
+                        raw_decoder.decode_raw(&batch).map(|_| ())
+                    } else {
+                        evaluated_decoder.decode_evaluated(&batch).map(|_| ())
+                    };
+                    assert!(
+                        result.unwrap_err().to_string().contains("ordering"),
+                        "{content} ordering {ordering:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The encoder's own declarations are refused when they contradict the frame, and the schema with
+/// no fields is refused; an evaluation grid, by contrast, now describes a legal evaluated frame
+/// instead of making the schema unusable here.
+#[test]
+fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
+    let schema = test_schema(&["value"]);
+    let grid_schema = SeriesSchema {
+        fields: schema.fields.clone(),
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(1, 2, 3).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    // A schema with an evaluation grid describes evaluated samples, which is a legal frame in this
+    // family: the raw-only constructor still refuses it, while the one constructor accepts it as an
+    // evaluated frame that declares its grid and addresses time by grid spans.
+    assert!(raw_series_frame_schema(&grid_schema, FrameLabelMode::Explicit).is_err());
+    let evaluated = series_frame_schema(&grid_schema, FrameLabelMode::Explicit, None).unwrap();
+    assert_eq!(
+        evaluated.metadata().get(CONTENT).map(String::as_str),
+        Some("evaluated")
+    );
+    assert_eq!(
+        evaluated.metadata().get(TIME).map(String::as_str),
+        Some("grid_spans")
+    );
+    assert!(evaluated.metadata().get(GRID).is_some());
+    // An evaluated frame names its series by label, so a key identity stays refused.
+    assert!(
+        series_frame_schema(
+            &grid_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description())
+        )
+        .is_err()
+    );
+    let empty_schema =
+        series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
+    let empty = arrow::record_batch::RecordBatch::new_empty(empty_schema.clone());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &empty
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let wrong =
+        arrow::record_batch::RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new(
+            "read_key",
+            DataType::Utf8,
+            false,
+        )])));
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &wrong
+        )
+        .is_err()
+    );
+    let no_fields = SeriesSchema {
+        fields: Arc::from([]),
+        eval_grid: None,
+    };
+    assert!(
+        series_frame_schema(&no_fields, FrameLabelMode::Key, Some(&dense_description())).is_err()
+    );
+
+    let mut metadata = empty_schema.metadata().clone();
+    metadata.insert(
+        "greptime.series.content".to_string(),
+        "evaluated".to_string(),
+    );
+    let contaminated = Arc::new(Schema::new_with_metadata(
+        empty_schema.fields().clone(),
+        metadata,
+    ));
+    let empty_bad = arrow::record_batch::RecordBatch::new_empty(contaminated);
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &empty_bad
+        )
+        .is_err()
+    );
+
+    let chunk = float_chunk(&schema, &[1], None, vec![1], vec![Some(2.0)], false);
+    assert!(
+        pack_raw_series_chunk(
+            &grid_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &chunk
+        )
+        .is_err()
+    );
+
+    let valid = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap()
+    .remove(0);
+    let mut extra_metadata = valid.schema().metadata().clone();
+    extra_metadata.insert("application.note".to_string(), "ignored".to_string());
+    let unrelated = arrow::record_batch::RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(
+            valid.schema().fields().clone(),
+            extra_metadata,
+        )),
+        valid.columns().to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &unrelated
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+
+    let mut wrong_metadata = valid.schema().metadata().clone();
+    wrong_metadata.remove("greptime.series.time");
+    let wrong = arrow::record_batch::RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(
+            valid.schema().fields().clone(),
+            wrong_metadata,
+        )),
+        valid.columns().to_vec(),
+    )
+    .unwrap();
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &wrong
+        )
+        .is_err()
+    );
+
+    // A raw frame must not declare an evaluation grid: `greptime.series.grid` belongs to an
+    // evaluated frame only.
+    let mut grid_metadata = valid.schema().metadata().clone();
+    grid_metadata.insert(
+        "greptime.series.grid".to_string(),
+        "{\"start_ms\":0,\"step_ms\":1,\"len\":3}".to_string(),
+    );
+    let contaminated = arrow::record_batch::RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(
+            valid.schema().fields().clone(),
+            grid_metadata,
+        )),
+        valid.columns().to_vec(),
+    )
+    .unwrap();
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &contaminated
+        )
+        .is_err()
+    );
+
+    // A reserved key this revision does not know is refused when the declarations are parsed,
+    // rather than travelling along as dead metadata or being silently ignored.
+    let mut unknown_key_metadata = valid.schema().metadata().clone();
+    unknown_key_metadata.insert("greptime.series.grid.start".to_string(), "0".to_string());
+    let unregistered =
+        Schema::new_with_metadata(valid.schema().fields().clone(), unknown_key_metadata);
+    assert!(series_frame_label_decode(&unregistered).is_err());
+    assert!(SeriesFrameDeclaration::parse(&unregistered).is_err());
+
+    for metadata_case in ["wrong_layout", "wrong_labels", "wrong_time"] {
+        let mut metadata = valid.schema().metadata().clone();
+        match metadata_case {
+            "wrong_layout" => {
+                // `v1` is the only layout this revision reads, so `v2` is what a wrong layout is
+                // spelled as now.
+                metadata.insert("greptime.series.layout".to_string(), "v2".to_string());
+            }
+            "wrong_labels" => {
+                metadata.insert("greptime.series.labels".to_string(), "explicit".to_string());
+            }
+            _ => {
+                metadata.insert("greptime.series.time".to_string(), "grid".to_string());
+            }
+        }
+        let malformed = arrow::record_batch::RecordBatch::try_new(
+            Arc::new(Schema::new_with_metadata(
+                valid.schema().fields().clone(),
+                metadata,
+            )),
+            valid.columns().to_vec(),
+        )
+        .unwrap();
+        assert!(
+            unpack_raw_series_frame(
+                &schema,
+                FrameLabelMode::Key,
+                Some(&dense_description()),
+                &malformed
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_timestamps_and_empty_raw_payloads() {
+    assert!(RawTimestamps::try_new(vec![1_i64, 1].into()).is_err());
+    assert!(RawTimestamps::try_new(vec![2_i64, 1].into()).is_err());
+
+    let schema = test_schema(&["value"]);
+    let chunk = float_chunk(&schema, &[1], None, vec![1], vec![Some(2.0)], false);
+    let valid = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap()
+    .remove(0);
+    for bad_timestamps in [vec![], vec![1, 1], vec![2, 1]] {
+        let malformed = with_timestamp_values(&valid, bad_timestamps);
+        assert!(
+            unpack_raw_series_frame(
+                &schema,
+                FrameLabelMode::Key,
+                Some(&dense_description()),
+                &malformed
+            )
+            .is_err()
+        );
+    }
+    let mut empty_columns = valid.columns().to_vec();
+    let empty_time = with_timestamp_values(&valid, vec![]);
+    empty_columns[2] = empty_time.column(2).clone();
+    let fields = valid.columns()[3]
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let payload = fields
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let empty_float_list = ListArray::try_new(
+        match payload.fields()[0].data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!(),
+        },
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 0])),
+        Arc::new(Float64Array::new_null(0)),
+        None,
+    )
+    .unwrap();
+    let empty_payload = StructArray::try_new(
+        payload.fields().clone(),
+        vec![Arc::new(empty_float_list), payload.column(1).clone()],
+        None,
+    )
+    .unwrap();
+    let empty_fields =
+        StructArray::try_new(fields.fields().clone(), vec![Arc::new(empty_payload)], None).unwrap();
+    empty_columns[3] = Arc::new(empty_fields);
+    let empty_time_and_payload =
+        arrow::record_batch::RecordBatch::try_new(valid.schema(), empty_columns).unwrap();
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &empty_time_and_payload
+        )
+        .is_err()
+    );
+
+    let two_samples = float_chunk(
+        &schema,
+        &[1],
+        None,
+        vec![1, 2],
+        vec![Some(2.0), Some(3.0)],
+        false,
+    );
+    let valid_two_samples = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &two_samples,
+    )
+    .unwrap()
+    .remove(0);
+    for bad_timestamps in [vec![1, 1], vec![2, 1]] {
+        let malformed = with_timestamp_values(&valid_two_samples, bad_timestamps);
+        assert!(
+            unpack_raw_series_frame(
+                &schema,
+                FrameLabelMode::Key,
+                Some(&dense_description()),
+                &malformed
+            )
+            .is_err()
+        );
+    }
+
+    let mut empty_payload_columns = valid.columns().to_vec();
+    let empty_time = with_timestamp_values(&valid, vec![]);
+    empty_payload_columns[2] = empty_time.column(2).clone();
+    let float_fields = valid.columns()[3]
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let float_payload = float_fields
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let empty_float_list = ListArray::try_new(
+        match float_payload.fields()[0].data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!(),
+        },
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 0])),
+        Arc::new(Float64Array::from(Vec::<Option<f64>>::new())),
+        None,
+    )
+    .unwrap();
+    let empty_payload = StructArray::try_new(
+        float_payload.fields().clone(),
+        vec![Arc::new(empty_float_list), float_payload.column(1).clone()],
+        None,
+    )
+    .unwrap();
+    let empty_fields = StructArray::try_new(
+        float_fields.fields().clone(),
+        vec![Arc::new(empty_payload)],
+        None,
+    )
+    .unwrap();
+    empty_payload_columns[3] = Arc::new(empty_fields);
+    let empty_payload =
+        arrow::record_batch::RecordBatch::try_new(valid.schema(), empty_payload_columns).unwrap();
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &empty_payload
+        )
+        .is_err()
+    );
+
+    let mut columns = valid.columns().to_vec();
+    columns[3] = Arc::new(StructArray::new_null(
+        match valid.schema().field(3).data_type() {
+            DataType::Struct(fields) => fields.clone(),
+            _ => unreachable!(),
+        },
+        1,
+    ));
+    // Arrow rejects nulls in this canonical non-nullable top-level field before
+    // the decoder can inspect it; keep this a constructor-invariant assertion.
+    assert!(arrow::record_batch::RecordBatch::try_new(valid.schema(), columns).is_err());
+
+    let mut bad = valid.columns().to_vec();
+    bad[2] = Arc::new(
+        with_timestamp_values(&valid, vec![1, 1])
+            .column(2)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .clone(),
+    );
+    let invalid_later_row = arrow::record_batch::RecordBatch::try_new(valid.schema(), bad).unwrap();
+    let later_invalid =
+        concat_batches(&valid.schema(), &[valid.clone(), invalid_later_row]).unwrap();
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &later_invalid
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn rejects_invalid_explicit_labels() {
+    let explicit_schema = test_schema(&["value"]);
+    let explicit_chunk = float_chunk(
+        &explicit_schema,
+        &[1],
+        Some(metric(None, &[])),
+        vec![1],
+        vec![Some(1.0)],
+        false,
+    );
+    let explicit = pack_raw_series_chunk(
+        &explicit_schema,
+        FrameLabelMode::Explicit,
+        None,
+        &explicit_chunk,
+    )
+    .unwrap()
+    .remove(0);
+    let name = explicit
+        .column(4)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .clone();
+    let null_label_struct = StructArray::new_null(
+        match explicit.schema().field(5).data_type() {
+            DataType::List(item) => match item.data_type() {
+                DataType::Struct(fields) => fields.clone(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        },
+        1,
+    );
+    // Arrow rejects null list items because the canonical label item is non-nullable;
+    // this malformed value cannot reach the decoder through a safe constructor.
+    assert!(
+        ListArray::try_new(
+            match explicit.schema().field(5).data_type() {
+                DataType::List(item) => item.clone(),
+                _ => unreachable!(),
+            },
+            OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+            Arc::new(null_label_struct),
+            None,
+        )
+        .is_err()
+    );
+    let mut columns = explicit.columns().to_vec();
+    columns[4] = Arc::new(name);
+
+    let mut duplicate_labels = explicit.columns().to_vec();
+    let duplicate_items = StructArray::try_new(
+        match explicit.schema().field(5).data_type() {
+            DataType::List(item) => match item.data_type() {
+                DataType::Struct(fields) => fields.clone(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        },
+        vec![
+            Arc::new(StringArray::from(vec!["x", "x"])),
+            Arc::new(StringArray::from(vec!["1", "2"])),
+        ],
+        None,
+    )
+    .unwrap();
+    let duplicate_list = ListArray::try_new(
+        match explicit.schema().field(5).data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!(),
+        },
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 2])),
+        Arc::new(duplicate_items),
+        None,
+    )
+    .unwrap();
+    duplicate_labels[5] = Arc::new(duplicate_list);
+    let duplicate =
+        arrow::record_batch::RecordBatch::try_new(explicit.schema(), duplicate_labels).unwrap();
+    assert!(
+        unpack_raw_series_frame(&explicit_schema, FrameLabelMode::Explicit, None, &duplicate)
+            .is_err()
+    );
+
+    let mut reserved_labels = explicit.columns().to_vec();
+    let reserved_items = StructArray::try_new(
+        match explicit.schema().field(5).data_type() {
+            DataType::List(item) => match item.data_type() {
+                DataType::Struct(fields) => fields.clone(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        },
+        vec![
+            Arc::new(StringArray::from(vec!["__name__"])),
+            Arc::new(StringArray::from(vec!["x"])),
+        ],
+        None,
+    )
+    .unwrap();
+    let reserved_list = ListArray::try_new(
+        match explicit.schema().field(5).data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!(),
+        },
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+        Arc::new(reserved_items),
+        None,
+    )
+    .unwrap();
+    reserved_labels[5] = Arc::new(reserved_list);
+    let reserved =
+        arrow::record_batch::RecordBatch::try_new(explicit.schema(), reserved_labels).unwrap();
+    assert!(
+        unpack_raw_series_frame(&explicit_schema, FrameLabelMode::Explicit, None, &reserved)
+            .is_err()
+    );
+}
+
+#[test]
+fn rejects_malformed_histogram_and_payload_encodings() {
+    let hist_schema = test_schema(&["hist"]);
+    let valid_hist = pack_raw_series_chunk(
+        &hist_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &RawSeriesChunk::try_new(
+            &hist_schema,
+            Buffer::from(vec![1_u8]),
+            None,
+            RawTimestamps::try_new(vec![1_i64].into()).unwrap(),
+            SeriesFields::one(
+                Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), histogram_batch())
+                    .unwrap(),
+            ),
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .remove(0);
+    let columns = valid_hist.columns().to_vec();
+    let fields = columns[3].as_any().downcast_ref::<StructArray>().unwrap();
+    let payload = fields
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let null_hist = payload
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap()
+        .clone();
+    let hidden_indices = ListArray::try_new(
+        match hist_schema_frame_field(&hist_schema) {
+            DataType::Struct(f) => match f[0].data_type() {
+                DataType::Struct(p) => match p[1].data_type() {
+                    DataType::Struct(h) => match h[0].data_type() {
+                        DataType::List(item) => item.clone(),
+                        _ => unreachable!(),
+                    },
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        },
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 2])),
+        Arc::new(UInt32Array::from(vec![Some(99), None])),
+        None,
+    )
+    .unwrap();
+    let null_hist = StructArray::try_new(
+        null_hist.fields().clone(),
+        vec![Arc::new(hidden_indices), null_hist.column(1).clone()],
+        Some(arrow::buffer::NullBuffer::new_null(1)),
+    )
+    .unwrap();
+    let visible_float = ListArray::try_new(
+        match hist_schema_frame_field(&hist_schema) {
+            DataType::Struct(f) => match f[0].data_type() {
+                DataType::Struct(p) => match p[0].data_type() {
+                    DataType::List(item) => item.clone(),
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        },
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+        Arc::new(Float64Array::from(vec![Some(1.25)])),
+        None,
+    )
+    .unwrap();
+    let payload = StructArray::try_new(
+        payload.fields().clone(),
+        vec![Arc::new(visible_float), Arc::new(null_hist.clone())],
+        None,
+    )
+    .unwrap();
+    let fields = StructArray::try_new(
+        fields.fields().clone(),
+        vec![Arc::new(payload.clone())],
+        None,
+    )
+    .unwrap();
+    let mut absent_hist_columns = valid_hist.columns().to_vec();
+    absent_hist_columns[3] = Arc::new(fields.clone());
+    let absent_hist =
+        arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), absent_hist_columns)
+            .unwrap();
+    let decoded_absent_hist = unpack_raw_series_frame(
+        &hist_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &absent_hist,
+    )
+    .unwrap();
+    assert!(
+        matches!(decoded_absent_hist[0].fields.get(0).unwrap().sample(0), SampleRef::Float(v) if v == 1.25)
+    );
+
+    let mut absent_both_columns = valid_hist.columns().to_vec();
+    let absent_both_fields = absent_both_columns[3]
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let absent_both_payload = absent_both_fields
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let absent_both_float = ListArray::try_new(
+        match absent_both_payload.fields()[0].data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!(),
+        },
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+        Arc::new(Float64Array::from(vec![Some(1.25)])),
+        Some(arrow::buffer::NullBuffer::new_null(1)),
+    )
+    .unwrap();
+    let absent_both_hist = absent_both_payload
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let absent_both_hist = StructArray::try_new(
+        absent_both_hist.fields().clone(),
+        absent_both_hist.columns().to_vec(),
+        Some(arrow::buffer::NullBuffer::new_null(1)),
+    )
+    .unwrap();
+    let absent_both_payload = StructArray::try_new(
+        absent_both_payload.fields().clone(),
+        vec![Arc::new(absent_both_float), Arc::new(absent_both_hist)],
+        None,
+    )
+    .unwrap();
+    let absent_both_fields = StructArray::try_new(
+        absent_both_fields.fields().clone(),
+        vec![Arc::new(absent_both_payload)],
+        None,
+    )
+    .unwrap();
+    absent_both_columns[3] = Arc::new(absent_both_fields);
+    let absent_both =
+        arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), absent_both_columns)
+            .unwrap();
+    assert!(
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &absent_both
+        )
+        .is_err()
+    );
+
+    let DataType::List(index_item) = null_hist.fields()[0].data_type() else {
+        panic!("expected histogram indices list");
+    };
+    let bad_indices = ListArray::try_new(
+        index_item.clone(),
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+        Arc::new(UInt32Array::from(vec![Some(99)])),
+        None,
+    )
+    .unwrap();
+    let bad_hist = StructArray::try_new(
+        null_hist.fields().clone(),
+        vec![Arc::new(bad_indices), null_hist.column(1).clone()],
+        None,
+    )
+    .unwrap();
+    let bad_payload = StructArray::try_new(
+        payload.fields().clone(),
+        vec![payload.column(0).clone(), Arc::new(bad_hist)],
+        None,
+    )
+    .unwrap();
+    let bad_fields =
+        StructArray::try_new(fields.fields().clone(), vec![Arc::new(bad_payload)], None).unwrap();
+    let mut bad_parent_columns = valid_hist.columns().to_vec();
+    bad_parent_columns[3] = Arc::new(bad_fields);
+    let present_bad_parent =
+        arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), bad_parent_columns).unwrap();
+    assert!(
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &present_bad_parent
+        )
+        .is_err()
+    );
+
+    let valid_float = ListArray::try_new(
+        match payload.fields()[0].data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!(),
+        },
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+        Arc::new(Float64Array::from(vec![Some(1.25)])),
+        None,
+    )
+    .unwrap();
+    let overlap_indices = ListArray::try_new(
+        index_item.clone(),
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+        Arc::new(UInt32Array::from(vec![Some(0)])),
+        None,
+    )
+    .unwrap();
+    let overlap_hist = StructArray::try_new(
+        null_hist.fields().clone(),
+        vec![Arc::new(overlap_indices), null_hist.column(1).clone()],
+        None,
+    )
+    .unwrap();
+    let overlap_payload = StructArray::try_new(
+        payload.fields().clone(),
+        vec![Arc::new(valid_float), Arc::new(overlap_hist)],
+        None,
+    )
+    .unwrap();
+    let overlap_fields = StructArray::try_new(
+        fields.fields().clone(),
+        vec![Arc::new(overlap_payload)],
+        None,
+    )
+    .unwrap();
+    let mut overlap_columns = valid_hist.columns().to_vec();
+    overlap_columns[3] = Arc::new(overlap_fields);
+    let overlap =
+        arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), overlap_columns).unwrap();
+    assert!(
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &overlap
+        )
+        .is_err()
+    );
+
+    let short_indices = ListArray::try_new(
+        index_item.clone(),
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 0])),
+        Arc::new(UInt32Array::from(Vec::<Option<u32>>::new())),
+        None,
+    )
+    .unwrap();
+    let short_hist = StructArray::try_new(
+        null_hist.fields().clone(),
+        vec![Arc::new(short_indices), null_hist.column(1).clone()],
+        None,
+    )
+    .unwrap();
+    let short_payload = StructArray::try_new(
+        payload.fields().clone(),
+        vec![payload.column(0).clone(), Arc::new(short_hist)],
+        None,
+    )
+    .unwrap();
+    let short_fields =
+        StructArray::try_new(fields.fields().clone(), vec![Arc::new(short_payload)], None).unwrap();
+    let mut short_columns = valid_hist.columns().to_vec();
+    short_columns[3] = Arc::new(short_fields);
+    let short_indices =
+        arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), short_columns).unwrap();
+    assert!(
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &short_indices
+        )
+        .is_err()
+    );
+
+    let malformed_histogram = || {
+        let mut columns = valid_hist.columns().to_vec();
+        let fields = columns[3].as_any().downcast_ref::<StructArray>().unwrap();
+        let payload = fields
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let hist = payload
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let table_list = hist.column(1).as_any().downcast_ref::<ListArray>().unwrap();
+        let table_value = table_list.value(0);
+        let table = table_value.as_any().downcast_ref::<StructArray>().unwrap();
+        let lengths = ListArray::try_new(
+            match table.fields()[9].data_type() {
+                DataType::List(item) => item.clone(),
+                _ => unreachable!(),
+            },
+            OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+            Arc::new(arrow::array::Int32Array::from(vec![1])),
+            None,
+        )
+        .unwrap();
+        let buckets = ListArray::try_new(
+            match table.fields()[10].data_type() {
+                DataType::List(item) => item.clone(),
+                _ => unreachable!(),
+            },
+            OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 2])),
+            Arc::new(Float64Array::from(vec![3.25, 7.5])),
+            None,
+        )
+        .unwrap();
+        let mut table_columns = table.columns().to_vec();
+        table_columns[9] = Arc::new(lengths);
+        table_columns[10] = Arc::new(buckets);
+        let malformed_table =
+            StructArray::try_new(table.fields().clone(), table_columns, None).unwrap();
+        let malformed_tables = ListArray::try_new(
+            match hist.fields()[1].data_type() {
+                DataType::List(item) => item.clone(),
+                _ => unreachable!(),
+            },
+            OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+            Arc::new(malformed_table),
+            None,
+        )
+        .unwrap();
+        let malformed_hist = StructArray::try_new(
+            hist.fields().clone(),
+            vec![hist.column(0).clone(), Arc::new(malformed_tables)],
+            None,
+        )
+        .unwrap();
+        let malformed_payload = StructArray::try_new(
+            payload.fields().clone(),
+            vec![payload.column(0).clone(), Arc::new(malformed_hist)],
+            None,
+        )
+        .unwrap();
+        let malformed_fields = StructArray::try_new(
+            fields.fields().clone(),
+            vec![Arc::new(malformed_payload)],
+            None,
+        )
+        .unwrap();
+        columns[3] = Arc::new(malformed_fields);
+        arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), columns).unwrap()
+    };
+    assert!(
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &malformed_histogram()
+        )
+        .is_err()
+    );
+
+    let mut hidden_float = valid_hist.columns().to_vec();
+    let fields = hidden_float[3]
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let payload = fields
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let float_field = match hist_schema_frame_field(&hist_schema) {
+        DataType::Struct(fields) => match fields[0].data_type() {
+            DataType::Struct(payload_fields) => payload_fields[0].clone(),
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let floats = ListArray::try_new(
+        match float_field.data_type() {
+            DataType::List(field) => field.clone(),
+            _ => unreachable!(),
+        },
+        OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
+        Arc::new(Float64Array::from(vec![Some(999.0)])),
+        Some(arrow::buffer::NullBuffer::new_null(1)),
+    )
+    .unwrap();
+    let payload = StructArray::try_new(
+        payload.fields().clone(),
+        vec![Arc::new(floats), payload.column(1).clone()],
+        None,
+    )
+    .unwrap();
+    let fields =
+        StructArray::try_new(fields.fields().clone(), vec![Arc::new(payload)], None).unwrap();
+    hidden_float[3] = Arc::new(fields);
+    let absent_float =
+        arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), hidden_float).unwrap();
+    let decoded_absent_float = unpack_raw_series_frame(
+        &hist_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &absent_float,
+    )
+    .unwrap();
+    assert_histogram(
+        match decoded_absent_float[0].fields.get(0).unwrap().sample(0) {
+            SampleRef::Histogram(histogram) => histogram,
+            _ => panic!("valid histogram was masked"),
+        },
+        -9.5,
+    );
+}
+
+#[test]
+fn decoded_key_and_payload_slices_keep_buffers_alive() {
+    let schema = test_schema(&["value"]);
+    let (owner, chunk, frames, decoded) = {
+        let owner = Float64Array::from(vec![Some(99.0), Some(2.5), None, Some(8.0)]);
+        let values = Samples::from_float(owner.slice(1, 2));
+        let chunk = RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(vec![0xaa_u8, 0x10, 0x20, 0xbb]),
+            None,
+            RawTimestamps::try_new(vec![0_i64, 11, 22, 33].into())
+                .unwrap()
+                .slice(1, 2)
+                .unwrap(),
+            SeriesFields::one(values),
+            true,
+        )
+        .unwrap();
+        let frames = pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &chunk,
+        )
+        .unwrap();
+        let decoded = unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &frames[0],
+        )
+        .unwrap();
+        (owner, chunk, frames, decoded)
+    };
+    let batch = frames[0].clone();
+    let fields = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let field_payload = fields
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let floats = field_payload
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::ListArray>()
+        .unwrap()
+        .values()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let decoded_floats = decoded[0].fields.get(0).unwrap();
+    let DenseSamplesRef::Float(source_floats) = chunk.fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!()
+    };
+    let DenseSamplesRef::Float(decoded_floats) = decoded_floats.dense().unwrap() else {
+        panic!()
+    };
+    assert_eq!(decoded_floats.values().as_ptr(), floats.values().as_ptr());
+    assert_eq!(
+        decoded_floats.values().as_ptr(),
+        owner.values().as_ptr().wrapping_add(1)
+    );
+    assert_eq!(
+        decoded_floats.values().as_ptr(),
+        source_floats.values().as_ptr()
+    );
+    let decoded_nulls = decoded_floats.nulls().unwrap();
+    let source_nulls = source_floats.nulls().unwrap();
+    assert_eq!(
+        decoded_nulls.buffer().as_ptr(),
+        source_nulls.buffer().as_ptr()
+    );
+    assert_eq!(decoded_nulls.offset(), source_nulls.offset());
+    let time_struct = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let timestamps = time_struct
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::ListArray>()
+        .unwrap();
+    let time_values = timestamps
+        .values()
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
+    let decoded_time = decoded[0].time.as_buffer();
+    assert_eq!(decoded_time.as_ptr(), time_values.values().as_ptr());
+    let source_time = chunk.time.as_buffer();
+    assert_eq!(decoded_time.as_ptr(), source_time.as_ptr());
+    drop(owner);
+    drop(chunk);
+    drop(frames);
+    drop(batch);
+    assert_eq!(&decoded_time[..], &[11, 22]);
+    assert!(matches!(decoded[0].fields.get(0).unwrap().sample(0), SampleRef::Float(v) if v == 2.5));
+    assert!(matches!(
+        decoded[0].fields.get(0).unwrap().sample(1),
+        SampleRef::Missing
+    ));
+    assert_eq!(decoded[0].primary_key.as_slice(), &[0xaa, 0x10, 0x20, 0xbb]);
+}
+
+#[test]
+fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
+    let schema = test_schema(&["mixed", "histogram"]);
+    let mut builder = HistogramBatchBuilder::new();
+    let custom = [1.5, 4.5];
+    let po = [1];
+    let pl = [2];
+    let pb = [3.25, 7.5];
+    let no = [-2];
+    let nl = [1];
+    let nb = [0.75];
+    for (sum, start_timestamp) in [(99.5, Some(-123)), (-9.5, Some(-123)), (90.5, None)] {
+        builder
+            .push(crate::series::histogram::HistogramView {
+                schema: -7,
+                zero_threshold: 0.125,
+                sum,
+                count: 17.25,
+                zero_count: 2.5,
+                reset_hint: CounterResetHint::Unrecognized(37),
+                start_timestamp,
+                custom_values: &custom,
+                positive: BucketSideView {
+                    span_offsets: &po,
+                    span_lengths: &pl,
+                    buckets: &pb,
+                },
+                negative: BucketSideView {
+                    span_offsets: &no,
+                    span_lengths: &nl,
+                    buckets: &nb,
+                },
+            })
+            .unwrap();
+    }
+    let original_table = builder.finish().unwrap();
+    let source_table = original_table.as_arrow();
+    let sliced_table = Arc::new(
+        crate::series::histogram::HistogramBatch::try_from_arrow(source_table.slice(1, 2)).unwrap(),
+    );
+    let indices_owner = UInt32Array::from(vec![Some(1), Some(0), None, Some(1)]);
+    let indices = indices_owner.slice(1, 2);
+    let histogram_indices_owner = UInt32Array::from(vec![Some(0), Some(1), Some(1), None]);
+    let histogram_indices = histogram_indices_owner.slice(1, 2);
+    let float_owner = Float64Array::from(vec![
+        Some(99.0),
+        None,
+        Some(f64::from_bits(0x400c_0000_0000_0001)),
+        Some(77.0),
+    ]);
+    let mixed = Samples::try_from_mixed(
+        float_owner.slice(1, 2),
+        crate::series::samples::HistogramSamples::try_new(indices.clone(), sliced_table.clone())
+            .unwrap(),
+    )
+    .unwrap();
+    let histogram =
+        Samples::try_from_histogram(histogram_indices.clone(), sliced_table.clone()).unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x42_u8]),
+        None,
+        RawTimestamps::try_new(vec![0_i64, 11, 22, 33].into())
+            .unwrap()
+            .slice(1, 2)
+            .unwrap(),
+        SeriesFields::try_from_vec(vec![mixed, histogram]).unwrap(),
+        true,
+    )
+    .unwrap();
+
+    let source_indices = match chunk.fields.get(0).unwrap().dense().unwrap() {
+        DenseSamplesRef::Mixed(mixed) => mixed.histograms().indices(),
+        _ => panic!("expected mixed source"),
+    };
+    assert_eq!(source_indices.offset(), 0);
+    assert_eq!(source_indices.value(0), 0);
+    assert!(!source_indices.is_valid(1));
+    assert_eq!(
+        source_indices.values().as_ptr(),
+        indices_owner.values().as_ptr().wrapping_add(1)
+    );
+    assert_eq!(
+        source_indices.nulls().unwrap().buffer().as_ptr(),
+        indices_owner.nulls().unwrap().buffer().as_ptr()
+    );
+    assert_eq!(source_indices.nulls().unwrap().offset(), 1);
+    assert_eq!(histogram_indices.value(0), 1);
+    assert_eq!(histogram_indices.value(1), 1);
+    assert_eq!(
+        histogram_indices.values().as_ptr(),
+        histogram_indices_owner.values().as_ptr().wrapping_add(1)
+    );
+    assert_eq!(
+        histogram_indices.nulls().unwrap().buffer().as_ptr(),
+        histogram_indices_owner.nulls().unwrap().buffer().as_ptr()
+    );
+    assert_eq!(histogram_indices.nulls().unwrap().offset(), 1);
+    assert_eq!(sliced_table.len(), 2);
+    let source_sum = source_table
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let sliced_sum = sliced_table
+        .as_arrow()
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(
+        sliced_sum.values().as_ptr(),
+        source_sum.values().as_ptr().wrapping_add(1)
+    );
+    let source_positive = source_table
+        .column(10)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let sliced_positive = sliced_table
+        .as_arrow()
+        .column(10)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let sliced_table_offset = sliced_table.as_arrow().offset();
+    assert_eq!(sliced_positive.offset(), source_positive.offset());
+    assert_eq!(
+        sliced_positive.value_offsets().as_ptr(),
+        source_positive.value_offsets().as_ptr().wrapping_add(1)
+    );
+    assert_eq!(
+        sliced_positive.value_offsets()[sliced_table_offset],
+        source_positive.value_offsets()[1]
+    );
+    assert_eq!(
+        sliced_positive.value_offsets()[sliced_table_offset + 1],
+        source_positive.value_offsets()[2]
+    );
+    assert_eq!(
+        sliced_positive
+            .values()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .values()
+            .as_ptr(),
+        source_positive
+            .values()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .values()
+            .as_ptr()
+    );
+    let source_times = chunk.time.as_buffer();
+
+    // One row per batch keeps this fixture's single constituents and their nonzero offsets
+    // observable: the default budget could coalesce several rows and copy their payloads.
+    let frames = pack_chunk_with_budget(
+        &schema,
+        FrameLabelMode::Key,
+        &chunk,
+        1,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+    .unwrap();
+    assert_eq!(frames.len(), 1);
+    let packed = &frames[0];
+    let packed_times = packed
+        .column(2)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap()
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .values()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(packed_times.values().as_ptr(), source_times.as_ptr());
+    assert_eq!(packed_times.values(), source_times);
+    let packed_mixed_indices = frame_field_payload(packed, 0)
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap()
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .values()
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    let packed_hist_indices = frame_field_payload(packed, 1)
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap()
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .values()
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    assert_eq!(
+        packed_mixed_indices,
+        &UInt32Array::from(vec![Some(0), None])
+    );
+    assert_eq!(
+        packed_hist_indices,
+        &UInt32Array::from(vec![Some(0), Some(0)]),
+        "both positions name the same distinct row"
+    );
+    let packed_mixed_table = frame_histogram_table(packed, 0);
+    let packed_hist_table = frame_histogram_table(packed, 1);
+    assert_eq!(packed_mixed_table.len(), 1);
+    assert_eq!(packed_hist_table.len(), 1);
+    let decoded = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        packed,
+    )
+    .unwrap();
+    let DenseSamplesRef::Mixed(decoded_mixed) = decoded[0].fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("mixed representation was normalized");
+    };
+    let DenseSamplesRef::Histogram(decoded_histogram) =
+        decoded[0].fields.get(1).unwrap().dense().unwrap()
+    else {
+        panic!("histogram representation was normalized");
+    };
+    let decoded_time_values = decoded[0].time.as_buffer();
+    assert_eq!(decoded_time_values.as_ptr(), packed_times.values().as_ptr());
+    assert_eq!(decoded_time_values, source_times);
+    assert_eq!(
+        decoded_mixed.histograms().indices(),
+        &UInt32Array::from(vec![Some(0), None])
+    );
+    assert_eq!(
+        decoded_histogram.indices(),
+        &UInt32Array::from(vec![Some(0), Some(0)]),
+        "both positions name the one distinct row"
+    );
+    assert_eq!(decoded_mixed.histograms().indices().value(0), 0);
+    assert!(!decoded_mixed.histograms().indices().is_valid(1));
+    assert_eq!(
+        decoded_mixed.floats().values().as_ptr(),
+        float_owner.values().as_ptr().wrapping_add(1)
+    );
+    assert_eq!(
+        decoded_mixed.floats().nulls().unwrap().buffer().as_ptr(),
+        float_owner.nulls().unwrap().buffer().as_ptr()
+    );
+    assert_eq!(decoded_mixed.floats().nulls().unwrap().offset(), 1);
+    assert_eq!(decoded_histogram.indices().value(0), 0);
+    assert_eq!(decoded_histogram.indices().value(1), 0);
+    assert_eq!(decoded_histogram.batch().len(), 1);
+    assert_histogram_with_start(
+        decoded_mixed.histograms().batch().view(0).unwrap(),
+        -9.5,
+        Some(-123),
+    );
+    // Both positions name the one distinct row of the compact table.
+    assert_histogram_with_start(decoded_histogram.batch().view(0).unwrap(), 90.5, None);
+
+    drop(packed_mixed_table);
+    drop(packed_hist_table);
+    drop(original_table);
+    drop(indices);
+    drop(histogram_indices);
+    drop(indices_owner);
+    drop(histogram_indices_owner);
+    drop(float_owner);
+    drop(sliced_table);
+    drop(chunk);
+    drop(frames);
+
+    assert_eq!(decoded_histogram.batch().len(), 1);
+    assert_histogram_with_start(
+        decoded_mixed.histograms().batch().view(0).unwrap(),
+        -9.5,
+        Some(-123),
+    );
+    assert_histogram_with_start(decoded_histogram.batch().view(0).unwrap(), 90.5, None);
+    assert!(matches!(
+        decoded[0].fields.get(0).unwrap().sample(0),
+        SampleRef::Histogram(_)
+    ));
+    assert!(
+        matches!(decoded[0].fields.get(0).unwrap().sample(1), SampleRef::Float(v) if v.to_bits() == 0x400c_0000_0000_0001)
+    );
+}
+
+#[test]
+fn malformed_pack_input_is_revalidated_before_encoding() {
+    let schema = test_schema(&["value"]);
+    let chunk = float_chunk(
+        &schema,
+        &[1],
+        None,
+        vec![1, 2],
+        vec![Some(3.0), Some(4.0)],
+        true,
+    );
+    let invalid = RawSeriesChunk {
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(3.0)]))),
+        ..chunk
+    };
+    assert!(
+        pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &invalid
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn public_segments_are_flat_ordered_and_retain_empty_dense_kinds() {
+    let histogram =
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), histogram_batch()).unwrap();
+    let mixed = Samples::try_from_mixed(
+        Float64Array::from(vec![Some(2.5)]),
+        crate::series::samples::HistogramSamples::try_new(
+            UInt32Array::from(vec![None]),
+            histogram_batch(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let empty_float = Samples::from_float(Float64Array::new_null(0));
+    let empty_histogram = Samples::try_from_histogram(
+        UInt32Array::from(Vec::<Option<u32>>::new()),
+        histogram_batch(),
+    )
+    .unwrap();
+    let empty_mixed = Samples::try_from_mixed(
+        Float64Array::new_null(0),
+        crate::series::samples::HistogramSamples::try_new(
+            UInt32Array::from(Vec::<Option<u32>>::new()),
+            histogram_batch(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    for (samples, expected_len) in [(&empty_float, 0), (&empty_histogram, 0), (&empty_mixed, 0)] {
+        assert_eq!(samples.segments().len(), 1);
+        assert_eq!(samples.segments()[0].len(), expected_len);
+        assert!(samples.segments()[0].dense().is_some());
+    }
+
+    let first_segment_owner = Float64Array::from(vec![1.0, 2.0]);
+    let nested = Samples::try_from_chunks(vec![
+        Samples::try_from_chunks(vec![
+            empty_float.clone(),
+            Samples::from_float(first_segment_owner.clone()),
+        ])
+        .unwrap(),
+        empty_histogram.clone(),
+        Samples::try_from_chunks(vec![histogram, empty_mixed.clone(), mixed]).unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(nested.len(), 4);
+    assert_eq!(nested.segments().len(), 3);
+    let DenseSamplesRef::Float(first_segment) = nested.segments()[0].dense().unwrap() else {
+        panic!("expected float segment");
+    };
+    assert_eq!(
+        first_segment.values().as_ptr(),
+        first_segment_owner.values().as_ptr()
+    );
+    let mut start = 0;
+    let mut starts = Vec::new();
+    for segment in nested.segments() {
+        starts.push(start);
+        assert!(segment.dense().is_some());
+        start += segment.len();
+    }
+    assert_eq!(starts, [0, 2, 3]);
+    assert_eq!(start, nested.len());
+    assert!(nested.dense().is_none());
+
+    let discarded_empty = Samples::try_from_chunks(vec![
+        empty_float.clone(),
+        Samples::from_float(Float64Array::from(vec![1.0])),
+        empty_histogram.clone(),
+        Samples::from_float(Float64Array::from(vec![2.0])),
+    ])
+    .unwrap();
+    assert_eq!(discarded_empty.segments().len(), 2);
+    assert_eq!(discarded_empty.segments()[0].len(), 1);
+    assert_eq!(discarded_empty.segments()[1].len(), 1);
+    let all_empty = Samples::try_from_chunks(vec![empty_histogram, empty_mixed]).unwrap();
+    assert_eq!(all_empty.segments().len(), 1);
+    assert_eq!(all_empty.segments()[0].len(), 0);
+    assert!(matches!(
+        all_empty.segments()[0].dense(),
+        Some(DenseSamplesRef::Float(_))
+    ));
+}
+
+#[test]
+fn cross_chunk_rows_coalesce_into_one_multirow_batch() {
+    let schema = test_schema(&["value"]);
+    let first = float_chunk(
+        &schema,
+        &[0xaa],
+        None,
+        vec![10, 20],
+        vec![Some(1.0), None],
+        false,
+    );
+    let second = float_chunk(
+        &schema,
+        &[0xbb],
+        None,
+        vec![30, 40, 50],
+        vec![Some(3.0), Some(4.0), None],
+        true,
+    );
+    assert_eq!(SeriesFrameBuilder::DEFAULT_MAX_ROWS, 256);
+    assert_eq!(SeriesFrameBuilder::DEFAULT_MAX_BYTES, 1 << 20);
+    let expected =
+        series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
+
+    let mut builder = SeriesFrameBuilder::try_new(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+    .unwrap();
+    assert_eq!(builder.schema(), &expected);
+
+    let mut batches = append_chunk(&mut builder, &schema, FrameLabelMode::Key, &first).unwrap();
+    batches.extend(append_chunk(&mut builder, &schema, FrameLabelMode::Key, &second).unwrap());
+    if let Some(batch) = builder.flush().unwrap() {
+        batches.push(batch);
+    }
+    // Rows of both chunks coalesce into one batch: a partially filled buffer must survive the
+    // cursor boundary instead of becoming a batch of its own.
+    assert_eq!(batches.len(), 1);
+    let batch = &batches[0];
+    assert_eq!(batch.num_rows(), 2);
+    assert_eq!(batch.schema(), expected);
+    assert_eq!(
+        batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["read_key", "is_last", "time", "fields"]
+    );
+    for (key, value) in [
+        ("greptime.series.layout", "v1"),
+        ("greptime.series.content", "raw"),
+        ("greptime.series.labels", "key"),
+        ("greptime.series.time", "timestamps"),
+    ] {
+        assert_eq!(
+            batch.schema().metadata().get(key).map(String::as_str),
+            Some(value)
+        );
+    }
+
+    let keys = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .unwrap();
+    assert_eq!(keys.value(0), &[0xaa]);
+    assert_eq!(keys.value(1), &[0xbb]);
+    let lasts = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .unwrap();
+    assert_eq!(
+        (0..2).map(|row| lasts.value(row)).collect::<Vec<_>>(),
+        [false, true]
+    );
+    let times = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap()
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert_eq!(times.value_offsets(), [0, 2, 5]);
+    assert_eq!(
+        times
+            .values()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[10_i64, 20, 30, 40, 50]
+    );
+    let floats = frame_field_payload(batch, 0)
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert_eq!(floats.value_offsets(), [0, 2, 5]);
+    let float_values = floats
+        .values()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(
+        (0..float_values.len())
+            .map(|position| float_values.is_valid(position))
+            .collect::<Vec<_>>(),
+        [true, false, true, true, false]
+    );
+    assert_eq!(float_values.value(0).to_bits(), 1.0_f64.to_bits());
+    assert_eq!(float_values.value(2).to_bits(), 3.0_f64.to_bits());
+    assert_eq!(float_values.value(3).to_bits(), 4.0_f64.to_bits());
+
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &batches);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[0xaa]);
+    assert!(!decoded[0].is_last);
+    assert_eq!(
+        (0..decoded[0].time.len())
+            .map(|position| decoded[0].time.timestamp(position).unwrap())
+            .collect::<Vec<_>>(),
+        [10, 20]
+    );
+    assert_float_bits(decoded[0].fields.get(0).unwrap(), &[Some(1.0), None]);
+    assert_eq!(decoded[1].primary_key.as_slice(), &[0xbb]);
+    assert!(decoded[1].is_last);
+    assert_eq!(
+        (0..decoded[1].time.len())
+            .map(|position| decoded[1].time.timestamp(position).unwrap())
+            .collect::<Vec<_>>(),
+        [30, 40, 50]
+    );
+    assert_float_bits(
+        decoded[1].fields.get(0).unwrap(),
+        &[Some(3.0), Some(4.0), None],
+    );
+    assert_eq!(decoded.iter().map(|row| row.time.len()).sum::<usize>(), 5);
+}
+
+#[test]
+fn raw_frame_builder_emits_at_the_row_budget_without_another_cursor() {
+    let schema = test_schema(&["value"]);
+    let chunks = [
+        float_chunk(&schema, &[1], None, vec![1], vec![Some(1.0)], false),
+        float_chunk(&schema, &[2], None, vec![2], vec![Some(2.0)], false),
+        float_chunk(&schema, &[3], None, vec![3], vec![Some(3.0)], true),
+    ];
+
+    for max_rows in [2usize, 3] {
+        let mut builder = SeriesFrameBuilder::try_new(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            max_rows,
+            SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        )
+        .unwrap();
+        let mut emitted_at = None;
+        let mut batches = Vec::new();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let produced = append_chunk(&mut builder, &schema, FrameLabelMode::Key, chunk).unwrap();
+            assert!(produced.len() <= 1, "one cursor emits at most one batch");
+            if let Some(batch) = produced.first() {
+                assert!(
+                    emitted_at.replace(index).is_none(),
+                    "the row bound is reached once, without another cursor"
+                );
+                batches.push(batch.clone());
+            }
+        }
+        if let Some(batch) = builder.flush().unwrap() {
+            batches.push(batch);
+        }
+        // Three one-row chunks emit at the max_rows-th row: a budget of two is reached during the
+        // second chunk and a budget of three during the third, so no further cursor is needed.
+        assert_eq!(emitted_at, Some(max_rows - 1));
+        assert_eq!(batches[0].num_rows(), max_rows);
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            3
+        );
+        assert!(batches.iter().all(|batch| batch.num_rows() <= max_rows));
+        let keys = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(
+            (0..max_rows)
+                .map(|row| keys.value(row).to_vec())
+                .collect::<Vec<_>>(),
+            (1..=max_rows)
+                .map(|key| vec![key as u8])
+                .collect::<Vec<_>>()
+        );
+
+        let decoded = decode_batches(&schema, FrameLabelMode::Key, &batches);
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|row| row.time.timestamp(0).unwrap())
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            decoded.iter().map(|row| row.is_last).collect::<Vec<_>>(),
+            [false, false, true]
+        );
+    }
+}
+
+#[test]
+fn raw_frame_builder_rejects_zero_budgets_and_bounds_offsets() {
+    let schema = test_schema(&["value"]);
+    // Zero in either budget is not a legal configuration; the literals take the parameter's type.
+    assert!(
+        SeriesFrameBuilder::try_new(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            0,
+            SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        )
+        .is_err()
+    );
+    assert!(
+        SeriesFrameBuilder::try_new(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+            0,
+        )
+        .is_err()
+    );
+    assert!(
+        SeriesFrameBuilder::try_new(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            0,
+            0
+        )
+        .is_err()
+    );
+    assert!(
+        SeriesFrameBuilder::try_new(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            1,
+            SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        )
+        .is_ok()
+    );
+
+    // Cumulative Arrow list offsets are bounded through the shared helper, so the limit is proven
+    // without allocating a two-gigabyte fixture.
+    assert_eq!(checked_offset(i32::MAX as usize).unwrap(), i32::MAX);
+    assert!(checked_offset(i32::MAX as usize + 1).is_err());
+    assert!(checked_offset(usize::MAX).is_err());
+}
+
+#[test]
+fn byte_budget_emits_legal_oversized_rows_without_dropping_them() {
+    let schema = test_schema(&["value"]);
+    let owner = Float64Array::from(vec![Some(1.0), Some(2.0), Some(3.0)]);
+    let samples = Samples::try_from_chunks(
+        (0..3)
+            .map(|position| Samples::from_float(owner.slice(position, 1)))
+            .collect(),
+    )
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x9a_u8]),
+        None,
+        RawTimestamps::try_new(vec![7_i64, 8, 9].into()).unwrap(),
+        SeriesFields::one(samples),
+        true,
+    )
+    .unwrap();
+
+    // A one-byte budget cannot hold any row, yet every legal row is still emitted as its own
+    // batch instead of being dropped or merged.
+    let batches = pack_chunk_with_budget(
+        &schema,
+        FrameLabelMode::Key,
+        &chunk,
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        1,
+    )
+    .unwrap();
+    assert_eq!(batches.len(), 3);
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch.num_rows() == 1 && batch.schema() == batches[0].schema()),
+        "an oversized row is emitted alone, never dropped"
+    );
+
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &batches);
+    assert_eq!(decoded.len(), 3);
+    for (position, row) in decoded.iter().enumerate() {
+        assert_eq!(row.primary_key.as_slice(), &[0x9a]);
+        assert_eq!(row.time.timestamp(0), Some(7 + position as i64));
+        assert_eq!(row.is_last, position == 2);
+        assert_float_bits(row.fields.get(0).unwrap(), &[Some(position as f64 + 1.0)]);
+    }
+}
+
+#[test]
+fn byte_budget_flushes_before_exceeding_and_retries_the_pending_row() {
+    let schema = test_schema(&["value"]);
+    let chunks = [
+        float_chunk(&schema, &[1], None, vec![10], vec![Some(1.0)], false),
+        float_chunk(&schema, &[2], None, vec![20], vec![Some(2.0)], true),
+    ];
+    // The bound comes from the real rows instead of a fabricated counter: one byte less than
+    // both rows together fits the first row alone, so the second one must not join it.
+    let mut measured = Vec::with_capacity(chunks.len());
+    for chunk in &chunks {
+        let mut cursor =
+            SeriesFrameCursor::try_new_raw(&schema, FrameLabelMode::Key, chunk.clone()).unwrap();
+        measured.push(cursor.next_row(None).unwrap().unwrap().bytes);
+    }
+    let budget = measured[0] + measured[1] - 1;
+
+    let mut builder = SeriesFrameBuilder::try_new(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        budget,
+    )
+    .unwrap();
+    let mut first =
+        SeriesFrameCursor::try_new_raw(&schema, FrameLabelMode::Key, chunks[0].clone()).unwrap();
+    assert!(first.append_to(&mut builder).unwrap().is_none());
+
+    let mut second =
+        SeriesFrameCursor::try_new_raw(&schema, FrameLabelMode::Key, chunks[1].clone()).unwrap();
+    let emitted = second.append_to(&mut builder).unwrap().unwrap();
+    assert_eq!(emitted.num_rows(), 1, "the first row is flushed alone");
+    // The second row stays pending across the flush and is retried, never dropped.
+    assert!(second.append_to(&mut builder).unwrap().is_none());
+    let remainder = builder.flush().unwrap().unwrap();
+    assert_eq!(remainder.num_rows(), 1);
+
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &[emitted, remainder]);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[1]);
+    assert_eq!(decoded[1].primary_key.as_slice(), &[2]);
+    assert_eq!(decoded[0].time.timestamp(0), Some(10));
+    assert_eq!(decoded[1].time.timestamp(0), Some(20));
+    assert_eq!(
+        decoded.iter().map(|row| row.is_last).collect::<Vec<_>>(),
+        [false, true]
+    );
+    assert_float_bits(decoded[0].fields.get(0).unwrap(), &[Some(1.0)]);
+    assert_float_bits(decoded[1].fields.get(0).unwrap(), &[Some(2.0)]);
+
+    // A requested byte bound is clamped to the representable cumulative offset range, and that
+    // range is rejected before any child array is allocated.
+    let clamped = SeriesFrameBuilder::try_new(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(clamped.max_bytes, i32::MAX as usize);
+    assert!(offset_buffer(&[i32::MAX as usize, 1]).is_err());
+}
+
+#[test]
+fn histogram_tables_encode_only_referenced_rows_and_remap_indices() {
+    let schema = test_schema(&["histogram", "mixed", "all_null"]);
+    let table = histogram_batch();
+    let indices = UInt32Array::from(vec![Some(1), None, Some(0), Some(1)]);
+    let mixed = Samples::try_from_mixed(
+        Float64Array::from(vec![None, Some(12.5), None, None]),
+        crate::series::samples::HistogramSamples::try_new(indices.clone(), table.clone()).unwrap(),
+    )
+    .unwrap();
+    let fields = SeriesFields::try_from_vec(vec![
+        Samples::try_from_histogram(indices.clone(), table.clone()).unwrap(),
+        mixed,
+        Samples::try_from_histogram(UInt32Array::new_null(4), table.clone()).unwrap(),
+    ])
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x71_u8]),
+        None,
+        RawTimestamps::try_new(vec![1_i64, 2, 3, 4].into()).unwrap(),
+        fields,
+        true,
+    )
+    .unwrap();
+    let packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
+    let (encoded_indices, _) = frame_histogram_lists(&packed[0], 0);
+    let encoded_indices = encoded_indices
+        .value(0)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap()
+        .clone();
+    // Source indices are [1, null, 0, 1]: row 1 is named first and then row 0, and the second
+    // reference to row 1 reuses the first encoded row.
+    assert_eq!(
+        encoded_indices,
+        UInt32Array::from(vec![Some(0), None, Some(1), Some(0)])
+    );
+    assert_eq!(
+        frame_histogram_table(&packed[0], 0).len(),
+        2,
+        "one encoded row per distinct referenced row, not per reference"
+    );
+    assert_eq!(frame_histogram_table(&packed[0], 1).len(), 2);
+    assert_eq!(frame_histogram_table(&packed[0], 2).len(), 0);
+
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &packed);
+    let DenseSamplesRef::Histogram(histograms) = decoded[0].fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("histogram representation was normalized");
+    };
+    assert_eq!(
+        histograms.indices(),
+        &UInt32Array::from(vec![Some(0), None, Some(1), Some(0)])
+    );
+    assert_histogram_with_start(histograms.view_at(0).unwrap(), 90.5, None);
+    assert_histogram_with_start(histograms.view_at(2).unwrap(), -9.5, Some(-123));
+    assert_histogram_with_start(histograms.view_at(3).unwrap(), 90.5, None);
+
+    let DenseSamplesRef::Mixed(mixed) = decoded[0].fields.get(1).unwrap().dense().unwrap() else {
+        panic!("mixed representation was normalized");
+    };
+    assert_eq!(mixed.histograms().indices(), histograms.indices());
+    for (index, expected) in [None, Some(12.5_f64), None, None].into_iter().enumerate() {
+        match (
+            mixed.floats().is_valid(index),
+            mixed.floats().value(index),
+            expected,
+        ) {
+            (false, _, None) => {}
+            (true, actual, Some(expected)) => {
+                assert_eq!(actual.to_bits(), expected.to_bits(), "position {index}");
+            }
+            _ => panic!("unexpected mixed float at position {index}"),
+        }
+    }
+    assert!(mixed.floats().is_null(0));
+    assert!(mixed.histograms().indices().is_valid(0));
+    assert!(mixed.floats().is_valid(1));
+    assert!(!mixed.histograms().indices().is_valid(1));
+    assert_histogram_with_start(mixed.histograms().view_at(0).unwrap(), 90.5, None);
+    assert_histogram_with_start(mixed.histograms().view_at(2).unwrap(), -9.5, Some(-123));
+    assert_histogram_with_start(mixed.histograms().view_at(3).unwrap(), 90.5, None);
+
+    let DenseSamplesRef::Histogram(all_null) = decoded[0].fields.get(2).unwrap().dense().unwrap()
+    else {
+        panic!("all-null histogram representation was normalized");
+    };
+    assert_eq!(all_null.indices().len(), 4);
+    assert!((0..4).all(|index| !all_null.indices().is_valid(index)));
+    assert_eq!(all_null.batch().len(), 0);
+}
+
+#[test]
+fn repeated_references_to_one_histogram_row_encode_it_once() {
+    let schema = test_schema(&["histogram"]);
+    let table = histogram_batch();
+    // Every position names the same row: the encoded payload must grow with distinct named rows,
+    // not with positions.
+    let positions = 10_000;
+    let indices = UInt32Array::from(vec![Some(1); positions]);
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x33_u8]),
+        None,
+        RawTimestamps::try_new((0..positions as i64).collect::<Vec<_>>().into()).unwrap(),
+        SeriesFields::one(Samples::try_from_histogram(indices, table).unwrap()),
+        true,
+    )
+    .unwrap();
+    let packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
+    let (encoded_indices, _) = frame_histogram_lists(&packed[0], 0);
+    let encoded = encoded_indices
+        .value(0)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap()
+        .clone();
+    assert_eq!(encoded.len(), positions);
+    assert!(
+        (0..positions).all(|position| encoded.value(position) == 0),
+        "every position reuses the one encoded row"
+    );
+    assert_eq!(
+        frame_histogram_table(&packed[0], 0).len(),
+        1,
+        "one distinct referenced row, regardless of how often it is referenced"
+    );
+
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &packed);
+    let DenseSamplesRef::Histogram(histograms) = decoded[0].fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("histogram representation was normalized");
+    };
+    assert_eq!(histograms.batch().len(), 1);
+    // Row 1 of the fixture is the one with sum 90.5 and no start timestamp.
+    for position in [0, positions / 2, positions - 1] {
+        assert_histogram_with_start(histograms.view_at(position).unwrap(), 90.5, None);
+    }
+}
+
+#[test]
+fn multirow_histogram_rows_keep_row_local_indices_and_tables() {
+    let schema = test_schema(&["histogram"]);
+    let first_table = histogram_batch();
+    let second_table = histogram_batch_with_sum(42.25);
+    let first_row =
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0), None]), first_table).unwrap();
+    let second_row =
+        Samples::try_from_histogram(UInt32Array::from(vec![None, Some(0)]), second_table).unwrap();
+    let fields = SeriesFields::one(Samples::try_from_chunks(vec![first_row, second_row]).unwrap());
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x5a_u8]),
+        None,
+        RawTimestamps::try_new(vec![1_i64, 2, 3, 4].into()).unwrap(),
+        fields,
+        true,
+    )
+    .unwrap();
+
+    // The public wrapper groups two independent rows into one multirow batch.
+    let packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
+    assert_eq!(packed.len(), 1);
+    assert_eq!(packed[0].num_rows(), 2);
+
+    let (indices, tables) = frame_histogram_lists(&packed[0], 0);
+    let encoded_first = indices.value(0);
+    let encoded_first = encoded_first
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    assert_eq!(encoded_first.value(0), 0);
+    assert!(!encoded_first.is_valid(1));
+    let encoded_second = indices.value(1);
+    let encoded_second = encoded_second
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    assert!(!encoded_second.is_valid(0));
+    assert_eq!(
+        encoded_second.value(1),
+        0,
+        "indices must be remapped within their row's compact table"
+    );
+    // Each row's sole referenced table entry is encoded independently.
+    assert_eq!(tables.value_offsets(), [0, 1, 2]);
+    let concatenated = tables
+        .values()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert_eq!(concatenated.len(), 2);
+
+    let decoded = decode_batches(
+        &schema,
+        FrameLabelMode::Key,
+        std::slice::from_ref(&packed[0]),
+    );
+    assert_row_local_histogram_rows(&decoded);
+
+    // A real Arrow IPC round trip keeps the schema, compact row tables, null index entries and
+    // the bit-exact referenced payloads.
+    let mut ipc = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut ipc, &packed[0].schema()).unwrap();
+        writer.write(&packed[0]).unwrap();
+        writer.finish().unwrap();
+    }
+    let reader = StreamReader::try_new(std::io::Cursor::new(ipc), None).unwrap();
+    let restored = reader.map(|batch| batch.unwrap()).collect::<Vec<_>>();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].schema(), packed[0].schema());
+    assert_eq!(restored[0].num_rows(), 2);
+    let (restored_indices, restored_tables) = frame_histogram_lists(&restored[0], 0);
+    assert_eq!(restored_tables.value_offsets(), tables.value_offsets());
+    let restored_second = restored_indices.value(1);
+    assert_eq!(
+        restored_second
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap()
+            .value(1),
+        0
+    );
+    let restored_rows = decode_batches(&schema, FrameLabelMode::Key, &restored);
+    assert_row_local_histogram_rows(&restored_rows);
+}
+
+#[test]
+fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
+    let schema = test_schema(&["value"]);
+    let expected =
+        series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
+    let first = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &float_chunk(
+            &schema,
+            &[1],
+            None,
+            vec![1, 2],
+            vec![Some(1.0), Some(2.0)],
+            false,
+        ),
+    )
+    .unwrap()
+    .remove(0);
+    let second = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &float_chunk(&schema, &[2], None, vec![3], vec![Some(3.0)], true),
+    )
+    .unwrap()
+    .remove(0);
+
+    let key_decoder =
+        SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Key, Some(&dense_description()))
+            .unwrap();
+    let decoded = key_decoder.decode_raw(&first).unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[1]);
+    assert_eq!(
+        match decoded[0].fields.get(0).unwrap().dense().unwrap() {
+            crate::series::samples::DenseSamplesRef::Float(values) => values.value(0),
+            _ => panic!("expected float samples"),
+        },
+        1.0
+    );
+    assert_eq!(
+        (0..decoded[0].time.len())
+            .map(|position| decoded[0].time.timestamp(position).unwrap())
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    // The same decoder accepts a later valid batch before the malformed ones below.
+    let decoded = key_decoder.decode_raw(&second).unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[2]);
+    assert!(decoded[0].is_last);
+
+    // Unrelated metadata is not part of the raw frame contract.
+    let mut unrelated_metadata = second.schema().metadata().clone();
+    unrelated_metadata.insert("application.note".to_string(), "ignored".to_string());
+    let unrelated = arrow::record_batch::RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(
+            expected.fields().clone(),
+            unrelated_metadata,
+        )),
+        second.columns().to_vec(),
+    )
+    .unwrap();
+    assert_eq!(key_decoder.decode_raw(&unrelated).unwrap().len(), 1);
+
+    // Reserved metadata and evolved fields are rejected, including by a zero-row batch.
+    for (key, value) in [
+        // `v1` is the layout this decoder expects, so `v2` is the wrong one.
+        ("greptime.series.layout", "v2"),
+        ("greptime.series.content", "evaluated"),
+        ("greptime.series.labels", "explicit"),
+        ("greptime.series.time", "grid"),
+    ] {
+        let mut metadata = second.schema().metadata().clone();
+        metadata.insert(key.to_string(), value.to_string());
+        let contaminated = arrow::record_batch::RecordBatch::try_new(
+            Arc::new(Schema::new_with_metadata(
+                expected.fields().clone(),
+                metadata,
+            )),
+            second.columns().to_vec(),
+        )
+        .unwrap();
+        assert!(
+            key_decoder.decode_raw(&contaminated).is_err(),
+            "{key} must be rejected"
+        );
+    }
+    let evolved_schema = test_schema(&["other"]);
+    let evolved = pack_raw_series_chunk(
+        &evolved_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &float_chunk(&evolved_schema, &[3], None, vec![4], vec![Some(4.0)], false),
+    )
+    .unwrap()
+    .remove(0);
+    assert!(key_decoder.decode_raw(&evolved).is_err());
+    let empty_evolved = arrow::record_batch::RecordBatch::new_empty(
+        series_frame_schema(
+            &evolved_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+        )
+        .unwrap(),
+    );
+    assert!(key_decoder.decode_raw(&empty_evolved).is_err());
+    // Rejections leave the cached schema usable, and a valid zero-row batch stays valid.
+    assert_eq!(key_decoder.decode_raw(&first).unwrap().len(), 1);
+    assert!(
+        key_decoder
+            .decode_raw(&arrow::record_batch::RecordBatch::new_empty(
+                expected.clone()
+            ))
+            .unwrap()
+            .is_empty()
+    );
+
+    // Explicit mode reuses one decoder for a present but nameless metric and a named one.
+    let explicit_decoder =
+        SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None).unwrap();
+    let nameless = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Explicit,
+        None,
+        &float_chunk(
+            &schema,
+            &[7],
+            Some(metric(None, &[("zone", "west")])),
+            vec![5],
+            vec![Some(5.0)],
+            true,
+        ),
+    )
+    .unwrap()
+    .remove(0);
+    let named = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Explicit,
+        None,
+        &float_chunk(
+            &schema,
+            &[8],
+            Some(metric(Some("cpu"), &[])),
+            vec![6],
+            vec![Some(6.0)],
+            false,
+        ),
+    )
+    .unwrap()
+    .remove(0);
+    let decoded = explicit_decoder.decode_raw(&nameless).unwrap();
+    let labels = decoded[0].metric.as_ref().unwrap();
+    assert_eq!(labels.name(), None);
+    assert_eq!(labels.get("zone"), Some("west"));
+    assert_eq!(
+        explicit_decoder.decode_raw(&named).unwrap()[0]
+            .metric
+            .as_ref()
+            .unwrap()
+            .name(),
+        Some("cpu")
+    );
+    // Label modes are not interchangeable.
+    assert!(explicit_decoder.decode_raw(&first).is_err());
+    assert!(key_decoder.decode_raw(&nameless).is_err());
+}
+
+/// A dense description carrying the ordered key columns and the logical tags the decoder reads.
+fn dense_description() -> LabelDecodeSpec {
+    LabelDecodeSpec {
+        version: LABEL_DECODE_VERSION,
+        metric_name: "cpu_usage".to_string(),
+        encoding: LabelDecodeEncoding::Dense,
+        primary_key: vec![
+            LabelDecodeColumn {
+                column_id: 1,
+                name: "host".to_string(),
+                physical_type: crate::data_type::ConcreteDataType::string_datatype(),
+            },
+            LabelDecodeColumn {
+                column_id: 2,
+                name: "region".to_string(),
+                physical_type: crate::data_type::ConcreteDataType::string_datatype(),
+            },
+        ],
+        logical_tags: vec![LabelDecodeTag {
+            column_id: 1,
+            name: "host".to_string(),
+        }],
+    }
+}
+
+#[test]
+fn label_decode_description_roundtrips_through_schema_metadata() {
+    let description = dense_description();
+    let key = series_frame_schema(
+        &test_schema(&["value"]),
+        FrameLabelMode::Key,
+        Some(&description),
+    )
+    .unwrap();
+    assert_eq!(
+        series_frame_label_decode(&key).unwrap(),
+        Some(description.clone())
+    );
+    // The description is metadata-only: the column contract is untouched, so only the
+    // `greptime.series.label_decode` text differs from a frame declaring another description.
+    let mut other = dense_description();
+    other.encoding = LabelDecodeEncoding::Sparse;
+    let other =
+        series_frame_schema(&test_schema(&["value"]), FrameLabelMode::Key, Some(&other)).unwrap();
+    assert_eq!(key.fields(), other.fields());
+    assert_ne!(
+        key.metadata().get(LABEL_DECODE),
+        other.metadata().get(LABEL_DECODE)
+    );
+    assert_eq!(key.metadata().get(LABELS).map(String::as_str), Some("key"));
+}
+
+#[test]
+fn explicit_frames_declare_no_label_decode_description() {
+    let schema = test_schema(&["value"]);
+    let explicit = series_frame_schema(&schema, FrameLabelMode::Explicit, None).unwrap();
+    assert!(explicit.metadata().get(LABEL_DECODE).is_none());
+    assert_eq!(series_frame_label_decode(&explicit).unwrap(), None);
+    // A key frame without a description, or an explicit frame with one, is rejected instead of
+    // being written as a frame the consumer cannot decode.
+    assert!(
+        series_frame_schema(&schema, FrameLabelMode::Key, None).is_err(),
+        "key-encoded frames must describe their labels"
+    );
+    assert!(
+        series_frame_schema(
+            &schema,
+            FrameLabelMode::Explicit,
+            Some(&dense_description())
+        )
+        .is_err(),
+        "explicit frames carry complete labels"
+    );
+}
+
+/// The raw frame's own columns with exactly the supplied metadata map.
+fn schema_with_metadata(metadata: Vec<(String, String)>) -> Schema {
+    let layout = series_frame_schema(
+        &test_schema(&["value"]),
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+    )
+    .unwrap();
+    Schema::new_with_metadata(layout.fields().clone(), metadata.into_iter().collect())
+}
+
+/// The five metadata entries every raw v2 frame declares, with the given label mode.
+fn base_metadata(labels: &str) -> Vec<(String, String)> {
+    [
+        ("greptime.series.layout", "v1"),
+        ("greptime.series.content", "raw"),
+        ("greptime.series.labels", labels),
+        ("greptime.series.time", "timestamps"),
+        ("greptime.series.ordering", "contiguous"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect()
+}
+
+/// A description the reader would refuse cannot be written into a frame.
+///
+/// The three shapes below are each a self-contradictory binding: a duplicate key column, a logical
+/// tag naming a column the primary key does not list, and a tag listed twice. Writing one would
+/// produce a frame no consumer could decode, so the producer is where it is refused. A frame that
+/// arrives already carrying one is a different case, and the decoder rejects those on read.
+#[test]
+fn label_decode_description_rejects_inconsistent_bindings_on_write() {
+    let schema = test_schema(&["value"]);
+    let mut cases = Vec::new();
+
+    let mut duplicate_column = dense_description();
+    duplicate_column.primary_key[1].column_id = 1;
+    cases.push(("duplicate primary-key column", duplicate_column));
+
+    let mut unbound_tag = dense_description();
+    unbound_tag.logical_tags[0].column_id = 3;
+    cases.push(("logical tag outside the primary key", unbound_tag));
+
+    let mut duplicate_tag = dense_description();
+    let tag = duplicate_tag.logical_tags[0].clone();
+    duplicate_tag.logical_tags.push(tag);
+    cases.push(("duplicate logical tag", duplicate_tag));
+
+    for (label, description) in cases {
+        // Both directions reject: a frame is worth writing only if it can be read back, so an
+        // inconsistent description is refused at the producer instead of being written faithfully
+        // and refused only once it reaches a consumer who cannot fix it. The case that must still
+        // reach the wire is a hand-built frame, which the fixture below covers.
+        assert!(
+            series_frame_schema(&schema, FrameLabelMode::Key, Some(&description)).is_err(),
+            "{label}: an inconsistent description is rejected when written"
+        );
+    }
+}
+
+/// A frame declaring no label mode has no label layout to describe. The rest of the parse and
+/// validation rejections (unknown version, missing/unknown/wrongly typed fields, malformed JSON,
+/// and mode and description disagreeing in either direction) are pinned case for case by
+/// [`raw_series_label_decode_metadata_fixture`], so they are not re-asserted here.
+#[test]
+fn label_decode_rejects_a_frame_without_a_label_mode() {
+    let without_mode = base_metadata("key")
+        .into_iter()
+        .filter(|(key, _)| key != LABELS)
+        .collect();
+    assert!(
+        series_frame_label_decode(&schema_with_metadata(without_mode)).is_err(),
+        "a frame without a label mode has no label layout to describe"
+    );
+}
+
+#[test]
+fn raw_series_label_decode_metadata_fixture() {
+    use std::collections::HashMap;
+
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        metadata: HashMap<String, String>,
+        /// The encoding a decoding consumer expects, or `null` when the fixture must be rejected.
+        encoding: Option<String>,
+    }
+
+    let cases: Vec<Case> = serde_json::from_str(include_str!(
+        "../../../../../tests/compatibility/wire/raw_series_label_decode/v1_metadata.json"
+    ))
+    .unwrap();
+    for case in cases {
+        let layout = series_frame_schema(
+            &test_schema(&["value"]),
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+        )
+        .unwrap();
+        let frame_schema =
+            Schema::new_with_metadata(layout.fields().clone(), case.metadata.clone());
+        match case.encoding.as_deref() {
+            None => assert!(
+                series_frame_label_decode(&frame_schema).is_err(),
+                "{}: must be rejected",
+                case.name
+            ),
+            Some(expected) => {
+                let decode = series_frame_label_decode(&frame_schema)
+                    .unwrap_or_else(|error| panic!("{}: {error}", case.name))
+                    .unwrap_or_else(|| panic!("{}: no description", case.name));
+                let encoding = match decode.encoding {
+                    LabelDecodeEncoding::Dense => "dense",
+                    LabelDecodeEncoding::Sparse => "sparse",
+                };
+                assert_eq!(encoding, expected, "{}", case.name);
+                assert_eq!(decode.version, LABEL_DECODE_VERSION, "{}", case.name);
+                assert_eq!(decode.metric_name, "cpu_usage", "{}", case.name);
+                assert_eq!(
+                    decode.primary_key,
+                    vec![
+                        LabelDecodeColumn {
+                            column_id: 1,
+                            name: "host".to_string(),
+                            physical_type: crate::data_type::ConcreteDataType::string_datatype(),
+                        },
+                        LabelDecodeColumn {
+                            column_id: 2,
+                            name: "shard".to_string(),
+                            physical_type: crate::data_type::ConcreteDataType::uint32_datatype(),
+                        },
+                    ],
+                    "{}: the ordered key columns are decoded in place",
+                    case.name
+                );
+                assert_eq!(
+                    decode.logical_tags,
+                    vec![
+                        LabelDecodeTag {
+                            column_id: 1,
+                            name: "host".to_string(),
+                        },
+                        LabelDecodeTag {
+                            column_id: 2,
+                            name: "shard".to_string(),
+                        },
+                    ],
+                    "{}",
+                    case.name
+                );
+                if expected == "dense" {
+                    // The fixture text is the encoder's own output, byte for byte: re-encoding the
+                    // description it decodes to must reproduce it exactly.
+                    let roundtrip = series_frame_schema(
+                        &test_schema(&["value"]),
+                        FrameLabelMode::Key,
+                        Some(&decode),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        roundtrip.metadata().get(LABEL_DECODE),
+                        case.metadata.get(LABEL_DECODE),
+                        "{}: re-encoding reproduces the fixture text",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A tag column typed as a timestamp is described like any other key column: the description
+/// carries its physical type, and the text is exactly what the encoder wrote.
+#[test]
+fn label_decode_description_carries_a_timestamp_typed_tag_column() {
+    let mut description = dense_description();
+    description.primary_key[1].name = "observed".to_string();
+    description.primary_key[1].physical_type =
+        crate::data_type::ConcreteDataType::timestamp_millisecond_datatype();
+    description.logical_tags.push(LabelDecodeTag {
+        column_id: 2,
+        name: "observed".to_string(),
+    });
+    let frame = series_frame_schema(
+        &test_schema(&["value"]),
+        FrameLabelMode::Key,
+        Some(&description),
+    )
+    .unwrap();
+    let text = frame.metadata().get(LABEL_DECODE).unwrap();
+    // The expected text is the encoder's real output for a timestamp-typed tag column.
+    assert!(
+        text.contains("\"physical_type\":{\"Timestamp\":{\"Millisecond\":null}}"),
+        "the encoder wrote a timestamp type: {text}"
+    );
+    let recovered = series_frame_label_decode(&frame).unwrap().unwrap();
+    assert_eq!(recovered, description);
+    assert_eq!(
+        recovered.primary_key[1].physical_type,
+        crate::data_type::ConcreteDataType::timestamp_millisecond_datatype()
+    );
+}
+
+/// Two producers that list the same logical tags in a different order write the same bytes.
+///
+/// The tag order carries no meaning to a decoder, so the writer sorts its own copy before
+/// serializing and leaves the caller's value alone. The encoding order of `primary_key` is a
+/// different thing entirely: it is the order of the key columns, so it is written as given.
+#[test]
+fn label_decode_text_is_independent_of_the_callers_tag_order() {
+    let mut ascending = dense_description();
+    ascending.logical_tags = vec![
+        LabelDecodeTag {
+            column_id: 1,
+            name: "host".to_string(),
+        },
+        LabelDecodeTag {
+            column_id: 2,
+            name: "region".to_string(),
+        },
+    ];
+    let mut descending = ascending.clone();
+    descending.logical_tags.reverse();
+    // The encoding order of the key columns is not the tag order: reverse it in the second
+    // description so a writer that sorted `primary_key` too would be caught below.
+    descending.primary_key.reverse();
+
+    let write = |description: &LabelDecodeSpec| {
+        let frame = series_frame_schema(
+            &test_schema(&["value"]),
+            FrameLabelMode::Key,
+            Some(description),
+        )
+        .unwrap();
+        frame.metadata().get(LABEL_DECODE).unwrap().clone()
+    };
+
+    let same_tags = {
+        let mut reordered = ascending.clone();
+        reordered.logical_tags.reverse();
+        write(&reordered)
+    };
+    assert_eq!(
+        write(&ascending),
+        same_tags,
+        "two tag orders wrote different bytes"
+    );
+    assert_eq!(
+        ascending.logical_tags,
+        vec![
+            LabelDecodeTag {
+                column_id: 1,
+                name: "host".to_string(),
+            },
+            LabelDecodeTag {
+                column_id: 2,
+                name: "region".to_string(),
+            },
+        ],
+        "the writer reordered the caller's description"
+    );
+    // The key columns keep the order they were given, so the two descriptions are different
+    // frames rather than the same bytes: that is the part canonicalization must not touch.
+    assert_ne!(
+        write(&ascending),
+        write(&descending),
+        "the writer reordered the encoding columns"
+    );
+    let recovered = series_frame_label_decode(
+        &series_frame_schema(
+            &test_schema(&["value"]),
+            FrameLabelMode::Key,
+            Some(&descending),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        recovered.primary_key, descending.primary_key,
+        "the recovered key order is not the encoding order"
+    );
+}
+/// One entry of `v1_physical_types.json`: a [`ConcreteDataType`] variant and the exact text this
+/// revision's serde writes for a representative value of it.
+#[derive(serde::Deserialize)]
+struct FrozenPhysicalType {
+    /// The [`ConcreteDataType`] variant, as [`concrete_datatype_variants`] spells it.
+    variant: String,
+    /// The `serde_json` text this revision writes for that variant's representative value.
+    text: String,
+}
+
+/// Spells every [`ConcreteDataType`] variant exactly once, together with one representative value of
+/// it.
+///
+/// Everything that has to notice a new variant is derived from this one list:
+///
+/// - [`variant_name`] matches on it with **no wildcard arm**, so adding a variant to
+///   [`ConcreteDataType`] is a compile error until the variant is added here.
+/// - [`datatype_representatives`] yields one value per listed variant, so the same edit is what
+///   supplies the value the tests read the serde text from.
+/// - [`VARIANT_NAMES`] is generated from it too, which is what
+///   [`the_frozen_text_covers_every_datatype_variant`] requires a fixture entry for.
+macro_rules! concrete_datatype_variants {
+    ($($variant:ident => $value:expr),+ $(,)?) => {
+        /// The [`ConcreteDataType`] variant a value belongs to, spelled as the fixture names it.
+        ///
+        /// Exhaustive on purpose: a new variant of [`ConcreteDataType`] makes this match fail to
+        /// compile, which is what makes a missing fixture entry impossible to land.
+        fn variant_name(data_type: &ConcreteDataType) -> &'static str {
+            match data_type {
+                $(ConcreteDataType::$variant(_) => stringify!($variant),)+
+            }
+        }
+
+        /// One representative value per variant, in the order listed above.
+        fn datatype_representatives() -> Vec<ConcreteDataType> {
+            vec![$($value),+]
+        }
+
+        /// Every [`ConcreteDataType`] variant name, in the order listed above.
+        const VARIANT_NAMES: &[&str] = &[$(stringify!($variant)),+];
+    };
+}
+
+concrete_datatype_variants!(
+    Null => ConcreteDataType::null_datatype(),
+    Boolean => ConcreteDataType::boolean_datatype(),
+    Int8 => ConcreteDataType::int8_datatype(),
+    Int16 => ConcreteDataType::int16_datatype(),
+    Int32 => ConcreteDataType::int32_datatype(),
+    Int64 => ConcreteDataType::int64_datatype(),
+    UInt8 => ConcreteDataType::uint8_datatype(),
+    UInt16 => ConcreteDataType::uint16_datatype(),
+    UInt32 => ConcreteDataType::uint32_datatype(),
+    UInt64 => ConcreteDataType::uint64_datatype(),
+    Float32 => ConcreteDataType::float32_datatype(),
+    Float64 => ConcreteDataType::float64_datatype(),
+    Decimal128 => ConcreteDataType::decimal128_datatype(10, 2),
+    Binary => ConcreteDataType::binary_datatype(),
+    String => ConcreteDataType::string_datatype(),
+    Date => ConcreteDataType::date_datatype(),
+    Timestamp => ConcreteDataType::timestamp_millisecond_datatype(),
+    Time => ConcreteDataType::time_microsecond_datatype(),
+    Duration => ConcreteDataType::duration_nanosecond_datatype(),
+    Interval => ConcreteDataType::interval_month_day_nano_datatype(),
+    List => ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
+    Dictionary => ConcreteDataType::dictionary_datatype(
+        ConcreteDataType::int32_datatype(),
+        ConcreteDataType::string_datatype(),
+    ),
+    Struct => ConcreteDataType::struct_datatype(crate::types::StructType::new(Arc::new(vec![
+        crate::types::StructField::new("host", ConcreteDataType::string_datatype(), false),
+        crate::types::StructField::new("port", ConcreteDataType::uint16_datatype(), true),
+    ]))),
+    Json => ConcreteDataType::json_datatype(),
+    Vector => ConcreteDataType::vector_datatype(3),
+);
+
+/// The frozen text of every [`ConcreteDataType`] variant, as a label decode description embeds it.
+const FROZEN_PHYSICAL_TYPES: &str = include_str!(
+    "../../../../../tests/compatibility/wire/raw_series_label_decode/v1_physical_types.json"
+);
+
+fn frozen_physical_types() -> Vec<FrozenPhysicalType> {
+    serde_json::from_str(FROZEN_PHYSICAL_TYPES).expect("the frozen physical-type fixture parses")
+}
+
+/// The representative value of one variant, named the way the fixture names it.
+fn representative(variant: &str) -> ConcreteDataType {
+    VARIANT_NAMES
+        .iter()
+        .zip(datatype_representatives())
+        .find(|(name, _)| **name == variant)
+        .unwrap_or_else(|| panic!("{variant}: no representative value is listed for this variant"))
+        .1
+}
+
+/// The text a description embeds for a key column's type is not this module's to spell: it is
+/// [`ConcreteDataType`]'s own serde, so it changes whenever that type's serde does.
+///
+/// `v1_physical_types.json` freezes that text for every variant. This test fails when a variant no
+/// longer parses back from its frozen text, when it no longer re-serializes to it, or when the
+/// parsed value is no longer the type that variant names — which is what a silent serde change
+/// looks like. Since the frame text is compared byte for byte across nodes, such a change is a
+/// [`LABEL_DECODE_VERSION`] bump, and this test is the alarm that raises it.
+#[test]
+fn every_datatype_round_trips_through_its_frozen_text() {
+    use crate::data_type::DataType as _;
+
+    for entry in frozen_physical_types() {
+        let parsed: ConcreteDataType = serde_json::from_str(&entry.text).unwrap_or_else(|error| {
+            panic!("{}: {} cannot be read: {error}", entry.variant, entry.text)
+        });
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            entry.text,
+            "{}: re-serializes to the frozen text",
+            entry.variant
+        );
+        assert_eq!(
+            parsed.name(),
+            representative(&entry.variant).name(),
+            "{}: the frozen text still names the same type",
+            entry.variant
+        );
+        assert_eq!(
+            parsed,
+            representative(&entry.variant),
+            "{}: the frozen text still describes the same value",
+            entry.variant
+        );
+    }
+}
+
+/// The fixture above only freezes a variant if it has an entry, so every variant must have one.
+///
+/// This test is what makes that hold: [`variant_name`] matches every [`ConcreteDataType`] variant
+/// with no wildcard arm, so a new variant does not compile until it is listed in
+/// [`concrete_datatype_variants`]; that listing also extends [`VARIANT_NAMES`] and
+/// [`datatype_representatives`], and this test then requires a fixture entry for it and rejects an
+/// entry naming a variant that does not exist.
+#[test]
+fn the_frozen_text_covers_every_datatype_variant() {
+    let frozen = frozen_physical_types();
+
+    for data_type in datatype_representatives() {
+        let variant = variant_name(&data_type);
+        let entry = frozen
+            .iter()
+            .find(|entry| entry.variant == variant)
+            .unwrap_or_else(|| {
+                panic!("{variant}: v1_physical_types.json has no entry for this datatype variant")
+            });
+        // The entry's text is this variant's text: read it back and name the variant it describes.
+        let parsed: ConcreteDataType = serde_json::from_str(&entry.text)
+            .unwrap_or_else(|error| panic!("{variant}: {} is unreadable: {error}", entry.text));
+        assert_eq!(
+            variant_name(&parsed),
+            variant,
+            "{variant}: the entry's text describes this variant"
+        );
+    }
+
+    // Nothing in the fixture names a variant that does not exist, and no variant is listed twice.
+    for entry in &frozen {
+        assert!(
+            VARIANT_NAMES.contains(&entry.variant.as_str()),
+            "{}: the fixture names a variant ConcreteDataType does not have",
+            entry.variant
+        );
+    }
+    assert_eq!(
+        frozen.len(),
+        VARIANT_NAMES.len(),
+        "one fixture entry per datatype variant, no duplicates"
+    );
+}
+
+#[cfg(test)]
+mod aggregate_state_acceptance {
+    use super::*;
+    use crate::series::aggregate_state::{
+        AggregateStateKind as Kind, AggregateStateSchema, AggregateStateValues as Values,
+        StateComponent as Component, StatePayload, StateSeries,
+    };
+
+    fn state_schema(fields: &[&str], len: usize) -> SeriesSchema {
+        let base = test_schema(fields);
+        SeriesSchema {
+            fields: base.fields,
+            eval_grid: Some(Arc::new(
+                crate::series::time::EvalGrid::try_new(
+                    crate::series::time::GridSpec::try_new(0, 1, len as u64).unwrap(),
+                )
+                .unwrap(),
+            )),
+        }
+    }
+
+    fn state_frame(
+        kind: Kind,
+        schema: &SeriesSchema,
+        spans: Vec<GridSpan>,
+        states: Vec<Vec<Option<StatePayload>>>,
+        last: bool,
+    ) -> (RecordBatch, SeriesFrameDecoder) {
+        let components = match kind {
+            Kind::Sum => vec![Component::Value, Component::Compensation],
+            Kind::Count => vec![Component::Count],
+            Kind::Avg => vec![
+                Component::Value,
+                Component::Mean,
+                Component::Compensation,
+                Component::Count,
+                Component::IncrementalMean,
+            ],
+            Kind::Min | Kind::Max => vec![Component::Value],
+            Kind::Group => vec![],
+            Kind::Stddev | Kind::Stdvar => {
+                vec![Component::Value, Component::Mean, Component::Count]
+            }
+            Kind::HistogramSum => vec![
+                Component::HistogramValue,
+                Component::HistogramCompensation,
+                Component::Poisoned,
+                Component::IncompatibleLayout,
+                Component::CustomBoundsReconciled,
+                Component::CounterResetSeen,
+                Component::NotCounterResetSeen,
+            ],
+            Kind::HistogramAvg => vec![
+                Component::HistogramValue,
+                Component::HistogramCompensation,
+                Component::Count,
+                Component::IncrementalMean,
+                Component::Poisoned,
+                Component::IncompatibleLayout,
+                Component::CustomBoundsReconciled,
+                Component::CounterResetSeen,
+                Component::NotCounterResetSeen,
+            ],
+        };
+        let state = AggregateStateSchema::try_new(kind, components).unwrap();
+        let time = TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap();
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            schema,
+            StateSeries {
+                metric: metric(Some("m"), &[("job", "x")]),
+                time,
+                states,
+            },
+            last,
+        )
+        .unwrap();
+        let mut builder = SeriesFrameBuilder::try_new_aggregate_state(
+            &state,
+            schema,
+            FrameLabelMode::Explicit,
+            8,
+            1 << 20,
+        )
+        .unwrap();
+        let mut cursor = cursor;
+        assert!(cursor.append_to(&mut builder).unwrap().is_none());
+        let batch = builder.flush().unwrap().unwrap();
+        let decoder =
+            SeriesFrameDecoder::try_new_aggregate_state(&state, schema, FrameLabelMode::Explicit)
+                .unwrap();
+        (batch, decoder)
+    }
+
+    fn floats(n: usize, seed: f64) -> Vec<Option<Values>> {
+        (0..n)
+            .map(|i| {
+                Some(Values {
+                    value: seed + i as f64,
+                    mean: seed + 10.0 + i as f64,
+                    compensation: seed + 20.0 + i as f64,
+                    count: seed + 30.0 + i as f64,
+                    incremental_mean: i % 2 == 0,
+                })
+            })
+            .collect()
+    }
+
+    fn values(n: usize, seed: f64) -> Vec<Option<StatePayload>> {
+        floats(n, seed)
+            .into_iter()
+            .map(|value| value.map(StatePayload::Float))
+            .collect()
+    }
+
+    /// The payload one seeded position holds, cloned so a test can reuse its vector.
+    fn at(states: &[Option<StatePayload>], position: usize) -> Option<StatePayload> {
+        states[position].clone()
+    }
+
+    /// The numeric components of a state vector, which is what a walk hands on unchanged.
+    fn numeric(states: &[Option<StatePayload>]) -> Vec<Option<Values>> {
+        states
+            .iter()
+            .map(|state| state.as_ref().and_then(StatePayload::float).copied())
+            .collect()
+    }
+
+    #[test]
+    fn group_state_keeps_field_local_presence_through_ipc_and_slices() {
+        let schema = state_schema(&["a", "b"], 6);
+        let (batch, decoder) = state_frame(
+            Kind::Group,
+            &schema,
+            vec![GridSpan::new(0, 4)],
+            vec![
+                vec![
+                    Some(StatePayload::Float(Values::default())),
+                    None,
+                    Some(StatePayload::Float(Values::default())),
+                    None,
+                ],
+                vec![None; 4],
+            ],
+            true,
+        );
+        let expected = decoder.decode_aggregate_state(&batch).unwrap();
+        let baseline_metric = expected[0].metric().clone();
+        let baseline_positions = expected[0].time().positions().collect::<Vec<_>>();
+        let baseline_last = expected[0].is_last();
+        let check = |rows: Vec<StateFrameRow>| {
+            let row = &rows[0];
+            let fields = row.fields().unwrap();
+            let presence = |field| {
+                (0..4)
+                    .map(|i| fields.is_present(field, i).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(presence(0), vec![true, false, true, false]);
+            assert_eq!(presence(1), vec![false; 4]);
+            assert_eq!(row.metric(), &baseline_metric);
+            assert_eq!(
+                row.time().positions().collect::<Vec<_>>(),
+                baseline_positions
+            );
+            assert_eq!(row.is_last(), baseline_last);
+        };
+        check(expected);
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, &batch.schema()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let batches = StreamReader::try_new(std::io::Cursor::new(ipc), None)
+            .unwrap()
+            .map(|batch| batch.unwrap())
+            .collect::<Vec<_>>();
+        let joined = concat_batches(&batch.schema(), &batches).unwrap();
+        check(decoder.decode_aggregate_state(&joined).unwrap());
+        check(decoder.decode_aggregate_state(&joined.slice(0, 1)).unwrap());
+    }
+
+    #[test]
+    fn aggregate_state_kinds_round_trip_values_presence_labels_axis_and_finality() {
+        let kinds = [
+            Kind::Sum,
+            Kind::Count,
+            Kind::Avg,
+            Kind::Min,
+            Kind::Max,
+            Kind::Group,
+            Kind::Stddev,
+            Kind::Stdvar,
+        ];
+        for kind in kinds {
+            let schema = state_schema(&["x", "y"], 5);
+            let (batch, decoder) = state_frame(
+                kind,
+                &schema,
+                vec![GridSpan::new(1, 2), GridSpan::new(4, 1)],
+                vec![
+                    values(3, 1.0),
+                    vec![None, at(&values(3, 1.0), 1), at(&values(3, 1.0), 2)],
+                ],
+                true,
+            );
+            let rows = decoder.decode_aggregate_state(&batch).unwrap();
+            assert_eq!(rows.len(), 1);
+            let row = &rows[0];
+            assert_eq!(row.metric(), &metric(Some("m"), &[("job", "x")]));
+            assert_eq!(
+                row.time().positions().map(|(p, _)| p).collect::<Vec<_>>(),
+                vec![1, 2, 4]
+            );
+            assert!(row.is_last());
+            let fields = row.fields().unwrap();
+            assert_eq!(fields.kind(), kind);
+            assert_eq!(
+                (0..3)
+                    .map(|i| fields.is_present(0, i).unwrap())
+                    .collect::<Vec<_>>(),
+                vec![true; 3]
+            );
+            assert_eq!(
+                (0..3)
+                    .map(|i| fields.is_present(1, i).unwrap())
+                    .collect::<Vec<_>>(),
+                vec![false, true, true]
+            );
+            for field in 0..2 {
+                for (component, expected) in [
+                    (Component::Value, [1.0, 2.0, 3.0]),
+                    (Component::Mean, [11.0, 12.0, 13.0]),
+                    (Component::Compensation, [21.0, 22.0, 23.0]),
+                    (Component::Count, [31.0, 32.0, 33.0]),
+                ] {
+                    if let Some(array) = fields.field_values(field, component).unwrap() {
+                        for (i, value) in expected.iter().enumerate() {
+                            if fields.is_present(field, i).unwrap() {
+                                assert_eq!(array.value(i), *value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_state_all_kinds_keep_values_and_presence_through_ipc_slicing_and_concat() {
+        let kinds = [
+            Kind::Sum,
+            Kind::Count,
+            Kind::Avg,
+            Kind::Min,
+            Kind::Max,
+            Kind::Group,
+            Kind::Stddev,
+            Kind::Stdvar,
+        ];
+        let components = [
+            Component::Value,
+            Component::Mean,
+            Component::Compensation,
+            Component::Count,
+            Component::IncrementalMean,
+        ];
+
+        for kind in kinds {
+            let schema = state_schema(&["x", "y"], 5);
+            let source_values = values(4, 3.0);
+            let states = || {
+                vec![
+                    source_values.clone(),
+                    vec![None, at(&source_values, 1), at(&values(4, 30.0), 2), None],
+                ]
+            };
+            // Two rows, so slicing and re-concatenating at an offset has something to shift: with
+            // one row, a decoder that ignored the offset would still agree with the baseline.
+            let (first, decoder) = state_frame(
+                kind,
+                &schema,
+                vec![GridSpan::new(0, 3), GridSpan::new(4, 1)],
+                states(),
+                false,
+            );
+            let (second, _) = state_frame(
+                kind,
+                &schema,
+                vec![GridSpan::new(0, 3), GridSpan::new(4, 1)],
+                states(),
+                true,
+            );
+            let batch = concat_batches(&first.schema(), &[first, second]).unwrap();
+            let baseline = decoder.decode_aggregate_state(&batch).unwrap();
+            assert_eq!(baseline.len(), 2);
+
+            // This migrates #10080's property: IPC bytes plus batch concatenation must not change
+            // field-local presence, accumulator values, labels, axis, or finality.
+            let mut ipc = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut ipc, &batch.schema()).unwrap();
+                writer.write(&batch).unwrap();
+                writer.finish().unwrap();
+            }
+            let read_back = StreamReader::try_new(std::io::Cursor::new(ipc), None)
+                .unwrap()
+                .map(|batch| batch.unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(read_back.len(), 1);
+            let ipc_batch = &read_back[0];
+            assert_eq!(ipc_batch.num_rows(), baseline.len());
+            // Both halves carry a non-zero offset after concatenation, so the decoder has to honour
+            // the child arrays' offsets rather than reading from their first element.
+            let sliced = vec![ipc_batch.slice(1, 1), ipc_batch.slice(0, 1)];
+            let joined = concat_batches(&batch.schema(), &sliced).unwrap();
+            assert_eq!(
+                joined.num_rows(),
+                baseline.len(),
+                "{kind:?}: every row survives slicing and concatenation"
+            );
+
+            let check = |rows: &[StateFrameRow], expected: &[&StateFrameRow], context: &str| {
+                assert_eq!(rows.len(), expected.len(), "{context}: row count");
+                for (row, expected) in rows.iter().zip(expected) {
+                    let expected: &StateFrameRow = expected;
+                    assert_eq!(row.metric(), expected.metric(), "{context}: labels");
+                    assert_eq!(row.is_last(), expected.is_last(), "{context}: finality");
+                    assert_eq!(
+                        row.time().positions().collect::<Vec<_>>(),
+                        expected.time().positions().collect::<Vec<_>>(),
+                        "{context}: positions"
+                    );
+                    let actual_fields = row.fields().unwrap();
+                    let expected_fields = expected.fields().unwrap();
+                    assert_eq!(
+                        actual_fields.kind(),
+                        expected_fields.kind(),
+                        "{context}: kind"
+                    );
+                    assert_eq!(
+                        actual_fields.components(),
+                        expected_fields.components(),
+                        "{context}: components"
+                    );
+                    if kind == Kind::Avg {
+                        // Pin the full set once, so iterating a candidate list cannot silently
+                        // skip every component a kind does not have.
+                        assert_eq!(
+                            actual_fields.components(),
+                            &components,
+                            "{context}: av components"
+                        );
+                    }
+                    for field in 0..expected_fields.len() {
+                        let positions = expected_fields
+                            .field(field)
+                            .expect("a declared field has an item array")
+                            .len();
+                        for position in 0..positions {
+                            assert_eq!(
+                                actual_fields.is_present(field, position).unwrap(),
+                                expected_fields.is_present(field, position).unwrap(),
+                                "{context}: presence {kind:?} field {field} position {position}"
+                            );
+                        }
+                        for component in components {
+                            // Only the incremental mean is boolean; the rest are float64. Asking
+                            // for the wrong one is itself an error, so the branch is by component.
+                            if component == Component::IncrementalMean {
+                                let expected_values =
+                                    expected_fields.field_bool_values(field, component).unwrap();
+                                let actual_values =
+                                    actual_fields.field_bool_values(field, component).unwrap();
+                                match (expected_values, actual_values) {
+                                    (Some(expected_values), Some(actual_values)) => {
+                                        for position in 0..expected_values.len() {
+                                            if expected_fields.is_present(field, position).unwrap()
+                                            {
+                                                assert_eq!(
+                                                    actual_values.value(position),
+                                                    expected_values.value(position),
+                                                    "{context}: {kind:?} {component:?} \
+                                                     field {field} position {position}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    (None, None) => {}
+                                    _ => panic!(
+                                        "{context}: {kind:?} {component:?} component changed"
+                                    ),
+                                }
+                                continue;
+                            }
+                            let expected_values =
+                                expected_fields.field_values(field, component).unwrap();
+                            let actual_values =
+                                actual_fields.field_values(field, component).unwrap();
+                            match (expected_values, actual_values) {
+                                (Some(expected_values), Some(actual_values)) => {
+                                    for position in 0..expected_values.len() {
+                                        if expected_fields.is_present(field, position).unwrap() {
+                                            assert_eq!(
+                                                actual_values.value(position),
+                                                expected_values.value(position),
+                                                "{context}: {kind:?} {component:?} field {field} \
+                                                 position {position}"
+                                            );
+                                        }
+                                    }
+                                }
+                                (None, None) => {}
+                                _ => panic!("{context}: {kind:?} {component:?} component changed"),
+                            }
+                        }
+                    }
+                }
+            };
+            // The slices are concatenated in reverse row order on purpose: the decoded order must
+            // follow the concatenation, not the batch the rows came from.
+            check(
+                &decoder.decode_aggregate_state(&joined).unwrap(),
+                &[&baseline[1], &baseline[0]],
+                "ipc+concat",
+            );
+            // A slice of the joined batch: the decoder must honour the offset rather than reading
+            // the first rows of the underlying arrays.
+            let tail = joined.slice(1, joined.num_rows() - 1);
+            check(
+                &decoder.decode_aggregate_state(&tail).unwrap(),
+                &[&baseline[0]],
+                "sliced",
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_state_cursor_moves_dense_states_without_filtering() {
+        let schema = state_schema(&["a", "b"], 4);
+        let state = AggregateStateSchema::try_new(
+            Kind::Avg,
+            vec![
+                Component::Value,
+                Component::Mean,
+                Component::Compensation,
+                Component::Count,
+                Component::IncrementalMean,
+            ],
+        )
+        .unwrap();
+        let states = vec![values(4, 1.0), values(4, 5.0)];
+        let allocation = states[0].as_ptr();
+        // A grid axis rather than a span axis, so the test can tell the chunk's own axis from a
+        // rebuilt one.
+        let time =
+            TimeAxis::Grid(GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 4).unwrap());
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            &schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states,
+            },
+            true,
+        )
+        .unwrap();
+        let ChunkWalk::State(walk) = cursor.walk else {
+            panic!("expected state walk")
+        };
+        // The dense fast path preserves the caller's field allocation and values verbatim.
+        assert_eq!(walk.series.states[0].as_ptr(), allocation);
+        assert_eq!(
+            numeric(&walk.series.states[0]),
+            floats(4, 1.0),
+            "the dense walk keeps its states"
+        );
+        assert_eq!(numeric(&walk.series.states[1]), floats(4, 5.0));
+        assert_eq!(
+            walk.series
+                .time
+                .positions()
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        // And it keeps the axis it was handed. A rebuilt axis always states spans, so a grid axis
+        // surviving here is what says the dense case did not rebuild one.
+        assert!(
+            matches!(walk.series.time, TimeAxis::Grid(_)),
+            "a dense chunk kept its own axis: {:?}",
+            walk.series.time
+        );
+    }
+
+    /// Every component of one field is absent exactly where that field is, so they share one mask.
+    ///
+    /// A position is carried when any field has a state there, so a hole needs a second field: the
+    /// two fields below cover each other's positions and each is absent where the other is present.
+    #[test]
+    fn state_components_share_their_fields_presence_mask() {
+        let schema = state_schema(&["x", "y"], 4);
+        let values = values(3, 1.0);
+        let (batch, decoder) = state_frame(
+            Kind::Avg,
+            &schema,
+            vec![GridSpan::new(0, 3)],
+            vec![
+                vec![at(&values, 0), None, at(&values, 2)],
+                vec![None, at(&values, 1), None],
+            ],
+            true,
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_eq!(rows.len(), 1);
+        let fields = rows[0].fields().unwrap();
+        assert_eq!(fields.len(), 2);
+        let mut masks = Vec::new();
+        // Field 0 is present at {0,2} and field 1 at {1}, so their masks differ in both content and
+        // hole count.
+        for (field, holes) in [1usize, 2].into_iter().enumerate() {
+            for component in [
+                Component::Value,
+                Component::Mean,
+                Component::Compensation,
+                Component::Count,
+            ] {
+                let array = fields.field_values(field, component).unwrap().unwrap();
+                let nulls = array.nulls().expect("a hole in this field");
+                assert_eq!(nulls.null_count(), holes, "field {field} {component:?}");
+                masks.push(nulls.inner().inner().as_ptr());
+            }
+            let boolean = fields
+                .field_bool_values(field, Component::IncrementalMean)
+                .unwrap()
+                .expect("avg declares the incremental mean");
+            masks.push(
+                boolean
+                    .nulls()
+                    .expect("the same hole")
+                    .inner()
+                    .inner()
+                    .as_ptr(),
+            );
+        }
+        // One mask per field, shared by that field's components: five components of field 0 agree,
+        // then five of field 1.
+        assert!(
+            masks[..5].windows(2).all(|pair| pair[0] == pair[1])
+                && masks[5..].windows(2).all(|pair| pair[0] == pair[1]),
+            "one mask per field, shared by its components: {masks:?}"
+        );
+        assert_ne!(
+            masks[0], masks[5],
+            "two fields with different holes are two masks"
+        );
+    }
+
+    /// A field with no hole states no mask at all, which is what a null buffer builder produces.
+    #[test]
+    fn a_field_without_holes_carries_no_null_buffer() {
+        let schema = state_schema(&["x"], 3);
+        let (batch, decoder) = state_frame(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 3)],
+            vec![values(3, 1.0)],
+            true,
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        let fields = rows[0].fields().unwrap();
+        let array = fields
+            .field_values(0, Component::Value)
+            .unwrap()
+            .expect("sum declares the value");
+        assert!(array.nulls().is_none());
+        let mean = fields
+            .field_bool_values(0, Component::IncrementalMean)
+            .unwrap();
+        assert!(mean.is_none(), "sum declares no incremental mean");
+    }
+
+    #[test]
+    fn aggregate_state_cursor_compacts_sparse_fields_and_preserves_runs() {
+        let schema = state_schema(&["a", "b"], 7);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let a = values(4, 1.0);
+        let b = values(4, 5.0);
+        let input = vec![
+            vec![at(&a, 0), None, at(&a, 2), None],
+            vec![None, at(&b, 1), None, at(&b, 3)],
+        ];
+        let time = TimeAxis::from_grid_spans(
+            schema.eval_grid.clone().unwrap(),
+            vec![
+                GridSpan::new(0, 1),
+                GridSpan::new(2, 1),
+                GridSpan::new(4, 1),
+                GridSpan::new(6, 1),
+            ],
+        )
+        .unwrap();
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            &schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states: input,
+            },
+            false,
+        )
+        .unwrap();
+        let ChunkWalk::State(walk) = cursor.walk else {
+            panic!("expected state walk")
+        };
+        assert_eq!(
+            walk.series
+                .time
+                .positions()
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 4, 6]
+        );
+        assert_eq!(
+            walk.runs
+                .iter()
+                .map(|run| (run.position, run.len))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (2, 1), (4, 1), (6, 1)]
+        );
+        let a = numeric(&a);
+        let b = numeric(&b);
+        assert_eq!(
+            numeric(&walk.series.states[0]),
+            vec![Some(a[0].unwrap()), None, Some(a[2].unwrap()), None]
+        );
+        assert_eq!(
+            numeric(&walk.series.states[1]),
+            vec![None, Some(b[1].unwrap()), None, Some(b[3].unwrap())]
+        );
+    }
+
+    #[test]
+    fn sparse_state_runs_and_empty_batch_decode() {
+        let schema = state_schema(&["x"], 10);
+        let (batch, decoder) = state_frame(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 3), GridSpan::new(5, 3)],
+            vec![values(6, 0.0)],
+            true,
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_eq!(
+            rows[0]
+                .time()
+                .runs()
+                .map(|r| (r.position, r.len))
+                .collect::<Vec<_>>(),
+            vec![(0, 3), (5, 3)]
+        );
+        assert!(
+            decoder
+                .decode_aggregate_state(&batch.slice(0, 0))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod aggregate_state_decoder_rejections {
+    use super::*;
+    use crate::series::aggregate_state::{
+        AggregateStateKind as Kind, AggregateStateSchema, AggregateStateValues as Values,
+        StateComponent as Component, StatePayload, StateSeries,
+    };
+
+    fn fixture() -> (RecordBatch, SeriesFrameDecoder) {
+        let base = test_schema(&["x"]);
+        let schema = SeriesSchema {
+            fields: base.fields,
+            eval_grid: Some(Arc::new(
+                crate::series::time::EvalGrid::try_new(
+                    crate::series::time::GridSpec::try_new(0, 1, 3).unwrap(),
+                )
+                .unwrap(),
+            )),
+        };
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 3)])
+                .unwrap();
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            &schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states: vec![vec![
+                    Some(StatePayload::Float(Values {
+                        value: 1.0,
+                        compensation: 2.0,
+                        ..Values::default()
+                    }));
+                    3
+                ]],
+            },
+            true,
+        )
+        .unwrap();
+        let mut cursor = cursor;
+        let mut builder = SeriesFrameBuilder::try_new_aggregate_state(
+            &state,
+            &schema,
+            FrameLabelMode::Explicit,
+            4,
+            4096,
+        )
+        .unwrap();
+        assert!(cursor.append_to(&mut builder).unwrap().is_none());
+        let batch = builder.flush().unwrap().unwrap();
+        let decoder =
+            SeriesFrameDecoder::try_new_aggregate_state(&state, &schema, FrameLabelMode::Explicit)
+                .unwrap();
+        (batch, decoder)
+    }
+
+    fn replace_field(batch: &RecordBatch, replacement: ArrayRef) -> RecordBatch {
+        let old = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let mut columns = old.columns().to_vec();
+        columns[0] = replacement;
+        let fields = Arc::new(
+            StructArray::try_new(old.fields().clone(), columns, old.nulls().cloned()).unwrap(),
+        );
+        let mut batch_columns = batch.columns().to_vec();
+        batch_columns[3] = fields;
+        RecordBatch::try_new(batch.schema(), batch_columns).unwrap()
+    }
+
+    #[test]
+    fn present_state_item_with_missing_component_is_rejected() {
+        let (batch, decoder) = fixture();
+        let list = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let item = list
+            .values()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let mut columns = item.columns().to_vec();
+        columns[0] = Arc::new(Float64Array::from(vec![None, Some(1.0), Some(1.0)]));
+        let broken_item = Arc::new(
+            StructArray::try_new(item.fields().clone(), columns, item.nulls().cloned()).unwrap(),
+        );
+        let broken_list = Arc::new(
+            ListArray::try_new(
+                match list.data_type() {
+                    DataType::List(f) => f.clone(),
+                    _ => unreachable!(),
+                },
+                list.offsets().clone(),
+                broken_item,
+                list.nulls().cloned(),
+            )
+            .unwrap(),
+        );
+        let broken = replace_field(&batch, broken_list);
+        assert!(decoder.decode_aggregate_state(&broken).is_err());
+    }
+
+    #[test]
+    fn state_list_length_must_match_carried_positions() {
+        let (batch, decoder) = fixture();
+        let list = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let broken = Arc::new(
+            ListArray::try_new(
+                match list.data_type() {
+                    DataType::List(f) => f.clone(),
+                    _ => unreachable!(),
+                },
+                OffsetBuffer::new(ScalarBuffer::from(vec![0i32, 2])),
+                list.values().slice(0, 2),
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(
+            decoder
+                .decode_aggregate_state(&replace_field(&batch, broken))
+                .is_err()
+        );
+    }
+}
+
+/// Differential tests for the direct raw decode.
+///
+/// A raw frame row holds exactly what one `RawSeriesChunk` holds, so the decoder builds the chunks
+/// straight from the frame's columns instead of collecting an intermediate row list. These tests
+/// hold that path to the former row-list path: for a legal batch the two must produce identical
+/// chunks, and for a malformed one they must reach the same verdict.
+///
+/// A raw frame declares its parent columns non-nullable, and Arrow refuses a null parent under a
+/// non-nullable field, so the row-level null-parent branches cannot be reached from a batch this
+/// crate can construct. The closest legal construction is a frame that declares a nullable parent,
+/// and both paths refuse that one at the schema check before a row is read; the row-level checks
+/// stay defensive guards on both paths.
+mod raw_direct_decode {
+    use super::*;
+
+    /// Builds the decoder both paths run on.
+    fn decoder(schema: &SeriesSchema, mode: FrameLabelMode) -> SeriesFrameDecoder {
+        let decode = (mode == FrameLabelMode::Key).then(dense_description);
+        SeriesFrameDecoder::try_new(schema, mode, decode.as_ref()).unwrap()
+    }
+
+    /// Decodes one batch both ways and requires the same verdict and, if legal, the same chunks.
+    fn agree(
+        schema: &SeriesSchema,
+        mode: FrameLabelMode,
+        batch: &RecordBatch,
+    ) -> crate::error::Result<Vec<RawSeriesChunk>> {
+        let decoder = decoder(schema, mode);
+        let direct = decoder.decode_raw(batch);
+        let via_rows = decoder.decode_raw_via_rows(batch);
+        match (&direct, &via_rows) {
+            (Ok(direct), Ok(via_rows)) => assert_chunks_equal(direct, via_rows),
+            // The two paths must refuse a batch for the same reason, not merely refuse it: a batch
+            // that carries more than one defect probes the order the checks run in.
+            (Err(direct), Err(via_rows)) => assert_eq!(
+                direct.to_string(),
+                via_rows.to_string(),
+                "both paths must refuse a malformed batch for the same reason"
+            ),
+            _ => panic!("direct and row paths disagreed: {direct:?} vs {via_rows:?}"),
+        }
+        direct
+    }
+
+    /// Requires both paths to refuse a batch, and returns the direct path's error text.
+    fn agree_refused(schema: &SeriesSchema, mode: FrameLabelMode, batch: &RecordBatch) -> String {
+        let direct = agree(schema, mode, batch);
+        let error = direct.expect_err("a malformed batch must be refused");
+        error.to_string()
+    }
+
+    fn assert_chunks_equal(direct: &[RawSeriesChunk], via_rows: &[RawSeriesChunk]) {
+        assert_eq!(direct.len(), via_rows.len(), "chunk count");
+        for (chunk, (direct, via_rows)) in direct.iter().zip(via_rows).enumerate() {
+            assert_eq!(
+                direct.primary_key.as_slice(),
+                via_rows.primary_key.as_slice(),
+                "chunk {chunk} key"
+            );
+            assert_eq!(direct.is_last, via_rows.is_last, "chunk {chunk} finality");
+            assert_eq!(
+                direct.time.as_buffer().as_ref(),
+                via_rows.time.as_buffer().as_ref(),
+                "chunk {chunk} timestamps"
+            );
+            match (&direct.metric, &via_rows.metric) {
+                (None, None) => {}
+                (Some(direct), Some(via_rows)) => {
+                    assert_eq!(direct.name(), via_rows.name(), "chunk {chunk} metric name");
+                    assert_eq!(direct.tags(), via_rows.tags(), "chunk {chunk} tags");
+                }
+                _ => panic!("chunk {chunk} changed label mode"),
+            }
+            assert_eq!(
+                direct.fields.len(),
+                via_rows.fields.len(),
+                "chunk {chunk} field count"
+            );
+            for (field, (direct, via_rows)) in
+                direct.fields.iter().zip(via_rows.fields.iter()).enumerate()
+            {
+                assert_samples_equal(direct, via_rows, chunk, field);
+            }
+        }
+    }
+
+    fn assert_samples_equal(direct: &Samples, via_rows: &Samples, chunk: usize, field: usize) {
+        assert_eq!(
+            dense_kind(direct),
+            dense_kind(via_rows),
+            "chunk {chunk} field {field} representation"
+        );
+        assert_eq!(
+            direct.len(),
+            via_rows.len(),
+            "chunk {chunk} field {field} length"
+        );
+        for (position, (direct, via_rows)) in direct.iter().zip(via_rows.iter()).enumerate() {
+            match (direct, via_rows) {
+                (SampleRef::Missing, SampleRef::Missing) => {}
+                (SampleRef::Float(direct), SampleRef::Float(via_rows)) => assert_eq!(
+                    direct.to_bits(),
+                    via_rows.to_bits(),
+                    "chunk {chunk} field {field} position {position}"
+                ),
+                (SampleRef::Histogram(direct), SampleRef::Histogram(via_rows)) => {
+                    assert_histogram_views_equal(direct, via_rows, chunk, field, position)
+                }
+                _ => panic!("chunk {chunk} field {field} position {position}: sample kind changed"),
+            }
+        }
+    }
+
+    fn dense_kind(samples: &Samples) -> &'static str {
+        match samples.dense() {
+            Some(DenseSamplesRef::Float(_)) => "float",
+            Some(DenseSamplesRef::Histogram(_)) => "histogram",
+            Some(DenseSamplesRef::Mixed(_)) => "mixed",
+            None => "chunked",
+        }
+    }
+
+    fn assert_histogram_views_equal(
+        direct: crate::series::histogram::HistogramView<'_>,
+        via_rows: crate::series::histogram::HistogramView<'_>,
+        chunk: usize,
+        field: usize,
+        position: usize,
+    ) {
+        let at = format!("chunk {chunk} field {field} position {position}");
+        assert_eq!(direct.schema, via_rows.schema, "{at} schema");
+        assert_eq!(
+            direct.zero_threshold.to_bits(),
+            via_rows.zero_threshold.to_bits(),
+            "{at} zero threshold"
+        );
+        assert_eq!(direct.sum.to_bits(), via_rows.sum.to_bits(), "{at} sum");
+        assert_eq!(
+            direct.count.to_bits(),
+            via_rows.count.to_bits(),
+            "{at} count"
+        );
+        assert_eq!(
+            direct.zero_count.to_bits(),
+            via_rows.zero_count.to_bits(),
+            "{at} zero count"
+        );
+        assert_eq!(direct.reset_hint, via_rows.reset_hint, "{at} reset hint");
+        assert_eq!(
+            direct.start_timestamp, via_rows.start_timestamp,
+            "{at} start timestamp"
+        );
+        assert_eq!(
+            bits(direct.custom_values),
+            bits(via_rows.custom_values),
+            "{at} custom values"
+        );
+        for (side, (direct, via_rows)) in [
+            (direct.positive, via_rows.positive),
+            (direct.negative, via_rows.negative),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                direct.span_offsets, via_rows.span_offsets,
+                "{at} side {side} span offsets"
+            );
+            assert_eq!(
+                direct.span_lengths, via_rows.span_lengths,
+                "{at} side {side} span lengths"
+            );
+            assert_eq!(
+                bits(direct.buckets),
+                bits(via_rows.buckets),
+                "{at} side {side} buckets"
+            );
+        }
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// Replaces one top-level column of a batch.
+    fn replace_column(batch: &RecordBatch, column: usize, value: ArrayRef) -> RecordBatch {
+        let mut columns = batch.columns().to_vec();
+        columns[column] = value;
+        RecordBatch::try_new(batch.schema(), columns).unwrap()
+    }
+
+    /// Replaces one column of the frame's `fields` struct.
+    fn replace_field_column(
+        batch: &RecordBatch,
+        field: usize,
+        replacement: ArrayRef,
+    ) -> RecordBatch {
+        let fields = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let mut columns = fields.columns().to_vec();
+        columns[field] = replacement;
+        let fields = Arc::new(
+            StructArray::try_new(fields.fields().clone(), columns, fields.nulls().cloned())
+                .unwrap(),
+        );
+        replace_column(batch, 3, fields)
+    }
+
+    /// Rebuilds the frame's timestamps as the given per-row lists.
+    fn with_timestamp_rows(batch: &RecordBatch, rows: &[Vec<i64>]) -> RecordBatch {
+        let time = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let times = time.column(0).as_any().downcast_ref::<ListArray>().unwrap();
+        let item = match times.data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!("the timestamps column is a list"),
+        };
+        let mut offsets = vec![0_i32];
+        let mut values = Vec::new();
+        for row in rows {
+            values.extend_from_slice(row);
+            offsets.push(values.len() as i32);
+        }
+        let list = ListArray::try_new(
+            item,
+            OffsetBuffer::new(ScalarBuffer::from(offsets)),
+            Arc::new(Int64Array::from(values)),
+            None,
+        )
+        .unwrap();
+        let time = Arc::new(
+            StructArray::try_new(time.fields().clone(), vec![Arc::new(list)], None).unwrap(),
+        );
+        replace_column(batch, 2, time)
+    }
+
+    /// Rebuilds one field's `float_values` list as the given per-row values.
+    fn with_float_rows(
+        batch: &RecordBatch,
+        field: usize,
+        rows: &[Vec<Option<f64>>],
+    ) -> RecordBatch {
+        let fields = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let payload = fields
+            .column(field)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let floats = payload
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let item = match floats.data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!("float values are a list"),
+        };
+        let mut offsets = vec![0_i32];
+        let mut values = Vec::new();
+        for row in rows {
+            values.extend_from_slice(row);
+            offsets.push(values.len() as i32);
+        }
+        let list = ListArray::try_new(
+            item,
+            OffsetBuffer::new(ScalarBuffer::from(offsets)),
+            Arc::new(Float64Array::from(values)),
+            None,
+        )
+        .unwrap();
+        let payload = Arc::new(
+            StructArray::try_new(
+                payload.fields().clone(),
+                vec![Arc::new(list), payload.column(1).clone()],
+                payload.nulls().cloned(),
+            )
+            .unwrap(),
+        );
+        replace_field_column(batch, field, payload)
+    }
+
+    /// Rebuilds one field's payload with neither a float nor a histogram value in it.
+    fn with_absent_payload(batch: &RecordBatch, field: usize) -> RecordBatch {
+        let fields = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let payload = fields
+            .column(field)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let floats = payload
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let item = match floats.data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!("float values are a list"),
+        };
+        let absent_floats = ListArray::try_new(
+            item,
+            OffsetBuffer::new(ScalarBuffer::from(floats.value_offsets().to_vec())),
+            floats.values().clone(),
+            Some(NullBuffer::new_null(floats.len())),
+        )
+        .unwrap();
+        let histogram = payload
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let absent_histogram = StructArray::try_new(
+            histogram.fields().clone(),
+            histogram.columns().to_vec(),
+            Some(NullBuffer::new_null(histogram.len())),
+        )
+        .unwrap();
+        let payload = Arc::new(
+            StructArray::try_new(
+                payload.fields().clone(),
+                vec![Arc::new(absent_floats), Arc::new(absent_histogram)],
+                payload.nulls().cloned(),
+            )
+            .unwrap(),
+        );
+        replace_field_column(batch, field, payload)
+    }
+
+    /// Rebuilds a batch without one reserved metadata entry.
+    fn without_metadata(batch: &RecordBatch, key: &str) -> RecordBatch {
+        let mut metadata = batch.schema().metadata().clone();
+        metadata.remove(key);
+        let schema = Arc::new(Schema::new_with_metadata(
+            batch.schema().fields().clone(),
+            metadata,
+        ));
+        RecordBatch::try_new(schema, batch.columns().to_vec()).unwrap()
+    }
+
+    /// Replaces the `read_key` column of an explicit frame with one that has a null row.
+    fn with_null_key(batch: &RecordBatch) -> RecordBatch {
+        let keys = BinaryArray::from(vec![None as Option<&[u8]>; batch.num_rows()]);
+        replace_column(batch, 0, Arc::new(keys))
+    }
+
+    fn float_chunk_for_mode(
+        schema: &SeriesSchema,
+        mode: FrameLabelMode,
+        fields: SeriesFields,
+        times: Vec<i64>,
+        is_last: bool,
+    ) -> RawSeriesChunk {
+        let metric = (mode == FrameLabelMode::Explicit).then(|| metric(Some("cpu_usage"), &[]));
+        RawSeriesChunk::try_new(
+            schema,
+            Buffer::from(vec![0x5a_u8, 0x01]),
+            metric,
+            RawTimestamps::try_new(times.into()).unwrap(),
+            fields,
+            is_last,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn float_payloads_decode_identically_through_both_paths() {
+        let schema = test_schema(&["cpu_usage", "cpu_idle"]);
+        let fields = SeriesFields::try_from_vec(vec![
+            Samples::from_float(Float64Array::from(vec![Some(1.5), None, Some(f64::NAN)])),
+            Samples::from_float(Float64Array::from(vec![
+                Some(-0.0),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+            ])),
+        ])
+        .unwrap();
+        for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+            let decode = (mode == FrameLabelMode::Key).then(dense_description);
+            let chunk = float_chunk_for_mode(&schema, mode, fields.clone(), vec![10, 20, 30], true);
+            let batch = pack_raw_series_chunk(&schema, mode, decode.as_ref(), &chunk)
+                .unwrap()
+                .remove(0);
+            let decoded = agree(&schema, mode, &batch).unwrap();
+            assert_eq!(decoded.len(), 1);
+            assert_eq!(decoded[0].primary_key.as_slice(), &[0x5a, 0x01]);
+            assert!(decoded[0].is_last);
+            assert_eq!(decoded[0].time.as_buffer().as_ref(), &[10, 20, 30]);
+            let expected_name = match mode {
+                FrameLabelMode::Key => None,
+                FrameLabelMode::Explicit => Some("cpu_usage"),
+            };
+            assert_eq!(
+                decoded[0].metric.as_ref().and_then(SeriesLabels::name),
+                expected_name
+            );
+            assert_float_bits(
+                decoded[0].fields.get(0).unwrap(),
+                &[Some(1.5), None, Some(f64::NAN)],
+            );
+            assert_float_bits(
+                decoded[0].fields.get(1).unwrap(),
+                &[Some(-0.0), Some(f64::INFINITY), Some(f64::NEG_INFINITY)],
+            );
+        }
+    }
+
+    #[test]
+    fn non_zero_slice_offsets_stay_aligned_through_both_paths() {
+        let schema = test_schema(&["cpu_usage", "cpu_idle"]);
+        // One segment per timestamp makes the cursor emit one row per position, so the batch this
+        // packs has several rows and can be sliced at a non-zero offset.
+        let field = |values: [f64; 3]| {
+            Samples::try_from_chunks(
+                values
+                    .into_iter()
+                    .map(|value| Samples::from_float(Float64Array::from(vec![Some(value)])))
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let fields =
+            SeriesFields::try_from_vec(vec![field([1.0, 2.0, 3.0]), field([10.0, 20.0, 30.0])])
+                .unwrap();
+        for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+            let decode = (mode == FrameLabelMode::Key).then(dense_description);
+            let chunk =
+                float_chunk_for_mode(&schema, mode, fields.clone(), vec![100, 200, 300], true);
+            let batch = pack_raw_series_chunk(&schema, mode, decode.as_ref(), &chunk)
+                .unwrap()
+                .remove(0);
+            assert_eq!(batch.num_rows(), 3);
+            for (offset, len) in [(0, 3), (1, 2), (2, 1), (1, 1)] {
+                let sliced = batch.slice(offset, len);
+                let decoded = agree(&schema, mode, &sliced).unwrap();
+                assert_eq!(decoded.len(), len, "slice ({offset}, {len}) chunk count");
+                for (position, chunk) in decoded.iter().enumerate() {
+                    assert_eq!(
+                        chunk.time.as_buffer().as_ref(),
+                        &[100 + 100 * (offset + position) as i64],
+                        "slice ({offset}, {len}) timestamps"
+                    );
+                    assert_float_bits(
+                        chunk.fields.get(0).unwrap(),
+                        &[Some(1.0 + (offset + position) as f64)],
+                    );
+                    assert_float_bits(
+                        chunk.fields.get(1).unwrap(),
+                        &[Some(10.0 * (1 + (offset + position)) as f64)],
+                    );
+                    assert_eq!(
+                        chunk.is_last,
+                        offset + position + 1 == batch.num_rows(),
+                        "slice ({offset}, {len}) finality"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_and_mixed_payloads_decode_identically_through_both_paths() {
+        let schema = test_schema(&["hist", "all_null_hist", "mixed", "float"]);
+        let table = histogram_batch();
+        let other = histogram_batch_with_sum(42.25);
+        let fields = SeriesFields::try_from_vec(vec![
+            Samples::try_from_histogram(UInt32Array::from(vec![Some(0), None]), table.clone())
+                .unwrap(),
+            Samples::try_from_histogram(UInt32Array::from(vec![None, Some(0)]), other.clone())
+                .unwrap(),
+            Samples::try_from_mixed(
+                Float64Array::from(vec![Some(3.5), None]),
+                crate::series::samples::HistogramSamples::try_new(
+                    UInt32Array::from(vec![None, Some(0)]),
+                    other,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            Samples::from_float(Float64Array::from(vec![None, Some(f64::NAN)])),
+        ])
+        .unwrap();
+        for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+            let decode = (mode == FrameLabelMode::Key).then(dense_description);
+            let chunk = float_chunk_for_mode(&schema, mode, fields.clone(), vec![7, 8], false);
+            let batch = pack_raw_series_chunk(&schema, mode, decode.as_ref(), &chunk)
+                .unwrap()
+                .remove(0);
+            let decoded = agree(&schema, mode, &batch).unwrap();
+            assert_eq!(decoded.len(), 1);
+            assert!(!decoded[0].is_last);
+            // The histogram route is shared, so the direct path must still hand back the same
+            // table values position by position rather than a normalized copy.
+            let SampleRef::Histogram(first) = decoded[0].fields.get(0).unwrap().sample(0) else {
+                panic!("histogram sample was lost");
+            };
+            assert_histogram(first, -9.5);
+            assert!(
+                matches!(
+                    decoded[0].fields.get(0).unwrap().sample(1),
+                    SampleRef::Missing
+                ),
+                "a null histogram index must stay missing"
+            );
+            let SampleRef::Histogram(third) = decoded[0].fields.get(1).unwrap().sample(1) else {
+                panic!("histogram sample was lost");
+            };
+            assert_histogram(third, 42.25);
+            let SampleRef::Float(mixed) = decoded[0].fields.get(2).unwrap().sample(0) else {
+                panic!("mixed float sample was lost");
+            };
+            assert_eq!(mixed.to_bits(), 3.5_f64.to_bits());
+            let SampleRef::Histogram(mixed) = decoded[0].fields.get(2).unwrap().sample(1) else {
+                panic!("mixed histogram sample was lost");
+            };
+            assert_histogram(mixed, 42.25);
+            assert!(matches!(
+                decoded[0].fields.get(3).unwrap().sample(1),
+                SampleRef::Float(value) if value.is_nan()
+            ));
+        }
+    }
+
+    #[test]
+    fn empty_batches_decode_identically_through_both_paths() {
+        let schema = test_schema(&["value"]);
+        for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+            let decode = (mode == FrameLabelMode::Key).then(dense_description);
+            let frame = series_frame_schema(&schema, mode, decode.as_ref()).unwrap();
+            let empty = arrow::record_batch::RecordBatch::new_empty(frame);
+            let decoded = agree(&schema, mode, &empty).unwrap();
+            assert!(decoded.is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_batches_get_the_same_verdict_from_both_paths() {
+        let schema = test_schema(&["value"]);
+        let chunk = float_chunk_for_mode(
+            &schema,
+            FrameLabelMode::Key,
+            SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(2.0)]))),
+            vec![1],
+            false,
+        );
+        let valid = pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &chunk,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(valid.num_rows(), 1);
+
+        // Reserved metadata is part of the frame's declaration, not of its payload.
+        let missing_time = without_metadata(&valid, TIME);
+        assert!(
+            agree_refused(&schema, FrameLabelMode::Key, &missing_time).contains("metadata"),
+            "a frame without its time declaration must be refused as a metadata mismatch"
+        );
+
+        // A decoder bound to another field layout refuses the batch before reading a row.
+        let renamed = test_schema(&["other"]);
+        assert!(
+            agree_refused(&renamed, FrameLabelMode::Key, &valid).contains("schema"),
+            "a frame whose declared fields differ must be refused as a schema mismatch"
+        );
+
+        // A frame whose parent columns admit nulls is not this revision's frame either.
+        let mut nullable_metadata = valid.schema().metadata().clone();
+        nullable_metadata.insert(LAYOUT.to_string(), FRAME_LAYOUT_VERSION.to_string());
+        let mut fields = valid.schema().fields().clone().to_vec();
+        fields[2] = Arc::new(Field::new("time", fields[2].data_type().clone(), true));
+        let nullable_time = RecordBatch::try_new(
+            Arc::new(Schema::new_with_metadata(fields, nullable_metadata)),
+            valid.columns().to_vec(),
+        )
+        .unwrap();
+        agree_refused(&schema, FrameLabelMode::Key, &nullable_time);
+
+        // Timestamps are the chunk's time axis, so they must be strictly increasing. Two positions
+        // come with two values, so the order is the batch's only defect: a payload that does not
+        // match the axis is refused earlier, before the order is ever looked at.
+        for bad in [vec![2, 1], vec![1, 1]] {
+            let unsorted = with_float_rows(
+                &with_timestamp_rows(&valid, std::slice::from_ref(&bad)),
+                0,
+                &[vec![Some(1.0), Some(2.0)]],
+            );
+            let error = agree_refused(&schema, FrameLabelMode::Key, &unsorted);
+            assert!(
+                error.contains("increasing"),
+                "timestamps {bad:?} must be refused as unordered, got: {error}"
+            );
+        }
+
+        // A field that carries no position at all is not a chunk this codec can produce.
+        let empty_axis = with_float_rows(&with_timestamp_rows(&valid, &[vec![]]), 0, &[vec![]]);
+        agree_refused(&schema, FrameLabelMode::Key, &empty_axis);
+
+        // Payload lengths are bound to the time axis of their own row.
+        let long_axis = with_timestamp_rows(&valid, &[vec![1, 2]]);
+        assert!(agree_refused(&schema, FrameLabelMode::Key, &long_axis).contains("length"));
+
+        // A field with neither payload kind cannot be decoded into samples.
+        let absent = with_absent_payload(&valid, 0);
+        agree_refused(&schema, FrameLabelMode::Key, &absent);
+
+        // An explicit raw row still carries the chunk's own key.
+        let explicit = test_schema(&["value"]);
+        let explicit_chunk = float_chunk_for_mode(
+            &explicit,
+            FrameLabelMode::Explicit,
+            SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(2.0)]))),
+            vec![1],
+            false,
+        );
+        let explicit_valid =
+            pack_raw_series_chunk(&explicit, FrameLabelMode::Explicit, None, &explicit_chunk)
+                .unwrap()
+                .remove(0);
+        assert_eq!(
+            agree(&explicit, FrameLabelMode::Explicit, &explicit_valid)
+                .unwrap()
+                .len(),
+            1
+        );
+        let null_key = with_null_key(&explicit_valid);
+        assert!(
+            agree_refused(&explicit, FrameLabelMode::Explicit, &null_key).contains("key"),
+            "an explicit raw row without a key must be refused"
+        );
+    }
+
+    #[test]
+    fn a_bad_last_row_leaves_no_decodable_prefix() {
+        let schema = test_schema(&["value"]);
+        // Two segments of two positions make one batch of two rows, so the last row can be broken
+        // on its own while the first stays legal.
+        let samples = Samples::try_from_chunks(vec![
+            Samples::from_float(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+            Samples::from_float(Float64Array::from(vec![Some(3.0), Some(4.0)])),
+        ])
+        .unwrap();
+        let chunk = float_chunk_for_mode(
+            &schema,
+            FrameLabelMode::Key,
+            SeriesFields::one(samples),
+            vec![10, 20, 30, 40],
+            false,
+        );
+        let batch = pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &chunk,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(batch.num_rows(), 2);
+
+        let broken = with_timestamp_rows(&batch, &[vec![10, 20], vec![40, 30]]);
+        let direct = decoder(&schema, FrameLabelMode::Key).decode_raw(&broken);
+        // The first row alone would decode, but a batch is decoded as a whole: the call fails and
+        // returns no chunks at all, so a consumer never sees the legal prefix of a broken batch.
+        let error = direct.expect_err("a batch whose last row is unordered must fail as a whole");
+        assert!(error.to_string().contains("increasing"), "{error}");
+        agree_refused(&schema, FrameLabelMode::Key, &broken);
+    }
+
+    /// A batch can carry more than one defect at once, and which one it reports must not depend on
+    /// which path decoded it: a row's payloads are checked before its timestamp order, and every row
+    /// is decoded before any chunk is built.
+    #[test]
+    fn a_batch_with_several_defects_reports_the_field_error_first() {
+        let schema = test_schema(&["value"]);
+        let valid = float_chunk_for_mode(
+            &schema,
+            FrameLabelMode::Key,
+            SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(1.0)]))),
+            vec![1],
+            false,
+        );
+        let valid = pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &valid,
+        )
+        .unwrap()
+        .remove(0);
+
+        // One row, two defects: unordered timestamps `[2, 1]` and a single float for two positions.
+        // The payload length is what a row is refused for, because that is the check that runs
+        // before the chunk is built.
+        let broken = with_float_rows(
+            &with_timestamp_rows(&valid, &[vec![2, 1]]),
+            0,
+            &[vec![Some(1.0)]],
+        );
+        let error = agree_refused(&schema, FrameLabelMode::Key, &broken);
+        assert!(error.contains("float payload length mismatch"), "{error}");
+
+        // The same across rows: a later row's payload outranks an earlier row's timestamp order,
+        // because a batch decodes every row before it builds any chunk.
+        let samples = Samples::try_from_chunks(vec![
+            Samples::from_float(Float64Array::from(vec![Some(1.0)])),
+            Samples::from_float(Float64Array::from(vec![Some(2.0)])),
+        ])
+        .unwrap();
+        let chunk = float_chunk_for_mode(
+            &schema,
+            FrameLabelMode::Key,
+            SeriesFields::one(samples),
+            vec![10, 20],
+            false,
+        );
+        let batch = pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &chunk,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(batch.num_rows(), 2);
+        // Row 0 carries two positions with its two values in the wrong order; row 1 carries one
+        // position and two values.
+        let broken = with_float_rows(
+            &with_timestamp_rows(&batch, &[vec![20, 10], vec![30]]),
+            0,
+            &[vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]],
+        );
+        let error = agree_refused(&schema, FrameLabelMode::Key, &broken);
+        assert!(error.contains("float payload length mismatch"), "{error}");
+    }
+}
+
+mod aggregate_state_histogram_states {
+    use super::*;
+    use crate::series::aggregate_state::{
+        AggregateStateKind as Kind, AggregateStateSchema, HistogramState,
+        StateComponent as Component, StatePayload, StateSeries,
+    };
+    use crate::series::histogram::HistogramView;
+
+    const SUM_COMPONENTS: [Component; 7] = [
+        Component::HistogramValue,
+        Component::HistogramCompensation,
+        Component::Poisoned,
+        Component::IncompatibleLayout,
+        Component::CustomBoundsReconciled,
+        Component::CounterResetSeen,
+        Component::NotCounterResetSeen,
+    ];
+    const AVG_COMPONENTS: [Component; 9] = [
+        Component::HistogramValue,
+        Component::HistogramCompensation,
+        Component::Count,
+        Component::IncrementalMean,
+        Component::Poisoned,
+        Component::IncompatibleLayout,
+        Component::CustomBoundsReconciled,
+        Component::CounterResetSeen,
+        Component::NotCounterResetSeen,
+    ];
+
+    fn components(kind: Kind) -> Vec<Component> {
+        match kind {
+            Kind::HistogramSum => SUM_COMPONENTS.to_vec(),
+            Kind::HistogramAvg => AVG_COMPONENTS.to_vec(),
+            _ => unreachable!("only histogram kinds are built here"),
+        }
+    }
+
+    fn schema(fields: &[&str], len: usize) -> SeriesSchema {
+        let base = test_schema(fields);
+        SeriesSchema {
+            fields: base.fields,
+            eval_grid: Some(Arc::new(
+                EvalGrid::try_new(GridSpec::try_new(0, 1, len as u64).unwrap()).unwrap(),
+            )),
+        }
+    }
+
+    /// One histogram row: `sum`/`count` with the given positive span layout and bucket counts.
+    fn histogram(
+        spans: &[(i32, i32)],
+        buckets: &[f64],
+        bounds: &[f64],
+        schema: i32,
+    ) -> Arc<HistogramBatch> {
+        let (offsets, lengths): (Vec<i32>, Vec<i32>) = spans.iter().copied().unzip();
+        let counts = buckets.to_vec();
+        let none = BucketSideView {
+            span_offsets: &[],
+            span_lengths: &[],
+            buckets: &[],
+        };
+        let mut builder = HistogramBatchBuilder::new();
+        builder
+            .push(HistogramView {
+                schema,
+                zero_threshold: 0.001,
+                sum: 6.5,
+                count: 4.0,
+                zero_count: 1.0,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp: None,
+                custom_values: bounds,
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: &counts,
+                },
+                negative: none,
+            })
+            .unwrap();
+        builder.finish().unwrap()
+    }
+
+    fn batch(spans: &[(i32, i32)], buckets: &[f64]) -> Arc<HistogramBatch> {
+        histogram(spans, buckets, &[], 0)
+    }
+
+    /// A state whose compensation carries the live value's bucket layout.
+    fn state(spans: &[(i32, i32)], buckets: &[f64]) -> Box<HistogramState> {
+        Box::new(HistogramState {
+            value: batch(spans, buckets),
+            compensation: batch(spans, &vec![0.0; buckets.len()]),
+            count: 0.0,
+            incremental_mean: false,
+            poisoned: false,
+            incompatible_layout: false,
+            custom_bounds_reconciled: false,
+            counter_reset_seen: false,
+            not_counter_reset_seen: false,
+        })
+    }
+
+    fn payload(state: Box<HistogramState>) -> Option<StatePayload> {
+        Some(StatePayload::Histogram(state))
+    }
+
+    fn frame(
+        kind: Kind,
+        schema: &SeriesSchema,
+        spans: Vec<GridSpan>,
+        states: Vec<Vec<Option<StatePayload>>>,
+    ) -> (RecordBatch, SeriesFrameDecoder) {
+        let state = AggregateStateSchema::try_new(kind, components(kind)).unwrap();
+        let time = TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap();
+        let mut cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            schema,
+            StateSeries {
+                metric: metric(Some("m"), &[("job", "x")]),
+                time,
+                states,
+            },
+            true,
+        )
+        .unwrap();
+        let mut builder = SeriesFrameBuilder::try_new_aggregate_state(
+            &state,
+            schema,
+            FrameLabelMode::Explicit,
+            8,
+            1 << 20,
+        )
+        .unwrap();
+        assert!(cursor.append_to(&mut builder).unwrap().is_none());
+        let batch = builder.flush().unwrap().unwrap();
+        let decoder =
+            SeriesFrameDecoder::try_new_aggregate_state(&state, schema, FrameLabelMode::Explicit)
+                .unwrap();
+        (batch, decoder)
+    }
+
+    /// Compares two one-row histograms by every field a merge reads, independent of the encoding.
+    fn assert_histogram_eq(actual: &HistogramBatch, expected: &HistogramBatch) {
+        let actual = actual.view(0).unwrap();
+        let expected = expected.view(0).unwrap();
+        assert_eq!(actual.schema, expected.schema);
+        assert_eq!(
+            actual.zero_threshold.to_bits(),
+            expected.zero_threshold.to_bits()
+        );
+        assert_eq!(actual.sum.to_bits(), expected.sum.to_bits());
+        assert_eq!(actual.count.to_bits(), expected.count.to_bits());
+        assert_eq!(actual.zero_count.to_bits(), expected.zero_count.to_bits());
+        assert_eq!(actual.reset_hint, expected.reset_hint);
+        assert_eq!(actual.start_timestamp, expected.start_timestamp);
+        assert_eq!(actual.custom_values, expected.custom_values);
+        for (actual, expected) in [
+            (actual.positive, expected.positive),
+            (actual.negative, expected.negative),
+        ] {
+            assert_eq!(actual.span_offsets, expected.span_offsets);
+            assert_eq!(actual.span_lengths, expected.span_lengths);
+            assert_eq!(actual.buckets, expected.buckets);
+        }
+    }
+
+    /// Compares the payload a decoded row carries with the one it was encoded from.
+    fn assert_state_eq(actual: &StatePayload, expected: &StatePayload) {
+        let actual = actual.histogram().expect("a histogram state");
+        let expected = expected.histogram().expect("a histogram state");
+        assert_histogram_eq(actual.value.as_ref(), expected.value.as_ref());
+        assert_histogram_eq(actual.compensation.as_ref(), expected.compensation.as_ref());
+        assert_eq!(actual.count.to_bits(), expected.count.to_bits());
+        assert_eq!(actual.incremental_mean, expected.incremental_mean);
+        assert_eq!(actual.poisoned, expected.poisoned);
+        assert_eq!(actual.incompatible_layout, expected.incompatible_layout);
+        assert_eq!(
+            actual.custom_bounds_reconciled,
+            expected.custom_bounds_reconciled
+        );
+        assert_eq!(actual.counter_reset_seen, expected.counter_reset_seen);
+        assert_eq!(
+            actual.not_counter_reset_seen,
+            expected.not_counter_reset_seen
+        );
+    }
+
+    /// One decoded row's payload at a field and position, read from its component columns.
+    ///
+    /// A row is exported as the columns it was decoded into, so this reads them back component by
+    /// component: absence stays per field, and a present position carries every component its kind
+    /// declares.
+    fn row_state(row: &StateFrameRow, field: usize, position: usize) -> Option<StatePayload> {
+        let fields = row.fields().unwrap();
+        if !fields.is_present(field, position).unwrap() {
+            return None;
+        }
+        let histogram = |component: Component| {
+            fields
+                .field_histogram(field, component, position)
+                .unwrap()
+                .expect("a present histogram state carries both histograms")
+        };
+        let number = |component: Component| {
+            fields
+                .field_values(field, component)
+                .unwrap()
+                .expect("a present histogram state carries its numeric components")
+                .value(position)
+        };
+        let flag = |component: Component| {
+            fields
+                .field_bool_values(field, component)
+                .unwrap()
+                .expect("a present histogram state carries its evidence bits")
+                .value(position)
+        };
+        let mut state = HistogramState {
+            value: Arc::new(histogram(Component::HistogramValue)),
+            compensation: Arc::new(histogram(Component::HistogramCompensation)),
+            count: 0.0,
+            incremental_mean: false,
+            poisoned: false,
+            incompatible_layout: false,
+            custom_bounds_reconciled: false,
+            counter_reset_seen: false,
+            not_counter_reset_seen: false,
+        };
+        for &component in fields.components() {
+            match component {
+                Component::HistogramValue | Component::HistogramCompensation => {}
+                Component::Count => state.count = number(component),
+                Component::IncrementalMean => state.incremental_mean = flag(component),
+                Component::Poisoned => state.poisoned = flag(component),
+                Component::IncompatibleLayout => state.incompatible_layout = flag(component),
+                Component::CustomBoundsReconciled => {
+                    state.custom_bounds_reconciled = flag(component)
+                }
+                Component::CounterResetSeen => state.counter_reset_seen = flag(component),
+                Component::NotCounterResetSeen => state.not_counter_reset_seen = flag(component),
+                Component::Value | Component::Mean | Component::Compensation => {
+                    unreachable!("a histogram state carries no numeric accumulator component")
+                }
+            }
+        }
+        Some(StatePayload::Histogram(Box::new(state)))
+    }
+
+    #[test]
+    fn histogram_state_spellings_are_canonical_and_refuse_unknowns() {
+        assert_eq!(Kind::HistogramSum.as_str(), "histogram_sum");
+        assert_eq!(Kind::HistogramAvg.as_str(), "histogram_avg");
+        assert_eq!(Kind::parse("histogram_sum").unwrap(), Kind::HistogramSum);
+        assert_eq!(Kind::parse("histogram_avg").unwrap(), Kind::HistogramAvg);
+        assert!(Kind::parse("histogram").is_err());
+        assert!(Kind::parse("histogramsum").is_err());
+        assert_eq!(Component::HistogramValue.as_str(), "histogram_value");
+        assert_eq!(
+            Component::parse("histogram_value").unwrap(),
+            Component::HistogramValue
+        );
+        assert_eq!(
+            Component::parse("not_counter_reset_seen").unwrap(),
+            Component::NotCounterResetSeen
+        );
+        assert!(Component::parse("hist_value").is_err());
+        assert_eq!(
+            AggregateStateSchema::from_text("histogram_sum", "histogram_value,histogram_compensation,poisoned,incompatible_layout,custom_bounds_reconciled,counter_reset_seen,not_counter_reset_seen")
+                .unwrap()
+                .kind,
+            Kind::HistogramSum
+        );
+        assert!(AggregateStateSchema::from_text("histogram_avg", "histogram_value").is_err());
+    }
+
+    #[test]
+    fn histogram_state_round_trips_in_sum_mode() {
+        let schema = schema(&["x", "y"], 6);
+        let mut first = state(&[(0, 2), (1, 1)], &[1.0, 2.0, 3.0]);
+        first.custom_bounds_reconciled = true;
+        first.counter_reset_seen = true;
+        let second = state(&[(-1, 3)], &[4.0, 5.0, 6.0]);
+        let expected = vec![
+            vec![payload(first), None, payload(second.clone())],
+            vec![None, payload(second), None],
+        ];
+        let (batch, decoder) = frame(
+            Kind::HistogramSum,
+            &schema,
+            vec![GridSpan::new(0, 3)],
+            expected.clone(),
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]
+                .time()
+                .positions()
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        for (field, values) in expected.iter().enumerate() {
+            for (position, value) in values.iter().enumerate() {
+                match value {
+                    Some(value) => assert_state_eq(
+                        row_state(&rows[0], field, position)
+                            .as_ref()
+                            .expect("a carried position is present"),
+                        value,
+                    ),
+                    None => assert!(row_state(&rows[0], field, position).is_none()),
+                }
+            }
+        }
+        // The payload nests a histogram struct inside a list item, one level deeper than a sample
+        // frame's histogram table, so it also has to survive the wire form and a slice of it.
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, &batch.schema()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let batches = StreamReader::try_new(std::io::Cursor::new(ipc), None)
+            .unwrap()
+            .map(|batch| batch.unwrap())
+            .collect::<Vec<_>>();
+        let joined = concat_batches(&batch.schema(), &batches).unwrap();
+        for batch in [joined.clone(), joined.slice(0, 1)] {
+            let rows = decoder.decode_aggregate_state(&batch).unwrap();
+            for (field, values) in expected.iter().enumerate() {
+                for (position, value) in values.iter().enumerate() {
+                    match value {
+                        Some(value) => assert_state_eq(
+                            row_state(&rows[0], field, position)
+                                .as_ref()
+                                .expect("a carried position is present"),
+                            value,
+                        ),
+                        None => assert!(row_state(&rows[0], field, position).is_none()),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_state_round_trips_in_mean_mode() {
+        let schema = schema(&["x"], 4);
+        let mut mean = state(&[(0, 2), (2, 2)], &[0.25, 0.5, 0.75, 1.0]);
+        mean.count = 4.0;
+        mean.incremental_mean = true;
+        mean.custom_bounds_reconciled = true;
+        let sum = state(&[(0, 4)], &[1.0, 2.0, 3.0, 4.0]);
+        let expected = vec![vec![payload(mean), payload(sum), None, None]];
+        let (batch, decoder) = frame(
+            Kind::HistogramAvg,
+            &schema,
+            vec![GridSpan::new(0, 4)],
+            expected.clone(),
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        // Only the positions that carry a contribution are kept, so the two trailing holes are the
+        // axis' business and not the state vector's.
+        assert_eq!(
+            rows[0]
+                .time()
+                .positions()
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        for (row, value) in expected[0].iter().take(2).enumerate() {
+            assert_state_eq(
+                row_state(&rows[0], 0, row)
+                    .as_ref()
+                    .expect("a carried position is present"),
+                value.as_ref().unwrap(),
+            );
+        }
+        // The mean mode bit and the count are components of their own, so they survive decoding even
+        // though both histogram payloads are otherwise alike.
+        let mean = row_state(&rows[0], 0, 0).expect("a carried position is present");
+        let mean = mean.histogram().unwrap();
+        assert!(mean.incremental_mean);
+        assert_eq!(mean.count, 4.0);
+        let sum = row_state(&rows[0], 0, 1).expect("a carried position is present");
+        let sum = sum.histogram().unwrap();
+        assert!(!sum.incremental_mean);
+        assert_eq!(
+            sum.count, 0.0,
+            "a state that was never switched keeps no count"
+        );
+    }
+
+    #[test]
+    fn compensation_with_the_same_buckets_spelled_differently_is_accepted() {
+        // `[(0, 2), (1, 1)]` and `[(0, 1), (0, 1), (1, 1)]` both expand to the bucket indices
+        // [0, 1, 3], so the two sides of one state are aligned even though their spans differ.
+        let schema = schema(&["x"], 1);
+        let mut state = state(&[(0, 2), (1, 1)], &[1.0, 2.0, 3.0]);
+        state.compensation = batch(&[(0, 1), (0, 1), (1, 1)], &[0.0, 0.0, 0.0]);
+        let (batch, decoder) = frame(
+            Kind::HistogramSum,
+            &schema,
+            vec![GridSpan::new(0, 1)],
+            vec![vec![payload(state.clone())]],
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_state_eq(
+            row_state(&rows[0], 0, 0)
+                .as_ref()
+                .expect("a carried position is present"),
+            &payload(state).unwrap(),
+        );
+    }
+
+    /// A poisoned position keeps its evidence and stays present, so no later crop can revive it.
+    #[test]
+    fn poisoned_histogram_state_round_trips_and_stays_present() {
+        let schema = schema(&["x"], 6);
+        let poisoned = Box::new(HistogramState {
+            value: batch(&[], &[]),
+            compensation: batch(&[], &[]),
+            count: 3.0,
+            incremental_mean: false,
+            poisoned: true,
+            incompatible_layout: true,
+            custom_bounds_reconciled: false,
+            counter_reset_seen: true,
+            not_counter_reset_seen: false,
+        });
+        let expected = vec![vec![payload(poisoned), None, None, None]];
+        let (batch, decoder) = frame(
+            Kind::HistogramAvg,
+            &schema,
+            vec![GridSpan::new(0, 4)],
+            expected.clone(),
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        // The two positions after the poisoned one carry nothing, so the chunk keeps only the
+        // position that has a contribution - and that position is the poisoned one.
+        assert_eq!(
+            rows[0]
+                .time()
+                .positions()
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert!(rows[0].fields().unwrap().is_present(0, 0).unwrap());
+        let decoded = row_state(&rows[0], 0, 0).expect("a carried position is present");
+        assert_state_eq(&decoded, expected[0][0].as_ref().unwrap());
+        let decoded = decoded.histogram().unwrap();
+        assert!(decoded.poisoned);
+        assert!(decoded.incompatible_layout);
+        assert!(decoded.counter_reset_seen);
+        assert!(!decoded.not_counter_reset_seen);
+        assert_eq!(decoded.count, 3.0, "a poisoned point keeps its count");
+    }
+
+    #[test]
+    fn histogram_kind_carrying_numeric_components_is_refused() {
+        assert!(
+            AggregateStateSchema::try_new(
+                Kind::HistogramSum,
+                vec![Component::Value, Component::Compensation]
+            )
+            .is_err()
+        );
+        // And a frame that declares a histogram kind over numeric columns is not the frame this
+        // kind describes, so the decoder refuses it before reading a single row.
+        let numeric = schema(&["x"], 3);
+        let (batch, _) = numeric_frame(&numeric);
+        let histogram =
+            AggregateStateSchema::try_new(Kind::HistogramSum, SUM_COMPONENTS.to_vec()).unwrap();
+        let decoder = SeriesFrameDecoder::try_new_aggregate_state(
+            &histogram,
+            &numeric,
+            FrameLabelMode::Explicit,
+        )
+        .unwrap();
+        assert!(decoder.decode_aggregate_state(&batch).is_err());
+    }
+
+    #[test]
+    fn histogram_sum_cannot_declare_mean_mode() {
+        let components = vec![
+            Component::HistogramValue,
+            Component::HistogramCompensation,
+            Component::Count,
+            Component::IncrementalMean,
+            Component::Poisoned,
+            Component::IncompatibleLayout,
+            Component::CustomBoundsReconciled,
+            Component::CounterResetSeen,
+            Component::NotCounterResetSeen,
+        ];
+        assert!(AggregateStateSchema::try_new(Kind::HistogramSum, components.clone()).is_err());
+        assert!(AggregateStateSchema::try_new(Kind::HistogramAvg, components).is_ok());
+        assert!(
+            AggregateStateSchema::try_new(
+                Kind::HistogramSum,
+                SUM_COMPONENTS
+                    .iter()
+                    .copied()
+                    .chain([Component::IncrementalMean])
+                    .collect()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn numeric_kind_carrying_histogram_state_is_refused() {
+        let schema = schema(&["x"], 2);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 1)])
+                .unwrap();
+        assert!(
+            SeriesFrameCursor::try_new_aggregate_state(
+                &state,
+                &schema,
+                StateSeries {
+                    metric: metric(Some("m"), &[]),
+                    time,
+                    states: vec![vec![payload(state_of_sum(1.0))]],
+                },
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    fn state_of_sum(value: f64) -> Box<HistogramState> {
+        let mut state = self::state(&[(0, 1)], &[value]);
+        state.count = 0.0;
+        state
+    }
+
+    /// The producer refuses a compensation whose layout disagrees with its live value.
+    #[test]
+    fn compensation_layout_mismatch_is_refused_by_the_producer() {
+        let schema = schema(&["x"], 1);
+        let state =
+            AggregateStateSchema::try_new(Kind::HistogramSum, SUM_COMPONENTS.to_vec()).unwrap();
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 1)])
+                .unwrap();
+        let mut mismatched = self::state(&[(0, 2)], &[1.0, 2.0]);
+        mismatched.compensation = batch(&[(0, 3)], &[0.0, 0.0, 0.0]);
+        assert!(
+            SeriesFrameCursor::try_new_aggregate_state(
+                &state,
+                &schema,
+                StateSeries {
+                    metric: metric(Some("m"), &[]),
+                    time,
+                    states: vec![vec![payload(mismatched)]],
+                },
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    /// A frame carrying a mismatched compensation, with its poison bit cleared.
+    ///
+    /// A poisoned position is exempt from the layout check, which is how a mismatched pair can be
+    /// written at all; clearing the poison bit leaves a frame that claims to be live.
+    fn unpoisoned_mismatched_frame(
+        value: Arc<HistogramBatch>,
+        compensation: Arc<HistogramBatch>,
+    ) -> (RecordBatch, SeriesFrameDecoder) {
+        let schema = schema(&["x"], 1);
+        let state = Box::new(HistogramState {
+            value,
+            compensation,
+            count: 0.0,
+            incremental_mean: false,
+            poisoned: true,
+            incompatible_layout: true,
+            custom_bounds_reconciled: false,
+            counter_reset_seen: false,
+            not_counter_reset_seen: false,
+        });
+        let (batch, decoder) = frame(
+            Kind::HistogramSum,
+            &schema,
+            vec![GridSpan::new(0, 1)],
+            vec![vec![payload(state)]],
+        );
+        assert!(decoder.decode_aggregate_state(&batch).is_ok());
+        (
+            replace_component(&batch, 2, Arc::new(BooleanArray::from(vec![false]))),
+            decoder,
+        )
+    }
+
+    /// The decoder refuses the mismatch even when the frame was produced elsewhere.
+    #[test]
+    fn compensation_layout_mismatch_is_refused_by_the_decoder() {
+        let (mismatched, decoder) = unpoisoned_mismatched_frame(
+            batch(&[(0, 2)], &[1.0, 2.0]),
+            batch(&[(0, 3)], &[0.0, 0.0, 0.0]),
+        );
+        assert!(decoder.decode_aggregate_state(&mismatched).is_err());
+        // The same holds when the two sides share their bucket indices and only the custom bounds
+        // disagree.
+        let (mismatched, decoder) = unpoisoned_mismatched_frame(
+            histogram(&[(0, 2)], &[1.0, 2.0], &[1.0, 2.0], 2),
+            histogram(&[(0, 2)], &[0.0, 0.0], &[1.0, 3.0], 2),
+        );
+        assert!(decoder.decode_aggregate_state(&mismatched).is_err());
+    }
+
+    /// A present item that is missing a histogram component is refused, as it is for numeric state.
+    #[test]
+    fn present_item_missing_a_histogram_component_is_refused() {
+        let schema = schema(&["x"], 1);
+        let (batch, decoder) = frame(
+            Kind::HistogramSum,
+            &schema,
+            vec![GridSpan::new(0, 1)],
+            vec![vec![payload(self::state(&[(0, 1)], &[1.0]))]],
+        );
+        assert!(decoder.decode_aggregate_state(&batch).is_ok());
+        let component = match batch.schema().field(3).data_type() {
+            DataType::Struct(fields) => match fields[0].data_type() {
+                DataType::List(item) => match item.data_type() {
+                    DataType::Struct(components) => components[1].data_type().clone(),
+                    _ => unreachable!("a state item is a component struct"),
+                },
+                _ => unreachable!("a state field is a list"),
+            },
+            _ => unreachable!("the state fields column is a struct"),
+        };
+        let missing = replace_component(&batch, 1, new_null_component(&component));
+        assert!(decoder.decode_aggregate_state(&missing).is_err());
+    }
+
+    #[test]
+    fn state_charges_follow_the_histogram_payload_width() {
+        let narrow = vec![vec![payload(self::state(&[(0, 2)], &[1.0, 2.0]))]];
+        let mut wide_state = self::state(&[(0, 10)], &[1.0; 10]);
+        wide_state.compensation = batch(&[(0, 10)], &[0.0; 10]);
+        let wide = vec![vec![payload(wide_state)]];
+        let narrow_charge = super::state_charges(&narrow).unwrap();
+        let wide_charge = super::state_charges(&wide).unwrap();
+        // Eight more buckets on each of the two histograms, at eight bytes a bucket.
+        assert_eq!(wide_charge - narrow_charge, 2 * 8 * 8);
+        let numeric = vec![vec![Some(StatePayload::Float(Default::default()))]];
+        assert!(super::state_charges(&numeric).unwrap() < narrow_charge);
+    }
+
+    fn new_null_component(data_type: &DataType) -> ArrayRef {
+        arrow::array::new_null_array(data_type, 1)
+    }
+
+    /// Replaces one component of the first field's items, keeping the layout of everything else.
+    fn replace_component(
+        batch: &RecordBatch,
+        component: usize,
+        replacement: ArrayRef,
+    ) -> RecordBatch {
+        let fields = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let list = fields
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let item = list
+            .values()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let mut columns = item.columns().to_vec();
+        columns[component] = replacement;
+        let item = Arc::new(
+            StructArray::try_new(item.fields().clone(), columns, item.nulls().cloned()).unwrap(),
+        );
+        let list = Arc::new(
+            ListArray::try_new(
+                match list.data_type() {
+                    DataType::List(field) => field.clone(),
+                    _ => unreachable!(),
+                },
+                list.offsets().clone(),
+                item,
+                list.nulls().cloned(),
+            )
+            .unwrap(),
+        );
+        let mut columns = fields.columns().to_vec();
+        columns[0] = list;
+        let fields = Arc::new(
+            StructArray::try_new(fields.fields().clone(), columns, fields.nulls().cloned())
+                .unwrap(),
+        );
+        let mut columns = batch.columns().to_vec();
+        columns[3] = fields;
+        RecordBatch::try_new(batch.schema(), columns).unwrap()
+    }
+
+    /// A numeric `Sum` frame, for the frame-shape rejections above.
+    fn numeric_frame(schema: &SeriesSchema) -> (RecordBatch, SeriesFrameDecoder) {
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 3)])
+                .unwrap();
+        let mut cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states: vec![vec![
+                    Some(StatePayload::Float(AggregateStateValues {
+                        value: 1.0,
+                        compensation: 2.0,
+                        ..Default::default()
+                    }));
+                    3
+                ]],
+            },
+            true,
+        )
+        .unwrap();
+        let mut builder = SeriesFrameBuilder::try_new_aggregate_state(
+            &state,
+            schema,
+            FrameLabelMode::Explicit,
+            4,
+            4096,
+        )
+        .unwrap();
+        assert!(cursor.append_to(&mut builder).unwrap().is_none());
+        let batch = builder.flush().unwrap().unwrap();
+        let decoder =
+            SeriesFrameDecoder::try_new_aggregate_state(&state, schema, FrameLabelMode::Explicit)
+                .unwrap();
+        (batch, decoder)
+    }
+}

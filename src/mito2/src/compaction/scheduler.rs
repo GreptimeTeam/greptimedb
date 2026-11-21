@@ -594,6 +594,14 @@ impl CompactionScheduler {
             waiter.send(Ok(0));
             return Ok(false);
         }
+        if manifest_ctx.awaits_leader_lease() {
+            info!(
+                "Skipping compaction for region {} that awaits its Leader lease, options: {:?}",
+                region_id, compact_options
+            );
+            waiter.send(Ok(0));
+            return Ok(false);
+        }
         if status.has_pending_tails() {
             info!(
                 "Skipping compaction for region {} with pending WAL tails, options: {:?}",
@@ -669,7 +677,13 @@ impl CompactionScheduler {
         let Some(pending_request) = std::mem::take(&mut status.pending_request) else {
             return false;
         };
-        if status.has_pending_tails() {
+        let awaits_leader_lease = manifest_ctx.awaits_leader_lease();
+        if awaits_leader_lease {
+            info!(
+                "Region {region_id} awaits its Leader lease, answering its queued compaction without compacting"
+            );
+        }
+        if status.has_pending_tails() || awaits_leader_lease {
             status.pending_task_state = None;
             status.publish_state();
             pending_request.waiter.send(Ok(0));
@@ -768,7 +782,11 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
         };
-        if status.has_pending_tails() {
+        let awaits_leader_lease = manifest_ctx.awaits_leader_lease();
+        if awaits_leader_lease {
+            info!("Region {region_id} awaits its Leader lease, starting no follow-up compaction");
+        }
+        if status.has_pending_tails() || awaits_leader_lease {
             return false;
         }
         // An external automatic trigger requires one unrestricted follow-up pick.

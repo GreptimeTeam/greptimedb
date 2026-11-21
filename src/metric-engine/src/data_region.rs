@@ -20,7 +20,7 @@ use common_telemetry::{debug, info};
 use datatypes::schema::{SkippingIndexOptions, SkippingIndexType};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
-use store_api::metadata::ColumnMetadata;
+use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     AddColumn, AffectedRows, AlterKind, RegionAlterRequest, RegionRequest,
@@ -69,7 +69,7 @@ impl DataRegion {
     /// [MetricEngineInner::add_physical_columns](crate::engine::MetricEngineInner::add_physical_columns).
     pub async fn add_columns(
         &self,
-        region_id: RegionId,
+        physical_region_id: RegionId,
         columns: Vec<ColumnMetadata>,
         index_options: IndexOptions,
     ) -> Result<()> {
@@ -78,10 +78,8 @@ impl DataRegion {
             return Ok(());
         }
 
-        let region_id = utils::to_data_region_id(region_id);
-
         let Some((new_column_count, request)) = self
-            .assemble_alter_request(region_id, columns, index_options)
+            .assemble_alter_request(physical_region_id, columns, index_options)
             .await?
         else {
             // Every requested column already exists.
@@ -92,7 +90,7 @@ impl DataRegion {
 
         let _ = self
             .mito
-            .handle_request(region_id, request)
+            .handle_request(utils::to_data_region_id(physical_region_id), request)
             .await
             .context(MitoWriteOperationSnafu)?;
 
@@ -108,15 +106,12 @@ impl DataRegion {
     /// Returns `None` if every given column already exists.
     async fn assemble_alter_request(
         &self,
-        region_id: RegionId,
+        physical_region_id: RegionId,
         columns: Vec<ColumnMetadata>,
         index_options: IndexOptions,
     ) -> Result<Option<(usize, RegionRequest)>> {
-        let region_metadata = self
-            .mito
-            .get_metadata(region_id)
-            .await
-            .context(MitoReadOperationSnafu)?;
+        let region_metadata = self.physical_metadata(physical_region_id).await?;
+        let region_id = region_metadata.region_id;
 
         // The caller derives the columns to add from a cached schema that a cancelled or
         // concurrent alter may have left behind, so the names are checked against the
@@ -244,17 +239,15 @@ impl DataRegion {
             .map(|result| result.affected_rows)
     }
 
-    pub async fn physical_columns(
+    /// Returns the current physical schema, including columns installed by an ALTER.
+    pub async fn physical_metadata(
         &self,
         physical_region_id: RegionId,
-    ) -> Result<Vec<ColumnMetadata>> {
-        let data_region_id = utils::to_data_region_id(physical_region_id);
-        let metadata = self
-            .mito
-            .get_metadata(data_region_id)
+    ) -> Result<RegionMetadataRef> {
+        self.mito
+            .get_metadata(utils::to_data_region_id(physical_region_id))
             .await
-            .context(MitoReadOperationSnafu)?;
-        Ok(metadata.column_metadatas.clone())
+            .context(MitoReadOperationSnafu)
     }
 
     pub async fn alter_region_options(

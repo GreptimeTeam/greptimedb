@@ -16,6 +16,8 @@ mod at_modifier;
 mod function_plans;
 mod island;
 mod matching_filters;
+pub(crate) mod native;
+pub use native::{NATIVE_PROMQL_EXTENSION_KEY, discovers_metric_name, native_promql_resolved};
 
 mod set_operator;
 
@@ -60,7 +62,7 @@ use datafusion_expr::expr_fn::when;
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{ExprSchemable, Literal, SortExpr, TableSource, ident, lit};
 use datafusion_functions::core::coalesce;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::{ConcreteDataType, DataType as GreptimeDataType};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
@@ -292,6 +294,16 @@ pub struct PromPlanner {
     ctx: PromPlannerContext,
     /// Optional collector passed to native histogram UDFs.
     promql_annotations: Option<PromqlAnnotationCollector>,
+    /// Whether a statement is first offered to the native fused-series compiler.
+    ///
+    /// Read per query from the context extension
+    /// [`NATIVE_PROMQL_EXTENSION_KEY`](super::planner::native::NATIVE_PROMQL_EXTENSION_KEY), and
+    /// `false` when the query says nothing: with it off, planning takes the existing path unchanged
+    /// and nothing below is reached.
+    ///
+    /// The engine-wide `QueryOptions::experimental_native_promql` is applied while `QueryEngineState`
+    /// is built; this planner reads the per-query request extension instead.
+    native_fused: bool,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
@@ -302,22 +314,40 @@ impl PromPlanner {
         stmt: &EvalStmt,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
-        Self::stmt_to_plan_with_annotations(table_provider, stmt, query_engine_state, None).await
+        Self::stmt_to_plan_with_annotations(table_provider, stmt, query_engine_state, None, false)
+            .await
     }
 
     /// Plans a PromQL statement and passes the optional collector to histogram UDFs.
+    ///
+    /// `native_fused` enables the native fused-series route: the statement is offered to
+    /// [`compile`](crate::promql::native_compile::compile) first, and whatever that compiler does
+    /// not accept is planned by the existing path, unchanged. See
+    /// [`Self::try_plan_native_fused`].
     pub async fn stmt_to_plan_with_annotations(
         table_provider: DfTableSourceProvider,
         stmt: &EvalStmt,
         query_engine_state: &QueryEngineState,
         promql_annotations: Option<PromqlAnnotationCollector>,
+        native_fused: bool,
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(stmt)?,
             promql_annotations,
+            native_fused,
         };
 
+        // The whole statement is offered to the native compiler first, because that compiler folds
+        // a range function and the math functions over it into one tree: offered any later, the
+        // expression has already been split into the nodes those functions would have shared. A
+        // shape it does not accept is planned by the existing path exactly as if it were not here.
+        if let Some(plan) = planner
+            .try_plan_native_fused(&stmt.expr, query_engine_state)
+            .await?
+        {
+            return planner.strip_tsid_column(plan);
+        }
         let plan = planner
             .prom_root_expr_to_plan(&stmt.expr, query_engine_state)
             .await?;
@@ -556,7 +586,11 @@ impl PromPlanner {
             // schema.
             self.ctx.start = end;
             self.ctx.end = end;
-            let plan = self.prom_expr_to_plan(expr, query_engine_state).await?;
+            let native_fused = self.native_fused;
+            self.native_fused = false;
+            let plan_result = self.prom_expr_to_plan(expr, query_engine_state).await;
+            self.native_fused = native_fused;
+            let plan = plan_result?;
             return Ok(LogicalPlan::EmptyRelation(EmptyRelation {
                 produce_one_row: false,
                 schema: plan.schema().clone(),
@@ -564,7 +598,11 @@ impl PromPlanner {
         };
         self.ctx.start = start;
         self.ctx.end = end;
-        self.prom_expr_to_plan(expr, query_engine_state).await
+        let native_fused = self.native_fused;
+        self.native_fused = false;
+        let plan_result = self.prom_expr_to_plan(expr, query_engine_state).await;
+        self.native_fused = native_fused;
+        plan_result
     }
 
     async fn prom_subquery_expr_to_plan(
@@ -624,10 +662,14 @@ impl PromPlanner {
             self.ctx.start = child_start;
             self.ctx.end = child_end;
         }
-        let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
+        let native_fused = self.native_fused;
+        self.native_fused = false;
+        let input_result = self.prom_expr_to_plan(expr, query_engine_state).await;
+        self.native_fused = native_fused;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
         self.ctx.end = current_end;
+        let input = input_result?;
         // Return no rows with the child schema so enclosing fallbacks still work.
         let input = match child_window {
             Some(_) => input,
@@ -1161,6 +1203,40 @@ impl PromPlanner {
             );
         }
 
+        // The same whole native binary the statement root was offered can sit below a
+        // legacy-only wrapper. A nested retry is valid only on the statement's own grid.
+        if self.native_fused
+            && self.ctx.start == self.ctx.stmt_start
+            && self.ctx.end == self.ctx.stmt_end
+        {
+            let saved = self.ctx.clone();
+            let native = self
+                .try_plan_native_fused(&PromExpr::Binary(binary_expr.clone()), query_engine_state)
+                .await;
+            self.ctx = saved;
+            if let Some(plan) = native? {
+                let mut fields = plan.schema().fields().iter();
+                if let Some(time) = fields.next().map(|field| field.name().clone()) {
+                    let values = fields
+                        .clone()
+                        .filter(|field| field.data_type() != &ArrowDataType::Utf8)
+                        .map(|field| field.name().clone())
+                        .collect();
+                    let tags = fields
+                        .filter(|field| field.data_type() == &ArrowDataType::Utf8)
+                        .map(|field| field.name().clone())
+                        .collect();
+                    self.ctx.reset();
+                    self.ctx.reset_table_name_and_schema();
+                    self.ctx.aggregation_field_labels.clear();
+                    self.ctx.time_index_column = Some(time);
+                    self.ctx.field_columns = values;
+                    self.ctx.tag_columns = tags;
+                    return Ok(plan);
+                }
+            }
+        }
+
         if let Some(plan) = self.try_plan_binary_island(binary_expr).await? {
             return Ok(plan);
         }
@@ -1351,25 +1427,29 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                let mut left_input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
-                let left_field_columns = self.ctx.field_columns.clone();
-                let left_time_index_column = self.ctx.time_index_column.clone();
+                // A declined binary uses the existing planner for its operands.
+                let (mut left_input, mut left_context, mut right_input, mut right_context) = {
+                    let left = self.prom_expr_to_plan(lhs, query_engine_state).await?;
+                    let left_ctx = self.ctx.clone();
+                    let right = self.prom_expr_to_plan(rhs, query_engine_state).await?;
+                    let right_ctx = self.ctx.clone();
+                    (left, left_ctx, right, right_ctx)
+                };
+                let left_time_index_column = left_context.time_index_column.clone();
+                self.ctx = left_context.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let mut left_context = self.ctx.clone();
-
-                let mut right_input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
-                let right_field_columns = self.ctx.field_columns.clone();
-                let right_time_index_column = self.ctx.time_index_column.clone();
+                let right_time_index_column = right_context.time_index_column.clone();
+                self.ctx = right_context.clone();
                 let mut right_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let mut right_context = self.ctx.clone();
 
                 // Both operands are planned first because only the planned contexts tell a tag
                 // from a value field. The rewrite merely adds matchers to a selector, so the
-                // table reference, time index and field columns captured above stay valid.
+                // table reference and time index captured above stay valid. The field columns are
+                // read after this rewrite, because an operand it re-plans brings its own.
                 if let Some(rewritten) = matching_filters::propagate(
                     binary_expr,
                     &left_context.tag_columns,
@@ -1400,6 +1480,8 @@ impl PromPlanner {
                     self.ctx = right_context.clone();
                 }
 
+                let left_field_columns = left_context.field_columns.clone();
+                let right_field_columns = right_context.field_columns.clone();
                 let left_is_empty_metric = Self::is_empty_metric(&left_input);
                 let right_is_empty_metric = Self::is_empty_metric(&right_input);
 
@@ -2410,9 +2492,23 @@ impl PromPlanner {
         // let promql_parser::parser::ast::Extension { expr } = ext_expr;
         let expr = &ext_expr.expr;
         let children = expr.children();
-        let plan = self
-            .prom_root_expr_to_plan(&children[0], query_engine_state)
-            .await?;
+        let native_plan = match expr.name() {
+            ANALYZE_NODE_NAME
+            | ANALYZE_VERBOSE_NODE_NAME
+            | EXPLAIN_NODE_NAME
+            | EXPLAIN_VERBOSE_NODE_NAME => {
+                self.try_plan_native_fused(&children[0], query_engine_state)
+                    .await?
+            }
+            _ => None,
+        };
+        let plan = match native_plan {
+            Some(plan) => plan,
+            None => {
+                self.prom_root_expr_to_plan(&children[0], query_engine_state)
+                    .await?
+            }
+        };
         // Wrapper for the explanation/analyze of the existing plan
         // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
         // if `analyze` is true, runs the actual plan and produces
@@ -3924,12 +4020,28 @@ impl PromPlanner {
                     query_engine_state,
                 )?;
 
-                // Reserve the current field columns except the `dst_label`.
-                for value in &self.ctx.field_columns {
-                    if *value != dst_label {
-                        let expr = DfExpr::Column(Column::from_name(value));
-                        exprs.push(expr);
+                // A destination label is a tag, and a tag is published under its own name. A
+                // value field of that name would have to be dropped or renamed to make room, and
+                // neither is what the statement says, so the collision is the statement's error
+                // rather than a value quietly going missing.
+                if self
+                    .ctx
+                    .field_columns
+                    .iter()
+                    .any(|field| field == &dst_label)
+                {
+                    return UnsupportedExprSnafu {
+                        name: format!(
+                            "label_join destination label {dst_label:?} collides with a value field"
+                        ),
                     }
+                    .fail();
+                }
+
+                // Reserve the current field columns.
+                for value in &self.ctx.field_columns {
+                    let expr = DfExpr::Column(Column::from_name(value));
+                    exprs.push(expr);
                 }
 
                 // Remove it from tag columns if exists to avoid duplicated column names
@@ -3945,12 +4057,10 @@ impl PromPlanner {
                 if let Some((replace_expr, dst_label)) =
                     self.build_regexp_replace_label_expr(&mut other_input_exprs, input_schema)?
                 {
-                    // Reserve the current field columns except the `dst_label`.
+                    // Reserve the current field columns.
                     for value in &self.ctx.field_columns {
-                        if *value != dst_label {
-                            let expr = DfExpr::Column(Column::from_name(value));
-                            exprs.push(expr);
-                        }
+                        let expr = DfExpr::Column(Column::from_name(value));
+                        exprs.push(expr);
                     }
 
                     // Remove it from tag columns if exists to avoid duplicated column names
@@ -4280,6 +4390,22 @@ impl PromPlanner {
 
         // Validate the destination label name
         Self::validate_label_name(&dst_label)?;
+        // A destination label is a tag, and a tag is published under its own name. A value field
+        // of that name would have to be dropped or renamed to make room, so report the collision
+        // before any no-op path below can silently decline the rewrite.
+        if self
+            .ctx
+            .field_columns
+            .iter()
+            .any(|field| field == &dst_label)
+        {
+            return UnsupportedExprSnafu {
+                name: format!(
+                    "label_replace destination label {dst_label:?} collides with a value field"
+                ),
+            }
+            .fail();
+        }
         let replacement = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)), _)) => r,
             other => UnexpectedPlanExprSnafu {
@@ -6573,11 +6699,18 @@ impl PromPlanner {
 
     fn strip_tsid_column(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let schema = plan.schema();
-        if !schema
-            .fields()
-            .iter()
-            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
-        {
+        // A series identifier is the internal `UInt64` key or the `Utf8` label synthesized from
+        // it, and only those two representations are stripped. The same name on any other column
+        // is the statement's own answer - `count(m)` aliased to `__tsid` answers an `Int64`, and a
+        // value is `Float64` or the canonical native histogram struct - so a name is not a role.
+        fn is_internal_tsid(field: &Field) -> bool {
+            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
+                && matches!(
+                    field.data_type(),
+                    ArrowDataType::UInt64 | ArrowDataType::Utf8
+                )
+        }
+        if !schema.fields().iter().any(|field| is_internal_tsid(field)) {
             return Ok(plan);
         }
 
@@ -6585,7 +6718,7 @@ impl PromPlanner {
         // the columns by their original qualified names.
         let project_exprs = schema
             .iter()
-            .filter(|(_, field)| field.name() != DATA_SCHEMA_TSID_COLUMN_NAME)
+            .filter(|(_, field)| !is_internal_tsid(field))
             .map(|(qualifier, field)| {
                 DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
             })

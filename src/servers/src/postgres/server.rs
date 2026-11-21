@@ -120,8 +120,8 @@ impl PostgresServer {
         self
     }
 
-    /// Wires the OTLP handler used by table-less
-    /// `COPY FROM STDIN WITH (FORMAT otlp)` — the same handler the
+    /// Wires the OTLP handler used by
+    /// `COPY [table] FROM STDIN WITH (FORMAT otlp)` — the same handler the
     /// OTLP/HTTP endpoints use, so the payload runs through the
     /// identical pipeline. `with_metric_engine` carries the same flag
     /// the HTTP wiring passes from its options.

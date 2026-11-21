@@ -209,6 +209,20 @@ pub fn new_downgrade_region_reply(
     exist: bool,
     error: Option<String>,
 ) -> MailboxMessage {
+    new_downgrade_regions_reply(
+        id,
+        vec![DowngradeRegionReply {
+            region_id: RegionId::new(0, 0),
+            last_entry_id,
+            metadata_last_entry_id: None,
+            exists: exist,
+            error: legacy_instruction_error(error),
+        }],
+    )
+}
+
+/// Generates a [InstructionReply::DowngradeRegions] reply for a batch of regions.
+pub fn new_downgrade_regions_reply(id: u64, replies: Vec<DowngradeRegionReply>) -> MailboxMessage {
     MailboxMessage {
         id,
         subject: "mock".to_string(),
@@ -217,13 +231,7 @@ pub fn new_downgrade_region_reply(
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::DowngradeRegions(
-                DowngradeRegionsReply::new(vec![DowngradeRegionReply {
-                    region_id: RegionId::new(0, 0),
-                    last_entry_id,
-                    metadata_last_entry_id: None,
-                    exists: exist,
-                    error: legacy_instruction_error(error),
-                }]),
+                DowngradeRegionsReply::new(replies),
             ))
             .unwrap(),
         )),
@@ -238,6 +246,19 @@ pub fn new_upgrade_region_reply(
     exists: bool,
     error: Option<String>,
 ) -> MailboxMessage {
+    new_upgrade_regions_reply(
+        id,
+        vec![UpgradeRegionReply {
+            region_id: RegionId::new(0, 0),
+            ready,
+            exists,
+            error: legacy_instruction_error(error),
+        }],
+    )
+}
+
+/// Generates a [InstructionReply::UpgradeRegions] reply with a reply for each region.
+pub fn new_upgrade_regions_reply(id: u64, replies: Vec<UpgradeRegionReply>) -> MailboxMessage {
     MailboxMessage {
         id,
         subject: "mock".to_string(),
@@ -245,14 +266,9 @@ pub fn new_upgrade_region_reply(
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::UpgradeRegions(
-                UpgradeRegionsReply::single(UpgradeRegionReply {
-                    region_id: RegionId::new(0, 0),
-                    ready,
-                    exists,
-                    error: legacy_instruction_error(error),
-                }),
-            ))
+            serde_json::to_string(&InstructionReply::UpgradeRegions(UpgradeRegionsReply::new(
+                replies,
+            )))
             .unwrap(),
         )),
         header: None,
@@ -399,21 +415,26 @@ pub async fn new_wal_prune_metadata(
     min_prunable_entry_id
 }
 
+/// Returns a mito leader region as datanode 1 reports it.
+pub fn new_leader_region(flushed_entry_id: u64, has_pending_tails: bool) -> LeaderRegion {
+    LeaderRegion {
+        datanode_id: 1,
+        manifest: LeaderRegionManifestInfo::Mito {
+            manifest_version: 0,
+            flushed_entry_id,
+            topic_latest_entry_id: 0,
+        },
+        has_pending_tails,
+    }
+}
+
 pub async fn update_in_memory_region_flushed_entry_id(
     leader_region_registry: &LeaderRegionRegistryRef,
     region_entry_ids: HashMap<RegionId, u64>,
 ) -> Result<()> {
     let mut key_values = Vec::with_capacity(region_entry_ids.len());
     for (region_id, flushed_entry_id) in region_entry_ids {
-        let value = LeaderRegion {
-            datanode_id: 1,
-            manifest: LeaderRegionManifestInfo::Mito {
-                manifest_version: 0,
-                flushed_entry_id,
-                topic_latest_entry_id: 0,
-            },
-        };
-        key_values.push((region_id, value));
+        key_values.push((region_id, new_leader_region(flushed_entry_id, false)));
     }
     leader_region_registry.batch_put(key_values);
 

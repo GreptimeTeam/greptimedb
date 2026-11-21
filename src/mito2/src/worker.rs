@@ -36,6 +36,9 @@ mod handle_tail_replay;
 mod handle_truncate;
 mod handle_write;
 
+#[cfg(test)]
+pub(crate) use handle_catchup::persist_backfilled_metadata_and_notify_if_fenced;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
@@ -81,8 +84,8 @@ use crate::region::{
     RegionMapRef,
 };
 use crate::request::{
-    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
-    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, BulkInsertRequest, DdlRequest, OptionOutputTx,
+    SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
@@ -235,6 +238,10 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .enable_columnar_meta_cache(
+                    config.experimental_series_index_format
+                        == crate::config::SeriesIndexFormat::Columnar,
+                )
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
@@ -436,6 +443,15 @@ impl WorkerGroup {
         &self.granted_leases
     }
 
+    /// Tells the worker of `region` that a lease ended its wait for its Leader lease, without
+    /// waiting.
+    pub(crate) fn notify_leader_lease_wait_ended(&self, region: &MitoRegionRef) {
+        handle_catchup::notify_leader_lease_wait_ended(
+            &self.worker(region.region_id).sender,
+            region,
+        );
+    }
+
     /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
     pub(crate) fn notify_writable(&self, region: &MitoRegionRef) {
         handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
@@ -539,6 +555,10 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .enable_columnar_meta_cache(
+                    config.experimental_series_index_format
+                        == crate::config::SeriesIndexFormat::Columnar,
+                )
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
@@ -648,7 +668,50 @@ async fn series_index_store_from_config(
     }
 
     let root = Path::new(data_home).join("series_index");
-    new_fs_cache_store(&root.to_string_lossy()).await.map(Some)
+    let store = new_fs_cache_store(&root.to_string_lossy()).await?;
+    initialize_series_index_cache(&store).await?;
+    Ok(Some(store))
+}
+
+/// Marks the rebuildable local index layout, and resets the store when it changes.
+///
+/// This branch is experimental and has no deployments, so it pins the token at `1`: a
+/// cache written by any other build is discarded on startup and rebuilt from the SSTs.
+/// Artifacts are additionally rejected on open when they lack the mandatory
+/// `identity_encoding` discriminator, so a stale artifact is never served even if the
+/// reset did not happen (a read that precedes it, or an artifact outside this cache).
+const SERIES_INDEX_CACHE_VERSION: &str = "1";
+
+/// Resets incompatible caches before any worker or reader can use their catalogs.
+async fn initialize_series_index_cache(store: &ObjectStore) -> Result<()> {
+    let version = match store.read("version").await {
+        Ok(bytes) => Some(bytes.to_bytes()),
+        Err(error) if error.kind() == object_store::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context(crate::error::OpenDalSnafu),
+    };
+    if version.as_deref() == Some(SERIES_INDEX_CACHE_VERSION.as_bytes()) {
+        return Ok(());
+    }
+    common_telemetry::info!("Resetting series-index cache: missing or incompatible layout version");
+    // Preserve the cache root, which may be a mount point.
+    let entries = store.list("/").await.context(crate::error::OpenDalSnafu)?;
+    for entry in entries {
+        // Listings can include the directory itself.
+        if entry.path() == "/" {
+            continue;
+        }
+        store
+            .delete_with(entry.path())
+            .recursive(true)
+            .await
+            .context(crate::error::OpenDalSnafu)?;
+    }
+    store
+        .write("version", SERIES_INDEX_CACHE_VERSION)
+        .await
+        .context(crate::error::OpenDalSnafu)?;
+    common_telemetry::info!("Series-index cache reset complete");
+    Ok(())
 }
 
 pub async fn write_cache_from_config(
@@ -844,6 +907,7 @@ impl<S: LogStore> WorkerStarter<S> {
             granted_leases: self.granted_leases,
             staging_regions: self.staging_regions,
             tail_replays: HashMap::new(),
+            lease_deferred_index_retries: HashMap::new(),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -1310,6 +1374,9 @@ struct RegionWorkerLoop<S> {
     staging_regions: StagingRegionsRef,
     /// Running tail replays, which stay here until they report their end.
     tail_replays: HashMap<RegionId, CancellableTaskState>,
+    /// Index build retries refused while their region awaited its Leader lease, which the end of
+    /// the wait re-issues.
+    lease_deferred_index_retries: HashMap<RegionId, Vec<BuildIndexRequest>>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1591,6 +1658,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     };
                     sender.send(result);
                 }
+                WorkerRequest::DiscardPendingTails {
+                    region_id,
+                    node_id,
+                    sender,
+                } => {
+                    self.handle_discard_pending_tails(region_id, node_id, sender);
+                }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
@@ -1798,6 +1872,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_region_reloaded(region_id, old, result).await
             }
             BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::LeaderLeaseWaitEnded => {
+                self.handle_leader_lease_wait_ended(region_id).await
+            }
             BackgroundNotify::RegionCannotReplay { region } => {
                 self.handle_region_cannot_replay(region_id, region)
             }
@@ -1806,10 +1883,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 edit,
                 tails,
             } => {
-                self.handle_tail_replay_committed(region_id, region, edit, tails)
+                self.apply_tails_edit(region_id, &region, edit, &tails)
                     .await
             }
             BackgroundNotify::TailReplayEnded => self.handle_tail_replay_ended(region_id),
+            BackgroundNotify::PendingTailsDiscarded {
+                region,
+                edit,
+                tails,
+                discarded,
+                sender,
+            } => {
+                self.handle_pending_tails_discarded(
+                    region_id, region, edit, tails, discarded, sender,
+                )
+                .await
+            }
         }
         // Completion handlers may return early after releasing their scheduler. Dispatch
         // here covers those paths as well as their normal completion.
@@ -1889,7 +1978,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S> RegionWorkerLoop<S> {
     /// Cleans up the worker.
-    async fn clean(&self) {
+    async fn clean(&mut self) {
         for state in self.tail_replays.values() {
             let _ = state.request_cancel();
         }
@@ -1912,6 +2001,7 @@ impl<S> RegionWorkerLoop<S> {
         self.regions.clear();
         for region in regions {
             self.granted_leases.remove(region.region_id);
+            self.lease_deferred_index_retries.remove(&region.region_id);
         }
     }
 
@@ -1969,6 +2059,38 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_tail_commit_begin(_region_id).await;
+        }
+    }
+
+    /// A tail replay committed its result and has not told the worker yet.
+    pub(crate) async fn on_tail_commit_end(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_commit_end(_region_id).await;
+        }
+    }
+
+    /// A discard of pending tails released the region's WAL.
+    pub(crate) fn on_discarded_tails_wal_released(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_discarded_tails_wal_released(_region_id);
+        }
+    }
+
+    /// The worker handled the end of the region's wait for its Leader lease.
+    pub(crate) fn on_leader_lease_wait_ended(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_leader_lease_wait_ended(_region_id);
+        }
+    }
+
+    /// The worker spawns the persisting of the region's backfilled metadata.
+    pub(crate) fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_persist_backfilled_metadata_begin(_region_id);
         }
     }
 
@@ -2232,6 +2354,70 @@ impl WorkerListener {
 mod tests {
     use super::*;
     use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_series_index_cache_layout_reset() {
+        let parent = common_test_util::temp_dir::create_temp_dir("series-cache-version");
+        let root = parent.path().join("series_index");
+        let sentinel = parent.path().join("sst");
+        tokio::fs::write(&sentinel, b"source data").await.unwrap();
+        let store = crate::access_layer::new_fs_cache_store(&root.to_string_lossy())
+            .await
+            .unwrap();
+        // Keep the original directory alive so its inode cannot be reused after deletion.
+        #[cfg(unix)]
+        let root_handle = tokio::fs::File::open(&root).await.unwrap();
+        for version in [None, Some("0"), Some("invalid")] {
+            if let Some(version) = version {
+                store.write("version", version).await.unwrap();
+            }
+            store.write("stale", "old").await.unwrap();
+            store
+                .write("42/samples/old/source/part-0.samples", "old")
+                .await
+                .unwrap();
+            store
+                .write("42/samples.json", "stale references")
+                .await
+                .unwrap();
+            super::initialize_series_index_cache(&store).await.unwrap();
+            assert!(!store.exists("stale").await.unwrap());
+            assert_eq!(
+                store.read("version").await.unwrap().to_bytes().as_ref(),
+                SERIES_INDEX_CACHE_VERSION.as_bytes()
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+
+                let original = root_handle.metadata().await.unwrap();
+                let current = tokio::fs::metadata(&root).await.unwrap();
+                assert_eq!(
+                    (original.dev(), original.ino()),
+                    (current.dev(), current.ino())
+                );
+            }
+            assert!(!store.exists("42/samples.json").await.unwrap());
+            assert!(
+                !store
+                    .exists("42/samples/old/source/part-0.samples")
+                    .await
+                    .unwrap()
+            );
+            store
+                .write("42/series/current/manifest.json", "current")
+                .await
+                .unwrap();
+            super::initialize_series_index_cache(&store).await.unwrap();
+            assert!(
+                store
+                    .exists("42/series/current/manifest.json")
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(tokio::fs::read(&sentinel).await.unwrap(), b"source data");
+        }
+    }
 
     #[test]
     fn test_region_id_to_index() {

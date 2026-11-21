@@ -55,7 +55,9 @@ use tokio::sync::{Notify, oneshot};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::engine::listener::{EventListener, FlushCancellationListener};
+use crate::engine::open_test::new_dummy_fetcher;
 use crate::engine::region_hook::{RegionHook, RegionHookRef};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::storage::{delta_file, gen_path, manifest_dir};
@@ -215,6 +217,74 @@ async fn test_create_and_reopen_region_with_object_store_wal() {
         region.version_control.current().last_entry_id
     );
     assert_eq!(3, count_rows(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_root_prefix_create_reopen_and_offline_cleanup() {
+    let mut env = TestEnv::with_prefix("object-store-wal-root-prefix").await;
+    let (engine, log_store) = new_engine(&mut env).await;
+    let region_id = RegionId::new(1, 1);
+    let provider = object_store_provider(region_id);
+    let options = HashMap::from([(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&WalOptions::ObjectStore(ObjectStoreWalOptions::new(
+            wal_config().prefix,
+        )))
+        .unwrap(),
+    )]);
+    let request = CreateRequestBuilder::new()
+        .insert_option(WAL_OPTIONS_KEY, &options[WAL_OPTIONS_KEY])
+        .build();
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    assert_eq!(provider, engine.get_region(region_id).unwrap().provider);
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    let last_entry_id = log_store.latest_entry_id(&provider).unwrap();
+
+    reopen_region(&engine, region_id, table_dir.clone(), true, options.clone()).await;
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(provider, region.provider);
+    assert_eq!(
+        last_entry_id,
+        region.version_control.current().last_entry_id
+    );
+    assert_eq!(3, count_rows(&engine, region_id).await);
+    let object_store = region.access_layer.object_store().clone();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    assert!(!object_store.list(&region_dir).await.unwrap().is_empty());
+    drop(region);
+
+    close_region(&engine, region_id).await;
+    assert_eq!(
+        vec![last_entry_id],
+        stored_entry_ids(&log_store, region_id).await
+    );
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::CleanUp(RegionCleanUpRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(stored_entry_ids(&log_store, region_id).await.is_empty());
+    assert!(object_store.list(&region_dir).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -468,20 +538,36 @@ pub(crate) async fn count_ssts(store: &ObjectStore, region_dir: &str) -> usize {
         .count()
 }
 
+/// A commit is stale because the Leader deadline of its writer passes while it is written, or,
+/// with `awaiting_leader_lease`, because a catchup made its writer writable and no Leader lease
+/// confirmed it; the cases cover the commits such a writer still makes: the flushes of its
+/// downgrade and of its close.
 #[rstest]
-#[case::flush(RegionRequest::Flush(RegionFlushRequest::default()), 1)]
+#[case::flush(RegionRequest::Flush(RegionFlushRequest::default()), 1, false)]
 #[case::compaction(
     RegionRequest::Compact(RegionCompactRequest {
         options: compact_request::Options::StrictWindow(StrictWindow { window_seconds: 3600 }),
         ..Default::default()
     }),
-    1
+    1,
+    false
 )]
-#[case::truncate(RegionRequest::Truncate(RegionTruncateRequest::All), 0)]
+#[case::truncate(RegionRequest::Truncate(RegionTruncateRequest::All), 0, false)]
+#[case::downgrade_flush_awaiting_leader_lease(
+    RegionRequest::Flush(RegionFlushRequest::default()),
+    1,
+    true
+)]
+#[case::close_flush_awaiting_leader_lease(
+    RegionRequest::Close(RegionCloseRequest { flush_on_close: true }),
+    1,
+    true
+)]
 #[tokio::test]
 async fn test_stale_commit_on_deleted_delta_name_conflicts(
     #[case] commit: RegionRequest,
     #[case] new_ssts: usize,
+    #[case] awaiting_leader_lease: bool,
 ) {
     common_telemetry::init_default_ut_logging();
     // The creation is version 0 and the flushes below are versions 1 and 2.
@@ -501,7 +587,17 @@ async fn test_stale_commit_on_deleted_delta_name_conflicts(
         put_rows(&old_leader, region_id, rows(start)).await;
         flush_region(&old_leader, region_id, None).await;
     }
+    if awaiting_leader_lease {
+        promote_to_await_leader_lease(&old_leader, region_id).await;
+    }
     put_rows(&old_leader, region_id, rows(6)).await;
+    // A close turns the region downgrading itself.
+    if awaiting_leader_lease && !matches!(commit, RegionRequest::Close(_)) {
+        old_leader
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+            .await
+            .unwrap();
+    }
 
     let region = old_leader.get_region(region_id).unwrap();
     let (manifest, checkpoint) = {
@@ -546,7 +642,22 @@ async fn test_stale_commit_on_deleted_delta_name_conflicts(
         }
     }
 
-    old_leader.freeze_lease_clock(deadline);
+    if awaiting_leader_lease {
+        assert!(region.manifest_ctx.awaits_leader_lease());
+        // A lease that ends the wait during the write does not lift the check.
+        old_leader
+            .set_region_role_with_lease(
+                region_id,
+                RegionRole::StagingLeader,
+                Instant::now(),
+                deadline,
+                None,
+            )
+            .unwrap();
+        assert!(!region.manifest_ctx.awaits_leader_lease());
+    } else {
+        old_leader.freeze_lease_clock(deadline);
+    }
     blocker.release();
     let error = commit.await.unwrap().unwrap_err();
     assert!(error.retry_hint().is_retryable(), "{error:?}");
@@ -1107,6 +1218,66 @@ async fn test_conflict_reloads_region() {
     );
     assert_eq!(6, count_rows(&engine, region_id).await);
     assert!(!engine.is_region_catching_up(region_id));
+}
+
+/// The persisting of backfilled metadata that the end of a wait for the Leader lease spawns
+/// outside the worker asks the worker to reload the region it fenced on a newer manifest.
+#[tokio::test]
+async fn test_conflicting_backfill_asks_for_reload() {
+    let region_id = RegionId::new(1, 1);
+    let expr = r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
+    let mut env = TestEnv::with_prefix("backfill-conflict-reload")
+        .await
+        .with_partition_expr_fetcher(new_dummy_fetcher(region_id, expr.to_string()));
+    let (engine, _log_store) = new_engine(&mut env).await;
+    engine.require_write_lease();
+    engine.freeze_lease_clock(Instant::now());
+    let request = CreateRequestBuilder::new()
+        .insert_option(WAL_OPTIONS_KEY, &wal_options()[WAL_OPTIONS_KEY])
+        .partition_expr_json(None)
+        .build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    close_region(&engine, region_id).await;
+    let open = RegionRequest::Open(open_request(table_dir.clone()));
+    engine.handle_request(region_id, open).await.unwrap();
+    let now = Instant::now();
+    engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            now,
+            now + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    let version = next_manifest_version(&region).await;
+    let store = env.get_object_store().unwrap();
+    publish_delta(
+        &store,
+        &region_dir,
+        version,
+        encode_delta(nop_action()).await,
+    )
+    .await;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+
+    crate::worker::persist_backfilled_metadata_and_notify_if_fenced(&sender, &region).await;
+
+    assert!(region.manifest_ctx.is_reload_pending());
+    let request = receiver.try_recv().unwrap().request;
+    assert!(matches!(
+        request,
+        WorkerRequest::Background {
+            region_id: notified,
+            notify: BackgroundNotify::RegionFenced,
+        } if notified == region_id
+    ));
 }
 
 #[tokio::test]

@@ -276,7 +276,7 @@ impl RegionManifestManager {
                 flushed_entry_id: Some(flushed_entry_id),
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             }));
         }
 
@@ -1203,7 +1203,7 @@ mod test {
                         flushed_entry_id: None,
                         flushed_sequence: None,
                         committed_sequence: None,
-                        wal_recovery: Default::default(),
+                        ..Default::default()
                     })]),
                     false,
                 )

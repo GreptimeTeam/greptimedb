@@ -1031,33 +1031,14 @@ fn validate_region_engine_config(configs: &[RegionEngineConfig]) -> Result<()> {
 
 /// Rejects an object store WAL config the log store cannot run on.
 fn validate_object_store_wal_config(config: &ObjectStoreWalConfig) -> Result<()> {
-    let prefix = config.prefix.trim();
-    ensure!(
-        !prefix.is_empty(),
+    config.validate_prefix().map_err(|reason| {
         InvalidObjectStoreWalConfigSnafu {
             field: "prefix",
             value: &config.prefix,
-            reason: "must not be empty",
+            reason,
         }
-    );
-    ensure!(
-        !prefix.starts_with('/'),
-        InvalidObjectStoreWalConfigSnafu {
-            field: "prefix",
-            value: &config.prefix,
-            reason: "must be a relative path",
-        }
-    );
-    ensure!(
-        !prefix
-            .split('/')
-            .any(|component| component.is_empty() || component == ".."),
-        InvalidObjectStoreWalConfigSnafu {
-            field: "prefix",
-            value: &config.prefix,
-            reason: "must not contain empty or `..` components",
-        }
-    );
+        .build()
+    })?;
     ensure!(
         config.flush_interval >= Duration::from_millis(10),
         InvalidObjectStoreWalConfigSnafu {
@@ -1494,6 +1475,13 @@ mod tests {
             (
                 ObjectStoreWalConfig {
                     prefix: "wal/".to_string(),
+                    ..Default::default()
+                },
+                "prefix",
+            ),
+            (
+                ObjectStoreWalConfig {
+                    prefix: "wal/./objects".to_string(),
                     ..Default::default()
                 },
                 "prefix",

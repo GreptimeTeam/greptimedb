@@ -98,11 +98,6 @@ fn new_test_table_info_with_columns(
 }
 
 #[cfg(test)]
-fn new_physical_test_table_info(table_id: u32, table_name: &str) -> TableInfo {
-    new_test_table_info_with_columns(table_id, table_name, test_column_schemas(true), vec![0, 2])
-}
-
-#[cfg(test)]
 fn new_logical_test_table_info(table_id: u32, table_name: &str) -> TableInfo {
     new_test_table_info_with_columns(table_id, table_name, test_column_schemas(false), vec![0])
 }
@@ -279,96 +274,110 @@ async fn test_partition_expr_version_cache() {
 
 #[tokio::test]
 async fn test_logical_split_rows_rejects_physical_only_partition_column() {
-    let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
-    let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
-    let table_route_cache = test_new_table_route_cache(kv_backend.clone());
-    let partition_info_cache = test_new_partition_info_cache(table_route_cache.clone());
-    let partition_manager =
-        PartitionRuleManager::new(kv_backend, table_route_cache, partition_info_cache);
-    let physical_table_info = new_physical_test_table_info(1024, "physical");
-    let logical_table_info = new_logical_test_table_info(1025, "logical");
-    assert_eq!(
-        vec!["a", "b"],
-        physical_table_info
-            .meta
-            .partition_column_names()
-            .map(|name| name.as_str())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        vec!["a"],
-        logical_table_info
-            .meta
-            .partition_column_names()
-            .map(|name| name.as_str())
-            .collect::<Vec<_>>()
-    );
+    for missing_column in ["b", "__tsid"] {
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
+        let table_route_cache = test_new_table_route_cache(kv_backend.clone());
+        let partition_info_cache = test_new_partition_info_cache(table_route_cache.clone());
+        let partition_manager =
+            PartitionRuleManager::new(kv_backend, table_route_cache, partition_info_cache);
+        let mut physical_columns = test_column_schemas(true);
+        physical_columns[2].name = missing_column.to_string();
+        let physical_table_info =
+            new_test_table_info_with_columns(1024, "physical", physical_columns, vec![0, 2]);
+        let mut logical_table_info = new_logical_test_table_info(1025, "logical");
+        logical_table_info.meta.engine =
+            store_api::metric_engine_consts::METRIC_ENGINE_NAME.to_string();
+        logical_table_info.meta.options.extra_options.insert(
+            store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY.to_string(),
+            "1024".to_string(),
+        );
+        assert_eq!(
+            vec!["a", missing_column],
+            physical_table_info
+                .meta
+                .partition_column_names()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec!["a"],
+            logical_table_info
+                .meta
+                .partition_column_names()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+        );
 
-    table_metadata_manager
-        .create_table_metadata(
-            physical_table_info,
-            TableRouteValue::physical(vec![RegionRoute {
-                region: Region {
-                    id: 1.into(),
-                    name: "r1".to_string(),
-                    attrs: BTreeMap::new(),
-                    partition_expr: PartitionExpr::new(
-                        Operand::Expr(PartitionExpr::new(
-                            Operand::Column("a".to_string()),
-                            RestrictedOp::GtEq,
-                            Operand::Value(datatypes::value::Value::Int32(10)),
-                        )),
-                        RestrictedOp::And,
-                        Operand::Expr(PartitionExpr::new(
-                            Operand::Column("b".to_string()),
-                            RestrictedOp::Lt,
-                            Operand::Value(datatypes::value::Value::Int32(50)),
-                        )),
-                    )
-                    .as_json_str()
-                    .unwrap(),
+        table_metadata_manager
+            .create_table_metadata(
+                physical_table_info,
+                TableRouteValue::physical(vec![RegionRoute {
+                    region: Region {
+                        id: 1.into(),
+                        name: "r1".to_string(),
+                        attrs: BTreeMap::new(),
+                        partition_expr: PartitionExpr::new(
+                            Operand::Expr(PartitionExpr::new(
+                                Operand::Column("a".to_string()),
+                                RestrictedOp::GtEq,
+                                Operand::Value(datatypes::value::Value::Int32(10)),
+                            )),
+                            RestrictedOp::And,
+                            Operand::Expr(PartitionExpr::new(
+                                Operand::Column(missing_column.to_string()),
+                                RestrictedOp::Lt,
+                                Operand::Value(datatypes::value::Value::Int32(50)),
+                            )),
+                        )
+                        .as_json_str()
+                        .unwrap(),
+                    },
+                    leader_peer: Some(Peer::new(1, "")),
+                    follower_peers: vec![],
+                    leader_state: None,
+                    leader_down_since: None,
+                    write_route_policy: None,
+                }]),
+                new_test_region_wal_options(vec![1]),
+            )
+            .await
+            .unwrap();
+        table_metadata_manager
+            .create_table_metadata(
+                logical_table_info.clone(),
+                TableRouteValue::logical(1024),
+                new_test_region_wal_options(vec![]),
+            )
+            .await
+            .unwrap();
+
+        let error = partition_manager
+            .find_table_partition_rule(&logical_table_info)
+            .await
+            .err()
+            .expect("Physical-only partition columns must be rejected");
+        assert!(
+            matches!(error, partition::error::Error::UndefinedColumn { ref column, .. } if column == missing_column)
+        );
+
+        let error = partition_manager
+            .split_rows(
+                &logical_table_info,
+                Rows {
+                    schema: vec![tag_column_schema("a", ColumnDataType::Int32)],
+                    rows: vec![Row {
+                        values: vec![ValueData::I32Value(100).into()],
+                    }],
                 },
-                leader_peer: Some(Peer::new(1, "")),
-                follower_peers: vec![],
-                leader_state: None,
-                leader_down_since: None,
-                write_route_policy: None,
-            }]),
-            new_test_region_wal_options(vec![1]),
-        )
-        .await
-        .unwrap();
-    table_metadata_manager
-        .create_table_metadata(
-            logical_table_info.clone(),
-            TableRouteValue::logical(1024),
-            new_test_region_wal_options(vec![]),
-        )
-        .await
-        .unwrap();
-
-    let (partition_rule, _) = partition_manager
-        .find_table_partition_rule(&logical_table_info)
-        .await
-        .unwrap();
-    assert_eq!(&["a"], partition_rule.partition_columns());
-
-    let error = partition_manager
-        .split_rows(
-            &logical_table_info,
-            Rows {
-                schema: vec![tag_column_schema("a", ColumnDataType::Int32)],
-                rows: vec![Row {
-                    values: vec![ValueData::I32Value(100).into()],
-                }],
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        partition::error::Error::UndefinedColumn { ref column, .. } if column == "b"
-    ));
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            partition::error::Error::UndefinedColumn { ref column, .. } if column == missing_column
+        ));
+    }
 }
 
 #[tokio::test]

@@ -47,6 +47,33 @@ use crate::session_config::{
 use crate::write_progress::WriteProgress;
 use crate::{MutableInner, ReadPreference};
 
+/// Which logical metric tables this request's selector may discover, decided by the frontend
+/// against the caller's grants. It is process-local authorization state and is never carried by
+/// `api::v1::QueryContext`: a remote node must not receive a scope that widens what it may read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum MetricDiscoveryScope {
+    /// Discovery is unavailable on paths that do not prepare frontend authorization.
+    #[default]
+    Unavailable,
+    /// Every metric table may be discovered.
+    Unrestricted,
+    /// Only these tables may be discovered.
+    Allowed(std::collections::HashSet<auth::PermissionTableTarget>),
+}
+
+impl MetricDiscoveryScope {
+    pub fn allowed(targets: impl IntoIterator<Item = (String, String, String)>) -> Self {
+        Self::Allowed(
+            targets
+                .into_iter()
+                .map(|(catalog, schema, table)| {
+                    auth::PermissionTableTarget::new(catalog, schema, table)
+                })
+                .collect(),
+        )
+    }
+}
+
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
@@ -115,6 +142,22 @@ pub struct QueryContext {
     /// Protocol specific context
     #[builder(default)]
     protocol_ctx: ProtocolCtx,
+    /// Process-local discovery allowlist, set by the frontend before planning. Skipped by the
+    /// builder for the same reason as `admitted_write`: it is not part of the request's identity.
+    #[builder(setter(skip))]
+    metric_discovery_scope: MetricDiscoveryScope,
+}
+
+impl QueryContext {
+    /// The metric discovery scope this request's frontend authorization produced.
+    pub fn metric_discovery_scope(&self) -> &MetricDiscoveryScope {
+        &self.metric_discovery_scope
+    }
+
+    /// Sets the metric discovery scope for this request.
+    pub fn set_metric_discovery_scope(&mut self, scope: MetricDiscoveryScope) {
+        self.metric_discovery_scope = scope;
+    }
 }
 
 /// This fields hold data that is only valid to current query context
@@ -817,6 +860,7 @@ impl QueryContextBuilder {
             channel,
             batching_enabled: self.batching_enabled.unwrap_or_default(),
             admitted_write: None,
+            metric_discovery_scope: MetricDiscoveryScope::default(),
             write_progress: None,
             body_memory_bytes: Weak::new(),
             confirmed_writes: false,

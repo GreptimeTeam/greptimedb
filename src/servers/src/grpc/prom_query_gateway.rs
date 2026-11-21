@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use auth::UserProviderRef;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_query::promql_annotations::promql_annotation_collector;
 use common_time::util::current_time_rfc3339;
 use promql_parser::parser::value::ValueType;
 use query::parser::PromQuery;
@@ -135,7 +136,9 @@ impl PrometheusGatewayService {
             }
         };
         let (metric_name, mut result_type) = retrieve_metric_name_and_result_type(query.expr());
-        let query_id = ctx.remote_query_id().map(str::to_string);
+        // Create the collector here so one strong reference spans planning, execution and the response;
+        // the planner and executor find it by query id through the registry.
+        let collector = ctx.remote_query_id().map(promql_annotation_collector);
         // A range query only returns a matrix, and matrix serialization sorts
         // samples and series, so execution order never reaches the response.
         let query = if is_range_query {
@@ -146,12 +149,6 @@ impl PrometheusGatewayService {
         };
         let result = self.handler.do_query_parsed(query, ctx).await;
 
-        PrometheusJsonResponse::from_query_result(
-            result,
-            metric_name,
-            result_type,
-            query_id.as_deref(),
-        )
-        .await
+        PrometheusJsonResponse::from_query_result(result, metric_name, result_type, collector).await
     }
 }

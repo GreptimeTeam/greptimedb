@@ -170,4 +170,30 @@ impl TableMutationHandler for TableMutationOperator {
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)
     }
+
+    async fn discard_pending_tails(
+        &self,
+        region_id: RegionId,
+        node_id: u64,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_discard_pending_tails(region_id, node_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn discard_pending_tails_by_table(
+        &self,
+        table_name: TableName,
+        node_id: u64,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_discard_pending_tails_by_table(table_name, node_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
 }

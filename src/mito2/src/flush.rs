@@ -506,7 +506,7 @@ impl RegionFlushTask {
             flushed_entry_id: Some(version_data.last_entry_id),
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         info!("Applying {edit:?} to region {}", self.region_id);
 
@@ -1005,6 +1005,7 @@ impl MemtableSstWriter {
             primary_key_min,
             primary_key_max,
             preserve_row_sequence,
+            format: sst_info.format.clone(),
         })
     }
 
@@ -2100,7 +2101,7 @@ mod tests {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
-                    wal_recovery: Default::default(),
+                    ..Default::default()
                 },
                 memtables_to_remove: smallvec![],
             }),
@@ -2424,7 +2425,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             }),
             &[0],
             builder.file_purger(),
@@ -2726,7 +2727,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             }),
             &[0],
             builder.file_purger(),
@@ -2801,7 +2802,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             }),
             &[0],
             builder.file_purger(),

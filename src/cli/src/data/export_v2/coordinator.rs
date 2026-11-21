@@ -577,8 +577,6 @@ mod tests {
             )]));
             let mut table = ParquetFileWriter::open_packed(
                 schema,
-                store.clone(),
-                "unused",
                 None,
                 PackedTableWriter::new(packed.clone(), "empty".into(), 1, false),
             )

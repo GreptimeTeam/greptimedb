@@ -785,6 +785,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Retention TTL is not supported on metric logical tables; set `ttl` on the physical table instead"
+    ))]
+    RetentionTtlOnLogicalTable {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid partition rule: {}", reason))]
     InvalidPartitionRule {
         reason: String,
@@ -958,6 +966,66 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Missing required option `{}` for relational external table", name))]
+    MissingRelationalOption {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to connect to remote database, connection: {}", connection))]
+    ConnectRemote {
+        connection: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to fetch column metadata from remote table `{}`", remote_table))]
+    FetchMetadata {
+        remote_table: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Remote table not found: `{}`", table))]
+    RemoteTableNotFound {
+        table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid `remote_table` value `{}`: the table name must not be empty",
+        remote_table
+    ))]
+    InvalidRemoteTable {
+        remote_table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Cannot determine the schema for remote table `{}`: specify a schema-qualified table name or set a default database in the connection",
+        remote_table
+    ))]
+    MissingRemoteSchema {
+        remote_table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Remote table already has a column named `{}`, which is reserved for the synthetic time index",
+        name
+    ))]
+    ReservedTimeIndexColumn {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "enterprise")]
     #[snafu(display("Not trigger querier is specified"))]
     MissingTriggerQuerier {
@@ -1097,7 +1165,8 @@ impl ErrorExt for Error {
             Error::EmptyDdlExpr { .. }
             | Error::InvalidPartitionRule { .. }
             | Error::ParseSqlValue { .. }
-            | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidTimestampRange { .. }
+            | Error::RetentionTtlOnLogicalTable { .. } => StatusCode::InvalidArguments,
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
             Error::BuildRecordBatch { source, .. } => source.status_code(),
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
@@ -1118,6 +1187,13 @@ impl ErrorExt for Error {
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
             Error::TimestampFormatNotSupported { .. } => StatusCode::InvalidArguments,
             Error::SqlCommon { source, .. } => source.status_code(),
+            Error::MissingRelationalOption { .. }
+            | Error::ConnectRemote { .. }
+            | Error::ReservedTimeIndexColumn { .. }
+            | Error::InvalidRemoteTable { .. }
+            | Error::MissingRemoteSchema { .. } => StatusCode::InvalidArguments,
+            Error::FetchMetadata { .. } => StatusCode::Internal,
+            Error::RemoteTableNotFound { .. } => StatusCode::TableNotFound,
             #[cfg(feature = "enterprise")]
             Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
             #[cfg(feature = "enterprise")]

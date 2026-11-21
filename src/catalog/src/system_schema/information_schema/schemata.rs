@@ -17,7 +17,6 @@ use std::sync::{Arc, Weak};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_SCHEMATA_TABLE_ID;
 use common_error::ext::BoxedError;
-use common_meta::key::schema_name::SchemaNameKey;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
@@ -33,14 +32,13 @@ use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
 use crate::error::{
-    CreateRecordBatchSnafu, InternalSnafu, Result, TableMetadataManagerSnafu,
-    UpgradeWeakCatalogManagerRefSnafu,
+    CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
+use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::SystemTable;
 use crate::system_schema::information_schema::{
     InformationSchemaTableScope, InformationTable, Predicates, SCHEMATA,
 };
-use crate::system_schema::utils;
 
 pub const CATALOG_NAME: &str = "catalog_name";
 pub const SCHEMA_NAME: &str = "schema_name";
@@ -177,29 +175,19 @@ impl InformationSchemaSchemataBuilder {
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
-        let table_metadata_manager = utils::table_meta_manager(&self.catalog_manager)?;
         let predicates = Predicates::from_scan_request(&request);
 
-        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
-            let opts = if let Some(table_metadata_manager) = &table_metadata_manager {
-                table_metadata_manager
-                    .schema_manager()
-                    .get(SchemaNameKey::new(&catalog_name, &schema_name))
-                    .await
-                    .context(TableMetadataManagerSnafu)?
-                    // information_schema is not available from this
-                    // table_metadata_manager and we return None
-                    .map(|schema_opts| format!("{}", schema_opts.into_inner()))
-            } else {
-                None
-            };
-
-            self.add_schema(
-                &predicates,
-                &catalog_name,
-                &schema_name,
-                opts.as_deref().unwrap_or(""),
-            );
+        if let Some(manager) = catalog_manager
+            .as_any()
+            .downcast_ref::<KvBackendCatalogManager>()
+        {
+            for (name, options) in manager.schema_options(&catalog_name).await? {
+                self.add_schema(&predicates, &catalog_name, &name, &options);
+            }
+        } else {
+            for name in catalog_manager.schema_names(&catalog_name, None).await? {
+                self.add_schema(&predicates, &catalog_name, &name, "");
+            }
         }
 
         self.finish()

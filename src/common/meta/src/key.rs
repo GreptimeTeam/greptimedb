@@ -1173,31 +1173,34 @@ impl TableMetadataManager {
             return Ok(dropped_tables);
         }
 
-        let marker_keys = dropped_tables
-            .iter()
-            .flat_map(|table| {
-                vec![
-                    dropped_at_key(table.table_id),
-                    retention_expires_at_key(table.table_id),
-                    drop_generation_key(table.table_id),
-                    purging_key(table.table_id),
-                ]
-            })
-            .collect::<Vec<_>>();
-        let marker_values = self.tombstone_manager.batch_get(&marker_keys).await?;
-        for table in &mut dropped_tables {
-            table.dropped_at = Self::parse_dropped_at(
-                table.table_id,
-                marker_values.get(&dropped_at_key(table.table_id)),
-            )?;
-            table.retention_expires_at = Self::parse_retention_expires_at(
-                table.table_id,
-                marker_values.get(&retention_expires_at_key(table.table_id)),
-            )?;
-            table.drop_generation = Self::parse_drop_generation(
-                marker_values.get(&drop_generation_key(table.table_id)),
-            );
-            table.purging = marker_values.contains_key(&purging_key(table.table_id));
+        // Each dropped table has four independent marker keys.
+        for batch in dropped_tables.chunks_mut(128) {
+            let marker_keys = batch
+                .iter()
+                .flat_map(|table| {
+                    vec![
+                        dropped_at_key(table.table_id),
+                        retention_expires_at_key(table.table_id),
+                        drop_generation_key(table.table_id),
+                        purging_key(table.table_id),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let marker_values = self.tombstone_manager.batch_get(&marker_keys).await?;
+            for table in batch {
+                table.dropped_at = Self::parse_dropped_at(
+                    table.table_id,
+                    marker_values.get(&dropped_at_key(table.table_id)),
+                )?;
+                table.retention_expires_at = Self::parse_retention_expires_at(
+                    table.table_id,
+                    marker_values.get(&retention_expires_at_key(table.table_id)),
+                )?;
+                table.drop_generation = Self::parse_drop_generation(
+                    marker_values.get(&drop_generation_key(table.table_id)),
+                );
+                table.purging = marker_values.contains_key(&purging_key(table.table_id));
+            }
         }
 
         Ok(dropped_tables)

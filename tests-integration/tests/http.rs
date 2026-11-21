@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
@@ -46,8 +46,20 @@ use common_frontend::slow_query_event::{
 };
 use common_memory_manager::OnExhaustedPolicy;
 use common_options::plugin_options::StandaloneFlag;
+use datafusion::common::{DFSchema, ToDFSchema};
+use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+use datafusion::physical_plan::metrics::MetricValue;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+use datatypes::arrow::array::{
+    Array as _, Float64Array, StringArray, StringViewArray, TimestampMillisecondArray,
+};
+use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use datatypes::series::samples::{SampleRef, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpec};
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use frontend::instance::Instance;
+use futures::TryStreamExt;
 use log_query::{AggFunc, Context, Limit, LogExpr, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
@@ -62,6 +74,9 @@ use pipeline::{
     GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME,
 };
 use prost::Message;
+use query::options::QueryOptions;
+use query::parser::PromQuery;
+use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
 use rstest_reuse::apply;
 use serde_json::{Value, json};
 use servers::http::handler::HealthResponse;
@@ -79,16 +94,18 @@ use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::http::{GreptimeQueryOutput, HttpOptions, HttpServerBuilder};
+use servers::interceptor::{PromQueryInterceptor, PromQueryInterceptorRef};
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::prom_store::{self, mock_timeseries_new_label};
+use servers::query_handler::sql::SqlQueryHandler;
 use servers::request_memory_limiter::ServerMemoryLimiter;
-use session::context::QueryContextRef;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     MockInstanceImpl, StorageType, TestGuard, assert_wal_delta, build_test_prom_server,
-    setup_test_http_app, setup_test_http_app_with_frontend,
+    execute_sql_and_expect, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_custom_options,
     setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
@@ -166,6 +183,8 @@ macro_rules! http_tests {
                 test_http_analyze_stream_scan_diagnostics,
                 test_http_sql_slow_query,
                 test_prometheus_promql_api,
+                test_prometheus_native_promql_route,
+                test_native_promql_route_plans_the_query,
                 test_promql_over_non_millisecond_physical_tables,
                 test_prometheus_label_replace_response,
                 test_prom_http_api,
@@ -177,6 +196,19 @@ macro_rules! http_tests {
                 test_prometheus_remote_write,
                 test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_v2_native_histogram,
+                test_remote_write_v2_histogram_prometheus_native_route,
+                test_remote_write_v2_histogram_float_prefix_native_route,
+                test_remote_write_v2_histogram_count_and_group_native_route,
+                test_remote_write_v2_histogram_sum_over_range,
+                test_remote_write_v2_histogram_sum_and_avg_native_route,
+                test_remote_write_v2_histogram_avg_native_partitions,
+                test_remote_write_v2_histogram_sum_incompatible_layouts_warns,
+                test_remote_write_v2_histogram_native_annotations,
+                test_remote_write_v2_histogram_native_arithmetic,
+                test_remote_write_v2_histogram_native_composition,
+                test_remote_write_v2_histogram_flush_native_consistency,
+                test_remote_write_v2_histogram_native_partitions,
+                test_remote_write_v2_histogram_native_range_function,
                 test_prometheus_remote_write_batched,
                 test_prometheus_remote_write_batched_mixed_time_index_units,
                 test_prometheus_remote_write_batched_interceptor_time_index_units,
@@ -184,6 +216,7 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_batched_microsecond_physical_table,
                 test_prometheus_remote_write_batched_conflicting_physical_selections,
                 test_prometheus_remote_special_labels,
+                test_prometheus_remote_write_with_ttl_hint,
                 test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
                 test_vm_proto_remote_write,
@@ -1577,6 +1610,1286 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
     );
 
     guard.remove_all().await;
+}
+
+/// Keeps the plan of the last PromQL request so a test can prove which route answered it.
+///
+/// The plan is only complete once the response body has been drained: a frontend plan keeps its
+/// region stages behind `MergeScanExec`, whose `children()` is empty, and those stages fill in their
+/// metrics while the body streams out. `take_plan` therefore runs after the body is consumed and
+/// leaves nothing behind, so no request can read the plan of another one.
+#[derive(Default)]
+struct PromRouteObserver {
+    last_plan: Mutex<Option<Arc<dyn ExecutionPlan>>>,
+}
+
+impl PromQueryInterceptor for PromRouteObserver {
+    type Error = servers::error::Error;
+
+    fn post_execute(
+        &self,
+        output: common_query::Output,
+        _query_ctx: QueryContextRef,
+    ) -> servers::error::Result<common_query::Output> {
+        *self.last_plan.lock().unwrap() = output.meta.plan.clone();
+        Ok(output)
+    }
+}
+
+impl PromRouteObserver {
+    /// Takes the plan of the request that just finished.
+    fn take_plan(&self) -> Arc<dyn ExecutionPlan> {
+        self.last_plan
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the request finished without the observer seeing the plan it executed")
+    }
+}
+
+/// Every plan node of every stage of an executed plan, in plan order.
+fn plan_nodes(plan: &Arc<dyn ExecutionPlan>) -> Vec<Value> {
+    fn push(node: &Value, nodes: &mut Vec<Value>) {
+        nodes.push(node.clone());
+        if let Some(children) = node["children"].as_array() {
+            for child in children {
+                push(child, nodes);
+            }
+        }
+    }
+
+    let stages = query::analyze_plan_metrics_to_json_value(plan, true)
+        .expect("an executed plan's metrics serialize to JSON");
+    let mut nodes = Vec::new();
+    for stage in stages
+        .as_array()
+        .expect("plan metrics are a list of stages")
+    {
+        push(&stage["plan"], &mut nodes);
+    }
+    nodes
+}
+
+/// The nodes of `plan` named `name`.
+fn plan_nodes_named(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Vec<Value> {
+    plan_nodes(plan)
+        .into_iter()
+        .filter(|node| node["name"] == name)
+        .collect()
+}
+
+/// Whether the executed plan answered on the native fused-series route.
+///
+/// Every stage is searched: on a vector query the fused node runs inside the region stage behind
+/// `MergeScanExec`, while on a constant it is the frontend plan itself.
+fn executes_fused_series(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    !plan_nodes_named(plan, "FusedSeriesExec").is_empty()
+}
+
+/// One row of a PromQL result: its tag columns in schema order, its timestamp and its value.
+type PromqlRow = (Vec<(String, String)>, i64, f64);
+
+/// Checks that a native result plans one fused node, that a constant plans no scan and a vector one
+/// scan exposing `scan_partitions` partitions, and returns the plan's view of the fused node.
+///
+/// `exec` is the fused node that really ran. For a vector it is the region-side node, which the JSON
+/// view reports as a separate stage, so it is passed in rather than found in `plan`.
+fn assert_native_plan(
+    plan: &Arc<dyn ExecutionPlan>,
+    exec: &Arc<dyn ExecutionPlan>,
+    scan_partitions: Option<usize>,
+    context: &str,
+) -> Value {
+    let fused = {
+        let mut nodes = plan_nodes_named(plan, "FusedSeriesExec");
+        assert_eq!(
+            nodes.len(),
+            1,
+            "{context}: expected one fused node: {nodes:?}"
+        );
+        nodes.remove(0)
+    };
+    // The tree the node ran, as its own line renders it: `native_tree=[...]`. The JSON view reports
+    // each node of that tree as its own child, next to the plans the operator reads, so this is the
+    // one place the tree is still a single text.
+    let display = datafusion::physical_plan::displayable(exec.as_ref())
+        .indent(false)
+        .to_string();
+    let tree = display
+        .split_once("native_tree=[")
+        .map(|(_, tree)| tree.to_string())
+        .unwrap_or_else(|| panic!("{context}: the fused node renders no tree: {display}"));
+    let scans = plan_nodes_named(plan, "SeriesScanExec");
+    let Some(partitions) = scan_partitions else {
+        // A constant reads no frame: its one value per grid point comes from the tree alone, so the
+        // node has no child, plans no scan and binds no source.
+        assert!(
+            scans.is_empty(),
+            "{context}: a constant planned a scan: {scans:?}"
+        );
+        assert!(
+            exec.children().is_empty(),
+            "{context}: a constant's fused node reads a child: {fused}"
+        );
+        assert!(
+            !tree.contains("Input"),
+            "{context}: a constant's tree binds an input: {tree}"
+        );
+        return fused;
+    };
+    assert_eq!(
+        scans.len(),
+        1,
+        "{context}: a vector must read exactly one scan: {scans:?}"
+    );
+    // A fused node can read its region through a router and a merge scan, whose region half is
+    // dispatched rather than nested, so the scan it reads is the one this statement observed.
+    let scan = scans[0].clone();
+    assert_eq!(
+        scan["name"], "SeriesScanExec",
+        "{context}: the statement's scan is not a series scan: {scan}"
+    );
+    let scan_description = scan["param"].as_str().unwrap_or_default();
+    assert!(
+        scan_description.contains(&format!("partitions={partitions}")),
+        "{context}: the scan does not expose {partitions} partitions: {scan_description}"
+    );
+    // Both inputs of one selector name the one source, so a tree that reads two sources or none
+    // would have had to pair or gather them.
+    assert_eq!(
+        tree.matches("source=0").count(),
+        1,
+        "{context}: the tree does not read the one source: {tree}"
+    );
+    assert!(
+        !tree.contains("source=1"),
+        "{context}: the tree reads a second source: {tree}"
+    );
+    // What the node did is in its own set: the registrations name the partition they ran on, and the
+    // samples and values are the counts the tree recorded. Which partition did that work is the
+    // canonical router's hash over the series it was delivered, so these are "some partition"
+    // claims; the figure the statement fixes - how many values the partitions published between them
+    // - is asserted against the result by [`assert_native_partition_output`].
+    let metrics = node_metric_set(exec);
+    let published = metrics
+        .iter()
+        .filter(|metric| metric.value().name() == "native.root.output_values")
+        .map(|metric| metric.value().as_usize())
+        .sum::<usize>();
+    assert!(
+        published > 0,
+        "no partition of `{context}` published a value: {display}"
+    );
+    let read = metrics
+        .iter()
+        .filter(|metric| metric.value().name() == "native.root.input_samples")
+        .map(|metric| metric.value().as_usize())
+        .sum::<usize>();
+    assert!(
+        read > 0,
+        "no partition of `{context}` read any input sample: {display}"
+    );
+    fused
+}
+
+/// Checks that the fused node that actually ran answered the whole result, and that the values its
+/// partitions published add up to the rows the result holds.
+///
+/// The JSON drops `metric.partition()`, so the per-partition figures are only on the captured node.
+/// Which partition produced which value is the canonical router's hash over the series it was
+/// delivered, so the total is the assertion; the split is reported in the failure messages, never
+/// asserted.
+fn assert_native_partition_output(
+    fused: &Arc<dyn ExecutionPlan>,
+    scan_partitions: Option<usize>,
+    expected_rows: usize,
+    context: &str,
+) {
+    // A constant answers on the one partition it has.
+    let partitions = scan_partitions.unwrap_or(1);
+    let output_partitions = fused.output_partitioning().partition_count();
+    assert_eq!(
+        output_partitions, partitions,
+        "{context}: the fused node runs {output_partitions} partitions, not {partitions}"
+    );
+    if scan_partitions.is_some() {
+        let children = fused.children();
+        assert_eq!(
+            children.len(),
+            1,
+            "{context}: the fused node reads {} children, not one",
+            children.len()
+        );
+        let child_partitions = children[0].output_partitioning().partition_count();
+        assert_eq!(
+            child_partitions, partitions,
+            "{context}: the fused node's one child runs {child_partitions} partitions, not \
+             {partitions}"
+        );
+    }
+    let metrics = node_metric_set(fused);
+    let mut values_by_partition = vec![0_usize; partitions];
+    for metric in metrics.iter() {
+        if metric.value().name() != "native.root.output_values" {
+            continue;
+        }
+        let MetricValue::Count { count, .. } = metric.value() else {
+            continue;
+        };
+        let partition = metric.partition().unwrap_or_else(|| {
+            panic!("{context}: the fused node reports output values for no partition")
+        });
+        let values = values_by_partition.get_mut(partition).unwrap_or_else(|| {
+            panic!("{context}: partition {partition} of the fused node is not one of {partitions}")
+        });
+        *values += count.value();
+    }
+    // A partition-local tree publishes on the owners the canonical router hashed each series onto,
+    // so which partition folds what - and how many partitions fold anything at all - is the router's
+    // hash of the series it was delivered, not a property of the statement: a small fixture can leave
+    // some owners empty, which is not evidence of lost work. The total below is the assertion that
+    // every value was produced.
+    assert!(
+        values_by_partition.iter().any(|values| *values > 0),
+        "{context}: no native execution partition reported values: {values_by_partition:?}"
+    );
+    assert_eq!(
+        values_by_partition.iter().sum::<usize>(),
+        expected_rows,
+        "{context}: the partitions reported a different number of values than the result holds"
+    );
+}
+
+/// The registrations the fused node's tree made, exactly as they were recorded.
+///
+/// [`datafusion::physical_plan::ExecutionPlan::metrics`] leaves them out: a flat set cannot say
+/// which tree node recorded what, so the node keeps its own set for readers that key by name.
+fn node_metric_set(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> datafusion::physical_plan::metrics::MetricsSet {
+    plan.downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+        .unwrap_or_else(|| panic!("the plan is a FusedSeriesExec, not {}", plan.name()))
+        .node_metric_set()
+}
+
+/// The columns of a result as (name, type, nullable).
+fn result_columns(schema: &SchemaRef) -> Vec<(String, DataType, bool)> {
+    schema
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name().clone(),
+                field.data_type().clone(),
+                field.is_nullable(),
+            )
+        })
+        .collect()
+}
+
+/// Checks the schema the native route reports: the time index, then one nullable `Float64` per
+/// series field, then one nullable `Utf8` per tag.
+///
+/// A constant reports no tags and no series fields: its one value per grid point is `value` on the
+/// `time` grid.
+///
+/// The tags are stated by the caller rather than read off the result: a vector that matches no
+/// series reports no row to read them from, and still answers with its tag columns.
+fn assert_native_result_schema(schema: &SchemaRef, tags: &[&str], value_name: &str, context: &str) {
+    // The time index and the one field the tree reports, then one `Utf8` column per tag. The
+    // native route names the value column after the expression, so the caller states that name;
+    // `value`/`val` are the legacy route's names.
+    let mut columns = vec![
+        (
+            if tags.is_empty() { "time" } else { "ts" }.to_string(),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        (value_name.to_string(), DataType::Float64, true),
+    ];
+    for name in tags {
+        columns.push(((*name).to_string(), DataType::Utf8, true));
+    }
+    // A rows layout declares the per-row name column after the labels; a constant has no rows and
+    // no labels, and stays the two columns it always was.
+    if !tags.is_empty() {
+        columns.push(("__name__".to_string(), DataType::Utf8, true));
+    }
+    assert_eq!(
+        result_columns(schema),
+        columns,
+        "{context}: native result schema"
+    );
+}
+
+/// Checks the schema the legacy route reports by role rather than by position or field name, which
+/// it does not share with the native route: one millisecond time column, one `Float64` value column
+/// whose name contains the field it derives from, and one `Utf8` column per tag, named exactly as
+/// that tag.
+///
+/// The value column's name is checked loosely because a computed legacy vector column may be named
+/// after the expression that computes it; only constants are compared field for field.
+///
+/// As on the native route the tags are stated by the caller, so a vector that matches no series is
+/// still expected to answer with its tag columns.
+fn assert_legacy_result_schema(schema: &SchemaRef, tags: &[&str], context: &str) {
+    let time_column = if tags.is_empty() { "time" } else { "ts" };
+    let columns = result_columns(schema);
+    assert_eq!(
+        columns.len(),
+        2 + tags.len(),
+        "{context}: legacy result columns: {columns:?}"
+    );
+    let times = columns
+        .iter()
+        .filter(|column| matches!(column.1, DataType::Timestamp(TimeUnit::Millisecond, None)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        times.len(),
+        1,
+        "{context}: legacy result reports one millisecond time column: {columns:?}"
+    );
+    assert_eq!(
+        times[0].0, time_column,
+        "{context}: legacy time column name: {columns:?}"
+    );
+    let values = columns
+        .iter()
+        .filter(|column| column.1 == DataType::Float64)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values.len(),
+        1,
+        "{context}: legacy result reports one Float64 value column: {columns:?}"
+    );
+    assert!(
+        values[0].0.contains("val"),
+        "{context}: legacy value column does not name the field it derives from: {columns:?}"
+    );
+    let tag_names = columns
+        .iter()
+        .filter(|column| column.1 == DataType::Utf8)
+        .map(|column| column.0.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tag_names, tags,
+        "{context}: legacy tag columns: {columns:?}"
+    );
+}
+
+/// Compares two complete row lists: the same series at the same timestamps, and values that agree to
+/// a relative `1e-9`. Comparing the keys row by row is what rejects a prefix, a duplicate or a
+/// missing series; a row count alone would accept the first two.
+fn assert_rows_eq(actual: &[PromqlRow], expected: &[PromqlRow], context: &str) {
+    let keys = |rows: &[PromqlRow]| {
+        rows.iter()
+            .map(|(tags, timestamp, _)| (tags.clone(), *timestamp))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        keys(actual),
+        keys(expected),
+        "{context}: the result does not name the expected series and times"
+    );
+    for (actual, expected) in actual.iter().zip(expected) {
+        let tolerance = 1e-9 * expected.2.abs().max(1.0);
+        assert!(
+            (actual.2 - expected.2).abs() <= tolerance,
+            "{context}: series {:?} at {} must report {}, found {}",
+            expected.0,
+            expected.1,
+            expected.2,
+            actual.2
+        );
+    }
+}
+
+/// The three grid points of every fixture host: its two stored samples, then the last of them carried
+/// forward to the last point. `value` turns a stored sample into the queried value.
+fn fixture_rows(value: impl Fn(f64) -> f64) -> Vec<PromqlRow> {
+    (0..8)
+        .flat_map(|host| {
+            let tags = vec![("host".to_string(), format!("h{host}"))];
+            [
+                (0, value((host + 1) as f64)),
+                (1_000, value((host + 2) as f64)),
+                (2_000, value((host + 2) as f64)),
+            ]
+            .into_iter()
+            .map(move |(timestamp, value)| (tags.clone(), timestamp, value))
+        })
+        .collect()
+}
+
+/// Replays the captured raw scan through both public FusedSeries output formats.
+async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend: &Arc<Instance>) {
+    let table_id = frontend
+        .catalog_manager()
+        .table("greptime", "public", "native_demo", None)
+        .await
+        .unwrap()
+        .expect("fixture table exists")
+        .table_info()
+        .table_id();
+    let (_, route) = frontend
+        .table_metadata_manager()
+        .table_route_manager()
+        .get_physical_table_route(table_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        route.region_routes.len(),
+        1,
+        "fixture has exactly one physical region"
+    );
+
+    observer.clear();
+    let (_, row_schema, _) = promql_output(frontend, "native_demo", Some(true), "0", "2").await;
+    let origin = observer.take("native_demo");
+    let children = origin.children();
+    assert_eq!(children.len(), 1, "the fused origin has exactly one child");
+    // The fused node's child is the router over the statement's dispatched raw read, so the raw
+    // scan is the one the region planned: it is observed on its own rather than nested here.
+    let scan_plan = observer.take_scan("native_demo");
+    let scan = scan_plan
+        .downcast_ref::<table::table::scan::SeriesScanExec>()
+        .expect("the observed raw input is a real SeriesScanExec");
+    let raw_schema = Arc::clone(scan.series_schema());
+    let label_source = scan.label_source().clone();
+    let ordering = scan.raw_series_ordering();
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 3).unwrap()).unwrap());
+    let output_schema = Arc::new(SeriesSchema {
+        fields: Arc::clone(&raw_schema.fields),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let raw_type = promql::native::plan::NativeType::Samples(Arc::clone(&raw_schema));
+    let root = promql::native::plan::NativeNode {
+        expr: promql::native::plan::NativeExpr::Instant {
+            input: Box::new(promql::native::plan::NativeNode {
+                expr: promql::native::plan::NativeExpr::Input(promql::native::plan::BoundInput {
+                    source_index: 0,
+                    output: raw_type.clone(),
+                    ordering,
+                }),
+                output: raw_type,
+            }),
+            op: promql::native::plan::BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: promql::native::plan::InstantValue::Sample,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: promql::native::plan::NativeType::Samples(Arc::clone(&output_schema)),
+    };
+    let tree = promql::native::plan::NativeTree::try_new(root).unwrap();
+    let binding = promql::extension_plan::FusedSeriesBinding {
+        grid,
+        metric_name: Some(Arc::from("native_demo")),
+        time_index: row_schema
+            .fields()
+            .iter()
+            .find(|field| {
+                matches!(
+                    field.data_type(),
+                    DataType::Timestamp(TimeUnit::Millisecond, _)
+                )
+            })
+            .expect("PromQL result has a millisecond timestamp field")
+            .name()
+            .clone(),
+        tags: vec!["host".to_string()],
+    };
+    let logical_child = LogicalPlan::EmptyRelation(EmptyRelation {
+        produce_one_row: false,
+        schema: DFSchema::try_from(scan.schema()).unwrap().into(),
+    });
+    let expected = fixture_rows(|value| value);
+    for format in [
+        promql::extension_plan::FusedOutputFormat::PlainRows,
+        promql::extension_plan::FusedOutputFormat::SeriesFrame,
+    ] {
+        let scan_plan = scan_plan.clone().reset_state().unwrap();
+        let exec = promql::extension_plan::FusedSeries::try_new_with_format(
+            Arc::from("native_demo"),
+            tree.clone(),
+            binding.clone(),
+            vec![logical_child.clone()],
+            if format == promql::extension_plan::FusedOutputFormat::SeriesFrame {
+                let packed = common_query::series_frame::pack_evaluated_series(
+                    Box::pin(futures::stream::empty()),
+                    Arc::clone(&output_schema),
+                )
+                .unwrap();
+                Arc::new(DFSchema::try_from(packed.schema()).unwrap())
+            } else {
+                row_schema.clone().to_dfschema_ref().unwrap()
+            },
+            format,
+        )
+        .unwrap()
+        .to_execution_plan(vec![(scan_plan.clone(), label_source.clone(), ordering)])
+        .unwrap();
+        let context = "standalone raw SeriesScanExec replay";
+        let mut actual = Vec::new();
+        let mut closed = 0;
+        let mut partition_counts = Vec::new();
+        for partition in 0..4 {
+            let stream = exec
+                .execute(
+                    partition,
+                    datafusion::prelude::SessionContext::new().task_ctx(),
+                )
+                .unwrap();
+            if format == promql::extension_plan::FusedOutputFormat::SeriesFrame {
+                let series = common_query::series_frame::unpack_evaluated_series(stream, None)
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+                assert!(
+                    !series.is_empty(),
+                    "partition {partition} emitted no series frames"
+                );
+                partition_counts.push(
+                    series
+                        .iter()
+                        .map(|(s, _)| s.time.timestamps().unwrap().len())
+                        .sum::<usize>(),
+                );
+                for (series, last) in series {
+                    assert_eq!(series.metric.name(), Some("native_demo"));
+                    assert_eq!(series.metric.tags().len(), 1);
+                    assert_eq!(series.fields.len(), 1);
+                    let host = series.metric.get("host").unwrap().to_string();
+                    let timestamps = series.time.timestamps().unwrap();
+                    let samples = series.fields.get(0).unwrap();
+                    for (i, timestamp) in timestamps.iter().enumerate() {
+                        let SampleRef::Float(value) = samples.iter().nth(i).unwrap() else {
+                            panic!("expected float sample")
+                        };
+                        actual.push((vec![("host".to_string(), host.clone())], *timestamp, value));
+                    }
+                    closed += usize::from(last);
+                }
+            } else {
+                // The rows layout declares the per-row metric-name column after the labels, and this
+                // replay binds `native_demo` as the metric the tree evaluates: every row reports it.
+                assert_eq!(row_schema.fields().len(), 4);
+                let name_field = row_schema
+                    .fields()
+                    .iter()
+                    .rposition(|field| datatypes::schema::is_metric_name_field(field))
+                    .expect("the rows layout declares the metric-name column");
+                assert_eq!(
+                    name_field,
+                    row_schema.fields().len() - 1,
+                    "the name column is appended after the labels: {name_field}"
+                );
+                let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+                let mut count = 0;
+                for batch in batches {
+                    let ts = batch
+                        .column_by_name(&binding.time_index)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap();
+                    let host = batch
+                        .column_by_name("host")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    // The native route names its value column after the expression, so the
+                    // type is what identifies it; `val` is only the legacy route's name.
+                    let values = batch
+                        .columns()
+                        .iter()
+                        .find(|column| column.data_type() == &DataType::Float64)
+                        .expect("one Float64 value column")
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+                    let names = batch
+                        .column_by_name("__name__")
+                        .expect("the rows carry the name column")
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    assert_eq!(names.null_count(), 0, "every row reports its metric name");
+                    for i in 0..batch.num_rows() {
+                        assert_eq!(
+                            "native_demo",
+                            names.value(i),
+                            "a row names the metric the bound tree evaluates"
+                        );
+                        actual.push((
+                            vec![("host".to_string(), host.value(i).to_string())],
+                            ts.value(i),
+                            values.value(i),
+                        ));
+                        count += 1;
+                    }
+                }
+                assert!(count > 0, "partition {partition} emitted no rows");
+                partition_counts.push(count);
+            }
+        }
+        assert_eq!(partition_counts.len(), 4);
+        assert!(
+            partition_counts.iter().all(|count| *count > 0),
+            "all four partitions emitted output: {partition_counts:?}"
+        );
+        assert_eq!(partition_counts.iter().sum::<usize>(), 24);
+        if format == promql::extension_plan::FusedOutputFormat::SeriesFrame {
+            assert_eq!(closed, 8, "one closing frame per host series");
+        }
+        actual.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        assert_rows_eq(&actual, &expected, context);
+        assert_native_partition_output(&exec, Some(4), 24, context);
+    }
+}
+
+/// Runs one PromQL query through the public frontend handler and returns the plan it executed, the
+/// schema it answered with and every row it reported.
+async fn promql_output(
+    frontend: &Arc<Instance>,
+    query: &str,
+    native: Option<bool>,
+    start: &str,
+    end: &str,
+) -> (Arc<dyn ExecutionPlan>, SchemaRef, Vec<PromqlRow>) {
+    let mut query_ctx = QueryContextBuilder::default();
+    // `None` states nothing, so the session and the engine-wide default answer; `Some(false)` asks
+    // for the existing route explicitly, which the engine default cannot say on its own.
+    if let Some(native) = native {
+        query_ctx = query_ctx.set_extension(
+            "query.experimental_native_promql".to_string(),
+            native.to_string(),
+        );
+    }
+    let prom_query = PromQuery {
+        query: query.to_string(),
+        start: start.to_string(),
+        end: end.to_string(),
+        step: "1s".to_string(),
+        ..Default::default()
+    };
+    let outputs = SqlQueryHandler::do_promql_query(
+        frontend.as_ref(),
+        &prom_query,
+        Arc::new(query_ctx.build()),
+    )
+    .await;
+    let output = outputs
+        .into_iter()
+        .next()
+        .expect("a PromQL query answers once")
+        .unwrap_or_else(|error| panic!("`{query}` failed: {error}"));
+    let plan = output
+        .meta
+        .plan
+        .clone()
+        .expect("a query reports the plan it executed");
+    let output_data = match output.data {
+        common_query::OutputData::RecordBatches(batches) => batches,
+        common_query::OutputData::Stream(stream) => {
+            common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap_or_else(|error| panic!("`{query}` result collection failed: {error}"))
+        }
+        common_query::OutputData::AffectedRows(rows) => {
+            panic!("`{query}` returned affected rows: {rows}")
+        }
+    };
+    // The collected batches keep the schema the stream reported, so a result that holds no row still
+    // names the columns its route answers with.
+    let schema = output_data.schema().arrow_schema().clone();
+    let mut rows = Vec::new();
+    for batch in output_data.iter() {
+        let batch = batch.df_record_batch();
+        let arrow_schema = batch.schema();
+        let timestamps = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<TimestampMillisecondArray>())
+            .unwrap_or_else(|| panic!("`{query}` reports no millisecond timestamp column"));
+        let values = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+            .unwrap_or_else(|| panic!("`{query}` reports no Float64 value column"));
+        // The tags are the result's string columns, in schema order: a column the schema names but
+        // no row carries would be caught by the row comparison below.
+        let tag_columns = arrow_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| matches!(field.data_type(), DataType::Utf8 | DataType::Utf8View))
+            .map(|(index, field)| {
+                (
+                    index,
+                    field.name().clone(),
+                    datatypes::schema::is_metric_name_field(field),
+                )
+            })
+            .collect::<Vec<_>>();
+        for row in 0..batch.num_rows() {
+            assert!(
+                timestamps.is_valid(row),
+                "`{query}`: null timestamp at row {row}"
+            );
+            assert!(values.is_valid(row), "`{query}`: null value at row {row}");
+            // The name column is declared on every rows layout and is null for a row whose value is
+            // computed rather than read from a series; the labels themselves are never null.
+            let tags = tag_columns
+                .iter()
+                .filter_map(|(index, name, is_name)| {
+                    let column = batch.column(*index);
+                    let value = match column.data_type() {
+                        DataType::Utf8 => {
+                            let array = column.as_any().downcast_ref::<StringArray>().unwrap();
+                            if !array.is_valid(row) {
+                                assert!(*is_name, "`{query}`: null tag {name} at row {row}");
+                                return None;
+                            }
+                            array.value(row).to_string()
+                        }
+                        DataType::Utf8View => {
+                            let array = column.as_any().downcast_ref::<StringViewArray>().unwrap();
+                            if !array.is_valid(row) {
+                                assert!(*is_name, "`{query}`: null tag {name} at row {row}");
+                                return None;
+                            }
+                            array.value(row).to_string()
+                        }
+                        other => panic!("`{query}`: tag column {name} is not a string: {other}"),
+                    };
+                    Some((name.clone(), value))
+                })
+                .collect::<Vec<_>>();
+            rows.push((tags, timestamps.value(row), values.value(row)));
+        }
+    }
+    rows.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    (plan, schema, rows)
+}
+
+/// Checks public PromQL results and the executed plan of every request on both routes.
+///
+/// One standalone frontend serves both routes: the engine-wide option is on, so each request's own
+/// hint decides its route, and the test-local observer proves which one answered. Every response is
+/// compared whole - result type, labels, timestamp and value - and never by prefix.
+pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
+    let plugins = Plugins::default();
+    let observer = Arc::new(PromRouteObserver::default());
+    plugins.insert::<PromQueryInterceptorRef<servers::error::Error>>(observer.clone());
+    let mut instance =
+        tests_integration::standalone::GreptimeDbStandaloneBuilder::new("promql_native_route")
+            .with_default_store_type(store_type)
+            .with_query_options(QueryOptions {
+                experimental_native_promql: true,
+                ..Default::default()
+            })
+            .with_plugin(plugins)
+            .build()
+            .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    let native_hint = ("x-greptime-hints", "query.experimental_native_promql=true");
+
+    for sql in [
+        // One series to compute over, one whose only value is zero, and one table that keeps no row.
+        "CREATE TABLE native_route (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host))",
+        "CREATE TABLE native_zero (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host))",
+        "CREATE TABLE native_empty (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host))",
+        "INSERT INTO native_route(host, val, ts) VALUES ('h1', 1.0, 0), ('h1', 2.0, 1000)",
+        "INSERT INTO native_zero(host, val, ts) VALUES ('z', 0.0, 0), ('z', 0.0, 1000)",
+    ] {
+        let res = client
+            .get(&format!("/v1/sql?db=public&sql={}", encode(sql)))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "{sql}");
+    }
+
+    // One expression per shape a statement root can take: a folded constant, a negated constant, a
+    // broadcast on either side of the input, a negation compiled as one, and two divisions by zero.
+    // `100 / 0` is `+Inf` and `0 / 0` is `NaN`: both are reported as the values they are, not as a
+    // missing sample, so each series keeps its row.
+    let instants = [
+        ("1 + 2", json!({"resultType":"scalar","result":[1.0,"3.0"]})),
+        ("-1", json!({"resultType":"scalar","result":[1.0,"-1.0"]})),
+        (
+            "native_route * 100",
+            json!({"resultType":"vector","result":[{"metric":{"host":"h1"},"value":[1.0,"200.0"]}]}),
+        ),
+        (
+            "100 / native_route",
+            json!({"resultType":"vector","result":[{"metric":{"host":"h1"},"value":[1.0,"50.0"]}]}),
+        ),
+        (
+            "-native_route",
+            json!({"resultType":"vector","result":[{"metric":{"host":"h1"},"value":[1.0,"-2.0"]}]}),
+        ),
+        (
+            "100 / native_zero",
+            json!({"resultType":"vector","result":[{"metric":{"host":"z"},"value":[1.0,"inf"]}]}),
+        ),
+        (
+            "native_zero / 0",
+            json!({"resultType":"vector","result":[{"metric":{"host":"z"},"value":[1.0,"NaN"]}]}),
+        ),
+        // A selector that matches nothing broadcasts over no series, and a table that holds no row
+        // reports no series either; a constant answers on the grid it was asked about in both cases.
+        (
+            "native_route{host=\"absent\"} * 100",
+            json!({"resultType":"vector","result":[]}),
+        ),
+        ("native_empty", json!({"resultType":"vector","result":[]})),
+    ];
+    for native in [false, true] {
+        for (query, expected) in &instants {
+            let mut request = client.get(&format!(
+                "/v1/prometheus/api/v1/query?query={}&time=1",
+                encode(query)
+            ));
+            // The engine-wide default is on here, so the request states the route it wants in both
+            // directions: a missing value would leave the choice to the default, which is native.
+            request = request.header(
+                native_hint.0,
+                if native {
+                    "query.experimental_native_promql=true"
+                } else {
+                    "query.experimental_native_promql=false"
+                },
+            );
+            let res = request.send().await;
+            assert_eq!(res.status(), StatusCode::OK, "`{query}`, native={native}");
+            let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+            assert_eq!(body.status, "success", "`{query}`, native={native}");
+            let actual = serde_json::to_value(&body.data).unwrap();
+            assert_eq!(&actual, expected, "`{query}`, native={native}");
+            assert_eq!(
+                executes_fused_series(&observer.take_plan()),
+                native,
+                "`{query}` asked native={native} but executed the other route"
+            );
+        }
+    }
+
+    // A subquery root is a matrix natively, while query_range rejects a range vector.
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=native_route[5m:1m]&time=300")
+        .header(native_hint.0, native_hint.1)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(
+        serde_json::to_value(&body.data).unwrap()["resultType"],
+        "matrix"
+    );
+    assert_eq!(
+        serde_json::to_value(&body.data).unwrap()["result"][0]["values"],
+        json!([
+            [60.0, "2.0"],
+            [120.0, "2.0"],
+            [180.0, "2.0"],
+            [240.0, "2.0"],
+            [300.0, "2.0"]
+        ])
+    );
+    let res = client
+        .get(
+            "/v1/prometheus/api/v1/query_range?query=native_route[5m:1m]&start=300&end=300&step=1s",
+        )
+        .header(native_hint.0, native_hint.1)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(res.text().await.contains("range vector"));
+
+    // The same expression over a range: a matrix carries every grid point of every series, with the
+    // last sample carried forward, and both routes answer it with the same one.
+    let query = encode("native_route * 100");
+    let expected = json!({"resultType":"matrix","result":[{"metric":{"host":"h1"},"values":[[0.0,"100.0"],[1.0,"200.0"],[2.0,"200.0"]]}]});
+    for native in [false, true] {
+        let mut request = client.get(&format!(
+            "/v1/prometheus/api/v1/query_range?query={query}&start=0&end=2&step=1s"
+        ));
+        // Both routes are asked for explicitly: the engine default is on, so leaving the value out
+        // would ask for neither.
+        request = request.header(
+            native_hint.0,
+            if native {
+                "query.experimental_native_promql=true"
+            } else {
+                "query.experimental_native_promql=false"
+            },
+        );
+        let res = request.send().await;
+        assert_eq!(res.status(), StatusCode::OK, "range query, native={native}");
+        let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+        assert_eq!(body.status, "success", "range query, native={native}");
+        let actual = serde_json::to_value(&body.data).unwrap();
+        assert_eq!(&actual, &expected, "range query, native={native}");
+        assert_eq!(
+            executes_fused_series(&observer.take_plan()),
+            native,
+            "the hinted range query executed the other route"
+        );
+    }
+
+    instance.guard.remove_all().await;
+}
+
+/// Keeps the native fused node and the raw scan the request executed, for the figures only they
+/// record.
+///
+/// The two are observed from different plans: the fused node is the frontend's, while the raw scan
+/// is the one the region planned for the statement's raw read. Uses the existing
+/// [`PhysicalPlanWrapper`] hook, which runs per plan; `clear` before a query and `take`/`take_scan`
+/// after its body is drained keep each query reading only the nodes it ran.
+#[derive(Default)]
+struct NativeFusedObserver(
+    Mutex<Vec<Arc<dyn ExecutionPlan>>>,
+    Mutex<Vec<Arc<dyn ExecutionPlan>>>,
+);
+
+impl NativeFusedObserver {
+    /// Drops both what an earlier request captured: its fused node and its raw scan.
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+        self.1.lock().unwrap().clear();
+    }
+
+    /// The one fused node the request just executed.
+    fn take(&self, context: &str) -> Arc<dyn ExecutionPlan> {
+        let mut captured = std::mem::take(&mut *self.0.lock().unwrap());
+        assert_eq!(
+            captured.len(),
+            1,
+            "`{context}`: the request executed {} fused nodes: {captured:?}",
+            captured.len()
+        );
+        captured.remove(0)
+    }
+
+    /// The one raw scan the request just executed.
+    ///
+    /// The fused node reads its region through a router over a merge scan, whose region half is
+    /// dispatched rather than nested: the plan below the fused node is the router and the merge
+    /// scan, so the raw scan the statement read is taken from the plan the region planned for it
+    /// instead of by walking down from the fused node.
+    fn take_scan(&self, context: &str) -> Arc<dyn ExecutionPlan> {
+        let mut captured = std::mem::take(&mut *self.1.lock().unwrap());
+        assert_eq!(
+            captured.len(),
+            1,
+            "`{context}`: the request executed {} series scans: {captured:?}",
+            captured.len()
+        );
+        captured.remove(0)
+    }
+
+    /// Every fused node the request just executed.
+    ///
+    /// A statement the route answers with one node yields one; a split aggregate yields the
+    /// partial producer and the final consumer, which are two separate executions.
+    fn take_all(&self, context: &str) -> Vec<Arc<dyn ExecutionPlan>> {
+        let captured = std::mem::take(&mut *self.0.lock().unwrap());
+        assert!(
+            !captured.is_empty(),
+            "`{context}`: the request executed no fused node, so it left the native route"
+        );
+        captured
+    }
+}
+
+impl PhysicalPlanWrapper for NativeFusedObserver {
+    fn wrap(
+        &self,
+        origin: Arc<dyn ExecutionPlan>,
+        _ctx: QueryContextRef,
+    ) -> Arc<dyn ExecutionPlan> {
+        let mut stack = vec![origin.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec" {
+                self.0.lock().unwrap().push(Arc::clone(&node));
+            } else if node
+                .downcast_ref::<table::table::scan::SeriesScanExec>()
+                .is_some()
+            {
+                self.1.lock().unwrap().push(Arc::clone(&node));
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        origin
+    }
+}
+
+/// Verifies the native route's plan and complete result against the legacy one.
+///
+/// The fixture is four pk-disjoint insert batches, each persisted by its own flush, so the scan has
+/// four series batches to distribute over the four partitions the query asks for.
+pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let mut instance =
+        tests_integration::standalone::GreptimeDbStandaloneBuilder::new("promql_native_route_plan")
+            .with_default_store_type(store_type)
+            .with_query_options(QueryOptions {
+                experimental_native_promql: true,
+                parallelism: 4,
+                ..Default::default()
+            })
+            .with_plugin(plugins)
+            .build()
+            .await;
+    let frontend = instance.fe_instance();
+
+    // The relaxed TWCS thresholds keep the four flushed files from being compacted back into one
+    // unit of work, so four file ranges reach the scan.
+    for sql in [
+        "CREATE TABLE native_demo (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host)) WITH ('compaction.type' = 'twcs', 'compaction.twcs.active_window.trigger_file_num' = '100', 'compaction.twcs.inactive_window.trigger_file_num' = '100')",
+        "CREATE TABLE native_rate (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host)) WITH ('compaction.type' = 'twcs', 'compaction.twcs.active_window.trigger_file_num' = '100', 'compaction.twcs.inactive_window.trigger_file_num' = '100')",
+    ] {
+        execute_sql_and_expect(frontend, sql, "Affected Rows: 0").await;
+    }
+    for (first, second) in [(0, 1), (2, 3), (4, 5), (6, 7)] {
+        let values = [first, second]
+            .into_iter()
+            .map(|host| {
+                format!(
+                    "('h{host}', {}.0, 0), ('h{host}', {}.0, 1000)",
+                    host + 1,
+                    host + 2
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_sql_and_expect(
+            frontend,
+            &format!("INSERT INTO native_demo(host, val, ts) VALUES {values}"),
+            "Affected Rows: 4",
+        )
+        .await;
+        // One 0 -> 3 increment between the two samples.
+        let values = [first, second]
+            .into_iter()
+            .map(|host| format!("('h{host}', 0.0, 0), ('h{host}', 3.0, 1000)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_sql_and_expect(
+            frontend,
+            &format!("INSERT INTO native_rate(host, val, ts) VALUES {values}"),
+            "Affected Rows: 4",
+        )
+        .await;
+        // Flushing before the next pair keeps every round a separate persisted batch.
+        tests_integration::test_util::execute_sql(frontend, "ADMIN FLUSH_TABLE('native_demo')")
+            .await;
+        tests_integration::test_util::execute_sql(frontend, "ADMIN FLUSH_TABLE('native_rate')")
+            .await;
+    }
+
+    assert_raw_scan_fused_formats(&observer, frontend).await;
+
+    for (query, start, end, expected, scan_partitions) in [
+        (
+            "1 + 2",
+            "0",
+            "2",
+            vec![
+                (Vec::new(), 0_i64, 3.0),
+                (Vec::new(), 1_000, 3.0),
+                (Vec::new(), 2_000, 3.0),
+            ],
+            None,
+        ),
+        (
+            "-1",
+            "0",
+            "2",
+            vec![
+                (Vec::new(), 0_i64, -1.0),
+                (Vec::new(), 1_000, -1.0),
+                (Vec::new(), 2_000, -1.0),
+            ],
+            None,
+        ),
+        (
+            "native_demo * 100",
+            "0",
+            "2",
+            fixture_rows(|value| value * 100.0),
+            Some(4),
+        ),
+        (
+            "100 / native_demo",
+            "0",
+            "2",
+            fixture_rows(|value| 100.0 / value),
+            Some(4),
+        ),
+        (
+            "-native_demo",
+            "0",
+            "2",
+            fixture_rows(|value| -value),
+            Some(4),
+        ),
+        // The counter rises 0 -> 3 between ts 0 and 1s and is evaluated at 1s: the inferred zero
+        // point and the evaluation instant both sit on a sample, so neither edge is extrapolated and
+        // (3 / 300s) * 100 = 1.
+        (
+            "rate(native_rate[5m]) * 100",
+            "1",
+            "1",
+            (0..8)
+                .map(|host| (vec![("host".to_string(), format!("h{host}"))], 1_000, 1.0))
+                .collect::<Vec<PromqlRow>>(),
+            Some(4),
+        ),
+    ] {
+        // Only the node this query ran is read: the previous request's capture is dropped first.
+        observer.clear();
+        // Every fixture series carries one tag; a constant carries none.
+        let tags: &[&str] = if scan_partitions.is_some() {
+            &["host"]
+        } else {
+            &[]
+        };
+        let (plan, schema, rows) = promql_output(frontend, query, Some(true), start, end).await;
+        assert_rows_eq(&rows, &expected, query);
+        assert_native_result_schema(&schema, tags, query, query);
+        // The body is drained, so every partition has finished and the node this statement ran is
+        // complete; its own registrations - not the flat set the JSON view reads - carry the
+        // per-partition figures.
+        let exec = observer.take(query);
+        assert_native_plan(&plan, &exec, scan_partitions, query);
+        assert_native_partition_output(&exec, scan_partitions, expected.len(), query);
+
+        // A request that turns the route off runs the legacy pipeline, which must answer with the
+        // same rows. The engine default is on here, so the request value is what selects the route.
+        let (legacy_plan, legacy_schema, legacy_rows) =
+            promql_output(frontend, query, Some(false), start, end).await;
+        assert!(
+            !executes_fused_series(&legacy_plan),
+            "`{query}` with the route turned off executed the fused plan"
+        );
+        assert_rows_eq(&legacy_rows, &expected, query);
+        assert_legacy_result_schema(&legacy_schema, tags, query);
+        // Both routes report the time column and one Float64 value. The native route names that
+        // value after the expression, so the constant cases agree by role, not by header name.
+        if scan_partitions.is_none() {
+            assert_eq!(
+                2,
+                schema.fields().len(),
+                "`{query}`: native constant schema"
+            );
+            assert_eq!(
+                2,
+                legacy_schema.fields().len(),
+                "`{query}`: legacy constant schema"
+            );
+            assert_eq!(
+                schema.field(0).data_type(),
+                legacy_schema.field(0).data_type(),
+                "`{query}`: time column type"
+            );
+            assert_eq!(
+                &DataType::Float64,
+                schema.field(1).data_type(),
+                "`{query}`: native value type"
+            );
+            assert_eq!(
+                &DataType::Float64,
+                legacy_schema.field(1).data_type(),
+                "`{query}`: legacy value type"
+            );
+        }
+    }
+
+    // A vector that matches no series is a typed empty result, not a constant: both routes still
+    // report the time, value and tag columns, and the native route still plans its one scan. What
+    // such a plan reports per partition is deliberately not read: an empty input may be pruned to a
+    // different partition layout than the four non-empty queries above.
+    let query = "native_demo{host=\"absent\"} * 100";
+    observer.clear();
+    let (plan, schema, rows) = promql_output(frontend, query, Some(true), "0", "2").await;
+    assert!(rows.is_empty(), "`{query}` reported {} rows", rows.len());
+    assert_native_result_schema(&schema, &["host"], query, query);
+    assert!(
+        executes_fused_series(&plan),
+        "`{query}` did not execute the fused route"
+    );
+    let fused_nodes = plan_nodes_named(&plan, "FusedSeriesExec");
+    assert_eq!(
+        fused_nodes.len(),
+        1,
+        "`{query}`: expected one fused node: {fused_nodes:?}"
+    );
+    let scans = plan_nodes_named(&plan, "SeriesScanExec");
+    assert_eq!(
+        scans.len(),
+        1,
+        "`{query}`: an empty vector must read exactly one scan: {scans:?}"
+    );
+    // The body is drained, so the one fused node the request ran has finished. Its own child list is
+    // what says how many plans it reads, and its own line is where the tree it ran is still one text:
+    // the JSON view lists that tree's nodes as children of the operator, next to the plans it reads.
+    let exec = observer.take(query);
+    assert_eq!(
+        exec.children().len(),
+        1,
+        "`{query}`: an empty vector must read exactly one child"
+    );
+    let display = datafusion::physical_plan::displayable(exec.as_ref())
+        .indent(false)
+        .to_string();
+    let tree = display
+        .split_once("native_tree=[")
+        .map(|(_, tree)| tree.to_string())
+        .unwrap_or_else(|| panic!("`{query}`: the fused node renders no tree: {display}"));
+    // The tree binds the one source instead of answering as a constant, whose tree binds no input.
+    assert!(
+        tree.contains("Input"),
+        "`{query}`: the empty vector planned no input: {tree}"
+    );
+    assert_eq!(
+        tree.matches("source=0").count(),
+        1,
+        "`{query}`: the tree does not read the one source: {tree}"
+    );
+    assert!(
+        !tree.contains("source=1"),
+        "`{query}`: the tree reads a second source: {tree}"
+    );
+
+    // Without the per-query hint the same statement runs the legacy pipeline, which must answer
+    // with the same empty typed result.
+    let (legacy_plan, legacy_schema, legacy_rows) =
+        promql_output(frontend, query, Some(false), "0", "2").await;
+    assert!(
+        !executes_fused_series(&legacy_plan),
+        "`{query}` with the route turned off executed the fused plan"
+    );
+    assert!(
+        legacy_rows.is_empty(),
+        "`{query}` with the route turned off reported {} rows",
+        legacy_rows.len()
+    );
+    assert_legacy_result_schema(&legacy_schema, &["host"], query);
+
+    instance.guard.remove_all().await;
 }
 
 pub async fn test_prometheus_label_replace_response(store_type: StorageType) {
@@ -3572,6 +4885,7 @@ experimental_manifest_keep_removed_file_count = 256
 experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_enable_series_index = false
+experimental_series_index_format = "legacy"
 experimental_series_index_max_size = "5GiB"
 experimental_enable_range_index = false
 experimental_series_index_maintenance_interval = "5m"
@@ -3653,6 +4967,7 @@ experimental_spill_mode = "default"
 experimental_spill_max_temp_directory_size = "1GiB"
 experimental_spill_compression = "uncompressed"
 experimental_memory_pool_policy = "greedy"
+experimental_native_promql = false
 
 [memory]
 enable_heap_profiling = true
@@ -4166,14 +5481,2070 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
-    common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_prom_app_with_frontend(
-        store_type,
-        "prometheus_remote_write_v2_native_histogram",
+/// The Prometheus release these native-histogram expectations follow: **v3.15.0**.
+///
+/// That is the release the checked-in golden fixtures name in their own headers - the aggregate,
+/// range and histogram case files under `src/promql/src/` were all generated by a v3.15.0 engine -
+/// so a reader can look up the behaviour this route reproduces. Each expectation states the value
+/// it wants rather than comparing against a running Prometheus.
+const PROMETHEUS_REFERENCE: &str = "v3.15.0";
+
+/// Writes one native histogram through Remote Write 2.0.
+///
+/// `positive_deltas` holds *increments*, not bucket counts, so the two entries are derived from
+/// `count`: decoding accumulates them and the server rejects a payload whose bucket total disagrees
+/// with its count.
+async fn write_native_histogram(
+    client: &TestClient,
+    labels: &[(&str, &str)],
+    timestamp: i64,
+    count: u64,
+    sum: f64,
+) {
+    let mut request = remote_write_v2::request_with_labels_and_samples(labels.to_vec(), vec![]);
+    let label_refs = labels
+        .iter()
+        .flat_map(|(name, value)| {
+            let name_ref = request.symbols.iter().position(|s| s == name).unwrap() as u32;
+            let value_ref = request.symbols.iter().position(|s| s == value).unwrap() as u32;
+            [name_ref, value_ref]
+        })
+        .collect();
+    // The buckets have to add up to `count`, and `positive_deltas` holds *increments*, so the
+    // second entry is the difference between the two bucket counts rather than the second count.
+    // The server rejects a payload whose totals disagree, which is what caught the earlier
+    // attempt at writing the two independently.
+    let first = count / 2;
+    let second = count - first;
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: label_refs,
+        histograms: vec![Histogram {
+            count: Some(Count::CountInt(count)),
+            sum,
+            schema: 1,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_deltas: vec![
+                i64::try_from(first).expect("count fits a bucket delta"),
+                i64::try_from(second - first).expect("count fits a bucket delta"),
+            ],
+            reset_hint: 2,
+            timestamp,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let response = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    // The body carries the server's reason, which is what a rejected write has to report.
+    let status = response.status();
+    let body = response.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+}
+
+pub async fn test_remote_write_v2_histogram_flush_native_consistency(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_flush_native_consistency",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    write_native_histogram(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_flush"),
+            ("job", "api"),
+        ],
+        3000,
+        5,
+        10.0,
     )
     .await;
-    let client = TestClient::new(app).await;
+    observer.clear();
+    let first = client
+        .get("/v1/prometheus/api/v1/query?query=native_histogram_flush&time=3")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: Value = first.json().await;
+    assert_eq!(first["data"]["result"][0]["histogram"][1]["count"], "5");
+    assert_eq!(first["data"]["result"][0]["histogram"][1]["sum"], "10");
+    assert_eq!(
+        observer.take("histogram before flush").name(),
+        "FusedSeriesExec"
+    );
+    tests_integration::test_util::execute_sql(
+        instance.fe_instance(),
+        "ADMIN FLUSH_TABLE('native_histogram_flush')",
+    )
+    .await;
+    write_native_histogram(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_flush"),
+            ("job", "api"),
+        ],
+        6000,
+        8,
+        20.0,
+    )
+    .await;
+    tests_integration::test_util::execute_sql(
+        instance.fe_instance(),
+        "ADMIN FLUSH_TABLE('native_histogram_flush')",
+    )
+    .await;
+    observer.clear();
+    let second = client
+        .get("/v1/prometheus/api/v1/query?query=native_histogram_flush&time=6")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: Value = second.json().await;
+    assert_eq!(second["data"]["result"][0]["histogram"][1]["count"], "8");
+    assert_eq!(second["data"]["result"][0]["histogram"][1]["sum"], "20");
+    assert_eq!(
+        observer.take("histogram after flush").name(),
+        "FusedSeriesExec"
+    );
+}
+
+pub async fn test_remote_write_v2_histogram_native_partitions(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_native_partitions",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        parallelism: 4,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    for index in 0..8 {
+        let job = format!("job{index}");
+        let host = format!("host{index}");
+        write_native_histogram(
+            &client,
+            &[
+                (prom_store::METRIC_NAME_LABEL, "native_histogram_parts"),
+                ("job", &job),
+                ("instance", &host),
+            ],
+            index * 1000,
+            5 + index as u64,
+            10.0 + index as f64,
+        )
+        .await;
+        tests_integration::test_util::execute_sql(
+            instance.fe_instance(),
+            "ADMIN FLUSH_TABLE('native_histogram_parts')",
+        )
+        .await;
+    }
+    observer.clear();
+    let response = client
+        .get("/v1/prometheus/api/v1/query?query=native_histogram_parts&time=7")
+        .header(
+            "x-greptime-hints",
+            "query.experimental_native_promql=true,query_parallelism=4",
+        )
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    let results = body["data"]["result"].as_array().unwrap();
+    assert_eq!(results.len(), 8);
+    // Every series has to come back carrying the histogram it was written with: the counts differ
+    // per series, so a route that dropped or reordered them would not reproduce this map.
+    let mut written: BTreeMap<String, String> = BTreeMap::new();
+    for index in 0..8u64 {
+        written.insert(format!("job{index}"), (5 + index).to_string());
+    }
+    for result in results {
+        let job = result["metric"]["job"].as_str().expect("a job label");
+        // Take the entry rather than reading it: a duplicated `job` would then fail as unexpected,
+        // and a missing one is caught by the emptiness check below.
+        let expected = written
+            .remove(job)
+            .unwrap_or_else(|| panic!("unexpected or duplicate series: `{job}`"));
+        assert_eq!(
+            result["histogram"][1]["count"].as_str(),
+            Some(expected.as_str()),
+            "the histogram of `{job}` as {PROMETHEUS_REFERENCE} renders it"
+        );
+    }
+    assert!(written.is_empty(), "missing series: {written:?}");
+    let fused = observer.take("histogram partitions");
+    assert_eq!(fused.name(), "FusedSeriesExec");
+    let metrics = node_metric_set(&fused);
+    let mut partitions = BTreeMap::new();
+    let mut samples = BTreeMap::new();
+    for metric in metrics.iter() {
+        let Some(partition) = metric.partition() else {
+            continue;
+        };
+        let MetricValue::Count { count, .. } = metric.value() else {
+            continue;
+        };
+        let by_partition = match metric.value().name() {
+            "native.root.output_values" => &mut partitions,
+            "native.root.input_samples" => &mut samples,
+            _ => continue,
+        };
+        *by_partition.entry(partition).or_insert(0usize) += count.value();
+    }
+    // A partition-local tree publishes on the owners the canonical router hashed the series onto,
+    // so which partition reports a given histogram - and how many partitions report at all - is the
+    // router's hash of the series it was delivered, not a property of the statement. The total is:
+    // every series answers once at the single instant this query evaluates at, so the partitions
+    // together report exactly as many values as the result holds.
+    assert_eq!(
+        results.len(),
+        partitions.values().sum::<usize>(),
+        "the native partitions reported a different number of values than the result holds: \
+         {partitions:?}"
+    );
+    // Routing hashes each series' label set, so eight series over four owners can legitimately leave
+    // one of them empty. What the topology has to guarantee is that the series are spread over more
+    // than one owner - otherwise the merge this test exists for is never exercised - and that the
+    // routing loses none of them.
+    let non_empty = partitions.values().filter(|count| **count > 0).count();
+    assert!(
+        non_empty >= 2,
+        "the fused producer must run on more than one partition: {partitions:?}"
+    );
+    // An owner that published values is one that read the samples they were computed from; an owner
+    // that was handed nothing reports neither.
+    for (partition, values) in &partitions {
+        assert_eq!(
+            *values > 0,
+            samples.get(partition).is_some_and(|samples| *samples > 0),
+            "partition {partition} must read samples exactly when it publishes values; values: \
+             {partitions:?}, samples: {samples:?}"
+        );
+    }
+}
+
+pub async fn test_remote_write_v2_histogram_native_range_function(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_native_range_function",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    write_native_histogram(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_range"),
+            ("job", "api"),
+        ],
+        1000,
+        5,
+        10.0,
+    )
+    .await;
+    write_native_histogram(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_range"),
+            ("job", "api"),
+        ],
+        3000,
+        8,
+        20.0,
+    )
+    .await;
+    observer.clear();
+    let response = client.get("/v1/prometheus/api/v1/query?query=sum_over_time(native_histogram_range%5B1m%5D)&time=3")
+        .header("x-greptime-hints", "query.experimental_native_promql=true").send().await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(body["data"]["resultType"], "vector");
+    assert_eq!(body["data"]["result"][0]["histogram"][0], 3.0);
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["count"], "13",
+        "`sum_over_time` adds the counts as {PROMETHEUS_REFERENCE} does"
+    );
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["sum"], "30",
+        "`sum_over_time` adds the sums as {PROMETHEUS_REFERENCE} does"
+    );
+    assert_eq!(
+        observer.take("histogram sum_over_time").name(),
+        "FusedSeriesExec"
+    );
+}
+
+/// Scalar arithmetic over native histograms stays on the native route and scales the payload.
+///
+/// `h * 2` and `h / 2` scale every bucket. `-h` is the same multiply by a negative factor, which
+/// also turns the counter into a gauge, as Prometheus' own `Histogram.Mul` does. `2 / h` has no
+/// histogram answer, so that position is dropped rather than failing the query - the scalar
+/// division arithmetic of Prometheus returns a float only for a float input.
+///
+/// None of these reach the float-only arithmetic the range kernels use, so a query that passed
+/// admission could still fail at execution; these results are what proves it does not.
+pub async fn test_remote_write_v2_histogram_native_arithmetic(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_native_arithmetic",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    write_native_histogram(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_arithmetic"),
+            ("job", "api"),
+        ],
+        1000,
+        10,
+        20.0,
+    )
+    .await;
+
+    // `count` and `sum` of the one returned histogram, as the response writes them.
+    let histogram_of = |body: &Value| -> (String, String) {
+        (
+            body["data"]["result"][0]["histogram"][1]["count"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no histogram count in {body}"))
+                .to_string(),
+            body["data"]["result"][0]["histogram"][1]["sum"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no histogram sum in {body}"))
+                .to_string(),
+        )
+    };
+
+    for (query, expected_count, expected_sum) in [
+        ("native_histogram_arithmetic%20%2A%202", "20", "40"),
+        ("native_histogram_arithmetic%20%2F%202", "5", "10"),
+        ("-native_histogram_arithmetic", "-10", "-20"),
+    ] {
+        observer.clear();
+        let response = client
+            .get(&format!("/v1/prometheus/api/v1/query?query={query}&time=1"))
+            .header("x-greptime-hints", "query.experimental_native_promql=true")
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        let body: Value = response.json().await;
+        assert_eq!(body["data"]["resultType"], "vector", "{query}: {body}");
+        assert_eq!(
+            histogram_of(&body),
+            (expected_count.to_string(), expected_sum.to_string()),
+            "{query}: {body}"
+        );
+        assert_eq!(
+            observer.take("histogram arithmetic").name(),
+            "FusedSeriesExec",
+            "{query} left the native route"
+        );
+    }
+
+    // `2 / h` admits but has no histogram answer: the position is dropped, so the query succeeds
+    // with an empty result rather than failing at execution or falling back to the float path.
+    observer.clear();
+    let response = client
+        .get("/v1/prometheus/api/v1/query?query=2%20%2F%20native_histogram_arithmetic&time=1")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(
+        body["data"]["result"].as_array().map(Vec::len),
+        Some(0),
+        "`2 / h` should drop the histogram position: {body}"
+    );
+    assert_eq!(
+        observer
+            .take("histogram arithmetic: scalar over histogram")
+            .name(),
+        "FusedSeriesExec",
+        "`2 / h` left the native route"
+    );
+}
+
+/// Executes a public PromQL request and checks the binary node actually used, without assuming how
+/// many fused producers or children the physical plan contains.
+async fn native_histogram_composition_query(
+    client: &TestClient,
+    observer: &NativeFusedObserver,
+    route: &PromRouteObserver,
+    query: &str,
+    parameters: &str,
+) -> (StatusCode, Value) {
+    observer.clear();
+    let response = client
+        .get(&format!(
+            "/v1/prometheus/api/v1/{parameters}&query={}",
+            encode(query)
+        ))
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    let status = response.status();
+    let body: Value = response.json().await;
+
+    let descriptions = observer
+        .take_all(query)
+        .iter()
+        .map(|node| {
+            datafusion::physical_plan::displayable(node.as_ref())
+                .one_line()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    // The tree a fused node prints names its own nodes, indented by depth inside the
+    // `native_tree=[ ... ]` block, so the binary is found by its node line rather than by the
+    // operator line (which prints the tree, not the statement).
+    assert!(
+        descriptions.iter().any(|description| {
+            description
+                .lines()
+                .any(|line| line.trim_start().starts_with("Binary:"))
+        }),
+        "`{query}` did not execute a native Binary: {descriptions:?}; response: {body}"
+    );
+    let nodes = plan_nodes(&route.take_plan());
+    assert!(
+        nodes
+            .iter()
+            .all(|node| { !node["name"].as_str().unwrap_or_default().contains("Join") }),
+        "`{query}` executed a legacy join: {nodes:?}"
+    );
+    (status, body)
+}
+
+/// Composed histogram frames retain their values, annotations and matching semantics over HTTP.
+pub async fn test_remote_write_v2_histogram_native_composition(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let route = Arc::new(PromRouteObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    plugins.insert::<PromQueryInterceptorRef<servers::error::Error>>(route.clone());
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_native_composition",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    for (metric, job, instance_label, timestamp, count, sum) in [
+        ("native_comp_h", "api", "a", 1_000, 10, 20.0),
+        // A later count of 1 makes losing the offset observable at the second range step.
+        ("native_comp_h", "api", "a", 121_000, 1, 2.0),
+        // For this other job, losing @ end() instead makes the first step return 3 rather than 4.
+        ("native_comp_h", "anchor", "a", 1_000, 1, 2.0),
+        ("native_comp_h", "anchor", "a", 61_000, 10, 20.0),
+        ("native_comp_h", "anchor", "a", 121_000, 1, 2.0),
+        ("native_comp_h2", "api", "a", 1_000, 4, 8.0),
+        ("native_comp_h2", "other", "a", 1_000, 4, 8.0),
+        ("native_comp_dups", "duplicate", "a", 1_000, 4, 8.0),
+        ("native_comp_dups", "duplicate", "b", 1_000, 4, 8.0),
+    ] {
+        write_native_histogram(
+            &client,
+            &[
+                (prom_store::METRIC_NAME_LABEL, metric),
+                ("job", job),
+                ("instance", instance_label),
+            ],
+            timestamp,
+            count,
+            sum,
+        )
+        .await;
+    }
+    for sql in [
+        "CREATE TABLE native_comp_f (ts TIMESTAMP TIME INDEX, val DOUBLE, job STRING, PRIMARY KEY (job))",
+        "INSERT INTO native_comp_f(job, val, ts) VALUES ('api', 2.0, 1000), ('duplicate', 2.0, 1000), ('api', 2.0, 61000), ('api', 9.0, 121000), ('anchor', 2.0, 61000), ('anchor', 9.0, 121000)",
+    ] {
+        tests_integration::test_util::execute_sql(instance.fe_instance(), sql).await;
+    }
+
+    // A counter histogram with a start timestamp strictly inside `(0, 3000]`, its window's only
+    // sample: `rate` can answer that window through the start timestamp alone.
+    let start_request = remote_write_v2::request_with_labels_and_histograms(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "native_comp_start"),
+            ("job", "api"),
+        ],
+        vec![Histogram {
+            count: Some(Count::CountInt(8)),
+            sum: 10.0,
+            schema: 1,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_deltas: vec![4, 0],
+            reset_hint: 2,
+            start_timestamp: 1_500,
+            timestamp: 3_000,
+            ..Default::default()
+        }],
+    );
+    let payload = prom_store::snappy_compress(&start_request.encode_to_vec()).unwrap();
+    let written = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = written.status();
+    let body = written.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
+    // The first sample has two equal buckets of 5; h2 has two equal buckets of 2.
+    // Repeat the same public requests after flushing so the source can be memtable or SST.
+    for phase in ["memtable", "flushed"] {
+        if phase == "flushed" {
+            for table in [
+                "native_comp_h",
+                "native_comp_h2",
+                "native_comp_dups",
+                "native_comp_f",
+                "native_comp_start",
+            ] {
+                tests_integration::test_util::execute_sql(
+                    instance.fe_instance(),
+                    &format!("ADMIN FLUSH_TABLE('{table}')"),
+                )
+                .await;
+            }
+        }
+
+        for (query, count, sum, bucket) in [
+            (
+                "native_comp_f{job=\"api\"} * on(job) native_comp_h",
+                "20",
+                "40",
+                "10",
+            ),
+            (
+                "native_comp_h / on(job) native_comp_f{job=\"api\"}",
+                "5",
+                "10",
+                "2.5",
+            ),
+            (
+                "native_comp_h + on(job) native_comp_h2{job=\"api\"}",
+                "14",
+                "28",
+                "7",
+            ),
+            (
+                "native_comp_h - on(job) native_comp_h2{job=\"api\"}",
+                "6",
+                "12",
+                "3",
+            ),
+        ] {
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                query,
+                "query?time=1",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            assert_eq!(
+                body,
+                json!({
+                    "status": "success",
+                    "data": {"resultType": "vector", "result": [{
+                        "metric": {"job": "api"},
+                        "histogram": [1.0, {"count": count, "sum": sum, "buckets": [
+                            [0, "0.7071067811865476", "1", bucket],
+                            [0, "1", "1.4142135623730951", bucket]
+                        ]}]
+                    }]}
+                }),
+                "{phase}: {query}"
+            );
+        }
+
+        // These selectors read one unpartitioned histogram table but hold disjoint match groups.
+        // The real histogram/histogram pair cannot emit for `*` or `/`, so only a synthetic float
+        // can produce a result. Whether that result carries the unsupported-pair Info follows the
+        // operation the synthesized sample enters, not whether the pair was synthesized:
+        // Prometheus runs the same `doBinOp` on a filled sample, so a pairing it supports
+        // (`float * histogram`, `histogram / float`) stays silent, while one it does not
+        // (`float / histogram`) is dropped and reported exactly as a matched pair would be.
+        let left = "native_comp_h{job=\"api\"}";
+        let right = "native_comp_h{job=\"anchor\"}";
+        for (operator, expected, dropped_op) in [
+            (
+                "* on(job) fill(1)",
+                vec![("anchor", "1", "2", "1"), ("api", "10", "20", "5")],
+                None,
+            ),
+            (
+                "* on(job) fill_left(1)",
+                vec![("anchor", "1", "2", "1")],
+                None,
+            ),
+            (
+                "* on(job) fill_right(1)",
+                vec![("api", "10", "20", "5")],
+                None,
+            ),
+            (
+                "/ on(job) fill_right(2)",
+                vec![("api", "5", "10", "2.5")],
+                None,
+            ),
+            // `fill_left(2)` answers the anchor series with the synthesized float on the left, so
+            // the pair is `float / histogram`: division by a histogram has no kernel, and the
+            // sample Prometheus would drop here is the one this reports.
+            ("/ on(job) fill_left(2)", vec![], Some("/")),
+        ] {
+            let query = format!("{left} {operator} {right}");
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                &query,
+                "query?time=1",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            assert_eq!(body["status"], "success", "{phase}: {query}: {body}");
+            assert_eq!(
+                body["data"]["resultType"], "vector",
+                "{phase}: {query}: {body}"
+            );
+            match dropped_op {
+                Some(op) => assert_eq!(
+                    body["infos"],
+                    json!([format!(
+                        "{op}: dropped native histogram samples because this binary operation is not supported for native histograms"
+                    )]),
+                    "{phase}: {query}: {body}"
+                ),
+                None => assert!(
+                    body.get("infos").is_none(),
+                    "a supported fill is not a dropped pair: {phase}: {query}: {body}"
+                ),
+            }
+            assert!(body.get("warnings").is_none(), "{phase}: {query}: {body}");
+            let mut rows = body["data"]["result"].as_array().unwrap().clone();
+            rows.sort_by(|a, b| {
+                a["metric"]["job"]
+                    .as_str()
+                    .cmp(&b["metric"]["job"].as_str())
+            });
+            let expected_rows: Vec<_> = expected
+                .into_iter()
+                .map(|(job, count, sum, bucket)| {
+                    // The anchor fixture's count=1 has bucket counts [0, 1]; the HTTP histogram
+                    // omits the first, zero-count bucket. The api fixture has two equal buckets.
+                    let buckets = if job == "anchor" {
+                        json!([[0, "1", "1.4142135623730951", bucket]])
+                    } else {
+                        json!([
+                            [0, "0.7071067811865476", "1", bucket],
+                            [0, "1", "1.4142135623730951", bucket]
+                        ])
+                    };
+                    json!({
+                        "metric": {"job": job},
+                        "histogram": [1.0, {"count": count, "sum": sum, "buckets": buckets}]
+                    })
+                })
+                .collect();
+            assert_eq!(rows, expected_rows, "{phase}: {query}: {body}");
+        }
+        // A present, matched histogram/histogram pair still drops and reports its existing Info.
+        let query = format!("{left} * on(job) {left}");
+        let (status, body) =
+            native_histogram_composition_query(&client, &observer, &route, &query, "query?time=1")
+                .await;
+        assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+        assert_eq!(
+            body,
+            json!({
+                "status": "success",
+                "data": {"resultType": "vector", "result": []},
+                "infos": ["*: dropped native histogram samples because this binary operation is not supported for native histograms"]
+            }),
+            "{phase}: {query}"
+        );
+
+        // `clamp` is native-only here, so legacy fallback cannot produce these answers.
+        for (query, op) in [
+            (
+                "clamp(native_comp_f{job=\"api\"}, 1, 2) + on(job) native_comp_h",
+                "+",
+            ),
+            (
+                "native_comp_h + on(job) clamp(native_comp_f{job=\"api\"}, 1, 2)",
+                "+",
+            ),
+            ("native_comp_h * on(job) native_comp_h2{job=\"api\"}", "*"),
+        ] {
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                query,
+                "query?time=1",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            assert_eq!(
+                body,
+                json!({
+                    "status": "success",
+                    "data": {"resultType": "vector", "result": []},
+                    "infos": [format!("{op}: dropped native histogram samples because this binary operation is not supported for native histograms")]
+                }),
+                "{phase}: {query}"
+            );
+        }
+
+        // A different match group, or a selector with no samples, must not fabricate a drop Info.
+        for query in [
+            "clamp(native_comp_f{job=\"api\"}, 1, 2) + on(job) native_comp_h2{job=\"other\"}",
+            "native_comp_h * on(job) native_comp_h2{job=\"other\"}",
+            "clamp(native_comp_f{job=\"absent\"}, 1, 2) + on(job) native_comp_h",
+            "native_comp_h + on(job) clamp(native_comp_f{job=\"absent\"}, 1, 2)",
+        ] {
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                query,
+                "query?time=1",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            assert_eq!(
+                body,
+                json!({"status": "success", "data": {"resultType": "vector", "result": []}}),
+                "{phase}: {query}"
+            );
+        }
+
+        // The duplicate group is on the right. It is an error both when it matches and when it
+        // does not: both sides have samples, so the native matcher's presence gate is open.
+        for job in ["duplicate", "api"] {
+            let query =
+                format!("clamp(native_comp_f{{job=\"{job}\"}}, 1, 2) + on(job) native_comp_dups");
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                &query,
+                "query?time=1",
+            )
+            .await;
+            assert!(!status.is_success(), "{phase}: {query}: {body}");
+            assert_eq!(body["status"], "error", "{phase}: {query}: {body}");
+            let error = body["error"].as_str().expect("matching error message");
+            assert!(
+                error.contains("found duplicate series for the match group {job=\"duplicate\"} on the right hand-side of the operation at 1000 ms; many-to-many matching not allowed"),
+                "{phase}: {query}: {body}"
+            );
+        }
+
+        // The 121s end minus 1m reads the 61s histogram; @ start() reads the 61s float.
+        // Both are 2 after clamp, at both points. A 121s float of 9 exposes a lost @ start().
+        // The `anchor` job also exposes a lost @ end() at the first point; both jobs expose a
+        // lost offset at the second point. Neither expected series carries its metric name.
+        let query = "ceil(clamp(histogram_count(native_comp_h @ end() offset 1m), 1, 2) + on(job) native_comp_f{job=~\"api|anchor\"} @ start())";
+        let (status, body) = native_histogram_composition_query(
+            &client,
+            &observer,
+            &route,
+            query,
+            "query_range?start=61&end=121&step=60s",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+        assert_eq!(body["status"], "success", "{phase}: {query}: {body}");
+        assert_eq!(
+            body["data"]["resultType"], "matrix",
+            "{phase}: {query}: {body}"
+        );
+        let results = body["data"]["result"].as_array().expect("range result");
+        assert_eq!(results.len(), 2, "{phase}: {query}: {body}");
+        for job in ["api", "anchor"] {
+            let expected = json!({
+                "metric": {"job": job}, "values": [[61.0, "4.0"], [121.0, "4.0"]]
+            });
+            assert_eq!(
+                results.iter().filter(|result| **result == expected).count(),
+                1,
+                "{phase}: {query}: {body}"
+            );
+        }
+        assert!(body.get("infos").is_none(), "{phase}: {query}: {body}");
+        assert!(body.get("warnings").is_none(), "{phase}: {query}: {body}");
+
+        // The same two windows asked with the route explicitly off, so the legacy route answers
+        // them and the observer proves it did. The engine option is a default here (this instance
+        // sets it to `true`), so an unstated request would take the native route; stating `false`
+        // is what selects the existing one. This is where the delegated kernel has to agree with
+        // the native route: the raw sample's start timestamp is what lets `rate` measure the
+        // window, while `* 1` gives that timestamp up, so the derived window has nothing to
+        // measure against.
+        for (query, expected_count) in [
+            ("rate(native_comp_start[3s])", Some(8.0 / 3.0)),
+            ("rate((native_comp_start * 1)[3s:1s])", None),
+        ] {
+            let res = client
+                .get(&format!(
+                    "/v1/prometheus/api/v1/query?query={}&time=3",
+                    encode(query)
+                ))
+                .header("x-greptime-hints", "query.experimental_native_promql=false")
+                .send()
+                .await;
+            let status = res.status();
+            let body: Value = res.json().await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            let results = body["data"]["result"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{phase}: {query}: no result in {body}"));
+            match expected_count {
+                Some(count) => {
+                    assert_eq!(results.len(), 1, "{phase}: {query}: {body}");
+                    let reported: f64 = body["data"]["result"][0]["histogram"][1]["count"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{phase}: {query}: no count in {body}"))
+                        .parse()
+                        .unwrap();
+                    assert!(
+                        (reported - count).abs() < 1e-12,
+                        "{phase}: {query}: expected count {count}, got {body}"
+                    );
+                }
+                None => assert!(
+                    results.is_empty(),
+                    "{phase}: {query}: `* 1` clears the start timestamp, so the derived window \
+                     has nothing to measure: {body}"
+                ),
+            }
+            assert!(
+                body.get("infos").is_none() && body.get("warnings").is_none(),
+                "{phase}: {query}: a counter histogram has nothing to report: {body}"
+            );
+            assert!(
+                !executes_fused_series(&route.take_plan()),
+                "{phase}: {query} did not run on the legacy route"
+            );
+        }
+    }
+}
+
+/// A native histogram query that has something to warn about puts it in the response.
+///
+/// `rate` over a gauge histogram is the case: the kernel drops nothing but reports that the input
+/// was the wrong flavor. The warning has to travel from the kernel through the executor and the
+/// query's collector to the HTTP response, which is the whole channel this checks - a collector
+/// the execution never reaches would leave `warnings` absent.
+pub async fn test_remote_write_v2_histogram_native_annotations(store_type: StorageType) {
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "native_histogram_annotations",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    // A gauge histogram, which `rate` reports as the wrong flavor.
+    let mut request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (
+                prom_store::METRIC_NAME_LABEL,
+                "native_histogram_annotations",
+            ),
+            ("job", "api"),
+        ],
+        vec![],
+    );
+    let name_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let metric_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == "native_histogram_annotations")
+        .unwrap() as u32;
+    let job_ref = request.symbols.iter().position(|s| s == "job").unwrap() as u32;
+    let api_ref = request.symbols.iter().position(|s| s == "api").unwrap() as u32;
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![name_ref, metric_ref, job_ref, api_ref],
+        histograms: vec![
+            Histogram {
+                count: Some(Count::CountInt(4)),
+                sum: 8.0,
+                schema: 1,
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 2,
+                }],
+                // Increments: the two buckets hold 2 and 2, which sums to the count of 4.
+                positive_deltas: vec![2, 0],
+                // `CounterResetHint::Gauge`
+                reset_hint: 3,
+                timestamp: 2000,
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountInt(8)),
+                sum: 16.0,
+                schema: 1,
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 2,
+                }],
+                positive_deltas: vec![4, 0],
+                reset_hint: 3,
+                timestamp: 3000,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let response = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = response.status();
+    let body = response.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
+    let response = client
+        .get("/v1/prometheus/api/v1/query?query=rate(native_histogram_annotations%5B1m%5D)&time=3")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    let warnings = body["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings in {body}"));
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("should be a counter histogram"))),
+        "the flavor warning did not reach the response: {body}"
+    );
+}
+
+pub async fn test_remote_write_v2_histogram_prometheus_native_route(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_native_route",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let mut request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_e2e"),
+            ("job", "api"),
+        ],
+        vec![],
+    );
+    let name_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let metric_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == "native_histogram_e2e")
+        .unwrap() as u32;
+    let job_ref = request.symbols.iter().position(|s| s == "job").unwrap() as u32;
+    let api_ref = request.symbols.iter().position(|s| s == "api").unwrap() as u32;
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![name_ref, metric_ref, job_ref, api_ref],
+        histograms: vec![Histogram {
+            count: Some(Count::CountInt(5)),
+            sum: 10.0,
+            schema: 1,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_deltas: vec![2, 1],
+            reset_hint: 2,
+            timestamp: 3000,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let written = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    assert_eq!(written.status(), StatusCode::NO_CONTENT);
+
+    let response = client
+        .get("/v1/prometheus/api/v1/query?query=native_histogram_e2e&time=3")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(body["data"]["resultType"], "vector");
+    assert_eq!(body["data"]["result"][0]["metric"]["job"], "api");
+    assert_eq!(body["data"]["result"][0]["histogram"][0], 3.0);
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["count"], "5",
+        "count as {PROMETHEUS_REFERENCE} renders it"
+    );
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["sum"], "10",
+        "sum as {PROMETHEUS_REFERENCE} renders it"
+    );
+    let bucket_counts = body["data"]["result"][0]["histogram"][1]["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|bucket| bucket[3].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        bucket_counts.contains(&"2"),
+        "bucket counts: {bucket_counts:?}"
+    );
+    assert!(
+        bucket_counts.contains(&"3"),
+        "bucket counts: {bucket_counts:?}"
+    );
+    let fused = observer.take("remote-write native histogram selector");
+    assert_eq!(fused.name(), "FusedSeriesExec");
+}
+
+/// A statement that reads histograms and answers floats stays on the native route.
+///
+/// The output column follows the kind the tree's root answers, not the kind its scan carries:
+/// `count_over_time`, `histogram_count`, `resets`, `changes` and `timestamp` all reduce a histogram
+/// to a float, and an aggregate above one of them folds floats. Typing the column by the scan
+/// declared a histogram column for a float answer, so every one of these shapes failed at execution
+/// and the aggregate ones failed to plan. Each case below therefore pins three things at once: the
+/// response is the legacy response, the fused node actually ran, and the value is the one the data
+/// holds.
+pub async fn test_remote_write_v2_histogram_float_prefix_native_route(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_float_prefix_native_route",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_float_prefix";
+    let mut request = remote_write_v2::request_with_labels_and_samples(
+        vec![(prom_store::METRIC_NAME_LABEL, metric), ("job", "api")],
+        vec![],
+    );
+    let name_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let metric_ref = request.symbols.iter().position(|s| s == metric).unwrap() as u32;
+    let job_ref = request.symbols.iter().position(|s| s == "job").unwrap() as u32;
+    let api_ref = request.symbols.iter().position(|s| s == "api").unwrap() as u32;
+    // Two samples of one run: the second carries a larger count under the same start timestamp, so
+    // the pair is a counter that never restarted. `resets` answers 0 rather than borrowing a reset
+    // from the payload comparing unequal, which is `changes`.
+    // `positive_deltas` are deltas between neighbouring buckets, so the bucket counts are their
+    // running sums: `[2, 1]` holds 2 and 3, and the write checks the count against 5. A payload
+    // whose buckets disagree with its count is rejected at the write, not at the query.
+    let sample = |timestamp: i64, deltas: Vec<i64>, count: u64, sum: f64| Histogram {
+        count: Some(Count::CountInt(count)),
+        sum,
+        schema: 1,
+        positive_spans: vec![BucketSpan {
+            offset: 0,
+            length: deltas.len() as u32,
+        }],
+        positive_deltas: deltas,
+        // `CounterResetHint::NotCounterReset`
+        reset_hint: 2,
+        start_timestamp: 1500,
+        timestamp,
+        ..Default::default()
+    };
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![name_ref, metric_ref, job_ref, api_ref],
+        histograms: vec![
+            sample(2_000, vec![2, 1], 5, 10.0),
+            sample(4_000, vec![4, 2], 10, 20.0),
+        ],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let written = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = written.status();
+    let body = written.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
+    // Every query here transforms the value (a range function counts, resets, changes or reads a
+    // timestamp; `sum` aggregates), and Prometheus drops the metric name for all of them. The
+    // existing route keeps the name of the series it read, so the routes differ in exactly that
+    // label and nowhere else.
+    for (query, encoded, expected, drops_name) in [
+        (
+            "histogram_count(h)",
+            "histogram_count(native_histogram_float_prefix)",
+            "10.0",
+            true,
+        ),
+        (
+            "count_over_time(h[1m])",
+            "count_over_time(native_histogram_float_prefix%5B1m%5D)",
+            "2.0",
+            true,
+        ),
+        (
+            "resets(h[2m])",
+            "resets(native_histogram_float_prefix%5B2m%5D)",
+            "0.0",
+            true,
+        ),
+        (
+            "changes(h[2m])",
+            "changes(native_histogram_float_prefix%5B2m%5D)",
+            "1.0",
+            true,
+        ),
+        (
+            "timestamp(h)",
+            "timestamp(native_histogram_float_prefix)",
+            "4.0",
+            true,
+        ),
+        (
+            "sum by (job)(resets(h[2m]))",
+            "sum%20by%20(job)(resets(native_histogram_float_prefix%5B2m%5D))",
+            "0.0",
+            true,
+        ),
+    ] {
+        let url = format!("/v1/prometheus/api/v1/query?query={encoded}&time=4");
+        observer.clear();
+        let native = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=true")
+            .send()
+            .await;
+        assert_eq!(native.status(), StatusCode::OK, "{query} failed natively");
+        let native: Value = native.json().await;
+        // The fixture turns the native route on by default, so ask for the existing one
+        // explicitly: without the hint this request would run the native plan a second time
+        // and `take_all` would collect both runs.
+        let legacy = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=false")
+            .send()
+            .await;
+        assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
+        let legacy: Value = legacy.json().await;
+        if drops_name {
+            // The name is gone from the answer Prometheus gives, so the routes differ in exactly
+            // that label: the existing route keeps the name of the series it read.
+            assert_eq!(
+                native["data"]["result"][0]["metric"].get("__name__"),
+                None,
+                "{query}: a transforming function drops the name: {native}"
+            );
+            let mut stripped = legacy.clone();
+            for series in stripped["data"]["result"].as_array_mut().unwrap() {
+                series["metric"].as_object_mut().unwrap().remove("__name__");
+            }
+            assert_eq!(
+                native["data"]["result"], stripped["data"]["result"],
+                "{query}: the native answer differs from the legacy one"
+            );
+        } else {
+            assert_eq!(
+                native["data"]["result"], legacy["data"]["result"],
+                "{query}: the native answer differs from the legacy one"
+            );
+        }
+        assert_eq!(
+            native["data"]["result"][0]["value"][1].as_str(),
+            Some(expected),
+            "{query}: {native}"
+        );
+        let fused = observer.take_all(query);
+        assert!(
+            fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+            "{query} executed a node that is not the fused producer: {fused:?}"
+        );
+    }
+}
+
+/// `count` and `group` answer over histograms, through the route that folds them.
+///
+/// Prometheus counts every present sample whatever its type is and answers `1` for a non-empty
+/// group, so neither reads a value. The witness writes two histogram samples of one series and
+/// checks both answers against the existing plan's, so a native answer that dropped the histogram
+/// samples - the shape a fold without the presence arm produces - cannot pass.
+pub async fn test_remote_write_v2_histogram_count_and_group_native_route(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_count_and_group",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_counted";
+    let mut request = remote_write_v2::request_with_labels_and_samples(
+        vec![(prom_store::METRIC_NAME_LABEL, metric), ("job", "api")],
+        vec![],
+    );
+    let name_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let metric_ref = request.symbols.iter().position(|s| s == metric).unwrap() as u32;
+    let job_ref = request.symbols.iter().position(|s| s == "job").unwrap() as u32;
+    let api_ref = request.symbols.iter().position(|s| s == "api").unwrap() as u32;
+    // One series, two samples: a count over it is one sample per grid point, whether or not the
+    // second sample differs from the first.
+    let sample = |timestamp: i64, count: u64| Histogram {
+        count: Some(Count::CountInt(count)),
+        sum: 2.0 * count as f64,
+        schema: 1,
+        positive_spans: vec![BucketSpan {
+            offset: 0,
+            length: 1,
+        }],
+        positive_deltas: vec![count as i64],
+        reset_hint: 2,
+        start_timestamp: 1_500,
+        timestamp,
+        ..Default::default()
+    };
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![name_ref, metric_ref, job_ref, api_ref],
+        histograms: vec![sample(2_000, 4), sample(4_000, 8)],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let written = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = written.status();
+    let body = written.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
+    for (query, encoded, expected) in [
+        ("count(h)", "count(native_histogram_counted)", "1.0"),
+        ("group(h)", "group(native_histogram_counted)", "1.0"),
+    ] {
+        let url = format!("/v1/prometheus/api/v1/query?query={encoded}&time=4");
+        observer.clear();
+        let native = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=true")
+            .send()
+            .await;
+        assert_eq!(native.status(), StatusCode::OK, "{query} failed natively");
+        let native: Value = native.json().await;
+        // The fixture turns the native route on by default, so ask for the existing one
+        // explicitly: without the hint this request would run the native plan a second time
+        // and `take_all` would collect both runs.
+        let legacy = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=false")
+            .send()
+            .await;
+        assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
+        let legacy: Value = legacy.json().await;
+        assert_eq!(
+            native["data"]["result"], legacy["data"]["result"],
+            "{query}: the native answer differs from the legacy one"
+        );
+        assert_eq!(
+            native["data"]["result"][0]["value"][1].as_str(),
+            Some(expected),
+            "{query}: {native}"
+        );
+        let fused = observer.take_all(query);
+        assert!(
+            fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+            "{query} executed a node that is not the fused producer: {fused:?}"
+        );
+    }
+
+    // `min` reads a float value, so a group holding only histograms answers nothing - and says why:
+    // Prometheus reports the samples it skipped instead of refusing the statement.
+    let url = "/v1/prometheus/api/v1/query?query=min(native_histogram_counted)&time=4";
+    observer.clear();
+    let response = client
+        .get(url)
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(
+        body["data"]["result"].as_array().map(Vec::len),
+        Some(0),
+        "a histogram-only group has no float to answer: {body}"
+    );
+    // The route has to have run before the annotation can exist: check that first, so a missing
+    // info is read as an annotation problem and not as a fall back to the existing plan.
+    let fused = observer.take_all("min(h)");
+    assert_eq!(fused[0].name(), "FusedSeriesExec");
+    let infos = body["infos"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no infos in {body}"));
+    assert!(
+        infos.iter().any(|info| info
+            .as_str()
+            .is_some_and(|text| text.contains("ignored native histogram samples"))),
+        "the skipped-sample info did not reach the response: {body}"
+    );
+}
+
+/// `sum` over a native histogram answers every point of a range, not one point per run.
+///
+/// A split aggregate exports one state row per grid point and folds those rows elsewhere, and three
+/// adjacent samples are where a row addressed by its run instead of by its point collapses: every
+/// point of a run is written into the run's first row and the frame drops the rest, so the range
+/// answers one point carrying the run's last count. The counts written here are 1, 2 and 3, so a
+/// range answering 1, 2, 3 has one row per point and a range answering 3 alone has one row per run.
+/// Every current fixture is a single point or an instant query, which is why none of them sees it.
+pub async fn test_remote_write_v2_histogram_sum_over_range(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_sum_over_range",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    // Three adjacent samples of one series: the range below selects one of them per grid point, so
+    // the aggregate folds a run of three and the split exports a state row for each.
+    let metric = "native_histogram_range_sum";
+    for (timestamp, count, sum) in [(1000, 1u64, 10.0), (2000, 2, 20.0), (3000, 3, 30.0)] {
+        write_native_histogram(
+            &client,
+            &[(prom_store::METRIC_NAME_LABEL, metric), ("job", "api")],
+            timestamp,
+            count,
+            sum,
+        )
+        .await;
+    }
+    observer.clear();
+    let url = format!("/v1/prometheus/api/v1/query_range?query=sum({metric})&start=1&end=3&step=1");
+    let response = client
+        .get(&url)
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the range failed natively"
+    );
+    let body: Value = response.json().await;
+    assert_eq!(body["data"]["resultType"], "matrix");
+    let results = body["data"]["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no result in {body}"));
+    assert_eq!(results.len(), 1, "one group: {body}");
+    let histograms = results[0]["histograms"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no histograms in {body}"));
+    // One histogram per grid point, in grid order: a run collapsed into its first row answers one.
+    assert_eq!(
+        histograms.len(),
+        3,
+        "the range answers every point of the run: {body}"
+    );
+    for (index, (count, sum)) in [("1", "10"), ("2", "20"), ("3", "30")]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            histograms[index][0].as_f64(),
+            Some(1.0 + index as f64),
+            "point {index} is its own timestamp: {body}"
+        );
+        assert_eq!(
+            histograms[index][1]["count"].as_str(),
+            Some(count),
+            "point {index} answers the count of its own sample: {body}"
+        );
+        assert_eq!(
+            histograms[index][1]["sum"].as_str(),
+            Some(sum),
+            "point {index} answers the sum of its own sample: {body}"
+        );
+    }
+    // The answer came from the native route, which is the only one that exports this state.
+    let fused = observer.take_all("sum over a range");
+    assert!(
+        fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+        "sum over a range executed a node that is not the fused producer: {fused:?}"
+    );
+}
+
+// Writes one native histogram sample: `count` observations totalling `sum`, in `schema`.
+///
+/// A custom-bucket histogram is one with `schema: CUSTOM_BUCKETS_SCHEMA`; its bucket counts are
+/// spread the same way over the `custom_values` bounds. The deltas are increments, so the decoded
+/// bucket counts are their running sums and the last one is the second half of `count`.
+async fn write_native_histogram_sample(
+    client: &TestClient,
+    labels: &[(&str, &str)],
+    schema: i32,
+    custom_values: Vec<f64>,
+    timestamp: i64,
+    count: u64,
+    sum: f64,
+) {
+    let mut request = remote_write_v2::request_with_labels_and_samples(labels.to_vec(), vec![]);
+    let label_refs = labels
+        .iter()
+        .flat_map(|(name, value)| {
+            let name_ref = request.symbols.iter().position(|s| s == name).unwrap() as u32;
+            let value_ref = request.symbols.iter().position(|s| s == value).unwrap() as u32;
+            [name_ref, value_ref]
+        })
+        .collect();
+    let first = count / 2;
+    let second = count - first;
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: label_refs,
+        histograms: vec![Histogram {
+            count: Some(Count::CountInt(count)),
+            sum,
+            schema,
+            custom_values,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_deltas: vec![
+                i64::try_from(first).expect("count fits a bucket delta"),
+                i64::try_from(second - first).expect("count fits a bucket delta"),
+            ],
+            reset_hint: 2,
+            timestamp,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let response = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = response.status();
+    let body = response.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+}
+
+/// The fused node that publishes the statement's rows.
+///
+/// A split aggregate executes twice: the partial producer exports state frames, and the final
+/// consumer above the series router answers the statement. Only the consumer answers the statement's
+/// rows, so its schema is what tells the two apart.
+///
+/// `sum` and `avg` over native histograms answer a histogram (they add the payloads and the
+/// counts), so the answer column is a column whose type is the native histogram value type. Its
+/// name is the expression's now (`sum(some_metric)`), which is why the type and not the name
+/// identifies it.
+///
+/// The two schemas are otherwise unrelated: a state frame's columns are `read_key`, `is_last`,
+/// `time`, `fields`, `name` and `labels`, while the consumer's are the time index, the answer and
+/// the tags. The producer does carry a histogram, but only inside its accumulator column: `fields`
+/// types every state component in one struct, so the live histogram is a field of a list element
+/// under `fields` rather than a column of that schema. This check therefore reads the schema's own
+/// fields and never descends: the answer is a column of the rows the statement publishes, and
+/// looking deeper would be reading the merge state instead of those rows.
+fn answer_consumer(nodes: &[Arc<dyn ExecutionPlan>]) -> &Arc<dyn ExecutionPlan> {
+    use datatypes::prelude::DataType;
+
+    let histogram_type =
+        common_query::native_histogram::native_histogram_value_type().as_arrow_type();
+    let mut consumers = nodes.iter().filter(|node| {
+        node.schema()
+            .fields()
+            .iter()
+            .any(|field| field.data_type() == &histogram_type)
+    });
+    let consumer = consumers
+        .next()
+        .unwrap_or_else(|| panic!("no fused node answers a histogram column: {nodes:?}"));
+    assert!(
+        consumers.next().is_none(),
+        "more than one fused node answers the histogram column: {nodes:?}"
+    );
+    consumer
+}
+
+/// One histogram answer's `count` and `sum`, read out of the Prometheus HTTP API's JSON.
+fn histogram_fields(result: &Value) -> (f64, f64) {
+    let histogram = &result["histogram"][1];
+    let read = |field: &str| {
+        let text = histogram[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("no `{field}` in {result}"));
+        text.parse::<f64>()
+            .unwrap_or_else(|_| panic!("`{field}` is not a number in {result}"))
+    };
+    (read("count"), read("sum"))
+}
+
+/// Compares two `(count, sum)` pairs with a relative tolerance.
+fn assert_histogram_fields_close(
+    actual: (f64, f64),
+    expected: (f64, f64),
+    tolerance: f64,
+    context: &str,
+) {
+    for (actual, expected, field) in [
+        (actual.0, expected.0, "count"),
+        (actual.1, expected.1, "sum"),
+    ] {
+        assert!(
+            (actual - expected).abs() <= tolerance * expected.abs().max(1.0),
+            "{context}: {field} {actual} differs from {expected}"
+        );
+    }
+}
+
+/// `sum` and `avg` over native histograms run natively, and agree with the existing path on a
+/// fixture whose arithmetic is well conditioned.
+///
+/// Decision 1 of the design lists homogeneous layouts with small integers as a case where the two
+/// paths agree: they part widely only where the compensated sum matters (`1e16, 1, -1e16` and the
+/// like), so `sum` is compared exactly. `avg` is compared with a tolerance, because the two divide
+/// differently: v3.15 divides the sum by the sample count, while the existing path scales by the
+/// reciprocal, which the fixture above makes visible as `12 * (1/3)` - one ulp below the `4` the
+/// compensated divide answers. The native answer itself is still asserted exactly. The three series
+/// deliberately carry two different exponential schemas, because resolution reduction is part of
+/// the merge and must not disturb the scalar fields.
+pub async fn test_remote_write_v2_histogram_sum_and_avg_native_route(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_sum_and_avg",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_summed";
+    for (job, schema, count, sum) in [("a", 1, 2, 1.0), ("b", 0, 4, 2.0), ("c", 1, 6, 3.0)] {
+        write_native_histogram_sample(
+            &client,
+            &[(prom_store::METRIC_NAME_LABEL, metric), ("job", job)],
+            schema,
+            vec![],
+            2_000,
+            count,
+            sum,
+        )
+        .await;
+    }
+
+    // `count` and `sum` add exactly: 2 + 4 + 6 observations totalling 1 + 2 + 3, and an average of
+    // three samples divides both by three.
+    for (query, encoded, expected) in [
+        ("sum(h)", format!("sum({metric})"), (12.0, 6.0)),
+        ("avg(h)", format!("avg({metric})"), (4.0, 2.0)),
+    ] {
+        let url = format!("/v1/prometheus/api/v1/query?query={encoded}&time=2");
+        observer.clear();
+        let native = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=true")
+            .send()
+            .await;
+        assert_eq!(native.status(), StatusCode::OK, "{query} failed natively");
+        let native: Value = native.json().await;
+        let results = native["data"]["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no results in {native}"));
+        assert_eq!(results.len(), 1, "{query}: one group: {native}");
+        assert_eq!(
+            histogram_fields(&results[0]),
+            expected,
+            "{query} answered the wrong histogram: {native}"
+        );
+
+        // The existing path answers the same histogram. It is compared with a tolerance rather than
+        // exactly: it scales by the reciprocal where v3.15 divides, and on this fixture that is the
+        // one-ulp difference `12 * (1/3) = 3.9999999999999996` against `12 / 3 = 4`.
+        // The fixture turns the native route on by default, so ask for the existing one
+        // explicitly: without the hint this request would run the native plan a second time
+        // and `take_all` would collect both runs.
+        let legacy = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=false")
+            .send()
+            .await;
+        assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
+        let legacy: Value = legacy.json().await;
+        assert_histogram_fields_close(
+            histogram_fields(&legacy["data"]["result"][0]),
+            expected,
+            1e-15,
+            &format!("{query}: the existing path answered something else: {legacy}"),
+        );
+
+        // Both halves of the split executed: the partial producer folded each partition and the
+        // final consumer merged that state into the answer above.
+        let fused = observer.take_all(query);
+        assert_eq!(
+            fused.len(),
+            2,
+            "{query}: expected the split's two nodes: {fused:?}"
+        );
+        let consumer = answer_consumer(&fused);
+        assert_eq!(consumer.name(), "FusedSeriesExec");
+    }
+}
+
+/// A histogram average over several scan partitions answers what one partition answers.
+///
+/// The fixture is eight series worth of small integers, one flush each, so the scan hands the
+/// producer several series batches and the query asks for four partitions. Nothing overflows and
+/// every division is exact, so a merge that weighted its partitions differently from the single
+/// execution would still have to reach the same numbers: `count` and `sum` are compared exactly.
+pub async fn test_remote_write_v2_histogram_avg_native_partitions(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_avg_partitions",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        parallelism: 4,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_averaged";
+    for index in 0..8u64 {
+        let job = format!("job{index}");
+        let host = format!("host{index}");
+        write_native_histogram_sample(
+            &client,
+            &[
+                (prom_store::METRIC_NAME_LABEL, metric),
+                ("job", &job),
+                ("instance", &host),
+            ],
+            1,
+            vec![],
+            2_000,
+            1 + index,
+            2.0 * (1 + index) as f64,
+        )
+        .await;
+        tests_integration::test_util::execute_sql(
+            instance.fe_instance(),
+            &format!("ADMIN FLUSH_TABLE('{metric}')"),
+        )
+        .await;
+    }
+
+    let url = format!("/v1/prometheus/api/v1/query?query=avg({metric})&time=2");
+    observer.clear();
+    let partitioned = client
+        .get(&url)
+        .header(
+            "x-greptime-hints",
+            "query.experimental_native_promql=true,query_parallelism=4",
+        )
+        .send()
+        .await;
+    assert_eq!(partitioned.status(), StatusCode::OK, "avg failed natively");
+    let partitioned: Value = partitioned.json().await;
+    let results = partitioned["data"]["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no results in {partitioned}"));
+    assert_eq!(results.len(), 1, "one group: {partitioned}");
+    // Eight samples of 1..=8 observations totalling 2, 4, ... 16: the mean is 4.5 observations
+    // summing to 9, and every step of it is exact in binary.
+    assert_eq!(
+        histogram_fields(&results[0]),
+        (4.5, 9.0),
+        "the partitioned average is wrong: {partitioned}"
+    );
+    let fused = observer.take_all("avg over partitions");
+    let consumer = answer_consumer(&fused);
+    assert_eq!(consumer.name(), "FusedSeriesExec");
+    assert_eq!(
+        fused.len(),
+        2,
+        "the split's partial and final nodes both execute: {fused:?}"
+    );
+    // The producer runs once per partition that read rows, which is what makes this a merge and not
+    // a single fold.
+    let producer = fused
+        .iter()
+        .find(|node| !Arc::ptr_eq(node, consumer))
+        .expect("the partial producer");
+    let metrics = node_metric_set(producer);
+    let mut partitions: BTreeMap<usize, usize> = BTreeMap::new();
+    for metric in metrics.iter() {
+        if metric.value().name() == "native.root.output_values"
+            && let MetricValue::Count { count, .. } = metric.value()
+        {
+            *partitions
+                .entry(metric.partition().expect("partition label"))
+                .or_insert(0usize) += count.value();
+        }
+    }
+    assert_eq!(
+        partitions.len(),
+        4,
+        "the statement asks for four partitions and the producer runs one per partition: {partitions:?}"
+    );
+    // Routing hashes each series' label set, so eight series over four partitions can legitimately
+    // leave one of them empty, and on this fixture the flushes land on three of the four. What the
+    // topology has to guarantee is that the fold is spread over more than one partition, since one
+    // fold is what the merge has to be told apart from; that no series was lost is the answer
+    // asserted above, which counts every one of them exactly once.
+    let non_empty = partitions.values().filter(|count| **count > 0).count();
+    assert!(
+        non_empty >= 2,
+        "the average folded in one partition, so nothing was merged: {partitions:?}"
+    );
+
+    // The same statement over the same data asking for one partition: the merge has to answer what
+    // the single fold answers.
+    observer.clear();
+    let single = client
+        .get(&url)
+        .header(
+            "x-greptime-hints",
+            "query.experimental_native_promql=true,query_parallelism=1",
+        )
+        .send()
+        .await;
+    assert_eq!(single.status(), StatusCode::OK, "avg failed natively");
+    let single: Value = single.json().await;
+    assert_eq!(
+        single["data"]["result"], partitioned["data"]["result"],
+        "one partition and four answered differently"
+    );
+    assert_eq!(
+        observer.take_all("avg over one partition").len(),
+        2,
+        "the single-partition query still runs the split"
+    );
+}
+
+/// A point whose samples disagree on their bucket layout is removed, and the response says why.
+///
+/// One series carries exponential buckets and the other custom ones, which no addition can merge.
+/// Prometheus drops the point rather than the statement, so the group answers nothing and the
+/// warning reaches the caller - from the node that merged the state, which is the only place the
+/// outcome is final.
+pub async fn test_remote_write_v2_histogram_sum_incompatible_layouts_warns(
+    store_type: StorageType,
+) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_incompatible_layouts",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_mixed_layouts";
+    write_native_histogram_sample(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, metric),
+            ("job", "exponential"),
+        ],
+        1,
+        vec![],
+        2_000,
+        2,
+        1.0,
+    )
+    .await;
+    write_native_histogram_sample(
+        &client,
+        &[(prom_store::METRIC_NAME_LABEL, metric), ("job", "custom")],
+        -53,
+        vec![1.0, 2.0],
+        2_000,
+        2,
+        2.0,
+    )
+    .await;
+
+    observer.clear();
+    let response = client
+        .get(&format!(
+            "/v1/prometheus/api/v1/query?query=sum({metric})&time=2"
+        ))
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK, "the statement failed");
+    let body: Value = response.json().await;
+    assert_eq!(
+        body["data"]["result"].as_array().map(Vec::len),
+        Some(0),
+        "a group whose layouts disagree has no histogram to answer: {body}"
+    );
+    // The route has to have run before the warning can exist, so it is checked first: a missing
+    // warning is then read as an annotation problem and not as a fall back to the existing plan.
+    let fused = observer.take_all("sum over mixed layouts");
+    assert_eq!(
+        fused.len(),
+        2,
+        "the split's partial and final nodes both execute: {fused:?}"
+    );
+    answer_consumer(&fused);
+    let warnings = body["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings in {body}"));
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("incompatible native histogram layouts"))),
+        "the removed point did not report its layout: {body}"
+    );
+}
+
+pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    // The histogram answers at the end of this test are legacy ones, so the route observer is what
+    // proves the route they ran on: the engine-wide option stays off and no request carries a hint.
+    let route = Arc::new(PromRouteObserver::default());
+    let plugins = Plugins::default();
+    plugins.insert::<PromQueryInterceptorRef<servers::error::Error>>(route.clone());
+    let mut instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "prometheus_remote_write_v2_native_histogram",
+    )
+    .with_default_store_type(store_type)
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
     let mut write_request = remote_write_v2::request_with_labels_and_samples(
         vec![
@@ -4326,6 +7697,123 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         histogram_rows,
     )
     .await;
+
+    // The raw sample carries a start timestamp of 1500, strictly inside the window `(0, 3000]` of
+    // the requests below, and it is the window's only sample. A legacy `rate`/`increase` can only
+    // answer such a window through that start timestamp: the whole sample is what the increase
+    // since the synthetic zero measures, and `rate` is that over the window's seconds.
+    for (query, count, sum) in [
+        (
+            "rate(remote_write_v2_latency_seconds[3s])",
+            8.0 / 3.0,
+            10.0 / 3.0,
+        ),
+        ("increase(remote_write_v2_latency_seconds[3s])", 8.0, 10.0),
+    ] {
+        let res = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?query={}&time=3",
+                encode(query)
+            ))
+            .send()
+            .await;
+        let status = res.status();
+        let body: Value = res.json().await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        assert_eq!(body["data"]["resultType"], "vector", "{query}: {body}");
+        assert_eq!(
+            body["data"]["result"].as_array().map(Vec::len),
+            Some(1),
+            "{query}: {body}"
+        );
+        let histogram = &body["data"]["result"][0]["histogram"][1];
+        let reported = |field: &str| -> f64 {
+            histogram[field]
+                .as_str()
+                .unwrap_or_else(|| panic!("no histogram {field} in {body}"))
+                .parse()
+                .unwrap()
+        };
+        assert!(
+            (reported("count") - count).abs() < 1e-12 && (reported("sum") - sum).abs() < 1e-12,
+            "{query}: expected count {count} and sum {sum}, got {body}"
+        );
+        assert!(
+            body.get("infos").is_none() && body.get("warnings").is_none(),
+            "{query}: a counter histogram with a start timestamp has nothing to report: {body}"
+        );
+        assert!(
+            !executes_fused_series(&route.take_plan()),
+            "{query} did not run on the legacy route"
+        );
+    }
+
+    // A NaN observation: the buckets hold nine of the count's ten observations and the sum is NaN,
+    // which is how Prometheus marks the rest. Prometheus's NaN branch walks the buckets forward and
+    // leaves the top bucket for the interpolation, so the half quantile reads 2^5 rather than the
+    // 0.7711 the buckets' own rank gives - and the response has to say why.
+    let nan_request = remote_write_v2::request_with_labels_and_histograms(
+        vec![
+            (
+                prom_store::METRIC_NAME_LABEL,
+                "remote_write_v2_nan_quantile",
+            ),
+            ("job", "api"),
+        ],
+        vec![Histogram {
+            count: Some(Count::CountInt(10)),
+            sum: f64::NAN,
+            // A bucket's upper bound is 2^(index * 2^-schema), so schema 0 makes the two buckets
+            // (0.5, 1] and (1, 2]; the deltas hold 8 and then 1.
+            schema: 0,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_deltas: vec![8, -7],
+            reset_hint: 2,
+            timestamp: 3_000,
+            ..Default::default()
+        }],
+    );
+    let payload = prom_store::snappy_compress(&nan_request.encode_to_vec()).unwrap();
+    let written = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = written.status();
+    let body = written.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
+    let res = client
+        .get(&format!(
+            "/v1/prometheus/api/v1/query?query={}&time=3",
+            encode("histogram_quantile(0.5, remote_write_v2_nan_quantile)")
+        ))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    assert_eq!(body["data"]["resultType"], "vector", "{body}");
+    assert_eq!(
+        body["data"]["result"][0]["value"][1], "32.0",
+        "the NaN walk leaves the top bucket: {body}"
+    );
+    assert_eq!(
+        body["infos"],
+        json!(["input to histogram_quantile has NaN observations, result is skewed higher"]),
+        "{body}"
+    );
+    assert!(
+        !executes_fused_series(&route.take_plan()),
+        "`histogram_quantile` did not run on the legacy route"
+    );
 
     for flushed in [false, true] {
         if flushed {
@@ -4622,7 +8110,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     )
     .await;
 
-    guard.remove_all().await;
+    instance.guard.remove_all().await;
 }
 
 #[apply(both_deployment_cases)]
@@ -5383,6 +8871,129 @@ pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
         expected,
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_remote_write_with_ttl_hint(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "test_prometheus_remote_write_ttl_hint")
+            .await;
+    let client = TestClient::new(app).await;
+
+    // write snappy encoded data with an ingest TTL hint
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "ttl_hint_metric".to_string(),
+                },
+                Label {
+                    name: "host".to_string(),
+                    value: "host1".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                value: 1.0f64,
+                timestamp: 1664370459457,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header("x-greptime-hints", "ttl=7d")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // The hinted ingestion path must be usable end to end.
+    let expected = "[[1664370459457,1.0,\"host1\"]]";
+    validate_data(
+        "test_prometheus_remote_write_ttl_hint_select",
+        &client,
+        "select * from ttl_hint_metric",
+        expected,
+    )
+    .await;
+
+    // The automatically created physical metric table carries the retention TTL hint.
+    let res = client
+        .get("/v1/sql?sql=show create table greptime_physical_table")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    assert!(
+        resp.contains("ttl = '7d'") || resp.contains("ttl = '7days'"),
+        "expected ttl = '7d' in SHOW CREATE TABLE output for physical table, got: {resp}"
+    );
+
+    // The logical table must not inherit the retention TTL in create_options.
+    let res = client
+        .get("/v1/sql?sql=select create_options from information_schema.tables where table_name = 'ttl_hint_metric'")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    assert!(
+        !resp.contains("ttl"),
+        "did not expect retention ttl in create_options for logical table, got: {resp}"
+    );
+
+    // When the physical table already exists, the retention hint applies only on creation
+    // and is ignored on subsequent writes, returning 204 without altering physical table TTL.
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "ttl_hint_metric_again".to_string(),
+                },
+                Label {
+                    name: "host".to_string(),
+                    value: "host2".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                value: 2.0f64,
+                timestamp: 1664370459458,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let compressed_request = prom_store::snappy_compress(&write_request.encode_to_vec())
+        .expect("failed to encode snappy");
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header("x-greptime-hints", "ttl=1d")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // The physical table's TTL remains unchanged.
+    let res = client
+        .get("/v1/sql?sql=show create table greptime_physical_table")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    assert!(
+        resp.contains("ttl = '7d'") || resp.contains("ttl = '7days'"),
+        "expected ttl = '7d' in SHOW CREATE TABLE output for physical table to remain unchanged, got: {resp}"
+    );
 
     guard.remove_all().await;
 }
@@ -8445,6 +12056,45 @@ transform:
             .send()
             .await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+    {
+        // the dryrun API accepts at most 10 rows
+        let rows = (0..11)
+            .map(|i| {
+                json!({
+                    "id1": "2436",
+                    "id2": "2528",
+                    "logger": "INTERACT.MANAGER",
+                    "type": "I",
+                    "time": "2024-05-25 20:16:37.217",
+                    "log": format!("row {i}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let data = Value::Array(rows).to_string();
+        let expected =
+            json!("Invalid request parameter: dryrun data must not exceed 10 rows, got 11");
+
+        let body = json!({"pipeline_name": "test", "data": data});
+        let res = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body: Value = res.json().await;
+        assert_eq!(body["error"], expected);
+
+        let res = client
+            .post("/v1/pipelines/_dryrun?pipeline_name=test")
+            .header("Content-Type", "application/json")
+            .body(data)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body: Value = res.json().await;
+        assert_eq!(body["error"], expected);
     }
     guard.remove_all().await;
 }

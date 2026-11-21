@@ -43,6 +43,20 @@ as before the field existed:
 cargo nextest run -p store-api -E 'test(test_legacy_granted_region_wire)'
 ```
 
+The [pending tails discard fixture](wire/discard_pending_tails/README.md) checks that
+a region request discarding pending WAL tails stays at body field 24:
+
+```shell
+cargo nextest run -p store-api -E 'test(test_discard_pending_tails_request_wire)'
+```
+
+The [region statistic fixtures](wire/region_statistic_pending_tails/README.md) check that a
+region statistic without pending tails decodes and encodes as before the flag existed:
+
+```shell
+cargo nextest run -p common-meta -E 'test(test_has_pending_tails_wire)'
+```
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of

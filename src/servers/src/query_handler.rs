@@ -378,6 +378,19 @@ pub trait CopyInHandler: Send + Sync {
         query_ctx: QueryContextRef,
     ) -> Result<Option<TableInfoRef>>;
 
+    /// Validates that a COPY target's resolved catalog/schema is within
+    /// the session's allowed scope, before any data is transferred.
+    /// Enforces the `disallow_cross_catalog_query` restriction for
+    /// targets that leave the session's catalog — the same restriction
+    /// SQL INSERT and `copy_in_table` enforce. A no-op when the
+    /// restriction is disabled.
+    async fn copy_in_validate_scope(
+        &self,
+        catalog: &str,
+        schema: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<()>;
+
     /// Ingests Arrow batches through the same bulk path as Flight DoPut.
     /// The COPY transport owns framing and memory admission; implementations
     /// retain stream-level authorization and schema reconciliation.
