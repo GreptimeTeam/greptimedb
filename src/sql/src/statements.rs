@@ -99,8 +99,14 @@ pub fn column_to_schema(
     time_index: &str,
     timezone: Option<&Timezone>,
 ) -> Result<ColumnSchema> {
-    let is_time_index = column.name().value == time_index;
+    build_column_schema(column, column.name().value == time_index, timezone)
+}
 
+fn build_column_schema(
+    column: &Column,
+    is_time_index: bool,
+    timezone: Option<&Timezone>,
+) -> Result<ColumnSchema> {
     let is_nullable = column
         .options()
         .iter()
@@ -182,8 +188,8 @@ pub fn sql_col_to_grpc_col_def(
     column: &Column,
     timezone: Option<&Timezone>,
 ) -> Result<api::v1::ColumnDef> {
-    // An added column is never the time index.
-    let column_schema = column_to_schema(column, "", timezone)?;
+    // ADD COLUMN cannot add a time index.
+    let column_schema = build_column_schema(column, false, timezone)?;
     let is_primary_key = column
         .options()
         .iter()
@@ -462,6 +468,19 @@ mod tests {
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
         assert_eq!(ColumnDataType::Float64 as i32, grpc_column_def.data_type);
         assert!(grpc_column_def.default_constraint.is_empty());
+        assert_eq!(grpc_column_def.semantic_type, SemanticType::Field as i32);
+
+        // An added column is never the time index, whatever its name.
+        let column = Column {
+            column_def: ColumnDef {
+                name: "".into(),
+                data_type: SqlDataType::Timestamp(None, TimezoneInfo::None),
+                options: vec![],
+            },
+            extensions: ColumnExtensions::default(),
+        };
+        let grpc_column_def = sql_col_to_grpc_col_def(&column, None).unwrap();
+        assert!(grpc_column_def.is_nullable);
         assert_eq!(grpc_column_def.semantic_type, SemanticType::Field as i32);
 
         // test not null
