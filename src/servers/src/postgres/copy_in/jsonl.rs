@@ -137,31 +137,19 @@ struct JsonlRecordParser {
 }
 
 impl RecordParser for JsonlRecordParser {
-    fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>> {
-        let mut buf = data;
-        let mut rows = Vec::new();
-        while !buf.is_empty() {
-            let consumed = self.decoder.decode(buf).map_err(decode_error)?;
-            if consumed == 0 {
-                while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
-                    rows.extend(flush_batch(&batch)?);
-                }
-            } else {
-                buf = &buf[consumed..];
-            }
-        }
-        Ok(rows)
+    fn decode(&mut self, data: &[u8]) -> PgWireResult<usize> {
+        self.decoder.decode(data).map_err(decode_error)
     }
 
-    fn finish(&mut self) -> PgWireResult<Vec<ParsedRow>> {
-        // An empty decode signals EOF, finalizing a trailing record
-        // that lacks its newline.
-        self.decoder.decode(&[]).map_err(decode_error)?;
-        let mut rows = Vec::new();
-        while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
-            rows.extend(flush_batch(&batch)?);
+    fn is_full(&self) -> bool {
+        self.decoder.len() == COPY_IN_FLUSH_ROWS && !self.decoder.has_partial_record()
+    }
+
+    fn flush(&mut self) -> PgWireResult<Vec<ParsedRow>> {
+        match self.decoder.flush().map_err(decode_error)? {
+            Some(batch) => flush_batch(&batch),
+            None => Ok(Vec::new()),
         }
-        Ok(rows)
     }
 }
 
