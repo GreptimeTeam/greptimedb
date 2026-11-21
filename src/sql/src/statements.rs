@@ -59,7 +59,7 @@ use crate::ast::{
 use crate::error::{
     self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
     SerializeColumnDefaultConstraintSnafu, SetCompressionOptionSnafu, SetFulltextOptionSnafu,
-    SetSkippingIndexOptionSnafu, SqlCommonSnafu,
+    SetSkippingIndexOptionSnafu, SetStorageOptionSnafu, SqlCommonSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
@@ -153,6 +153,12 @@ pub fn column_to_schema(
         column_schema = column_schema
             .with_compression_options(options)
             .context(SetCompressionOptionSnafu)?;
+    }
+
+    if let Some(options) = column.extensions.build_storage_options()? {
+        column_schema = column_schema
+            .with_storage_options(options)
+            .context(SetStorageOptionSnafu)?;
     }
 
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
