@@ -19,11 +19,16 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_base::readable_size::ReadableSize;
+use datatypes::arrow::array::{AsArray, OffsetSizeTrait};
+use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::json::JsonSettings;
 use datatypes::schema::ColumnEncoding;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
-use parquet::file::metadata::ParquetMetaData;
-use parquet::file::properties::{DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT, WriterPropertiesBuilder};
+use parquet::file::metadata::{KeyValue, ParquetMetaData};
+use parquet::file::properties::{
+    DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT, EnabledStatistics, WriterPropertiesBuilder,
+};
 use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -113,6 +118,203 @@ pub(crate) fn apply_internal_column_encoding(
         .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
         .set_column_dictionary_enabled(ts_col, false)
         .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
+}
+
+/// Average uncompressed bytes in one row group that [row_group_size_for] aims at.
+///
+/// Writers buffer a whole row group before writing it, so with megabyte-sized values a
+/// row-count limit alone does not bound writer memory.
+const TARGET_ROW_GROUP_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Returns the row group size for data of `rows` rows and `bytes` uncompressed bytes.
+///
+/// The size comes from the average row width of the whole input, so a few wide rows at the
+/// start of a file do not shrink the row groups of the rest. Rows wider than the average can
+/// still make single row groups larger than the target.
+pub(crate) fn row_group_size_for(rows: u64, bytes: u64, configured: usize) -> usize {
+    if rows == 0 || bytes == 0 {
+        return configured;
+    }
+    let row_width = bytes.div_ceil(rows);
+    (TARGET_ROW_GROUP_BYTES / row_width).clamp(1, configured as u64) as usize
+}
+
+/// Returns the bytes of string and binary values in `batch` once decoded.
+///
+/// Encoded parquet sizes undercount these values when dictionary encoding stores repeated
+/// values once. Dictionary-typed arrays are skipped: readers decode them as dictionaries too.
+pub(crate) fn var_len_value_bytes(batch: &RecordBatch) -> u64 {
+    fn span<O: OffsetSizeTrait>(offsets: &[O]) -> u64 {
+        match (offsets.first(), offsets.last()) {
+            (Some(first), Some(last)) => (last.as_usize() - first.as_usize()) as u64,
+            _ => 0,
+        }
+    }
+
+    batch
+        .columns()
+        .iter()
+        .map(|array| match array.data_type() {
+            DataType::Binary => span(array.as_binary::<i32>().value_offsets()),
+            DataType::LargeBinary => span(array.as_binary::<i64>().value_offsets()),
+            DataType::Utf8 => span(array.as_string::<i32>().value_offsets()),
+            DataType::LargeUtf8 => span(array.as_string::<i64>().value_offsets()),
+            DataType::BinaryView => array
+                .as_binary_view()
+                .views()
+                .iter()
+                .map(|view| *view as u32 as u64)
+                .sum(),
+            DataType::Utf8View => array
+                .as_string_view()
+                .views()
+                .iter()
+                .map(|view| *view as u32 as u64)
+                .sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Footer key holding the decoded bytes of string and binary values in the row group with the
+/// most such bytes.
+pub(crate) const MAX_ROW_GROUP_VALUE_BYTES_KEY: &str = "greptime:max_row_group_value_bytes";
+
+/// Tracks the largest [var_len_value_bytes] of a row group, cutting row groups every
+/// `row_group_rows` rows from the start of the file like the parquet writers do.
+#[derive(Debug)]
+pub(crate) struct RowGroupValueBytes {
+    row_group_rows: usize,
+    rows_in_current: usize,
+    current: u64,
+    max: u64,
+}
+
+impl RowGroupValueBytes {
+    pub(crate) fn new(row_group_rows: usize) -> Self {
+        Self {
+            row_group_rows: row_group_rows.max(1),
+            rows_in_current: 0,
+            current: 0,
+            max: 0,
+        }
+    }
+
+    /// Adds the next batch written to the file.
+    pub(crate) fn update(&mut self, batch: &RecordBatch) {
+        let mut offset = 0;
+        while offset < batch.num_rows() {
+            let len = (self.row_group_rows - self.rows_in_current).min(batch.num_rows() - offset);
+            self.current += var_len_value_bytes(&batch.slice(offset, len));
+            self.max = self.max.max(self.current);
+            self.rows_in_current += len;
+            offset += len;
+            if self.rows_in_current == self.row_group_rows {
+                self.current = 0;
+                self.rows_in_current = 0;
+            }
+        }
+    }
+
+    /// Returns the footer entry, or `None` when the file has no such values.
+    pub(crate) fn into_key_value(self) -> Option<KeyValue> {
+        (self.max > 0).then(|| {
+            KeyValue::new(
+                MAX_ROW_GROUP_VALUE_BYTES_KEY.to_string(),
+                self.max.to_string(),
+            )
+        })
+    }
+}
+
+/// Returns the size of the largest row group of `metadata`, counting string and binary values
+/// at their decoded size when the footer records it under [MAX_ROW_GROUP_VALUE_BYTES_KEY].
+///
+/// Writers and the verifier of compaction outputs must both use this to agree on the value.
+pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
+    let max_encoded = metadata
+        .row_groups()
+        .iter()
+        .map(|row_group| {
+            row_group
+                .columns()
+                .iter()
+                .map(|column| column.uncompressed_size() as u64)
+                .sum::<u64>()
+        })
+        .max()
+        .unwrap_or(0);
+    max_encoded.max(max_row_group_value_bytes(metadata))
+}
+
+/// Returns the [MAX_ROW_GROUP_VALUE_BYTES_KEY] value of the footer, or 0 when it is absent.
+pub(crate) fn max_row_group_value_bytes(metadata: &ParquetMetaData) -> u64 {
+    metadata
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|kvs| {
+            kvs.iter()
+                .find(|kv| kv.key == MAX_ROW_GROUP_VALUE_BYTES_KEY)
+        })
+        .and_then(|kv| kv.value.as_deref())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Values at least this long make min/max statistics of a field column useless for pruning,
+/// while untruncated statistics copy two whole values per row group into the footer.
+const LARGE_VALUE_STATS_THRESHOLD: usize = 64 * 1024;
+
+/// Returns string and binary field columns whose longest value in `batch` reaches
+/// [LARGE_VALUE_STATS_THRESHOLD].
+///
+/// Primary key and tag columns keep exact statistics: pruning decodes primary keys from them.
+pub(crate) fn large_value_fields(metadata: &RegionMetadataRef, batch: &RecordBatch) -> Vec<String> {
+    fn max_len<O: OffsetSizeTrait>(offsets: &[O]) -> usize {
+        offsets
+            .windows(2)
+            .map(|w| w[1].as_usize() - w[0].as_usize())
+            .max()
+            .unwrap_or(0)
+    }
+    fn max_view_len(views: &[u128]) -> usize {
+        views
+            .iter()
+            .map(|view| *view as u32 as usize)
+            .max()
+            .unwrap_or(0)
+    }
+
+    metadata
+        .field_columns()
+        .filter_map(|column| {
+            let name = &column.column_schema.name;
+            let array = batch.column_by_name(name)?;
+            let max_len = match array.data_type() {
+                DataType::Binary => max_len(array.as_binary::<i32>().value_offsets()),
+                DataType::LargeBinary => max_len(array.as_binary::<i64>().value_offsets()),
+                DataType::Utf8 => max_len(array.as_string::<i32>().value_offsets()),
+                DataType::LargeUtf8 => max_len(array.as_string::<i64>().value_offsets()),
+                DataType::BinaryView => max_view_len(array.as_binary_view().views()),
+                DataType::Utf8View => max_view_len(array.as_string_view().views()),
+                _ => 0,
+            };
+            (max_len >= LARGE_VALUE_STATS_THRESHOLD).then(|| name.clone())
+        })
+        .collect()
+}
+
+/// Disables min/max statistics of `columns`.
+pub(crate) fn skip_statistics(
+    builder: WriterPropertiesBuilder,
+    columns: &[String],
+) -> WriterPropertiesBuilder {
+    columns.iter().fold(builder, |builder, name| {
+        builder.set_column_statistics_enabled(
+            ColumnPath::new(vec![name.clone()]),
+            EnabledStatistics::None,
+        )
+    })
 }
 
 /// Applies the per-column options declared with `COMPRESSION WITH (...)`.
@@ -281,12 +483,14 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::mito_engine_options::FloatFieldEncoding;
     use store_api::region_request::PathType;
+    use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
     use store_api::storage::{ColumnSchema, RegionId};
     use table::predicate::Predicate;
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
     use super::*;
     use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
+    use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
     use crate::cache::index::result_cache::PredicateKey;
     use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy};
@@ -299,8 +503,8 @@ mod tests {
     use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
-    use crate::sst::parquet::flat_format::FlatWriteFormat;
-    use crate::sst::parquet::metadata::extract_primary_key_range;
+    use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
+    use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::row_selection::RowGroupSelection;
     use crate::sst::parquet::writer::ParquetWriter;
@@ -311,8 +515,9 @@ mod tests {
     use crate::test_util::sst_util::{
         WriteChunkRecorder, build_test_binary_test_region_metadata,
         new_flat_source_from_record_batches, new_primary_key, new_record_batch_by_range,
-        new_record_batch_with_custom_sequence, new_sparse_primary_key, sst_file_handle,
-        sst_file_handle_with_file_id, sst_region_metadata, sst_region_metadata_with_encoding,
+        new_record_batch_with_binary_values, new_record_batch_with_custom_sequence,
+        new_sparse_primary_key, sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
+        sst_region_metadata_with_encoding,
     };
 
     const FILE_DIR: &str = "/";
@@ -1256,12 +1461,183 @@ mod tests {
         // Chunk statistics keep exact primary keys; pruning decodes them.
         let pk_stats = parquet_meta
             .row_group(0)
-            .column(column(store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME))
+            .column(column(PRIMARY_KEY_COLUMN_NAME))
             .statistics()
             .unwrap();
         let pk = new_primary_key(&[&tag]);
         assert!(pk.len() > 64);
         assert_eq!(pk_stats.max_bytes_opt().unwrap(), pk.as_slice());
+    }
+
+    #[test]
+    fn test_large_view_values_skip_statistics() {
+        let metadata = build_test_binary_test_region_metadata();
+        let large = "x".repeat(LARGE_VALUE_STATS_THRESHOLD);
+        let columns: [ArrayRef; 2] = [
+            Arc::new(arrow::array::StringViewArray::from_iter_values([
+                "a", &large,
+            ])),
+            Arc::new(arrow::array::BinaryViewArray::from_iter_values([
+                b"a".as_slice(),
+                large.as_bytes(),
+            ])),
+        ];
+        for array in columns {
+            let schema = Schema::new(vec![Field::new("field_0", array.data_type().clone(), true)]);
+            let batch = RecordBatch::try_new(Arc::new(schema), vec![array]).unwrap();
+            assert_eq!(large_value_fields(&metadata, &batch), ["field_0"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_large_field_values_skip_chunk_statistics() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = FixedPathProvider {
+            region_file_id: handle.file_id(),
+        };
+        let metadata = build_test_binary_test_region_metadata();
+        let tag = "t".repeat(100);
+        let values: Vec<Vec<u8>> = (0..8)
+            .map(|i| format!("{i:08}").into_bytes().repeat(32 * 1024))
+            .collect();
+        let batch = new_record_batch_with_binary_values(&tag, &values);
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            file_path,
+            &mut metrics,
+        )
+        .await;
+        let info = writer
+            .write_all_flat_as_primary_key(
+                new_flat_source_from_record_batches(vec![batch.slice(0, 0), batch]),
+                None,
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        let parquet_meta = info.file_metadata.unwrap();
+        let schema = parquet_meta.file_metadata().schema_descr();
+        let column = |name: &str| {
+            (0..schema.num_columns())
+                .find(|i| schema.column(*i).name() == name)
+                .unwrap()
+        };
+        let row_group = parquet_meta.row_group(0);
+        assert!(row_group.column(column("field_0")).statistics().is_none());
+        // Primary keys keep exact statistics for pruning.
+        let pk_stats = row_group
+            .column(column(PRIMARY_KEY_COLUMN_NAME))
+            .statistics()
+            .unwrap();
+        assert_eq!(
+            pk_stats.max_bytes_opt().unwrap(),
+            new_primary_key(&[&tag]).as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_row_group_size_counts_dictionary_encoded_values_decoded() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = FixedPathProvider {
+            region_file_id: handle.file_id(),
+        };
+        let metadata = build_test_binary_test_region_metadata();
+        // 2048 copies of one 64 KiB value decode to 128 MiB but dictionary-encode to one value.
+        let values = vec![vec![7u8; 64 * 1024]; 2048];
+        let batch = new_record_batch_with_binary_values("a", &values);
+        let sst_path = file_path.build_sst_file_path(handle.file_id());
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            file_path,
+            &mut metrics,
+        )
+        .await;
+        let info = writer
+            .write_all_flat_as_primary_key(
+                new_flat_source_from_record_batches(vec![batch]),
+                None,
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        let parquet_meta = info.file_metadata.as_ref().unwrap();
+        let schema = parquet_meta.file_metadata().schema_descr();
+        let field = (0..schema.num_columns())
+            .find(|i| schema.column(*i).name() == "field_0")
+            .unwrap();
+        assert!(parquet_meta.row_group(0).column(field).uncompressed_size() < 1024 * 1024);
+        assert!(info.max_row_group_uncompressed_size >= 2048 * 64 * 1024);
+        // Compaction outputs are verified by recomputing the size from the stored footer.
+        let footer = MetadataLoader::new(object_store, &sst_path, info.file_size)
+            .load(&mut Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            info.max_row_group_uncompressed_size,
+            max_row_group_decoded_size(&footer)
+        );
+        // Readers size batches by the decoded 64 KiB values, not the dictionary-encoded size.
+        assert_eq!(
+            1024,
+            estimate_batch_size(largest_row_group_statistic(&footer))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_row_group_size_counts_wide_rows_in_their_own_row_group() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = FixedPathProvider {
+            region_file_id: handle.file_id(),
+        };
+        let metadata = build_test_binary_test_region_metadata();
+        // Nine row groups of short values, then one of repeated 64 KiB values that
+        // dictionary-encode to a single value.
+        let short = new_record_batch_with_binary_values("a", &vec![b"short".to_vec(); 72]);
+        let wide = new_record_batch_with_binary_values("a", &vec![vec![7u8; 64 * 1024]; 8]);
+        let ts_index = time_index_column_index(wide.num_columns());
+        let mut columns = wide.columns().to_vec();
+        columns[ts_index] = Arc::new(TimestampMillisecondArray::from_iter_values(72..80));
+        let wide = RecordBatch::try_new(wide.schema(), columns).unwrap();
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            file_path,
+            &mut metrics,
+        )
+        .await;
+        let info = writer
+            .write_all_flat_as_primary_key(
+                new_flat_source_from_record_batches(vec![short, wide]),
+                None,
+                &WriteOptions {
+                    row_group_size: 8,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(10, info.num_row_groups);
+        assert!(info.max_row_group_uncompressed_size >= 8 * 64 * 1024);
     }
 
     #[rstest::rstest]
@@ -1882,32 +2258,6 @@ mod tests {
         assert!(cached.contains_row_group(1));
         assert!(cached.contains_row_group(2));
         assert!(cached.contains_row_group(3));
-    }
-
-    fn new_record_batch_with_binary_values(tag: &str, values: &[Vec<u8>]) -> RecordBatch {
-        let metadata = build_test_binary_test_region_metadata();
-        let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
-        let num_rows = values.len();
-        let mut tag_0_builder = StringDictionaryBuilder::<UInt32Type>::new();
-        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
-        let pk = new_primary_key(&[tag]);
-        for _ in 0..num_rows {
-            tag_0_builder.append_value(tag);
-            pk_builder.append(&pk).unwrap();
-        }
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(tag_0_builder.finish()),
-            Arc::new(datatypes::arrow::array::BinaryArray::from_iter_values(
-                values.iter().map(|v| v.as_slice()),
-            )),
-            Arc::new(TimestampMillisecondArray::from_iter_values(
-                0..num_rows as i64,
-            )),
-            Arc::new(pk_builder.finish()),
-            Arc::new(UInt64Array::from_value(1000, num_rows)),
-            Arc::new(UInt8Array::from_value(OpType::Put as u8, num_rows)),
-        ];
-        RecordBatch::try_new(flat_schema, columns).unwrap()
     }
 
     fn new_record_batch_with_binary(tags: &[&str], start: usize, end: usize) -> RecordBatch {

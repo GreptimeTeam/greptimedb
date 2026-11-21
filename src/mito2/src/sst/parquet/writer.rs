@@ -70,8 +70,9 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
-    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo, WriteOptions,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
+    large_value_fields, max_row_group_decoded_size, skip_statistics,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -273,6 +274,10 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     blob_columns: Vec<String>,
     /// Blob sidecar of the current file.
     blob_writer: Option<BlobFileWriter>,
+    /// Field columns of the current file that skip min/max statistics, picked from its first batch.
+    large_value_columns: Vec<String>,
+    /// Decoded value bytes per row group of the current file.
+    row_group_value_bytes: Option<RowGroupValueBytes>,
 }
 
 /// Registers output ownership before either an SST or its index is created in storage.
@@ -474,6 +479,8 @@ where
             blob_target: None,
             blob_columns: Vec::new(),
             blob_writer: None,
+            large_value_columns: Vec::new(),
+            row_group_value_bytes: None,
         }
     }
 
@@ -590,15 +597,17 @@ where
             self.check_cancelled()?;
             // Keep the upload owned until finalization succeeds, so an error
             // still reaches the common abort path.
-            let parquet_metadata = self
-                .writer
-                .as_mut()
-                .context(UnexpectedSnafu {
-                    reason: "Missing SST writer during finalization",
-                })?
-                .finish()
-                .await
-                .map_err(map_write_error)?;
+            let writer = self.writer.as_mut().context(UnexpectedSnafu {
+                reason: "Missing SST writer during finalization",
+            })?;
+            if let Some(value_bytes) = self
+                .row_group_value_bytes
+                .take()
+                .and_then(RowGroupValueBytes::into_key_value)
+            {
+                writer.append_key_value_metadata(value_bytes);
+            }
+            let parquet_metadata = writer.finish().await.map_err(map_write_error)?;
             self.writer.take();
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
             if self.memory.limits.is_some() {
@@ -614,10 +623,7 @@ where
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            let max_row_group_uncompressed_size: u64 = row_group_sizes(&parquet_metadata)
-                .map(|(_, bytes)| bytes)
-                .max()
-                .unwrap_or(0);
+            let max_row_group_uncompressed_size = max_row_group_decoded_size(&parquet_metadata);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
@@ -822,11 +828,21 @@ where
                     .await?;
             }
             let start = Instant::now();
+            if self.writer.is_none() {
+                // The first non-empty batch of a file decides which columns skip statistics.
+                if arrow_batch.num_rows() == 0 {
+                    return Ok(());
+                }
+                self.large_value_columns = large_value_fields(&self.metadata, &arrow_batch);
+            }
             self.maybe_init_writer(arrow_batch.schema_ref(), opts)
                 .await?
                 .write(&arrow_batch)
                 .await
                 .map_err(map_write_error)?;
+            if let Some(value_bytes) = &mut self.row_group_value_bytes {
+                value_bytes.update(&arrow_batch);
+            }
             self.metrics.write_batch += start.elapsed();
 
             self.check_cancelled()?;
@@ -923,15 +939,10 @@ where
                 .set_statistics_truncate_length(None);
             let props_builder = apply_internal_column_encoding(props_builder, &self.metadata);
             // References have no order meaning, so statistics on them would mislead pruning.
-            let props_builder = self
-                .blob_columns
-                .iter()
-                .fold(props_builder, |builder, name| {
-                    builder.set_column_statistics_enabled(
-                        ColumnPath::new(vec![name.clone()]),
-                        EnabledStatistics::None,
-                    )
-                });
+            let props_builder = skip_statistics(props_builder, &self.blob_columns);
+            let props_builder =
+                skip_statistics(props_builder, &mem::take(&mut self.large_value_columns));
+            self.row_group_value_bytes = Some(RowGroupValueBytes::new(opts.row_group_size));
             let props_builder = apply_float_field_encoding(
                 props_builder,
                 &self.metadata,

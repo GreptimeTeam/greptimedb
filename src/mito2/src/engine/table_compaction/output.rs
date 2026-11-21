@@ -23,7 +23,7 @@ use crate::error::{InvalidRequestSnafu, OpenDalSnafu, Result};
 use crate::region::MitoRegionRef;
 use crate::sst::file::FileMeta;
 use crate::sst::location;
-use crate::sst::parquet::blob::row_group_sizes;
+use crate::sst::parquet::max_row_group_decoded_size;
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 
 /// Verifies every output, then notifies the region hook once if one is registered.
@@ -125,10 +125,7 @@ fn verify_statistics(
     metadata: &RegionMetadataRef,
     file: &FileMeta,
 ) -> Result<()> {
-    let max_uncompressed = row_group_sizes(footer)
-        .map(|(_, bytes)| bytes)
-        .max()
-        .unwrap_or(0);
+    let max_uncompressed = max_row_group_decoded_size(footer);
     let pk_range = extract_primary_key_range(footer, metadata);
     ensure!(
         footer.file_metadata().num_rows() > 0
