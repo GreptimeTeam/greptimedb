@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CountdownCommand"],"struct":["CountdownTask","CountdownTaskHandle","RegionAliveKeeper","ResetLease"],"trait":["CountdownTaskHandlerExt"],"type":["CountdownTaskHandlerExtRef"]};

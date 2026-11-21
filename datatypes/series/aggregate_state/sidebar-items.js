@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AggregateStateKind","StateComponent","StatePayload"],"fn":["bucket_indices","check_layout","invalid","invalid_series","same_bounds","single_histogram"],"struct":["AggregateStateSchema","AggregateStateValues","HistogramState","StateFieldsBatch","StateSeries"]};

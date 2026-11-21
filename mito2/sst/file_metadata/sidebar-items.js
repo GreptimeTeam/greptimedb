@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SHARD_COUNT"],"enum":["MetadataRefInner"],"struct":["FileMetadataInterner","FileMetadataInternerState","MetadataRef","ScopedMetadata"],"type":["FileMetadataInternerRef"]};

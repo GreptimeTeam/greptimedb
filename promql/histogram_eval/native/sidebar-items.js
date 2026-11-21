@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CUSTOM_BUCKETS_SCHEMA"],"fn":["all_buckets","bound","bucket","fraction","fraction_below_exponential","go_string","invalid_layout","ldexp","push_bucket","quantile","side","variance"],"struct":["NativeBucket"]};

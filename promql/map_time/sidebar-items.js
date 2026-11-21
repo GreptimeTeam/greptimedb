@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ABSOLUTE_YEARS","MARCH_THRU_DECEMBER","SECONDS_PER_DAY","UNIX_TO_ABSOLUTE"],"enum":["DateFunction","QueryContextFunction"],"fn":["civil","date_of_eval_time","duration_seconds","eval_time_series","go_int64","time"],"struct":["Civil"]};

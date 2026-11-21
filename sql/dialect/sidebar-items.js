@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["GenericDialect","GreptimeDbDialect","MySqlDialect","PostgreSqlDialect"],"trait":["Dialect"]};

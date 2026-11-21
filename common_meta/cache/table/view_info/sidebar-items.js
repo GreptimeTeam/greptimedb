@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["init_factory","new_view_info_cache"],"type":["ViewInfoCache","ViewInfoCacheRef"]};

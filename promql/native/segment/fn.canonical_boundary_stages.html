@@ -1,0 +1,39 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Lowers a tree whose root is a canonical merge into a producer and a canonical router."><title>canonical_boundary_stages in promql::native::segment - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="promql" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">canonical_boundary_stages</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../promql/index.html">promql</a><span class="version">1.4.0-alpha.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In promql::<wbr>native::<wbr>segment</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">promql</a>::<wbr><a href="../index.html">native</a>::<wbr><a href="index.html">segment</a></div><h1>Function <span class="fn">canonical_<wbr>boundary_<wbr>stages</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/promql/native/segment.rs.html#622-724">Source</a> </span></div><pre class="rust item-decl"><code>pub fn canonical_boundary_stages(
+    promql: <a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.str.html">str</a>&gt;,
+    tree: &amp;<a class="struct" href="../plan/struct.NativeTree.html" title="struct promql::native::plan::NativeTree">NativeTree</a>,
+    children: &amp;[LogicalPlan],
+    source_tags: &amp;[<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>&gt;],
+    grid: &amp;<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;EvalGrid&gt;,
+    time_index: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.str.html">str</a>,
+    tags: &amp;[<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>],
+    metric: &amp;<a class="enum" href="https://doc.rust-lang.org/1.98.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.str.html">str</a>&gt;&gt;,
+    format: <a class="enum" href="../../extension_plan/enum.FusedOutputFormat.html" title="enum promql::extension_plan::FusedOutputFormat">FusedOutputFormat</a>,
+    root_kind: <a class="enum" href="../../extension_plan/enum.FieldKind.html" title="enum promql::extension_plan::FieldKind">FieldKind</a>,
+    output_tags_of: <a class="type" href="type.OutputTags.html" title="type promql::native::segment::OutputTags">OutputTags</a>,
+    field_names: <a class="type" href="type.FieldNames.html" title="type promql::native::segment::FieldNames">FieldNames</a>,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;(LogicalPlan, <a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>&gt;)&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Lowers a tree whose root is a canonical merge into a producer and a canonical router.</p>
+<p>The tree says the statement answers one series per canonical label set; what it cannot say is
+where the pieces of one set are, because a rewrite created them after the scan split the rows.
+So the pieces have to meet before the answer is written, and there are only two honest ways to
+make them meet: read every partition in one execution, or route each label set to one owner. The
+first takes the caller’s parallelism away for the whole query; this is the second.</p>
+<p>Two stages come out of it, and each has one job:</p>
+<ul>
+<li>the <strong>producer</strong> runs the tree’s root merge on every scan partition. Its merge collects the
+pieces that partition holds - which is what makes a same-partition collision an error here,
+before anything is routed - and it exports one series per label set as a series frame. It is
+explicitly partition-local: the same node without that distinction would gather its inputs and
+answer everything in one execution.</li>
+<li>the <strong>router</strong> is <code>SeriesRepartitionExec</code>’s canonical routing, which collects the pieces of one
+label set from <em>every</em> input partition. It is the conservative router - a label set is
+published only once every producer contributed it or ended - because a producer promises one
+series per set <em>per partition</em>, not that each set lives in one partition. A second piece of one
+set that holds a position another piece already holds is the same error, reported while that
+label set is assembled, and each output of the router then holds whole label sets: one series
+per set, complementary points joined.</li>
+</ul>
+<p><code>None</code> when the boundary cannot be built, so the caller keeps the plan it would have chosen.
+The stages of a canonical boundary over <code>tree</code>, and the columns its frames carry.</p>
+<p><code>format</code> says what the caller above reads: a statement root reads the boundary’s rows, and
+anything else reads the assembled frames as an ordinary evaluated input.</p>
+</div></details></section></div></main></body></html>

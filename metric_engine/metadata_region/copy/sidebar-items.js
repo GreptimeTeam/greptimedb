@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COPY_BATCH_BYTES","COPY_BATCH_ROWS"],"fn":["copy_entries","remap_column_key"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Scanner"],"fn":["exact_sequence_range","file_in_range","pre_filter_mode","time_range_covers_file"],"struct":["ExplainString","FileLevelPruningStats","FileSummary","PredicateGroup","ScanAnalysis","ScanInput","ScanInputBuilder","ScanRegion","StreamContext"]};

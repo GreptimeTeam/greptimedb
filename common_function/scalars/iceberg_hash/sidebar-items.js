@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_BUCKETS"],"enum":["HashDomain"],"fn":["equal_split_breakpoints","into_hashed_scalar","quoted_identifier"],"struct":["IcebergHashBoundsFunction","IcebergHashBreakpointsFunction","IcebergHashFunction","IcebergHashRangesSqlFunction"]};

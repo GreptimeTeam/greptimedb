@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["EXPONENTIAL_BOUNDS"]};

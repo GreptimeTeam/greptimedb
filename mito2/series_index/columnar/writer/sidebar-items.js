@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BLOCK_BYTE_BUDGET"],"fn":["encode_block"],"struct":["ColumnarWriter","Row"]};

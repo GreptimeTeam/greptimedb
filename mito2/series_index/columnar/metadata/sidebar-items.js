@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["HEADER_SIZE","MAGIC","PAGE_LIMIT","PAGE_STORED_LIMIT","PAGE_TARGET","ROOT_CAPACITY","TRAILER_SIZE"],"enum":["Page"],"fn":["header","pack","validate_header"],"struct":["Block","Column","PageReference","PayloadReference","Trailer"]};

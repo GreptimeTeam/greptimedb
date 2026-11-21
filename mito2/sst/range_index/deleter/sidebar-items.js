@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["range_index_path"],"struct":["RangeIndexDeleter"]};

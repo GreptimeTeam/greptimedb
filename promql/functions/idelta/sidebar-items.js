@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["instant_delta","last_two_samples"],"struct":["IDelta"]};

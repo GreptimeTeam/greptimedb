@@ -1,0 +1,1251 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/promql/src/native/segment.rs`."><title>segment.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="promql" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">promql/native/</div>segment.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright 2023 Greptime Team
+<a href=#2 id=2 data-nosnippet>2</a>//
+<a href=#3 id=3 data-nosnippet>3</a>// Licensed under the Apache License, Version 2.0 (the "License");
+<a href=#4 id=4 data-nosnippet>4</a>// you may not use this file except in compliance with the License.
+<a href=#5 id=5 data-nosnippet>5</a>// You may obtain a copy of the License at
+<a href=#6 id=6 data-nosnippet>6</a>//
+<a href=#7 id=7 data-nosnippet>7</a>//     http://www.apache.org/licenses/LICENSE-2.0
+<a href=#8 id=8 data-nosnippet>8</a>//
+<a href=#9 id=9 data-nosnippet>9</a>// Unless required by applicable law or agreed to in writing, software
+<a href=#10 id=10 data-nosnippet>10</a>// distributed under the License is distributed on an "AS IS" BASIS,
+<a href=#11 id=11 data-nosnippet>11</a>// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+<a href=#12 id=12 data-nosnippet>12</a>// See the License for the specific language governing permissions and
+<a href=#13 id=13 data-nosnippet>13</a>// limitations under the License.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="doccomment">//! Segmenting a native tree, so each per-series prefix runs where its input is read.
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! A tree that reads across series answers one partition and gathers whatever it reads. Its
+<a href=#18 id=18 data-nosnippet>18</a>//! per-series prefixes do not need that gather, so each is cut out as a [`FusedSeries`] node of its
+<a href=#19 id=19 data-nosnippet>19</a>//! own and keeps the partitions it was scanned with: `cut_as_segment` decides what can be cut,
+<a href=#20 id=20 data-nosnippet>20</a>//! [`cut_segments`] rewrites the tree into one segment per cut, and [`segment_tree`] builds the
+<a href=#21 id=21 data-nosnippet>21</a>//! nodes, recursing into a cut that wraps a whole-vector consumer.
+<a href=#22 id=22 data-nosnippet>22</a>//!
+<a href=#23 id=23 data-nosnippet>23</a>//! Everything here reads the bound tree alone. The columns a node publishes are the planner's
+<a href=#24 id=24 data-nosnippet>24</a>//! answer, so the builders ask for them through [`OutputTags`], [`FieldNames`] and [`RootSchema`]
+<a href=#25 id=25 data-nosnippet>25</a>//! instead of deriving them a second time.
+<a href=#26 id=26 data-nosnippet>26</a>
+<a href=#27 id=27 data-nosnippet>27</a></span><span class="kw">use </span>std::sync::Arc;
+<a href=#28 id=28 data-nosnippet>28</a>
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">use </span>common_query::native_histogram::native_histogram_value_type;
+<a href=#30 id=30 data-nosnippet>30</a><span class="kw">use </span>common_query::series_frame::raw_series_frame_schema_with_ordering;
+<a href=#31 id=31 data-nosnippet>31</a><span class="kw">use </span>datafusion::arrow::datatypes::{DataType <span class="kw">as </span>ArrowDataType, Field, TimeUnit <span class="kw">as </span>ArrowTimeUnit};
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">use </span>datafusion::common::{DFSchema, DFSchemaRef};
+<a href=#33 id=33 data-nosnippet>33</a><span class="kw">use </span>datafusion::logical_expr::{Extension, LogicalPlan};
+<a href=#34 id=34 data-nosnippet>34</a><span class="kw">use </span>datatypes::data_type::DataType <span class="kw">as _</span>;
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">use </span>datatypes::series::SeriesOrdering;
+<a href=#36 id=36 data-nosnippet>36</a><span class="kw">use </span>datatypes::series::frame::{FrameContent, FrameLabelMode, SeriesFrameDeclaration};
+<a href=#37 id=37 data-nosnippet>37</a><span class="kw">use </span>datatypes::series::time::EvalGrid;
+<a href=#38 id=38 data-nosnippet>38</a><span class="kw">use </span>store_api::region_engine::RawLabelSource;
+<a href=#39 id=39 data-nosnippet>39</a>
+<a href=#40 id=40 data-nosnippet>40</a><span class="kw">use </span><span class="kw">crate</span>::extension_plan::{
+<a href=#41 id=41 data-nosnippet>41</a>    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
+<a href=#42 id=42 data-nosnippet>42</a>    input_locality, tree_source_fields,
+<a href=#43 id=43 data-nosnippet>43</a>};
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span><span class="kw">crate</span>::native::plan::native_tree_supported;
+<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span><span class="kw">crate</span>::native::plan::{
+<a href=#46 id=46 data-nosnippet>46</a>    BoundAggregate, BoundInput, BoundVectorOp, Grouping, METRIC_NAME, NativeExpr, NativeNode,
+<a href=#47 id=47 data-nosnippet>47</a>    NativeTree, NativeType, reads_across_series,
+<a href=#48 id=48 data-nosnippet>48</a>};
+<a href=#49 id=49 data-nosnippet>49</a><span class="kw">use </span><span class="kw">crate</span>::vector_match::Cardinality;
+<a href=#50 id=50 data-nosnippet>50</a>
+<a href=#51 id=51 data-nosnippet>51</a><span class="doccomment">/// Derives the output tag columns a node publishes, from the tag columns each source declares.
+<a href=#52 id=52 data-nosnippet>52</a>///
+<a href=#53 id=53 data-nosnippet>53</a>/// The planner that owns the result layout names those columns with its own walk over the tree. A
+<a href=#54 id=54 data-nosnippet>54</a>/// segment only reads that answer - it never renames a column - so it asks through this leaf
+<a href=#55 id=55 data-nosnippet>55</a>/// rather than deriving the columns a second time.
+<a href=#56 id=56 data-nosnippet>56</a></span><span class="kw">pub type </span>OutputTags = <span class="kw">fn</span>(<span class="kw-2">&amp;</span>NativeNode, <span class="kw-2">&amp;</span>[Vec&lt;String&gt;]) -&gt; <span class="prelude-ty">Option</span>&lt;Vec&lt;String&gt;&gt;;
+<a href=#57 id=57 data-nosnippet>57</a>
+<a href=#58 id=58 data-nosnippet>58</a><span class="doccomment">/// Derives the value column names a statement's expression gives the compiled `fields`.
+<a href=#59 id=59 data-nosnippet>59</a>///
+<a href=#60 id=60 data-nosnippet>60</a>/// Like [`OutputTags`], this is the planner's answer: a segment publishes the values its tree
+<a href=#61 id=61 data-nosnippet>61</a>/// computes under the names the statement gave them, so the builders ask through this leaf instead
+<a href=#62 id=62 data-nosnippet>62</a>/// of publishing the compiler's own field names. The tree alone does not carry the statement's
+<a href=#63 id=63 data-nosnippet>63</a>/// expression, which is why the expression text is an input rather than something derived here.
+<a href=#64 id=64 data-nosnippet>64</a></span><span class="kw">pub type </span>FieldNames = <span class="kw">fn</span>(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>[String]) -&gt; Vec&lt;String&gt;;
+<a href=#65 id=65 data-nosnippet>65</a>
+<a href=#66 id=66 data-nosnippet>66</a><span class="doccomment">/// The row schema a statement root publishes for `promql`, or `None` when its columns cannot be
+<a href=#67 id=67 data-nosnippet>67</a>/// named once.
+<a href=#68 id=68 data-nosnippet>68</a>///
+<a href=#69 id=69 data-nosnippet>69</a>/// Like [`OutputTags`], this is the caller's answer: a segment that publishes rows publishes
+<a href=#70 id=70 data-nosnippet>70</a>/// exactly the columns the planner would have published for the same statement.
+<a href=#71 id=71 data-nosnippet>71</a></span><span class="kw">pub type </span>RootSchema = <span class="kw">fn</span>(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>NativeTree, <span class="kw-2">&amp;</span>[Vec&lt;String&gt;], <span class="kw-2">&amp;</span>str, FieldKind) -&gt; <span class="prelude-ty">Option</span>&lt;DFSchemaRef&gt;;
+<a href=#72 id=72 data-nosnippet>72</a>
+<a href=#73 id=73 data-nosnippet>73</a><span class="doccomment">/// Whether `node` reads samples point-wise, so that one partitioned execution is one answer.
+<a href=#74 id=74 data-nosnippet>74</a>///
+<a href=#75 id=75 data-nosnippet>75</a>/// A node's output type is not checked here: [`NativeNode::validate`] already refuses a selection,
+<a href=#76 id=76 data-nosnippet>76</a>/// a map or a binary operation whose operands are not evaluated vectors, so every branch below is
+<a href=#77 id=77 data-nosnippet>77</a>/// one that produces values rather than raw samples.
+<a href=#78 id=78 data-nosnippet>78</a></span><span class="kw">pub fn </span>pointwise_operand(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#79 id=79 data-nosnippet>79</a>    <span class="kw">match </span><span class="kw-2">&amp;</span>node.expr {
+<a href=#80 id=80 data-nosnippet>80</a>        <span class="comment">// A selection reads the raw samples below it; anything else below it is a value computed
+<a href=#81 id=81 data-nosnippet>81</a>        // from a whole series, not a scan.
+<a href=#82 id=82 data-nosnippet>82</a>        </span>NativeExpr::Instant { input, .. } | NativeExpr::Window { input, .. } =&gt; {
+<a href=#83 id=83 data-nosnippet>83</a>            <span class="macro">matches!</span>(input.expr, NativeExpr::Input(<span class="kw">_</span>))
+<a href=#84 id=84 data-nosnippet>84</a>        }
+<a href=#85 id=85 data-nosnippet>85</a>        NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } =&gt; pointwise_operand(input),
+<a href=#86 id=86 data-nosnippet>86</a>        <span class="comment">// A parameter that reads no data has the same value in every execution.
+<a href=#87 id=87 data-nosnippet>87</a>        </span>NativeExpr::ParameterizedMap {
+<a href=#88 id=88 data-nosnippet>88</a>            input, parameters, ..
+<a href=#89 id=89 data-nosnippet>89</a>        } =&gt; pointwise_operand(input) &amp;&amp; parameters.iter().all(NativeNode::is_data_free),
+<a href=#90 id=90 data-nosnippet>90</a>        <span class="comment">// A scalar that reads no data is broadcast over the vector side's positions. Two vectors
+<a href=#91 id=91 data-nosnippet>91</a>        // are a match between two series sets, which is the shape this route cannot split.
+<a href=#92 id=92 data-nosnippet>92</a>        </span>NativeExpr::Binary {
+<a href=#93 id=93 data-nosnippet>93</a>            left,
+<a href=#94 id=94 data-nosnippet>94</a>            right,
+<a href=#95 id=95 data-nosnippet>95</a>            matching,
+<a href=#96 id=96 data-nosnippet>96</a>        } =&gt; {
+<a href=#97 id=97 data-nosnippet>97</a>            <span class="kw">let </span>scalar = |side: <span class="kw-2">&amp;</span>NativeNode| <span class="macro">matches!</span>(side.output, NativeType::Scalar(<span class="kw">_</span>));
+<a href=#98 id=98 data-nosnippet>98</a>            matching.cardinality == Cardinality::OneToOne
+<a href=#99 id=99 data-nosnippet>99</a>                &amp;&amp; <span class="kw">match </span>(scalar(left), scalar(right)) {
+<a href=#100 id=100 data-nosnippet>100</a>                    (<span class="bool-val">true</span>, <span class="bool-val">false</span>) =&gt; left.is_data_free() &amp;&amp; pointwise_operand(right),
+<a href=#101 id=101 data-nosnippet>101</a>                    (<span class="bool-val">false</span>, <span class="bool-val">true</span>) =&gt; right.is_data_free() &amp;&amp; pointwise_operand(left),
+<a href=#102 id=102 data-nosnippet>102</a>                    <span class="kw">_ </span>=&gt; <span class="bool-val">false</span>,
+<a href=#103 id=103 data-nosnippet>103</a>                }
+<a href=#104 id=104 data-nosnippet>104</a>        }
+<a href=#105 id=105 data-nosnippet>105</a>        <span class="comment">// An aggregate folds a group, a vector operation reads the whole vector, and a bare input or
+<a href=#106 id=106 data-nosnippet>106</a>        // scalar is not a per-series evaluation. A parameterized topk or histogram reads the whole
+<a href=#107 id=107 data-nosnippet>107</a>        // vector, and `scalar()` answers from it.
+<a href=#108 id=108 data-nosnippet>108</a>        </span>NativeExpr::Input(<span class="kw">_</span>)
+<a href=#109 id=109 data-nosnippet>109</a>        | NativeExpr::Scalar(<span class="kw">_</span>)
+<a href=#110 id=110 data-nosnippet>110</a>        | NativeExpr::EvalTime { .. }
+<a href=#111 id=111 data-nosnippet>111</a>        | NativeExpr::VectorOf { .. }
+<a href=#112 id=112 data-nosnippet>112</a>        | NativeExpr::ScalarOf { .. }
+<a href=#113 id=113 data-nosnippet>113</a>        | NativeExpr::ParameterizedTopK { .. }
+<a href=#114 id=114 data-nosnippet>114</a>        | NativeExpr::ParameterizedHistogram { .. }
+<a href=#115 id=115 data-nosnippet>115</a>        | NativeExpr::Aggregate { .. }
+<a href=#116 id=116 data-nosnippet>116</a>        | NativeExpr::Vector { .. }
+<a href=#117 id=117 data-nosnippet>117</a>        | NativeExpr::Set { .. }
+<a href=#118 id=118 data-nosnippet>118</a>        | NativeExpr::Merge { .. }
+<a href=#119 id=119 data-nosnippet>119</a>        | NativeExpr::Info { .. } =&gt; <span class="bool-val">false</span>,
+<a href=#120 id=120 data-nosnippet>120</a>    }
+<a href=#121 id=121 data-nosnippet>121</a>}
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a><span class="kw">pub fn </span>independent_scan_pair(root: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="kw">let </span>(left, right) = <span class="kw">match </span><span class="kw-2">&amp;</span>root.expr {
+<a href=#125 id=125 data-nosnippet>125</a>        NativeExpr::Binary { left, right, .. } =&gt; <span class="kw">match </span>(<span class="kw-2">&amp;</span>left.expr, <span class="kw-2">&amp;</span>right.expr) {
+<a href=#126 id=126 data-nosnippet>126</a>            (NativeExpr::Scalar(<span class="kw">_</span>), NativeExpr::Scalar(<span class="kw">_</span>)) =&gt; <span class="kw">return </span><span class="bool-val">false</span>,
+<a href=#127 id=127 data-nosnippet>127</a>            (NativeExpr::Scalar(<span class="kw">_</span>), <span class="kw">_</span>) =&gt; <span class="kw">return </span>independent_scan_pair(right),
+<a href=#128 id=128 data-nosnippet>128</a>            (<span class="kw">_</span>, NativeExpr::Scalar(<span class="kw">_</span>)) =&gt; <span class="kw">return </span>independent_scan_pair(left),
+<a href=#129 id=129 data-nosnippet>129</a>            <span class="kw">_ </span>=&gt; (left, right),
+<a href=#130 id=130 data-nosnippet>130</a>        },
+<a href=#131 id=131 data-nosnippet>131</a>        NativeExpr::Map { input, .. } =&gt; <span class="kw">return </span>independent_scan_pair(input),
+<a href=#132 id=132 data-nosnippet>132</a>        NativeExpr::Set { left, right, .. } =&gt; {
+<a href=#133 id=133 data-nosnippet>133</a>            <span class="kw">return </span>scan_operand(left) &amp;&amp; scan_operand(right);
+<a href=#134 id=134 data-nosnippet>134</a>        }
+<a href=#135 id=135 data-nosnippet>135</a>        NativeExpr::Info { base, info, .. } =&gt; {
+<a href=#136 id=136 data-nosnippet>136</a>            <span class="kw">return </span>pointwise_operand(base) &amp;&amp; pointwise_operand(info);
+<a href=#137 id=137 data-nosnippet>137</a>        }
+<a href=#138 id=138 data-nosnippet>138</a>        <span class="kw">_ </span>=&gt; <span class="kw">return </span><span class="bool-val">false</span>,
+<a href=#139 id=139 data-nosnippet>139</a>    };
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a>    scan_operand(left) &amp;&amp; scan_operand(right)
+<a href=#142 id=142 data-nosnippet>142</a>}
+<a href=#143 id=143 data-nosnippet>143</a>
+<a href=#144 id=144 data-nosnippet>144</a><span class="kw">fn </span>scan_operand(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#145 id=145 data-nosnippet>145</a>    pointwise_operand(node) || independent_scan_pair(node)
+<a href=#146 id=146 data-nosnippet>146</a>}
+<a href=#147 id=147 data-nosnippet>147</a>
+<a href=#148 id=148 data-nosnippet>148</a><span class="doccomment">/// Whether a grouping in `node` keeps a label the existing planner's column list cannot name.
+<a href=#149 id=149 data-nosnippet>149</a>///
+<a href=#150 id=150 data-nosnippet>150</a>/// An aggregate's `by(...)` keeps the labels it lists that its input carries, and `__name__` is one
+<a href=#151 id=151 data-nosnippet>151</a>/// of them: the aggregate folds its groups by the metric name as by any other label. It is not a
+<a href=#152 id=152 data-nosnippet>152</a>/// column of any scan, though - it is the name the raw frame carries - so the existing planner's
+<a href=#153 id=153 data-nosnippet>153</a>/// `by(__name__)` finds no such column and reports no label at all. A schema taken from that list
+<a href=#154 id=154 data-nosnippet>154</a>/// would drop the metric name the native aggregate kept, and two groups differing only in their
+<a href=#155 id=155 data-nosnippet>155</a>/// metric would come out as two rows under one label set, which is a series identity lost rather
+<a href=#156 id=156 data-nosnippet>156</a>/// than an answer given.
+<a href=#157 id=157 data-nosnippet>157</a>///
+<a href=#158 id=158 data-nosnippet>158</a>/// `without(...)` needs no such check: both routes drop `__name__` there. Nor does a tree with one
+<a href=#159 id=159 data-nosnippet>159</a>/// source: a discovered selector's source declares `__name__` per metric, and a named one folds one
+<a href=#160 id=160 data-nosnippet>160</a>/// metric whose name cannot merge two groups. What the check is for is the tree reading more than one
+<a href=#161 id=161 data-nosnippet>161</a>/// source, where only a discovered source can report a name at all.
+<a href=#162 id=162 data-nosnippet>162</a></span><span class="kw">pub fn </span>groups_by_metric_name(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#163 id=163 data-nosnippet>163</a>    <span class="kw">let </span>grouping_names_metric = |op: <span class="kw-2">&amp;</span>BoundAggregate| <span class="macro">matches!</span>(<span class="kw-2">&amp;</span>op.group, Grouping::By(names) <span class="kw">if </span>names.iter().any(|name| name.as_ref() == METRIC_NAME));
+<a href=#164 id=164 data-nosnippet>164</a>    <span class="kw">match </span><span class="kw-2">&amp;</span>node.expr {
+<a href=#165 id=165 data-nosnippet>165</a>        NativeExpr::Input(<span class="kw">_</span>)
+<a href=#166 id=166 data-nosnippet>166</a>        | NativeExpr::Scalar(<span class="kw">_</span>)
+<a href=#167 id=167 data-nosnippet>167</a>        | NativeExpr::EvalTime { .. }
+<a href=#168 id=168 data-nosnippet>168</a>        | NativeExpr::VectorOf { .. } =&gt; <span class="bool-val">false</span>,
+<a href=#169 id=169 data-nosnippet>169</a>        <span class="comment">// `scalar()` answers one value with no labels at all, so a grouping by the metric name
+<a href=#170 id=170 data-nosnippet>170</a>        // below it cannot leave two groups under one label set: the walk stops there.
+<a href=#171 id=171 data-nosnippet>171</a>        </span>NativeExpr::ScalarOf { .. } =&gt; <span class="bool-val">false</span>,
+<a href=#172 id=172 data-nosnippet>172</a>        NativeExpr::Instant { input, .. }
+<a href=#173 id=173 data-nosnippet>173</a>        | NativeExpr::Merge { input }
+<a href=#174 id=174 data-nosnippet>174</a>        | NativeExpr::Window { input, .. }
+<a href=#175 id=175 data-nosnippet>175</a>        | NativeExpr::Map { input, .. }
+<a href=#176 id=176 data-nosnippet>176</a>        | NativeExpr::Timestamp { input } =&gt; groups_by_metric_name(input),
+<a href=#177 id=177 data-nosnippet>177</a>        NativeExpr::Aggregate { input, op } =&gt; {
+<a href=#178 id=178 data-nosnippet>178</a>            grouping_names_metric(op) || groups_by_metric_name(input)
+<a href=#179 id=179 data-nosnippet>179</a>        }
+<a href=#180 id=180 data-nosnippet>180</a>        NativeExpr::ParameterizedMap {
+<a href=#181 id=181 data-nosnippet>181</a>            input, parameters, ..
+<a href=#182 id=182 data-nosnippet>182</a>        } =&gt; groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
+<a href=#183 id=183 data-nosnippet>183</a>        NativeExpr::ParameterizedTopK {
+<a href=#184 id=184 data-nosnippet>184</a>            input, parameter, ..
+<a href=#185 id=185 data-nosnippet>185</a>        } =&gt; groups_by_metric_name(input) || groups_by_metric_name(parameter),
+<a href=#186 id=186 data-nosnippet>186</a>        NativeExpr::ParameterizedHistogram {
+<a href=#187 id=187 data-nosnippet>187</a>            input, parameters, ..
+<a href=#188 id=188 data-nosnippet>188</a>        } =&gt; groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
+<a href=#189 id=189 data-nosnippet>189</a>        NativeExpr::Vector { input, op } =&gt; {
+<a href=#190 id=190 data-nosnippet>190</a>            <span class="macro">matches!</span>(op, BoundVectorOp::CountValues { group: Grouping::By(names), .. }
+<a href=#191 id=191 data-nosnippet>191</a>                <span class="kw">if </span>names.iter().any(|name| name.as_ref() == METRIC_NAME))
+<a href=#192 id=192 data-nosnippet>192</a>                || groups_by_metric_name(input)
+<a href=#193 id=193 data-nosnippet>193</a>        }
+<a href=#194 id=194 data-nosnippet>194</a>        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } =&gt; {
+<a href=#195 id=195 data-nosnippet>195</a>            groups_by_metric_name(left) || groups_by_metric_name(right)
+<a href=#196 id=196 data-nosnippet>196</a>        }
+<a href=#197 id=197 data-nosnippet>197</a>        NativeExpr::Info { base, info, .. } =&gt; {
+<a href=#198 id=198 data-nosnippet>198</a>            groups_by_metric_name(base) || groups_by_metric_name(info)
+<a href=#199 id=199 data-nosnippet>199</a>        }
+<a href=#200 id=200 data-nosnippet>200</a>    }
+<a href=#201 id=201 data-nosnippet>201</a>}
+<a href=#202 id=202 data-nosnippet>202</a>
+<a href=#203 id=203 data-nosnippet>203</a><span class="doccomment">/// Whether a segment can hand `node`'s values to another segment.
+<a href=#204 id=204 data-nosnippet>204</a>///
+<a href=#205 id=205 data-nosnippet>205</a>/// A boundary carries an evaluated series frame: values addressed on a grid, under the labels of
+<a href=#206 id=206 data-nosnippet>206</a>/// the series they belong to. A scalar is broadcast rather than carried, aggregate state is
+<a href=#207 id=207 data-nosnippet>207</a>/// internal, and raw samples are what a scan produces - none of them is a frame, so a subtree
+<a href=#208 id=208 data-nosnippet>208</a>/// producing one stays inside the segment that reads it.
+<a href=#209 id=209 data-nosnippet>209</a></span><span class="kw">fn </span>exportable(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#210 id=210 data-nosnippet>210</a>    node.output
+<a href=#211 id=211 data-nosnippet>211</a>        .samples()
+<a href=#212 id=212 data-nosnippet>212</a>        .is_some_and(|schema| schema.eval_grid.is_some())
+<a href=#213 id=213 data-nosnippet>213</a>}
+<a href=#214 id=214 data-nosnippet>214</a>
+<a href=#215 id=215 data-nosnippet>215</a><span class="doccomment">/// Whether `node` is a window over an evaluated input - the shape a subquery over anything but a
+<a href=#216 id=216 data-nosnippet>216</a>/// bare selection compiles to.
+<a href=#217 id=217 data-nosnippet>217</a></span><span class="kw">fn </span>evaluated_input_window(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#218 id=218 data-nosnippet>218</a>    <span class="macro">matches!</span>(<span class="kw-2">&amp;</span>node.expr, NativeExpr::Window { op, .. } <span class="kw">if </span>op.input_grid.is_some())
+<a href=#219 id=219 data-nosnippet>219</a>}
+<a href=#220 id=220 data-nosnippet>220</a>
+<a href=#221 id=221 data-nosnippet>221</a><span class="doccomment">/// Whether the dist analyzer places a segment over `node` region-locally.
+<a href=#222 id=222 data-nosnippet>222</a>///
+<a href=#223 id=223 data-nosnippet>223</a>/// A segment is a `FusedSeries` node the analyzer has to move below the `MergeScan` for the physical
+<a href=#224 id=224 data-nosnippet>224</a>/// planner to read the scans it names. The `FusedSeries` arm of `Categorizer::check_extension_plan`
+<a href=#225 id=225 data-nosnippet>225</a>/// (`src/query/src/dist_plan/commutativity.rs`) is what decides that, from the bound tree alone: a
+<a href=#226 id=226 data-nosnippet>226</a>/// root that [`reads_across_series`] is `NonCommutative` unless it is a per-series evaluation or the
+<a href=#227 id=227 data-nosnippet>227</a>/// `Partial` half of a split fold. A segment it refuses stays above the merge, where the physical
+<a href=#228 id=228 data-nosnippet>228</a>/// planner finds neither a region scan nor an explicit-label frame below it, so the statement fails
+<a href=#229 id=229 data-nosnippet>229</a>/// while being planned instead of keeping the plan it had. Segmentation therefore asks that question
+<a href=#230 id=230 data-nosnippet>230</a>/// before it cuts, and `cut_as_segment` declines the nodes this refuses.
+<a href=#231 id=231 data-nosnippet>231</a></span><span class="kw">pub fn </span>region_local_segment(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#232 id=232 data-nosnippet>232</a>    !reads_across_series(node) || pointwise_operand(node) || independent_scan_pair(node)
+<a href=#233 id=233 data-nosnippet>233</a>}
+<a href=#234 id=234 data-nosnippet>234</a>
+<a href=#235 id=235 data-nosnippet>235</a><span class="doccomment">/// Whether `node` becomes a segment of its own under a parent that must gather.
+<a href=#236 id=236 data-nosnippet>236</a>///
+<a href=#237 id=237 data-nosnippet>237</a>/// Cut local prefixes, global consumers and canonical merges separately so the prefix keeps its
+<a href=#238 id=238 data-nosnippet>238</a>/// scan width, and every global consumer sees the canonical boundary below it. A pointwise wrapper
+<a href=#239 id=239 data-nosnippet>239</a>/// of a global consumer is cut as well, so it cannot hide that consumer from recursive lowering.
+<a href=#240 id=240 data-nosnippet>240</a></span><span class="kw">fn </span>cut_as_segment(node: <span class="kw-2">&amp;</span>NativeNode, canonical_segmentation: bool) -&gt; bool {
+<a href=#241 id=241 data-nosnippet>241</a>    <span class="comment">// A window over an evaluated input answers per series on its own grid, so its own shape says
+<a href=#242 id=242 data-nosnippet>242</a>    // nothing about where a segment over it can go: it drops the metric name, so two of the series
+<a href=#243 id=243 data-nosnippet>243</a>    // it answers can end under one label set, and the dist analyzer reads it as cross-series
+<a href=#244 id=244 data-nosnippet>244</a>    // ([`region_local_segment`]). Cutting one where the analyzer will not place it leaves a
+<a href=#245 id=245 data-nosnippet>245</a>    // `FusedSeries` above the `MergeScan` that the physical planner cannot build, so the segment is
+<a href=#246 id=246 data-nosnippet>246</a>    // only taken where the analyzer places it region-locally; otherwise the per-series prefix
+<a href=#247 id=247 data-nosnippet>247</a>    // inside the window is cut instead, and where there is none the statement keeps the plan it had.
+<a href=#248 id=248 data-nosnippet>248</a>    </span><span class="kw">if </span>evaluated_input_window(node) &amp;&amp; !region_local_segment(node) {
+<a href=#249 id=249 data-nosnippet>249</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#250 id=250 data-nosnippet>250</a>    }
+<a href=#251 id=251 data-nosnippet>251</a>    <span class="comment">// A window over an evaluated input is answered per series on its own grid, so it is not the
+<a href=#252 id=252 data-nosnippet>252</a>    // global gather a raw window's locality reports.
+<a href=#253 id=253 data-nosnippet>253</a>    </span><span class="kw">let </span>evaluated_window = evaluated_input_window(node);
+<a href=#254 id=254 data-nosnippet>254</a>    <span class="kw">if </span>!exportable(node)
+<a href=#255 id=255 data-nosnippet>255</a>        || <span class="macro">matches!</span>(node.expr, NativeExpr::Input(<span class="kw">_</span>))
+<a href=#256 id=256 data-nosnippet>256</a>        || (!canonical_segmentation
+<a href=#257 id=257 data-nosnippet>257</a>            &amp;&amp; !evaluated_window
+<a href=#258 id=258 data-nosnippet>258</a>            &amp;&amp; <span class="macro">matches!</span>(input_locality(node), InputLocality::SinglePartition))
+<a href=#259 id=259 data-nosnippet>259</a>    {
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#261 id=261 data-nosnippet>261</a>    }
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="kw">if </span>canonical_segmentation &amp;&amp; (contains_global_consumer(node) || is_canonical_cut(node)) {
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="kw">return </span><span class="bool-val">true</span>;
+<a href=#264 id=264 data-nosnippet>264</a>    }
+<a href=#265 id=265 data-nosnippet>265</a>    <span class="comment">// A segment builder needs an input, so data-free subtrees stay with their parent.
+<a href=#266 id=266 data-nosnippet>266</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>sources = Vec::new();
+<a href=#267 id=267 data-nosnippet>267</a>    collect_segment_inputs(node, <span class="kw-2">&amp;mut </span>sources);
+<a href=#268 id=268 data-nosnippet>268</a>    !sources.is_empty()
+<a href=#269 id=269 data-nosnippet>269</a>}
+<a href=#270 id=270 data-nosnippet>270</a>
+<a href=#271 id=271 data-nosnippet>271</a><span class="doccomment">/// Whether any canonical merge in `node` answers with histogram samples, given the kind its input
+<a href=#272 id=272 data-nosnippet>272</a>/// carries.
+<a href=#273 id=273 data-nosnippet>273</a>///
+<a href=#274 id=274 data-nosnippet>274</a>/// A merge collects the pieces of one label set and hands on the samples it was given, so its answer
+<a href=#275 id=275 data-nosnippet>275</a>/// kind is its child's. A histogram answer standing on a merge would travel through the canonical
+<a href=#276 id=276 data-nosnippet>276</a>/// boundary carrying histogram frames, a pairing no execution exercises yet: the planner keeps such
+<a href=#277 id=277 data-nosnippet>277</a>/// a statement on the existing plan until that pairing is covered, and it has to look at every
+<a href=#278 id=278 data-nosnippet>278</a>/// merge, not only a root one.
+<a href=#279 id=279 data-nosnippet>279</a></span><span class="kw">pub fn </span>merge_answers_histogram(node: <span class="kw-2">&amp;</span>NativeNode, input_kind: FieldKind) -&gt; bool {
+<a href=#280 id=280 data-nosnippet>280</a>    node.any(<span class="kw-2">&amp;</span>|node| {
+<a href=#281 id=281 data-nosnippet>281</a>        <span class="macro">matches!</span>(node.expr, NativeExpr::Merge { .. })
+<a href=#282 id=282 data-nosnippet>282</a>            &amp;&amp; node.output_field_kind(<span class="prelude-val">Some</span>(input_kind)) == <span class="prelude-val">Some</span>(FieldKind::Histogram)
+<a href=#283 id=283 data-nosnippet>283</a>    })
+<a href=#284 id=284 data-nosnippet>284</a>}
+<a href=#285 id=285 data-nosnippet>285</a>
+<a href=#286 id=286 data-nosnippet>286</a><span class="doccomment">/// Whether the merge producer's entire prefix can run on each scan partition independently.
+<a href=#287 id=287 data-nosnippet>287</a></span><span class="kw">pub fn </span>canonical_local_prefix(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#288 id=288 data-nosnippet>288</a>    <span class="kw">match </span><span class="kw-2">&amp;</span>node.expr {
+<a href=#289 id=289 data-nosnippet>289</a>        NativeExpr::Input(<span class="kw">_</span>) =&gt; <span class="bool-val">true</span>,
+<a href=#290 id=290 data-nosnippet>290</a>        NativeExpr::Instant { input, .. } | NativeExpr::Window { input, .. } =&gt; {
+<a href=#291 id=291 data-nosnippet>291</a>            <span class="macro">matches!</span>(input.expr, NativeExpr::Input(<span class="kw">_</span>))
+<a href=#292 id=292 data-nosnippet>292</a>        }
+<a href=#293 id=293 data-nosnippet>293</a>        NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } =&gt; {
+<a href=#294 id=294 data-nosnippet>294</a>            canonical_local_prefix(input)
+<a href=#295 id=295 data-nosnippet>295</a>        }
+<a href=#296 id=296 data-nosnippet>296</a>        NativeExpr::ParameterizedMap {
+<a href=#297 id=297 data-nosnippet>297</a>            input, parameters, ..
+<a href=#298 id=298 data-nosnippet>298</a>        } =&gt; canonical_local_prefix(input) &amp;&amp; parameters.iter().all(NativeNode::is_data_free),
+<a href=#299 id=299 data-nosnippet>299</a>        NativeExpr::Binary { left, right, .. } =&gt; {
+<a href=#300 id=300 data-nosnippet>300</a>            (left.is_data_free() &amp;&amp; canonical_local_prefix(right))
+<a href=#301 id=301 data-nosnippet>301</a>                || (right.is_data_free() &amp;&amp; canonical_local_prefix(left))
+<a href=#302 id=302 data-nosnippet>302</a>        }
+<a href=#303 id=303 data-nosnippet>303</a>        <span class="kw">_ </span>=&gt; <span class="bool-val">false</span>,
+<a href=#304 id=304 data-nosnippet>304</a>    }
+<a href=#305 id=305 data-nosnippet>305</a>}
+<a href=#306 id=306 data-nosnippet>306</a>
+<a href=#307 id=307 data-nosnippet>307</a><span class="kw">pub fn </span>contains_canonical_merge(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#308 id=308 data-nosnippet>308</a>    node.any(<span class="kw-2">&amp;</span>|node| <span class="macro">matches!</span>(node.expr, NativeExpr::Merge { .. }))
+<a href=#309 id=309 data-nosnippet>309</a>}
+<a href=#310 id=310 data-nosnippet>310</a>
+<a href=#311 id=311 data-nosnippet>311</a><span class="kw">pub fn </span>contains_global_consumer(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#312 id=312 data-nosnippet>312</a>    node.any(<span class="kw-2">&amp;</span>is_global_consumer)
+<a href=#313 id=313 data-nosnippet>313</a>}
+<a href=#314 id=314 data-nosnippet>314</a>
+<a href=#315 id=315 data-nosnippet>315</a><span class="doccomment">/// Whole-vector consumers remain global, but can be cut out as evaluated segments so a pointwise
+<a href=#316 id=316 data-nosnippet>316</a>/// parent does not inherit their single-partition placement.
+<a href=#317 id=317 data-nosnippet>317</a></span><span class="kw">fn </span>is_global_consumer(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#318 id=318 data-nosnippet>318</a>    <span class="macro">matches!</span>(
+<a href=#319 id=319 data-nosnippet>319</a>        node.expr,
+<a href=#320 id=320 data-nosnippet>320</a>        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. }
+<a href=#321 id=321 data-nosnippet>321</a>    ) &amp;&amp; <span class="macro">matches!</span>(input_locality(node), InputLocality::SinglePartition)
+<a href=#322 id=322 data-nosnippet>322</a>}
+<a href=#323 id=323 data-nosnippet>323</a>
+<a href=#324 id=324 data-nosnippet>324</a><span class="doccomment">/// Whether a subtree can be cut without inheriting its parent's global gather.
+<a href=#325 id=325 data-nosnippet>325</a>///
+<a href=#326 id=326 data-nosnippet>326</a>/// A local prefix stays on its source partitions. A canonical merge becomes its own routed
+<a href=#327 id=327 data-nosnippet>327</a>/// boundary, and a parent reads the assembled frames rather than gathering the scan.
+<a href=#328 id=328 data-nosnippet>328</a></span><span class="kw">fn </span>is_canonical_cut(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; bool {
+<a href=#329 id=329 data-nosnippet>329</a>    <span class="macro">matches!</span>(node.expr, NativeExpr::Merge { .. })
+<a href=#330 id=330 data-nosnippet>330</a>        || !<span class="macro">matches!</span>(input_locality(node), InputLocality::SinglePartition)
+<a href=#331 id=331 data-nosnippet>331</a>        || canonical_local_prefix(node)
+<a href=#332 id=332 data-nosnippet>332</a>}
+<a href=#333 id=333 data-nosnippet>333</a>
+<a href=#334 id=334 data-nosnippet>334</a><span class="doccomment">/// One segment: its tree rewritten to read only its own inputs, the scans it reads, and the
+<a href=#335 id=335 data-nosnippet>335</a>/// subtrees cut out of it.
+<a href=#336 id=336 data-nosnippet>336</a>///
+<a href=#337 id=337 data-nosnippet>337</a>/// A segment has one index space of its own - the scans it reads first, in the order it first names
+<a href=#338 id=338 data-nosnippet>338</a>/// them, then the subtrees cut out of it - because `FusedSeries` requires its source indices to be
+<a href=#339 id=339 data-nosnippet>339</a>/// dense over its children.
+<a href=#340 id=340 data-nosnippet>340</a></span><span class="kw">pub struct </span>Segment {
+<a href=#341 id=341 data-nosnippet>341</a>    <span class="kw">pub </span>node: NativeNode,
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="doccomment">/// Original scan indices, in the order this segment's indices name them.
+<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="kw">pub </span>sources: Vec&lt;usize&gt;,
+<a href=#344 id=344 data-nosnippet>344</a>    <span class="doccomment">/// The subtrees cut out of this segment, each still in the original index space.
+<a href=#345 id=345 data-nosnippet>345</a>    </span><span class="kw">pub </span>cut: Vec&lt;NativeNode&gt;,
+<a href=#346 id=346 data-nosnippet>346</a>}
+<a href=#347 id=347 data-nosnippet>347</a>
+<a href=#348 id=348 data-nosnippet>348</a><span class="doccomment">/// Collects a segment's scans and cut subtrees, without descending into a cut.
+<a href=#349 id=349 data-nosnippet>349</a></span><span class="kw">fn </span>collect_segment(
+<a href=#350 id=350 data-nosnippet>350</a>    node: <span class="kw-2">&amp;</span>NativeNode,
+<a href=#351 id=351 data-nosnippet>351</a>    sources: <span class="kw-2">&amp;mut </span>Vec&lt;usize&gt;,
+<a href=#352 id=352 data-nosnippet>352</a>    cut: <span class="kw-2">&amp;mut </span>Vec&lt;NativeNode&gt;,
+<a href=#353 id=353 data-nosnippet>353</a>    canonical_segmentation: bool,
+<a href=#354 id=354 data-nosnippet>354</a>) {
+<a href=#355 id=355 data-nosnippet>355</a>    <span class="kw">match </span><span class="kw-2">&amp;</span>node.expr {
+<a href=#356 id=356 data-nosnippet>356</a>        NativeExpr::Input(input) =&gt; {
+<a href=#357 id=357 data-nosnippet>357</a>            <span class="kw">if </span>!sources.contains(<span class="kw-2">&amp;</span>input.source_index) {
+<a href=#358 id=358 data-nosnippet>358</a>                sources.push(input.source_index);
+<a href=#359 id=359 data-nosnippet>359</a>            }
+<a href=#360 id=360 data-nosnippet>360</a>        }
+<a href=#361 id=361 data-nosnippet>361</a>        expr =&gt; {
+<a href=#362 id=362 data-nosnippet>362</a>            <span class="kw">for </span>child <span class="kw">in </span>expr.children() {
+<a href=#363 id=363 data-nosnippet>363</a>                <span class="kw">if </span>cut_as_segment(child, canonical_segmentation) {
+<a href=#364 id=364 data-nosnippet>364</a>                    cut.push(child.clone());
+<a href=#365 id=365 data-nosnippet>365</a>                } <span class="kw">else </span>{
+<a href=#366 id=366 data-nosnippet>366</a>                    collect_segment(child, sources, cut, canonical_segmentation);
+<a href=#367 id=367 data-nosnippet>367</a>                }
+<a href=#368 id=368 data-nosnippet>368</a>            }
+<a href=#369 id=369 data-nosnippet>369</a>        }
+<a href=#370 id=370 data-nosnippet>370</a>    }
+<a href=#371 id=371 data-nosnippet>371</a>}
+<a href=#372 id=372 data-nosnippet>372</a>
+<a href=#373 id=373 data-nosnippet>373</a><span class="doccomment">/// Collects every scan input in a selected segment without looking for nested cuts.
+<a href=#374 id=374 data-nosnippet>374</a></span><span class="kw">fn </span>collect_segment_inputs(node: <span class="kw-2">&amp;</span>NativeNode, sources: <span class="kw-2">&amp;mut </span>Vec&lt;usize&gt;) {
+<a href=#375 id=375 data-nosnippet>375</a>    <span class="kw">for </span>input <span class="kw">in </span>node.inputs() {
+<a href=#376 id=376 data-nosnippet>376</a>        <span class="kw">if </span>!sources.contains(<span class="kw-2">&amp;</span>input.source_index) {
+<a href=#377 id=377 data-nosnippet>377</a>            sources.push(input.source_index);
+<a href=#378 id=378 data-nosnippet>378</a>        }
+<a href=#379 id=379 data-nosnippet>379</a>    }
+<a href=#380 id=380 data-nosnippet>380</a>}
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a><span class="doccomment">/// Rewrites every input leaf in a selected segment to its index in the segment's own space.
+<a href=#383 id=383 data-nosnippet>383</a></span><span class="kw">fn </span>rewrite_inner_segment(node: <span class="kw-2">&amp;</span>NativeNode, sources: <span class="kw-2">&amp;</span>[usize]) -&gt; NativeNode {
+<a href=#384 id=384 data-nosnippet>384</a>    <span class="kw">let </span>expr = <span class="kw">match </span><span class="kw-2">&amp;</span>node.expr {
+<a href=#385 id=385 data-nosnippet>385</a>        NativeExpr::Input(input) =&gt; NativeExpr::Input(BoundInput {
+<a href=#386 id=386 data-nosnippet>386</a>            source_index: sources
+<a href=#387 id=387 data-nosnippet>387</a>                .iter()
+<a href=#388 id=388 data-nosnippet>388</a>                .position(|<span class="kw-2">&amp;</span>source| source == input.source_index)
+<a href=#389 id=389 data-nosnippet>389</a>                .expect(<span class="string">"the segment collected every scan it reads"</span>),
+<a href=#390 id=390 data-nosnippet>390</a>            output: input.output.clone(),
+<a href=#391 id=391 data-nosnippet>391</a>            ordering: input.ordering,
+<a href=#392 id=392 data-nosnippet>392</a>        }),
+<a href=#393 id=393 data-nosnippet>393</a>        expr =&gt; expr.with_children(
+<a href=#394 id=394 data-nosnippet>394</a>            expr.children()
+<a href=#395 id=395 data-nosnippet>395</a>                .into_iter()
+<a href=#396 id=396 data-nosnippet>396</a>                .map(|child| rewrite_inner_segment(child, sources))
+<a href=#397 id=397 data-nosnippet>397</a>                .collect(),
+<a href=#398 id=398 data-nosnippet>398</a>        ),
+<a href=#399 id=399 data-nosnippet>399</a>    };
+<a href=#400 id=400 data-nosnippet>400</a>    NativeNode {
+<a href=#401 id=401 data-nosnippet>401</a>        expr,
+<a href=#402 id=402 data-nosnippet>402</a>        output: node.output.clone(),
+<a href=#403 id=403 data-nosnippet>403</a>    }
+<a href=#404 id=404 data-nosnippet>404</a>}
+<a href=#405 id=405 data-nosnippet>405</a>
+<a href=#406 id=406 data-nosnippet>406</a><span class="doccomment">/// Rewrites a segment's tree so every leaf names its index in the segment's own space.
+<a href=#407 id=407 data-nosnippet>407</a></span><span class="kw">fn </span>rewrite_segment(
+<a href=#408 id=408 data-nosnippet>408</a>    node: <span class="kw-2">&amp;</span>NativeNode,
+<a href=#409 id=409 data-nosnippet>409</a>    sources: <span class="kw-2">&amp;</span>[usize],
+<a href=#410 id=410 data-nosnippet>410</a>    cut_base: usize,
+<a href=#411 id=411 data-nosnippet>411</a>    next_cut: <span class="kw-2">&amp;mut </span>usize,
+<a href=#412 id=412 data-nosnippet>412</a>    canonical_segmentation: bool,
+<a href=#413 id=413 data-nosnippet>413</a>) -&gt; NativeNode {
+<a href=#414 id=414 data-nosnippet>414</a>    <span class="kw">let </span>expr = <span class="kw">match </span><span class="kw-2">&amp;</span>node.expr {
+<a href=#415 id=415 data-nosnippet>415</a>        NativeExpr::Input(input) =&gt; NativeExpr::Input(BoundInput {
+<a href=#416 id=416 data-nosnippet>416</a>            source_index: sources
+<a href=#417 id=417 data-nosnippet>417</a>                .iter()
+<a href=#418 id=418 data-nosnippet>418</a>                .position(|<span class="kw-2">&amp;</span>source| source == input.source_index)
+<a href=#419 id=419 data-nosnippet>419</a>                .expect(<span class="string">"the segment collected every scan it reads"</span>),
+<a href=#420 id=420 data-nosnippet>420</a>            output: input.output.clone(),
+<a href=#421 id=421 data-nosnippet>421</a>            ordering: input.ordering,
+<a href=#422 id=422 data-nosnippet>422</a>        }),
+<a href=#423 id=423 data-nosnippet>423</a>        expr =&gt; {
+<a href=#424 id=424 data-nosnippet>424</a>            <span class="kw">let </span>children = expr
+<a href=#425 id=425 data-nosnippet>425</a>                .children()
+<a href=#426 id=426 data-nosnippet>426</a>                .into_iter()
+<a href=#427 id=427 data-nosnippet>427</a>                .map(|child| {
+<a href=#428 id=428 data-nosnippet>428</a>                    <span class="kw">if </span>cut_as_segment(child, canonical_segmentation) {
+<a href=#429 id=429 data-nosnippet>429</a>                        <span class="kw">let </span>index = cut_base + <span class="kw-2">*</span>next_cut;
+<a href=#430 id=430 data-nosnippet>430</a>                        <span class="kw-2">*</span>next_cut += <span class="number">1</span>;
+<a href=#431 id=431 data-nosnippet>431</a>                        NativeNode {
+<a href=#432 id=432 data-nosnippet>432</a>                            expr: NativeExpr::Input(BoundInput {
+<a href=#433 id=433 data-nosnippet>433</a>                                source_index: index,
+<a href=#434 id=434 data-nosnippet>434</a>                                output: child.output.clone(),
+<a href=#435 id=435 data-nosnippet>435</a>                                ordering: NATIVE_ORDERING,
+<a href=#436 id=436 data-nosnippet>436</a>                            }),
+<a href=#437 id=437 data-nosnippet>437</a>                            output: child.output.clone(),
+<a href=#438 id=438 data-nosnippet>438</a>                        }
+<a href=#439 id=439 data-nosnippet>439</a>                    } <span class="kw">else </span>{
+<a href=#440 id=440 data-nosnippet>440</a>                        rewrite_segment(child, sources, cut_base, next_cut, canonical_segmentation)
+<a href=#441 id=441 data-nosnippet>441</a>                    }
+<a href=#442 id=442 data-nosnippet>442</a>                })
+<a href=#443 id=443 data-nosnippet>443</a>                .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+<a href=#444 id=444 data-nosnippet>444</a>            expr.with_children(children)
+<a href=#445 id=445 data-nosnippet>445</a>        }
+<a href=#446 id=446 data-nosnippet>446</a>    };
+<a href=#447 id=447 data-nosnippet>447</a>    NativeNode {
+<a href=#448 id=448 data-nosnippet>448</a>        expr,
+<a href=#449 id=449 data-nosnippet>449</a>        output: node.output.clone(),
+<a href=#450 id=450 data-nosnippet>450</a>    }
+<a href=#451 id=451 data-nosnippet>451</a>}
+<a href=#452 id=452 data-nosnippet>452</a>
+<a href=#453 id=453 data-nosnippet>453</a><span class="doccomment">/// Splits `node` into one segment and the subtrees cut out of it.
+<a href=#454 id=454 data-nosnippet>454</a></span><span class="kw">pub fn </span>cut_segments(node: <span class="kw-2">&amp;</span>NativeNode, canonical_segmentation: bool) -&gt; Segment {
+<a href=#455 id=455 data-nosnippet>455</a>    <span class="kw">let </span><span class="kw-2">mut </span>sources = Vec::new();
+<a href=#456 id=456 data-nosnippet>456</a>    <span class="kw">let </span><span class="kw-2">mut </span>cut = Vec::new();
+<a href=#457 id=457 data-nosnippet>457</a>    collect_segment(node, <span class="kw-2">&amp;mut </span>sources, <span class="kw-2">&amp;mut </span>cut, canonical_segmentation);
+<a href=#458 id=458 data-nosnippet>458</a>    <span class="kw">let </span>cut_base = sources.len();
+<a href=#459 id=459 data-nosnippet>459</a>    <span class="kw">let </span><span class="kw-2">mut </span>next_cut = <span class="number">0</span>;
+<a href=#460 id=460 data-nosnippet>460</a>    <span class="kw">let </span>rewritten = rewrite_segment(
+<a href=#461 id=461 data-nosnippet>461</a>        node,
+<a href=#462 id=462 data-nosnippet>462</a>        <span class="kw-2">&amp;</span>sources,
+<a href=#463 id=463 data-nosnippet>463</a>        cut_base,
+<a href=#464 id=464 data-nosnippet>464</a>        <span class="kw-2">&amp;mut </span>next_cut,
+<a href=#465 id=465 data-nosnippet>465</a>        canonical_segmentation,
+<a href=#466 id=466 data-nosnippet>466</a>    );
+<a href=#467 id=467 data-nosnippet>467</a>    Segment {
+<a href=#468 id=468 data-nosnippet>468</a>        node: rewritten,
+<a href=#469 id=469 data-nosnippet>469</a>        sources,
+<a href=#470 id=470 data-nosnippet>470</a>        cut,
+<a href=#471 id=471 data-nosnippet>471</a>    }
+<a href=#472 id=472 data-nosnippet>472</a>}
+<a href=#473 id=473 data-nosnippet>473</a>
+<a href=#474 id=474 data-nosnippet>474</a><span class="doccomment">/// Appends the per-row name column to a rows layout's tag list.
+<a href=#475 id=475 data-nosnippet>475</a>///
+<a href=#476 id=476 data-nosnippet>476</a>/// A scalar root declares no name column: it publishes one value and no series, so the row it
+<a href=#477 id=477 data-nosnippet>477</a>/// answers has no name to report. The column is appended, so the layout keeps its order - the time
+<a href=#478 id=478 data-nosnippet>478</a>/// index, then the value fields, then the tags - and a label set that already reports the name keeps
+<a href=#479 id=479 data-nosnippet>479</a>/// the one column it has.
+<a href=#480 id=480 data-nosnippet>480</a></span><span class="kw">pub fn </span>with_row_name_column(node: <span class="kw-2">&amp;</span>NativeNode, <span class="kw-2">mut </span>tags: Vec&lt;String&gt;) -&gt; Vec&lt;String&gt; {
+<a href=#481 id=481 data-nosnippet>481</a>    <span class="kw">if </span>!<span class="macro">matches!</span>(<span class="kw-2">&amp;</span>node.output, NativeType::Samples(<span class="kw">_</span>)) {
+<a href=#482 id=482 data-nosnippet>482</a>        <span class="kw">return </span>tags;
+<a href=#483 id=483 data-nosnippet>483</a>    }
+<a href=#484 id=484 data-nosnippet>484</a>    <span class="comment">// A layout can already report the name: a set operation takes it from its sides, and a
+<a href=#485 id=485 data-nosnippet>485</a>    // discovered source sorts its tags for the union. Neither leaves that column last - `or` keeps
+<a href=#486 id=486 data-nosnippet>486</a>    // the left operand's order and only appends the right side's unseen tags, and sorting puts the
+<a href=#487 id=487 data-nosnippet>487</a>    // name wherever its bytes fall - so the existing one is removed and appended instead: every rows
+<a href=#488 id=488 data-nosnippet>488</a>    // layout then answers one order, the time index, the value fields, the labels, and the name
+<a href=#489 id=489 data-nosnippet>489</a>    // last.
+<a href=#490 id=490 data-nosnippet>490</a>    </span><span class="kw">if let </span><span class="prelude-val">Some</span>(index) = tags.iter().position(|tag| tag == METRIC_NAME) {
+<a href=#491 id=491 data-nosnippet>491</a>        tags.remove(index);
+<a href=#492 id=492 data-nosnippet>492</a>    }
+<a href=#493 id=493 data-nosnippet>493</a>    tags.push(METRIC_NAME.to_string());
+<a href=#494 id=494 data-nosnippet>494</a>    tags
+<a href=#495 id=495 data-nosnippet>495</a>}
+<a href=#496 id=496 data-nosnippet>496</a>
+<a href=#497 id=497 data-nosnippet>497</a><span class="doccomment">/// The ordering this route compiles its trees against: the weakest both scanners provide.
+<a href=#498 id=498 data-nosnippet>498</a>///
+<a href=#499 id=499 data-nosnippet>499</a>/// A native scan declares `KeyThenTime` and a two-phase scan `Contiguous`, and the logical planner
+<a href=#500 id=500 data-nosnippet>500</a>/// cannot read which one a statement will get. `Contiguous` is the weaker of the two - every
+<a href=#501 id=501 data-nosnippet>501</a>/// series' samples contiguous, the series themselves unordered - and a native evaluation only
+<a href=#502 id=502 data-nosnippet>502</a>/// refuses `Interleaved`, so a tree compiled against this ordering runs on either scanner.
+<a href=#503 id=503 data-nosnippet>503</a></span><span class="kw">pub const </span>NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
+<a href=#504 id=504 data-nosnippet>504</a>
+<a href=#505 id=505 data-nosnippet>505</a><span class="doccomment">/// The columns a [`FusedSeries`] node produces.
+<a href=#506 id=506 data-nosnippet>506</a>///
+<a href=#507 id=507 data-nosnippet>507</a>/// With `experimental_native_promql` enabled, a value column is named by the caller's [`FieldNames`]
+<a href=#508 id=508 data-nosnippet>508</a>/// answer for the statement's expression, not legacy planner expression text. Legacy headers in
+<a href=#509 id=509 data-nosnippet>509</a>/// `tests/cases/**` are unaffected because the native route is opt-in and off by default.
+<a href=#510 id=510 data-nosnippet>510</a>///
+<a href=#511 id=511 data-nosnippet>511</a>/// The shape is the one the existing unary pipeline consumes — the time index, then the series
+<a href=#512 id=512 data-nosnippet>512</a>/// fields, then the tags — and each column is declared the way the node's own conversion reads it
+<a href=#513 id=513 data-nosnippet>513</a>/// back:
+<a href=#514 id=514 data-nosnippet>514</a>/// the time column is a non-nullable millisecond timestamp with no timezone, because every
+<a href=#515 id=515 data-nosnippet>515</a>/// evaluated chunk is addressed on the statement's grid and carries one; a field is a nullable
+<a href=#516 id=516 data-nosnippet>516</a>/// `Float64`, because a grid point inside the statement's interval can have no sample; and a tag is
+<a href=#517 id=517 data-nosnippet>517</a>/// a nullable `Utf8`, because a range function drops the metric name and a series can be missing a
+<a href=#518 id=518 data-nosnippet>518</a>/// label entirely.
+<a href=#519 id=519 data-nosnippet>519</a>/// The output schema of a fused node: its time index, one column per field, then its tags.
+<a href=#520 id=520 data-nosnippet>520</a>///
+<a href=#521 id=521 data-nosnippet>521</a>/// `field_kind` says what a field column carries. The physical conversion reads the same kind off
+<a href=#522 id=522 data-nosnippet>522</a>/// this schema and dispatches on it, so the schema and the batch it describes cannot disagree.
+<a href=#523 id=523 data-nosnippet>523</a></span><span class="kw">pub fn </span>fused_output_schema(
+<a href=#524 id=524 data-nosnippet>524</a>    fields: <span class="kw-2">&amp;</span>[String],
+<a href=#525 id=525 data-nosnippet>525</a>    tags: <span class="kw-2">&amp;</span>[String],
+<a href=#526 id=526 data-nosnippet>526</a>    time_index: <span class="kw-2">&amp;</span>str,
+<a href=#527 id=527 data-nosnippet>527</a>    field_kind: FieldKind,
+<a href=#528 id=528 data-nosnippet>528</a>) -&gt; datafusion::common::Result&lt;DFSchemaRef&gt; {
+<a href=#529 id=529 data-nosnippet>529</a>    <span class="kw">let </span>field_type = <span class="kw">match </span>field_kind {
+<a href=#530 id=530 data-nosnippet>530</a>        FieldKind::Float =&gt; ArrowDataType::Float64,
+<a href=#531 id=531 data-nosnippet>531</a>        FieldKind::Histogram =&gt; native_histogram_value_type().as_arrow_type(),
+<a href=#532 id=532 data-nosnippet>532</a>    };
+<a href=#533 id=533 data-nosnippet>533</a>    <span class="kw">let </span><span class="kw-2">mut </span>columns = Vec::with_capacity(fields.len() + tags.len() + <span class="number">1</span>);
+<a href=#534 id=534 data-nosnippet>534</a>    <span class="comment">// The time index is marked as one, the way the existing planner's plans mark the table's own
+<a href=#535 id=535 data-nosnippet>535</a>    // time index: what a plan publishes is a result either way, and a reader of the marker - a
+<a href=#536 id=536 data-nosnippet>536</a>    // `RANGE` query over the plan, a schema converted back to GreptimeDB's - has to see the same
+<a href=#537 id=537 data-nosnippet>537</a>    // column on both routes.
+<a href=#538 id=538 data-nosnippet>538</a>    </span>columns.push((
+<a href=#539 id=539 data-nosnippet>539</a>        <span class="prelude-val">None</span>,
+<a href=#540 id=540 data-nosnippet>540</a>        Arc::new(
+<a href=#541 id=541 data-nosnippet>541</a>            Field::new(
+<a href=#542 id=542 data-nosnippet>542</a>                time_index,
+<a href=#543 id=543 data-nosnippet>543</a>                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, <span class="prelude-val">None</span>),
+<a href=#544 id=544 data-nosnippet>544</a>                <span class="bool-val">false</span>,
+<a href=#545 id=545 data-nosnippet>545</a>            )
+<a href=#546 id=546 data-nosnippet>546</a>            .with_metadata(std::collections::HashMap::from([(
+<a href=#547 id=547 data-nosnippet>547</a>                datatypes::schema::TIME_INDEX_KEY.to_string(),
+<a href=#548 id=548 data-nosnippet>548</a>                <span class="string">"true"</span>.to_string(),
+<a href=#549 id=549 data-nosnippet>549</a>            )])),
+<a href=#550 id=550 data-nosnippet>550</a>        ),
+<a href=#551 id=551 data-nosnippet>551</a>    ));
+<a href=#552 id=552 data-nosnippet>552</a>    <span class="kw">for </span>name <span class="kw">in </span>fields {
+<a href=#553 id=553 data-nosnippet>553</a>        columns.push((<span class="prelude-val">None</span>, Arc::new(Field::new(name, field_type.clone(), <span class="bool-val">true</span>))));
+<a href=#554 id=554 data-nosnippet>554</a>    }
+<a href=#555 id=555 data-nosnippet>555</a>    <span class="kw">for </span>name <span class="kw">in </span>tags {
+<a href=#556 id=556 data-nosnippet>556</a>        <span class="kw">let </span><span class="kw-2">mut </span>field = Field::new(name, ArrowDataType::Utf8, <span class="bool-val">true</span>);
+<a href=#557 id=557 data-nosnippet>557</a>        <span class="comment">// The runtime answers `__name__` from the metric name of the series it reports, so a tag
+<a href=#558 id=558 data-nosnippet>558</a>        // column of that name is the name of each row rather than one name for the whole result.
+<a href=#559 id=559 data-nosnippet>559</a>        // Declaring it keeps the response layer from naming every row after the statement.
+<a href=#560 id=560 data-nosnippet>560</a>        </span><span class="kw">if </span>name == METRIC_NAME {
+<a href=#561 id=561 data-nosnippet>561</a>            field = field.with_metadata(datatypes::schema::metric_name_field_metadata());
+<a href=#562 id=562 data-nosnippet>562</a>        }
+<a href=#563 id=563 data-nosnippet>563</a>        columns.push((<span class="prelude-val">None</span>, Arc::new(field)));
+<a href=#564 id=564 data-nosnippet>564</a>    }
+<a href=#565 id=565 data-nosnippet>565</a>
+<a href=#566 id=566 data-nosnippet>566</a>    <span class="comment">// GreptimeDB's schemas carry their version, and a result schema is no different: a schema
+<a href=#567 id=567 data-nosnippet>567</a>    // read back from this plan is one, exactly as the existing planner's answer for the same
+<a href=#568 id=568 data-nosnippet>568</a>    // statement is.
+<a href=#569 id=569 data-nosnippet>569</a>    </span><span class="kw">let </span>metadata = std::collections::HashMap::from([(
+<a href=#570 id=570 data-nosnippet>570</a>        datatypes::schema::VERSION_KEY.to_string(),
+<a href=#571 id=571 data-nosnippet>571</a>        datatypes::schema::Schema::INITIAL_VERSION.to_string(),
+<a href=#572 id=572 data-nosnippet>572</a>    )]);
+<a href=#573 id=573 data-nosnippet>573</a>    <span class="prelude-val">Ok</span>(Arc::new(DFSchema::new_with_metadata(columns, metadata)<span class="question-mark">?</span>))
+<a href=#574 id=574 data-nosnippet>574</a>}
+<a href=#575 id=575 data-nosnippet>575</a>
+<a href=#576 id=576 data-nosnippet>576</a><span class="doccomment">/// The grid one `FusedSeries` publishes on: the grid its root declares it produces, or the
+<a href=#577 id=577 data-nosnippet>577</a>/// statement's grid when the root declares none.
+<a href=#578 id=578 data-nosnippet>578</a>///
+<a href=#579 id=579 data-nosnippet>579</a>/// A root that produces one value per grid point says which grid that is, and that declared grid is
+<a href=#580 id=580 data-nosnippet>580</a>/// the one its consumer reads it on: a window over an evaluated input - a subquery - produces on the
+<a href=#581 id=581 data-nosnippet>581</a>/// window's own output grid, and a non-window root inside such a window, like the `Map` an
+<a href=#582 id=582 data-nosnippet>582</a>/// expression of a subquery compiles to, produces on the subquery's grid rather than on the
+<a href=#583 id=583 data-nosnippet>583</a>/// statement's. A statement root declares the statement's grid, so the two agree there. A root with
+<a href=#584 id=584 data-nosnippet>584</a>/// no declared grid - raw samples - is read where it was scanned and keeps the caller's grid.
+<a href=#585 id=585 data-nosnippet>585</a>/// Every lowering path binds the effective grid (the subquery's child grid for a matrix root, the
+<a href=#586 id=586 data-nosnippet>586</a>/// statement's grid otherwise), so a window root answers that same grid here.
+<a href=#587 id=587 data-nosnippet>587</a></span><span class="kw">fn </span>fused_publish_grid(root: <span class="kw-2">&amp;</span>NativeNode, statement_grid: <span class="kw-2">&amp;</span>Arc&lt;EvalGrid&gt;) -&gt; Arc&lt;EvalGrid&gt; {
+<a href=#588 id=588 data-nosnippet>588</a>    root.output
+<a href=#589 id=589 data-nosnippet>589</a>        .grid()
+<a href=#590 id=590 data-nosnippet>590</a>        .map_or_else(|| Arc::clone(statement_grid), Arc::clone)
+<a href=#591 id=591 data-nosnippet>591</a>}
+<a href=#592 id=592 data-nosnippet>592</a>
+<a href=#593 id=593 data-nosnippet>593</a><span class="doccomment">/// Lowers a tree whose root is a canonical merge into a producer and a canonical router.
+<a href=#594 id=594 data-nosnippet>594</a>///
+<a href=#595 id=595 data-nosnippet>595</a>/// The tree says the statement answers one series per canonical label set; what it cannot say is
+<a href=#596 id=596 data-nosnippet>596</a>/// where the pieces of one set are, because a rewrite created them after the scan split the rows.
+<a href=#597 id=597 data-nosnippet>597</a>/// So the pieces have to meet before the answer is written, and there are only two honest ways to
+<a href=#598 id=598 data-nosnippet>598</a>/// make them meet: read every partition in one execution, or route each label set to one owner. The
+<a href=#599 id=599 data-nosnippet>599</a>/// first takes the caller's parallelism away for the whole query; this is the second.
+<a href=#600 id=600 data-nosnippet>600</a>///
+<a href=#601 id=601 data-nosnippet>601</a>/// Two stages come out of it, and each has one job:
+<a href=#602 id=602 data-nosnippet>602</a>///
+<a href=#603 id=603 data-nosnippet>603</a>/// - the **producer** runs the tree's root merge on every scan partition. Its merge collects the
+<a href=#604 id=604 data-nosnippet>604</a>///   pieces that partition holds - which is what makes a same-partition collision an error here,
+<a href=#605 id=605 data-nosnippet>605</a>///   before anything is routed - and it exports one series per label set as a series frame. It is
+<a href=#606 id=606 data-nosnippet>606</a>///   explicitly partition-local: the same node without that distinction would gather its inputs and
+<a href=#607 id=607 data-nosnippet>607</a>///   answer everything in one execution.
+<a href=#608 id=608 data-nosnippet>608</a>/// - the **router** is `SeriesRepartitionExec`'s canonical routing, which collects the pieces of one
+<a href=#609 id=609 data-nosnippet>609</a>///   label set from *every* input partition. It is the conservative router - a label set is
+<a href=#610 id=610 data-nosnippet>610</a>///   published only once every producer contributed it or ended - because a producer promises one
+<a href=#611 id=611 data-nosnippet>611</a>///   series per set *per partition*, not that each set lives in one partition. A second piece of one
+<a href=#612 id=612 data-nosnippet>612</a>///   set that holds a position another piece already holds is the same error, reported while that
+<a href=#613 id=613 data-nosnippet>613</a>///   label set is assembled, and each output of the router then holds whole label sets: one series
+<a href=#614 id=614 data-nosnippet>614</a>///   per set, complementary points joined.
+<a href=#615 id=615 data-nosnippet>615</a>///
+<a href=#616 id=616 data-nosnippet>616</a>/// `None` when the boundary cannot be built, so the caller keeps the plan it would have chosen.
+<a href=#617 id=617 data-nosnippet>617</a>/// The stages of a canonical boundary over `tree`, and the columns its frames carry.
+<a href=#618 id=618 data-nosnippet>618</a>///
+<a href=#619 id=619 data-nosnippet>619</a>/// `format` says what the caller above reads: a statement root reads the boundary's rows, and
+<a href=#620 id=620 data-nosnippet>620</a>/// anything else reads the assembled frames as an ordinary evaluated input.
+<a href=#621 id=621 data-nosnippet>621</a></span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#622 id=622 data-nosnippet>622</a></span><span class="kw">pub fn </span>canonical_boundary_stages(
+<a href=#623 id=623 data-nosnippet>623</a>    promql: Arc&lt;str&gt;,
+<a href=#624 id=624 data-nosnippet>624</a>    tree: <span class="kw-2">&amp;</span>NativeTree,
+<a href=#625 id=625 data-nosnippet>625</a>    children: <span class="kw-2">&amp;</span>[LogicalPlan],
+<a href=#626 id=626 data-nosnippet>626</a>    source_tags: <span class="kw-2">&amp;</span>[Vec&lt;String&gt;],
+<a href=#627 id=627 data-nosnippet>627</a>    grid: <span class="kw-2">&amp;</span>Arc&lt;EvalGrid&gt;,
+<a href=#628 id=628 data-nosnippet>628</a>    time_index: <span class="kw-2">&amp;</span>str,
+<a href=#629 id=629 data-nosnippet>629</a>    tags: <span class="kw-2">&amp;</span>[String],
+<a href=#630 id=630 data-nosnippet>630</a>    metric: <span class="kw-2">&amp;</span><span class="prelude-ty">Option</span>&lt;Arc&lt;str&gt;&gt;,
+<a href=#631 id=631 data-nosnippet>631</a>    format: FusedOutputFormat,
+<a href=#632 id=632 data-nosnippet>632</a>    root_kind: FieldKind,
+<a href=#633 id=633 data-nosnippet>633</a>    output_tags_of: OutputTags,
+<a href=#634 id=634 data-nosnippet>634</a>    field_names: FieldNames,
+<a href=#635 id=635 data-nosnippet>635</a>) -&gt; <span class="prelude-ty">Option</span>&lt;(LogicalPlan, Vec&lt;String&gt;)&gt; {
+<a href=#636 id=636 data-nosnippet>636</a>    <span class="kw">let </span>NativeExpr::Merge { input } = <span class="kw-2">&amp;</span>tree.root().expr <span class="kw">else </span>{
+<a href=#637 id=637 data-nosnippet>637</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#638 id=638 data-nosnippet>638</a>    };
+<a href=#639 id=639 data-nosnippet>639</a>    <span class="kw">if </span>!canonical_local_prefix(input) {
+<a href=#640 id=640 data-nosnippet>640</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#641 id=641 data-nosnippet>641</a>    }
+<a href=#642 id=642 data-nosnippet>642</a>    <span class="kw">let </span>NativeType::Samples(schema) = <span class="kw-2">&amp;</span>tree.root().output <span class="kw">else </span>{
+<a href=#643 id=643 data-nosnippet>643</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#644 id=644 data-nosnippet>644</a>    };
+<a href=#645 id=645 data-nosnippet>645</a>    schema.eval_grid.as_ref()<span class="question-mark">?</span>;
+<a href=#646 id=646 data-nosnippet>646</a>    <span class="kw">let </span>fields = schema
+<a href=#647 id=647 data-nosnippet>647</a>        .fields
+<a href=#648 id=648 data-nosnippet>648</a>        .iter()
+<a href=#649 id=649 data-nosnippet>649</a>        .map(|field| field.name.to_string())
+<a href=#650 id=650 data-nosnippet>650</a>        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+<a href=#651 id=651 data-nosnippet>651</a>    <span class="kw">let </span>output_tags = output_tags_of(tree.root(), source_tags)<span class="question-mark">?</span>;
+<a href=#652 id=652 data-nosnippet>652</a>    <span class="comment">// The terminal rows of this boundary report the name of each row they publish, so the schema
+<a href=#653 id=653 data-nosnippet>653</a>    // declares it exactly as the other rows layouts do. The tags stay the walk's own: they name the
+<a href=#654 id=654 data-nosnippet>654</a>    // labels the frames carry, and the binding below is built from them.
+<a href=#655 id=655 data-nosnippet>655</a>    </span><span class="kw">let </span>row_tags = with_row_name_column(tree.root(), output_tags.clone());
+<a href=#656 id=656 data-nosnippet>656</a>    <span class="comment">// The values are named after the expression, as in every other rows layout of this statement.
+<a href=#657 id=657 data-nosnippet>657</a>    // A schema this boundary cannot declare declines here: the caller's error type is not one this
+<a href=#658 id=658 data-nosnippet>658</a>    // crate can build, so a name collision is reported by declining rather than as an internal
+<a href=#659 id=659 data-nosnippet>659</a>    // error, and the caller keeps the plan it would have chosen.
+<a href=#660 id=660 data-nosnippet>660</a>    </span><span class="kw">let </span>value_names = field_names(<span class="kw-2">&amp;</span>promql, <span class="kw-2">&amp;</span>fields);
+<a href=#661 id=661 data-nosnippet>661</a>    <span class="kw">let </span>output_schema = fused_output_schema(<span class="kw-2">&amp;</span>value_names, <span class="kw-2">&amp;</span>row_tags, time_index, root_kind).ok()<span class="question-mark">?</span>;
+<a href=#662 id=662 data-nosnippet>662</a>
+<a href=#663 id=663 data-nosnippet>663</a>    <span class="comment">// The producer: the statement's own tree, run per partition, exporting a frame. It runs above
+<a href=#664 id=664 data-nosnippet>664</a>    // the regions, where its router collects each label set from every region's contribution.
+<a href=#665 id=665 data-nosnippet>665</a>    </span><span class="kw">let </span>producer = FusedSeries::try_new_canonical_producer(
+<a href=#666 id=666 data-nosnippet>666</a>        Arc::clone(<span class="kw-2">&amp;</span>promql),
+<a href=#667 id=667 data-nosnippet>667</a>        tree.clone(),
+<a href=#668 id=668 data-nosnippet>668</a>        FusedSeriesBinding {
+<a href=#669 id=669 data-nosnippet>669</a>            grid: Arc::clone(grid),
+<a href=#670 id=670 data-nosnippet>670</a>            time_index: time_index.to_string(),
+<a href=#671 id=671 data-nosnippet>671</a>            tags: tags.to_vec(),
+<a href=#672 id=672 data-nosnippet>672</a>            metric_name: metric.clone(),
+<a href=#673 id=673 data-nosnippet>673</a>        },
+<a href=#674 id=674 data-nosnippet>674</a>        children.to_vec(),
+<a href=#675 id=675 data-nosnippet>675</a>    )
+<a href=#676 id=676 data-nosnippet>676</a>    .ok()<span class="question-mark">?</span>;
+<a href=#677 id=677 data-nosnippet>677</a>    <span class="kw">let </span>producer = LogicalPlan::Extension(Extension {
+<a href=#678 id=678 data-nosnippet>678</a>        node: Arc::new(producer),
+<a href=#679 id=679 data-nosnippet>679</a>    });
+<a href=#680 id=680 data-nosnippet>680</a>
+<a href=#681 id=681 data-nosnippet>681</a>    <span class="comment">// What reads the router depends on where this boundary sits. A consumer still above it reads
+<a href=#682 id=682 data-nosnippet>682</a>    // whole label sets, and the router already merged the pieces of one label set into one series,
+<a href=#683 id=683 data-nosnippet>683</a>    // so that consumer is an ordinary evaluated input of its own and needs no merge. The statement's
+<a href=#684 id=684 data-nosnippet>684</a>    // root instead publishes rows, which is this boundary's own frame converted as usual.
+<a href=#685 id=685 data-nosnippet>685</a>    </span><span class="kw">if </span>format == FusedOutputFormat::SeriesFrame {
+<a href=#686 id=686 data-nosnippet>686</a>        <span class="kw">return </span><span class="prelude-val">Some</span>((producer, output_tags));
+<a href=#687 id=687 data-nosnippet>687</a>    }
+<a href=#688 id=688 data-nosnippet>688</a>    <span class="kw">let </span>evaluated = NativeType::Samples(Arc::clone(schema));
+<a href=#689 id=689 data-nosnippet>689</a>    <span class="kw">let </span>consumer_tree = NativeTree::try_new(NativeNode {
+<a href=#690 id=690 data-nosnippet>690</a>        expr: NativeExpr::Input(BoundInput {
+<a href=#691 id=691 data-nosnippet>691</a>            source_index: <span class="number">0</span>,
+<a href=#692 id=692 data-nosnippet>692</a>            output: evaluated.clone(),
+<a href=#693 id=693 data-nosnippet>693</a>            ordering: NATIVE_ORDERING,
+<a href=#694 id=694 data-nosnippet>694</a>        }),
+<a href=#695 id=695 data-nosnippet>695</a>        output: evaluated,
+<a href=#696 id=696 data-nosnippet>696</a>    })
+<a href=#697 id=697 data-nosnippet>697</a>    .ok()<span class="question-mark">?</span>;
+<a href=#698 id=698 data-nosnippet>698</a>    <span class="comment">// A frame names each series' own metric, so the binding names one only when a tag column does.
+<a href=#699 id=699 data-nosnippet>699</a>    </span><span class="kw">let </span>consumer_metric = <span class="kw">if </span>output_tags.iter().any(|tag| tag == METRIC_NAME) {
+<a href=#700 id=700 data-nosnippet>700</a>        metric.clone()
+<a href=#701 id=701 data-nosnippet>701</a>    } <span class="kw">else </span>{
+<a href=#702 id=702 data-nosnippet>702</a>        <span class="prelude-val">None
+<a href=#703 id=703 data-nosnippet>703</a>    </span>};
+<a href=#704 id=704 data-nosnippet>704</a>    <span class="kw">let </span>consumer = FusedSeries::try_new_with_format(
+<a href=#705 id=705 data-nosnippet>705</a>        Arc::clone(<span class="kw-2">&amp;</span>promql),
+<a href=#706 id=706 data-nosnippet>706</a>        consumer_tree,
+<a href=#707 id=707 data-nosnippet>707</a>        FusedSeriesBinding {
+<a href=#708 id=708 data-nosnippet>708</a>            grid: Arc::clone(grid),
+<a href=#709 id=709 data-nosnippet>709</a>            time_index: time_index.to_string(),
+<a href=#710 id=710 data-nosnippet>710</a>            tags: output_tags.clone(),
+<a href=#711 id=711 data-nosnippet>711</a>            metric_name: consumer_metric,
+<a href=#712 id=712 data-nosnippet>712</a>        },
+<a href=#713 id=713 data-nosnippet>713</a>        <span class="macro">vec!</span>[producer],
+<a href=#714 id=714 data-nosnippet>714</a>        output_schema,
+<a href=#715 id=715 data-nosnippet>715</a>        FusedOutputFormat::PlainRows,
+<a href=#716 id=716 data-nosnippet>716</a>    )
+<a href=#717 id=717 data-nosnippet>717</a>    .ok()<span class="question-mark">?</span>;
+<a href=#718 id=718 data-nosnippet>718</a>    <span class="prelude-val">Some</span>((
+<a href=#719 id=719 data-nosnippet>719</a>        LogicalPlan::Extension(Extension {
+<a href=#720 id=720 data-nosnippet>720</a>            node: Arc::new(consumer),
+<a href=#721 id=721 data-nosnippet>721</a>        }),
+<a href=#722 id=722 data-nosnippet>722</a>        output_tags,
+<a href=#723 id=723 data-nosnippet>723</a>    ))
+<a href=#724 id=724 data-nosnippet>724</a>}
+<a href=#725 id=725 data-nosnippet>725</a>
+<a href=#726 id=726 data-nosnippet>726</a><span class="kw">fn </span>is_raw_series_source(plan: <span class="kw-2">&amp;</span>LogicalPlan) -&gt; bool {
+<a href=#727 id=727 data-nosnippet>727</a>    <span class="kw">match </span>plan {
+<a href=#728 id=728 data-nosnippet>728</a>        LogicalPlan::Extension(extension) =&gt; extension.node.as_any().is::&lt;RawSeriesSource&gt;(),
+<a href=#729 id=729 data-nosnippet>729</a>        <span class="kw">_ </span>=&gt; <span class="bool-val">false</span>,
+<a href=#730 id=730 data-nosnippet>730</a>    }
+<a href=#731 id=731 data-nosnippet>731</a>}
+<a href=#732 id=732 data-nosnippet>732</a>
+<a href=#733 id=733 data-nosnippet>733</a><span class="kw">fn </span>find_input_node(node: <span class="kw-2">&amp;</span>NativeNode, source_index: usize) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>BoundInput&gt; {
+<a href=#734 id=734 data-nosnippet>734</a>    node.inputs()
+<a href=#735 id=735 data-nosnippet>735</a>        .into_iter()
+<a href=#736 id=736 data-nosnippet>736</a>        .find(|input| input.source_index == source_index)
+<a href=#737 id=737 data-nosnippet>737</a>}
+<a href=#738 id=738 data-nosnippet>738</a>
+<a href=#739 id=739 data-nosnippet>739</a><span class="doccomment">/// Whether `plan` is the typed empty input a discovered selector that matched no table gets.
+<a href=#740 id=740 data-nosnippet>740</a>///
+<a href=#741 id=741 data-nosnippet>741</a>/// It reads no region and holds no scan, so it is not one of the tables a node's binding is derived
+<a href=#742 id=742 data-nosnippet>742</a>/// from: two selectors are "of one table" only if the tables they scan are one. The remote
+<a href=#743 id=743 data-nosnippet>743</a>/// admission gate reads the same shape back, to tell a node with nothing to ship from one that does
+<a href=#744 id=744 data-nosnippet>744</a>/// read regions, so the declared frame is part of the check: an empty relation that does not
+<a href=#745 id=745 data-nosnippet>745</a>/// declare the raw explicit-label frame is some other plan, not this input.
+<a href=#746 id=746 data-nosnippet>746</a></span><span class="kw">pub fn </span>is_empty_discovered_input(plan: <span class="kw-2">&amp;</span>LogicalPlan) -&gt; bool {
+<a href=#747 id=747 data-nosnippet>747</a>    <span class="kw">let </span>LogicalPlan::EmptyRelation(relation) = plan <span class="kw">else </span>{
+<a href=#748 id=748 data-nosnippet>748</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#749 id=749 data-nosnippet>749</a>    };
+<a href=#750 id=750 data-nosnippet>750</a>    <span class="kw">if </span>relation.produce_one_row {
+<a href=#751 id=751 data-nosnippet>751</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#752 id=752 data-nosnippet>752</a>    }
+<a href=#753 id=753 data-nosnippet>753</a>    <span class="kw">let </span><span class="prelude-val">Ok</span>(declaration) = SeriesFrameDeclaration::parse(relation.schema.as_arrow()) <span class="kw">else </span>{
+<a href=#754 id=754 data-nosnippet>754</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#755 id=755 data-nosnippet>755</a>    };
+<a href=#756 id=756 data-nosnippet>756</a>    <span class="kw">if </span>declaration.content() != FrameContent::Raw
+<a href=#757 id=757 data-nosnippet>757</a>        || declaration.labels() != FrameLabelMode::Explicit
+<a href=#758 id=758 data-nosnippet>758</a>    {
+<a href=#759 id=759 data-nosnippet>759</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#760 id=760 data-nosnippet>760</a>    }
+<a href=#761 id=761 data-nosnippet>761</a>    <span class="kw">let </span><span class="prelude-val">Ok</span>(frame) = raw_series_frame_schema_with_ordering(
+<a href=#762 id=762 data-nosnippet>762</a>        declaration.series(),
+<a href=#763 id=763 data-nosnippet>763</a>        <span class="kw-2">&amp;</span>RawLabelSource::Explicit,
+<a href=#764 id=764 data-nosnippet>764</a>        NATIVE_ORDERING,
+<a href=#765 id=765 data-nosnippet>765</a>    ) <span class="kw">else </span>{
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#767 id=767 data-nosnippet>767</a>    };
+<a href=#768 id=768 data-nosnippet>768</a>    relation.schema.as_arrow() == frame.as_ref()
+<a href=#769 id=769 data-nosnippet>769</a>}
+<a href=#770 id=770 data-nosnippet>770</a>
+<a href=#771 id=771 data-nosnippet>771</a><span class="attr">#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+<a href=#772 id=772 data-nosnippet>772</a></span><span class="kw">fn </span>build_evaluated_segment(
+<a href=#773 id=773 data-nosnippet>773</a>    promql: Arc&lt;str&gt;,
+<a href=#774 id=774 data-nosnippet>774</a>    node: <span class="kw-2">&amp;</span>NativeNode,
+<a href=#775 id=775 data-nosnippet>775</a>    children: <span class="kw-2">&amp;</span>[LogicalPlan],
+<a href=#776 id=776 data-nosnippet>776</a>    source_tags: <span class="kw-2">&amp;</span>[Vec&lt;String&gt;],
+<a href=#777 id=777 data-nosnippet>777</a>    source_ids: <span class="kw-2">&amp;</span>[<span class="prelude-ty">Option</span>&lt;usize&gt;],
+<a href=#778 id=778 data-nosnippet>778</a>    per_source: <span class="kw-2">&amp;</span>[(<span class="prelude-ty">Option</span>&lt;Arc&lt;str&gt;&gt;, String, Vec&lt;String&gt;)],
+<a href=#779 id=779 data-nosnippet>779</a>    grid: <span class="kw-2">&amp;</span>Arc&lt;EvalGrid&gt;,
+<a href=#780 id=780 data-nosnippet>780</a>    time_index: <span class="kw-2">&amp;</span>str,
+<a href=#781 id=781 data-nosnippet>781</a>    root_kind: FieldKind,
+<a href=#782 id=782 data-nosnippet>782</a>    output_tags_of: OutputTags,
+<a href=#783 id=783 data-nosnippet>783</a>    field_names: FieldNames,
+<a href=#784 id=784 data-nosnippet>784</a>) -&gt; <span class="prelude-ty">Option</span>&lt;(LogicalPlan, Vec&lt;String&gt;)&gt; {
+<a href=#785 id=785 data-nosnippet>785</a>    <span class="kw">let </span><span class="kw-2">mut </span>sources = Vec::new();
+<a href=#786 id=786 data-nosnippet>786</a>    collect_segment_inputs(node, <span class="kw-2">&amp;mut </span>sources);
+<a href=#787 id=787 data-nosnippet>787</a>    <span class="kw">if </span>sources.is_empty() {
+<a href=#788 id=788 data-nosnippet>788</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#789 id=789 data-nosnippet>789</a>    }
+<a href=#790 id=790 data-nosnippet>790</a>    <span class="kw">let </span><span class="kw-2">mut </span>inputs = Vec::with_capacity(sources.len());
+<a href=#791 id=791 data-nosnippet>791</a>    <span class="kw">let </span><span class="kw-2">mut </span>local_tags = Vec::with_capacity(sources.len());
+<a href=#792 id=792 data-nosnippet>792</a>    <span class="kw">let </span>tree = NativeTree::try_new(rewrite_inner_segment(node, <span class="kw-2">&amp;</span>sources)).ok()<span class="question-mark">?</span>;
+<a href=#793 id=793 data-nosnippet>793</a>    <span class="kw">let </span>source_fields = tree_source_fields(<span class="kw-2">&amp;</span>tree).ok()<span class="question-mark">?</span>;
+<a href=#794 id=794 data-nosnippet>794</a>    <span class="kw">for </span>(local_index, <span class="kw-2">&amp;</span>index) <span class="kw">in </span>sources.iter().enumerate() {
+<a href=#795 id=795 data-nosnippet>795</a>        <span class="kw">let </span>child = children.get(index)<span class="question-mark">?</span>.clone();
+<a href=#796 id=796 data-nosnippet>796</a>        <span class="kw">let </span>input = find_input_node(node, index)<span class="question-mark">?</span>;
+<a href=#797 id=797 data-nosnippet>797</a>        <span class="kw">if </span>input
+<a href=#798 id=798 data-nosnippet>798</a>            .output
+<a href=#799 id=799 data-nosnippet>799</a>            .samples()
+<a href=#800 id=800 data-nosnippet>800</a>            .is_some_and(|schema| schema.eval_grid.is_some())
+<a href=#801 id=801 data-nosnippet>801</a>            || is_raw_series_source(<span class="kw-2">&amp;</span>child)
+<a href=#802 id=802 data-nosnippet>802</a>            <span class="comment">// The typed empty frame of a selector that matched no table is an input in its own
+<a href=#803 id=803 data-nosnippet>803</a>            // right: it reads no region and carries no metric, so there is nothing to wrap it in.
+<a href=#804 id=804 data-nosnippet>804</a>            // A segment over it is still an explicit-label frame with no series.
+<a href=#805 id=805 data-nosnippet>805</a>            </span>|| is_empty_discovered_input(<span class="kw-2">&amp;</span>child)
+<a href=#806 id=806 data-nosnippet>806</a>        {
+<a href=#807 id=807 data-nosnippet>807</a>            inputs.push(child);
+<a href=#808 id=808 data-nosnippet>808</a>            local_tags.push(source_tags.get(index)<span class="question-mark">?</span>.clone());
+<a href=#809 id=809 data-nosnippet>809</a>        } <span class="kw">else </span>{
+<a href=#810 id=810 data-nosnippet>810</a>            <span class="kw">let </span>original_index = <span class="kw-2">*</span>source_ids.get(index)<span class="question-mark">?</span>.as_ref()<span class="question-mark">?</span>;
+<a href=#811 id=811 data-nosnippet>811</a>            <span class="kw">let </span>(<span class="prelude-val">Some</span>((<span class="prelude-val">Some</span>(metric), <span class="kw">_</span>, tags)), <span class="prelude-val">Some</span>(fields)) = (
+<a href=#812 id=812 data-nosnippet>812</a>                per_source.get(original_index),
+<a href=#813 id=813 data-nosnippet>813</a>                source_fields.get(local_index),
+<a href=#814 id=814 data-nosnippet>814</a>            ) <span class="kw">else </span>{
+<a href=#815 id=815 data-nosnippet>815</a>                <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#816 id=816 data-nosnippet>816</a>            };
+<a href=#817 id=817 data-nosnippet>817</a>            inputs.push(LogicalPlan::Extension(Extension {
+<a href=#818 id=818 data-nosnippet>818</a>                node: Arc::new(
+<a href=#819 id=819 data-nosnippet>819</a>                    RawSeriesSource::try_new(
+<a href=#820 id=820 data-nosnippet>820</a>                        Arc::clone(metric),
+<a href=#821 id=821 data-nosnippet>821</a>                        tags.clone(),
+<a href=#822 id=822 data-nosnippet>822</a>                        fields.clone(),
+<a href=#823 id=823 data-nosnippet>823</a>                        child,
+<a href=#824 id=824 data-nosnippet>824</a>                    )
+<a href=#825 id=825 data-nosnippet>825</a>                    .ok()<span class="question-mark">?</span>,
+<a href=#826 id=826 data-nosnippet>826</a>                ),
+<a href=#827 id=827 data-nosnippet>827</a>            }));
+<a href=#828 id=828 data-nosnippet>828</a>            local_tags.push(tags.clone());
+<a href=#829 id=829 data-nosnippet>829</a>        }
+<a href=#830 id=830 data-nosnippet>830</a>    }
+<a href=#831 id=831 data-nosnippet>831</a>    <span class="comment">// A canonical merge is not a segment: it is the middle of a boundary whose two frame nodes and
+<a href=#832 id=832 data-nosnippet>832</a>    // router are what answer one series per label set across partitions, so it is built as that
+<a href=#833 id=833 data-nosnippet>833</a>    // boundary and read as a frame.
+<a href=#834 id=834 data-nosnippet>834</a>    </span><span class="kw">if </span><span class="macro">matches!</span>(tree.root().expr, NativeExpr::Merge { .. }) {
+<a href=#835 id=835 data-nosnippet>835</a>        <span class="kw">let </span>(plan, tags) = canonical_boundary_stages(
+<a href=#836 id=836 data-nosnippet>836</a>            Arc::clone(<span class="kw-2">&amp;</span>promql),
+<a href=#837 id=837 data-nosnippet>837</a>            <span class="kw-2">&amp;</span>tree,
+<a href=#838 id=838 data-nosnippet>838</a>            <span class="kw-2">&amp;</span>inputs,
+<a href=#839 id=839 data-nosnippet>839</a>            <span class="kw-2">&amp;</span>local_tags,
+<a href=#840 id=840 data-nosnippet>840</a>            grid,
+<a href=#841 id=841 data-nosnippet>841</a>            time_index,
+<a href=#842 id=842 data-nosnippet>842</a>            <span class="kw-2">&amp;</span>[],
+<a href=#843 id=843 data-nosnippet>843</a>            <span class="kw-2">&amp;</span><span class="prelude-val">None</span>,
+<a href=#844 id=844 data-nosnippet>844</a>            FusedOutputFormat::SeriesFrame,
+<a href=#845 id=845 data-nosnippet>845</a>            root_kind,
+<a href=#846 id=846 data-nosnippet>846</a>            output_tags_of,
+<a href=#847 id=847 data-nosnippet>847</a>            field_names,
+<a href=#848 id=848 data-nosnippet>848</a>        )<span class="question-mark">?</span>;
+<a href=#849 id=849 data-nosnippet>849</a>        <span class="kw">return </span><span class="prelude-val">Some</span>((plan, tags));
+<a href=#850 id=850 data-nosnippet>850</a>    }
+<a href=#851 id=851 data-nosnippet>851</a>    <span class="kw">let </span>output_tags = output_tags_of(tree.root(), <span class="kw-2">&amp;</span>local_tags)<span class="question-mark">?</span>;
+<a href=#852 id=852 data-nosnippet>852</a>    <span class="kw">if </span>!native_tree_supported(<span class="kw-2">&amp;</span>tree) {
+<a href=#853 id=853 data-nosnippet>853</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#854 id=854 data-nosnippet>854</a>    }
+<a href=#855 id=855 data-nosnippet>855</a>    <span class="kw">let </span>frame = FusedSeries::series_frame_schema(<span class="kw-2">&amp;</span>tree).ok()<span class="question-mark">?</span>;
+<a href=#856 id=856 data-nosnippet>856</a>    <span class="kw">let </span>frame = DFSchema::try_from(frame.as_ref().clone()).ok()<span class="question-mark">?</span>;
+<a href=#857 id=857 data-nosnippet>857</a>    <span class="kw">let </span>publish_grid = fused_publish_grid(tree.root(), grid);
+<a href=#858 id=858 data-nosnippet>858</a>    <span class="kw">let </span>plan = FusedSeries::try_new_with_format(
+<a href=#859 id=859 data-nosnippet>859</a>        Arc::from(<span class="string">"segment"</span>),
+<a href=#860 id=860 data-nosnippet>860</a>        tree,
+<a href=#861 id=861 data-nosnippet>861</a>        FusedSeriesBinding {
+<a href=#862 id=862 data-nosnippet>862</a>            grid: publish_grid,
+<a href=#863 id=863 data-nosnippet>863</a>            time_index: time_index.to_string(),
+<a href=#864 id=864 data-nosnippet>864</a>            tags: output_tags.clone(),
+<a href=#865 id=865 data-nosnippet>865</a>            metric_name: <span class="prelude-val">None</span>,
+<a href=#866 id=866 data-nosnippet>866</a>        },
+<a href=#867 id=867 data-nosnippet>867</a>        inputs,
+<a href=#868 id=868 data-nosnippet>868</a>        Arc::new(frame),
+<a href=#869 id=869 data-nosnippet>869</a>        FusedOutputFormat::SeriesFrame,
+<a href=#870 id=870 data-nosnippet>870</a>    )
+<a href=#871 id=871 data-nosnippet>871</a>    .ok()<span class="question-mark">?</span>;
+<a href=#872 id=872 data-nosnippet>872</a>    <span class="prelude-val">Some</span>((
+<a href=#873 id=873 data-nosnippet>873</a>        LogicalPlan::Extension(Extension {
+<a href=#874 id=874 data-nosnippet>874</a>            node: Arc::new(plan),
+<a href=#875 id=875 data-nosnippet>875</a>        }),
+<a href=#876 id=876 data-nosnippet>876</a>        output_tags,
+<a href=#877 id=877 data-nosnippet>877</a>    ))
+<a href=#878 id=878 data-nosnippet>878</a>}
+<a href=#879 id=879 data-nosnippet>879</a>
+<a href=#880 id=880 data-nosnippet>880</a><span class="doccomment">/// Builds one segment's plan from a subtree, binding its scan inputs without cutting again.
+<a href=#881 id=881 data-nosnippet>881</a>///
+<a href=#882 id=882 data-nosnippet>882</a>/// Returns the plan and the output columns the segment reports, which its parent names its own
+<a href=#883 id=883 data-nosnippet>883</a>/// columns by. `None` when any part cannot be built, so the statement keeps the plan it had.
+<a href=#884 id=884 data-nosnippet>884</a></span><span class="attr">#[allow(clippy::type_complexity)]
+<a href=#885 id=885 data-nosnippet>885</a></span><span class="kw">fn </span>build_inner_segment(
+<a href=#886 id=886 data-nosnippet>886</a>    node: <span class="kw-2">&amp;</span>NativeNode,
+<a href=#887 id=887 data-nosnippet>887</a>    bare_scans: <span class="kw-2">&amp;</span>[LogicalPlan],
+<a href=#888 id=888 data-nosnippet>888</a>    per_source: <span class="kw-2">&amp;</span>[(<span class="prelude-ty">Option</span>&lt;Arc&lt;str&gt;&gt;, String, Vec&lt;String&gt;)],
+<a href=#889 id=889 data-nosnippet>889</a>    grid: <span class="kw-2">&amp;</span>Arc&lt;EvalGrid&gt;,
+<a href=#890 id=890 data-nosnippet>890</a>    output_tags_of: OutputTags,
+<a href=#891 id=891 data-nosnippet>891</a>) -&gt; <span class="prelude-ty">Option</span>&lt;(LogicalPlan, Vec&lt;String&gt;)&gt; {
+<a href=#892 id=892 data-nosnippet>892</a>    <span class="kw">let </span><span class="kw-2">mut </span>sources = Vec::new();
+<a href=#893 id=893 data-nosnippet>893</a>    collect_segment_inputs(node, <span class="kw-2">&amp;mut </span>sources);
+<a href=#894 id=894 data-nosnippet>894</a>    <span class="kw">if </span>sources.is_empty() {
+<a href=#895 id=895 data-nosnippet>895</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#896 id=896 data-nosnippet>896</a>    }
+<a href=#897 id=897 data-nosnippet>897</a>    <span class="kw">let </span>scans = sources
+<a href=#898 id=898 data-nosnippet>898</a>        .iter()
+<a href=#899 id=899 data-nosnippet>899</a>        .map(|<span class="kw-2">&amp;</span>index| bare_scans.get(index).cloned())
+<a href=#900 id=900 data-nosnippet>900</a>        .collect::&lt;<span class="prelude-ty">Option</span>&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#901 id=901 data-nosnippet>901</a>    <span class="kw">let </span>source_tags = sources
+<a href=#902 id=902 data-nosnippet>902</a>        .iter()
+<a href=#903 id=903 data-nosnippet>903</a>        .map(|<span class="kw-2">&amp;</span>index| per_source.get(index).map(|(<span class="kw">_</span>, <span class="kw">_</span>, tags)| tags.clone()))
+<a href=#904 id=904 data-nosnippet>904</a>        .collect::&lt;<span class="prelude-ty">Option</span>&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#905 id=905 data-nosnippet>905</a>    <span class="kw">let </span>tree = NativeTree::try_new(rewrite_inner_segment(node, <span class="kw-2">&amp;</span>sources)).ok()<span class="question-mark">?</span>;
+<a href=#906 id=906 data-nosnippet>906</a>    <span class="kw">let </span>output_tags = output_tags_of(tree.root(), <span class="kw-2">&amp;</span>source_tags)<span class="question-mark">?</span>;
+<a href=#907 id=907 data-nosnippet>907</a>    <span class="comment">// A segment publishes on the grid its own root declares, which is the grid its parent reads it
+<a href=#908 id=908 data-nosnippet>908</a>    // on: the segments of a subquery's inner expression are evaluated on the subquery's grid, not on
+<a href=#909 id=909 data-nosnippet>909</a>    // the statement's, whatever their root computes. The statement's grid is only the fallback for a
+<a href=#910 id=910 data-nosnippet>910</a>    // root that declares none.
+<a href=#911 id=911 data-nosnippet>911</a>    </span><span class="kw">let </span>segment_grid = fused_publish_grid(tree.root(), grid);
+<a href=#912 id=912 data-nosnippet>912</a>    <span class="kw">let </span>(inputs, metric, time_index, tags) = <span class="kw">if let </span>[index] = sources.as_slice() {
+<a href=#913 id=913 data-nosnippet>913</a>        <span class="kw">let </span>(metric, time_index, tags) = per_source.get(<span class="kw-2">*</span>index)<span class="question-mark">?</span>;
+<a href=#914 id=914 data-nosnippet>914</a>        (scans, metric.clone(), time_index.clone(), tags.clone())
+<a href=#915 id=915 data-nosnippet>915</a>    } <span class="kw">else </span>{
+<a href=#916 id=916 data-nosnippet>916</a>        <span class="comment">// A binding cannot describe different source identities. Give each child the existing
+<a href=#917 id=917 data-nosnippet>917</a>        // explicit-label source boundary used for separate metric tables.
+<a href=#918 id=918 data-nosnippet>918</a>        </span><span class="kw">let </span>source_fields = tree_source_fields(<span class="kw-2">&amp;</span>tree).ok()<span class="question-mark">?</span>;
+<a href=#919 id=919 data-nosnippet>919</a>        <span class="kw">let </span><span class="kw-2">mut </span>children = Vec::with_capacity(sources.len());
+<a href=#920 id=920 data-nosnippet>920</a>        <span class="kw">for </span>(local_index, <span class="kw-2">&amp;</span>source_index) <span class="kw">in </span>sources.iter().enumerate() {
+<a href=#921 id=921 data-nosnippet>921</a>            <span class="kw">let </span>(<span class="prelude-val">Some</span>((<span class="prelude-val">Some</span>(metric), <span class="kw">_</span>, source_tags)), <span class="prelude-val">Some</span>(fields), <span class="prelude-val">Some</span>(scan)) = (
+<a href=#922 id=922 data-nosnippet>922</a>                per_source.get(source_index),
+<a href=#923 id=923 data-nosnippet>923</a>                source_fields.get(local_index),
+<a href=#924 id=924 data-nosnippet>924</a>                scans.get(local_index),
+<a href=#925 id=925 data-nosnippet>925</a>            ) <span class="kw">else </span>{
+<a href=#926 id=926 data-nosnippet>926</a>                <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#927 id=927 data-nosnippet>927</a>            };
+<a href=#928 id=928 data-nosnippet>928</a>            children.push(LogicalPlan::Extension(Extension {
+<a href=#929 id=929 data-nosnippet>929</a>                node: Arc::new(
+<a href=#930 id=930 data-nosnippet>930</a>                    RawSeriesSource::try_new(
+<a href=#931 id=931 data-nosnippet>931</a>                        Arc::clone(metric),
+<a href=#932 id=932 data-nosnippet>932</a>                        source_tags.clone(),
+<a href=#933 id=933 data-nosnippet>933</a>                        fields.clone(),
+<a href=#934 id=934 data-nosnippet>934</a>                        scan.clone(),
+<a href=#935 id=935 data-nosnippet>935</a>                    )
+<a href=#936 id=936 data-nosnippet>936</a>                    .ok()<span class="question-mark">?</span>,
+<a href=#937 id=937 data-nosnippet>937</a>                ),
+<a href=#938 id=938 data-nosnippet>938</a>            }));
+<a href=#939 id=939 data-nosnippet>939</a>        }
+<a href=#940 id=940 data-nosnippet>940</a>        <span class="kw">let </span>time_index = per_source.get(<span class="kw-2">*</span>sources.first()<span class="question-mark">?</span>)<span class="question-mark">?</span>.<span class="number">1</span>.clone();
+<a href=#941 id=941 data-nosnippet>941</a>        (children, <span class="prelude-val">None</span>, time_index, output_tags.clone())
+<a href=#942 id=942 data-nosnippet>942</a>    };
+<a href=#943 id=943 data-nosnippet>943</a>    <span class="kw">if </span>!native_tree_supported(<span class="kw-2">&amp;</span>tree) {
+<a href=#944 id=944 data-nosnippet>944</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#945 id=945 data-nosnippet>945</a>    }
+<a href=#946 id=946 data-nosnippet>946</a>    <span class="kw">let </span>frame = FusedSeries::series_frame_schema(<span class="kw-2">&amp;</span>tree).ok()<span class="question-mark">?</span>;
+<a href=#947 id=947 data-nosnippet>947</a>    <span class="kw">let </span>frame = DFSchema::try_from(frame.as_ref().clone()).ok()<span class="question-mark">?</span>;
+<a href=#948 id=948 data-nosnippet>948</a>    <span class="kw">let </span>plan = FusedSeries::try_new_with_format(
+<a href=#949 id=949 data-nosnippet>949</a>        Arc::from(<span class="string">"segment"</span>),
+<a href=#950 id=950 data-nosnippet>950</a>        tree,
+<a href=#951 id=951 data-nosnippet>951</a>        FusedSeriesBinding {
+<a href=#952 id=952 data-nosnippet>952</a>            grid: segment_grid,
+<a href=#953 id=953 data-nosnippet>953</a>            time_index: time_index.clone(),
+<a href=#954 id=954 data-nosnippet>954</a>            tags: tags.clone(),
+<a href=#955 id=955 data-nosnippet>955</a>            metric_name: metric.clone(),
+<a href=#956 id=956 data-nosnippet>956</a>        },
+<a href=#957 id=957 data-nosnippet>957</a>        inputs,
+<a href=#958 id=958 data-nosnippet>958</a>        Arc::new(frame),
+<a href=#959 id=959 data-nosnippet>959</a>        FusedOutputFormat::SeriesFrame,
+<a href=#960 id=960 data-nosnippet>960</a>    )
+<a href=#961 id=961 data-nosnippet>961</a>    .ok()<span class="question-mark">?</span>;
+<a href=#962 id=962 data-nosnippet>962</a>    <span class="prelude-val">Some</span>((
+<a href=#963 id=963 data-nosnippet>963</a>        LogicalPlan::Extension(Extension {
+<a href=#964 id=964 data-nosnippet>964</a>            node: Arc::new(plan),
+<a href=#965 id=965 data-nosnippet>965</a>        }),
+<a href=#966 id=966 data-nosnippet>966</a>        output_tags,
+<a href=#967 id=967 data-nosnippet>967</a>    ))
+<a href=#968 id=968 data-nosnippet>968</a>}
+<a href=#969 id=969 data-nosnippet>969</a>
+<a href=#970 id=970 data-nosnippet>970</a><span class="doccomment">/// Plans `tree` as several segments, or `None` when it is one node already.
+<a href=#971 id=971 data-nosnippet>971</a>///
+<a href=#972 id=972 data-nosnippet>972</a>/// A tree that reads across series answers one partition and gathers whatever it reads. Its
+<a href=#973 id=973 data-nosnippet>973</a>/// per-series prefixes do not need that gather, so each becomes a segment of its own and keeps the
+<a href=#974 id=974 data-nosnippet>974</a>/// partitions it was scanned with. Global consumers and canonical merges are cut in their original
+<a href=#975 id=975 data-nosnippet>975</a>/// order, and recursive segments publish frames for their parents to consume. Only the statement
+<a href=#976 id=976 data-nosnippet>976</a>/// root publishes rows, and it does so under the statement's own value names: [`FieldNames`]
+<a href=#977 id=977 data-nosnippet>977</a>/// answers those, and the rows schema asks [`RootSchema`] for the rest of the layout.
+<a href=#978 id=978 data-nosnippet>978</a></span><span class="attr">#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+<a href=#979 id=979 data-nosnippet>979</a></span><span class="kw">pub fn </span>segment_tree(
+<a href=#980 id=980 data-nosnippet>980</a>    promql: Arc&lt;str&gt;,
+<a href=#981 id=981 data-nosnippet>981</a>    tree: <span class="kw-2">&amp;</span>NativeTree,
+<a href=#982 id=982 data-nosnippet>982</a>    children: <span class="kw-2">&amp;</span>[LogicalPlan],
+<a href=#983 id=983 data-nosnippet>983</a>    source_tags: <span class="kw-2">&amp;</span>[Vec&lt;String&gt;],
+<a href=#984 id=984 data-nosnippet>984</a>    bare_scans: <span class="kw-2">&amp;</span>[LogicalPlan],
+<a href=#985 id=985 data-nosnippet>985</a>    per_source: <span class="kw-2">&amp;</span>[(<span class="prelude-ty">Option</span>&lt;Arc&lt;str&gt;&gt;, String, Vec&lt;String&gt;)],
+<a href=#986 id=986 data-nosnippet>986</a>    grid: <span class="kw-2">&amp;</span>Arc&lt;EvalGrid&gt;,
+<a href=#987 id=987 data-nosnippet>987</a>    time_index: <span class="kw-2">&amp;</span>str,
+<a href=#988 id=988 data-nosnippet>988</a>    tags: <span class="kw-2">&amp;</span>[String],
+<a href=#989 id=989 data-nosnippet>989</a>    metric: <span class="kw-2">&amp;</span><span class="prelude-ty">Option</span>&lt;Arc&lt;str&gt;&gt;,
+<a href=#990 id=990 data-nosnippet>990</a>    format: FusedOutputFormat,
+<a href=#991 id=991 data-nosnippet>991</a>    canonical_segmentation: bool,
+<a href=#992 id=992 data-nosnippet>992</a>    root_kind: FieldKind,
+<a href=#993 id=993 data-nosnippet>993</a>    remote_raw_boundary: bool,
+<a href=#994 id=994 data-nosnippet>994</a>    output_tags_of: OutputTags,
+<a href=#995 id=995 data-nosnippet>995</a>    field_names: FieldNames,
+<a href=#996 id=996 data-nosnippet>996</a>    root_schema: RootSchema,
+<a href=#997 id=997 data-nosnippet>997</a>) -&gt; <span class="prelude-ty">Option</span>&lt;LogicalPlan&gt; {
+<a href=#998 id=998 data-nosnippet>998</a>    <span class="comment">// Only a tree the analyzer gathers is worth splitting: its per-series prefixes then run where
+<a href=#999 id=999 data-nosnippet>999</a>    // their input is read. A window over an evaluated input can need that split even where
+<a href=#1000 id=1000 data-nosnippet>1000</a>    // [`input_locality`] reports a local tree - it drops the metric name, so [`reads_across_series`]
+<a href=#1001 id=1001 data-nosnippet>1001</a>    // reads it as cross-series - and the per-series prefix inside it is what keeps the partitions it
+<a href=#1002 id=1002 data-nosnippet>1002</a>    // scanned. Proceeding only admits the attempt: every cut is admitted by `cut_as_segment`
+<a href=#1003 id=1003 data-nosnippet>1003</a>    // individually, which is where the analyzer's placement is asked.
+<a href=#1004 id=1004 data-nosnippet>1004</a>    </span><span class="kw">if </span>!<span class="macro">matches!</span>(input_locality(tree.root()), InputLocality::SinglePartition)
+<a href=#1005 id=1005 data-nosnippet>1005</a>        &amp;&amp; !evaluated_input_window(tree.root())
+<a href=#1006 id=1006 data-nosnippet>1006</a>    {
+<a href=#1007 id=1007 data-nosnippet>1007</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1008 id=1008 data-nosnippet>1008</a>    }
+<a href=#1009 id=1009 data-nosnippet>1009</a>    <span class="comment">// A segment boundary has to carry something, and the only thing it can carry is a per-series
+<a href=#1010 id=1010 data-nosnippet>1010</a>    // prefix: a subtree that answers each series on its own and can be recomputed. A tree with no
+<a href=#1011 id=1011 data-nosnippet>1011</a>    // such subtree inside it has nothing to cut, and cutting anything else - an aggregate's own
+<a href=#1012 id=1012 data-nosnippet>1012</a>    // state, a constant - is either impossible or a plain recomputation of the same work in one
+<a href=#1013 id=1013 data-nosnippet>1013</a>    // more node. Cutting on locality alone would accept one here.
+<a href=#1014 id=1014 data-nosnippet>1014</a>    //
+<a href=#1015 id=1015 data-nosnippet>1015</a>    // The window this tree may be rooted at is not one of those consumers, but it is no boundary
+<a href=#1016 id=1016 data-nosnippet>1016</a>    // either: `cut_as_segment` never cuts one, and what keeps its input's partitions is the
+<a href=#1017 id=1017 data-nosnippet>1017</a>    // per-series prefix below it, which the cuts below are admitted for.
+<a href=#1018 id=1018 data-nosnippet>1018</a>    // A grouping by `__name__` keeps that label while the fused node's declared columns cannot
+<a href=#1019 id=1019 data-nosnippet>1019</a>    // name it. With multiple sources, groups differing only by metric name would therefore be
+<a href=#1020 id=1020 data-nosnippet>1020</a>    // reported under one label set. A single-source tree cannot merge distinct metric-name groups
+<a href=#1021 id=1021 data-nosnippet>1021</a>    // this way, so this restriction is specific to multi-source segmentation.
+<a href=#1022 id=1022 data-nosnippet>1022</a>    </span><span class="kw">if </span>children.len() &gt; <span class="number">1 </span>&amp;&amp; groups_by_metric_name(tree.root()) {
+<a href=#1023 id=1023 data-nosnippet>1023</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1024 id=1024 data-nosnippet>1024</a>    }
+<a href=#1025 id=1025 data-nosnippet>1025</a>    <span class="kw">let </span><span class="kw-2">mut </span>current_tree = tree.clone();
+<a href=#1026 id=1026 data-nosnippet>1026</a>    <span class="kw">let </span><span class="kw-2">mut </span>current_children = children.to_vec();
+<a href=#1027 id=1027 data-nosnippet>1027</a>    <span class="kw">let </span><span class="kw-2">mut </span>current_tags = source_tags.to_vec();
+<a href=#1028 id=1028 data-nosnippet>1028</a>    <span class="kw">let </span><span class="kw-2">mut </span>current_source_ids = (<span class="number">0</span>..children.len()).map(<span class="prelude-val">Some</span>).collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+<a href=#1029 id=1029 data-nosnippet>1029</a>    <span class="kw">let </span><span class="kw-2">mut </span>first_iteration = <span class="bool-val">true</span>;
+<a href=#1030 id=1030 data-nosnippet>1030</a>    <span class="kw">let </span><span class="kw-2">mut </span>changed = <span class="bool-val">false</span>;
+<a href=#1031 id=1031 data-nosnippet>1031</a>    <span class="kw">loop </span>{
+<a href=#1032 id=1032 data-nosnippet>1032</a>        <span class="comment">// A tree the analyzer keeps partition-local needs no segment; a window over an evaluated
+<a href=#1033 id=1033 data-nosnippet>1033</a>        // input is still worth attempting one for, so its per-series prefix keeps its partitions.
+<a href=#1034 id=1034 data-nosnippet>1034</a>        </span><span class="kw">if </span>!<span class="macro">matches!</span>(
+<a href=#1035 id=1035 data-nosnippet>1035</a>            input_locality(current_tree.root()),
+<a href=#1036 id=1036 data-nosnippet>1036</a>            InputLocality::SinglePartition
+<a href=#1037 id=1037 data-nosnippet>1037</a>        ) &amp;&amp; !evaluated_input_window(current_tree.root())
+<a href=#1038 id=1038 data-nosnippet>1038</a>        {
+<a href=#1039 id=1039 data-nosnippet>1039</a>            <span class="kw">break</span>;
+<a href=#1040 id=1040 data-nosnippet>1040</a>        }
+<a href=#1041 id=1041 data-nosnippet>1041</a>        <span class="kw">let </span>segment = cut_segments(current_tree.root(), canonical_segmentation);
+<a href=#1042 id=1042 data-nosnippet>1042</a>        <span class="kw">if </span>segment.cut.is_empty() {
+<a href=#1043 id=1043 data-nosnippet>1043</a>            <span class="kw">break</span>;
+<a href=#1044 id=1044 data-nosnippet>1044</a>        }
+<a href=#1045 id=1045 data-nosnippet>1045</a>        <span class="kw">let </span><span class="kw-2">mut </span>inputs = Vec::with_capacity(segment.sources.len() + segment.cut.len());
+<a href=#1046 id=1046 data-nosnippet>1046</a>        <span class="kw">let </span><span class="kw-2">mut </span>child_tags = Vec::with_capacity(inputs.capacity());
+<a href=#1047 id=1047 data-nosnippet>1047</a>        <span class="kw">for </span><span class="kw-2">&amp;</span>index <span class="kw">in </span><span class="kw-2">&amp;</span>segment.sources {
+<a href=#1048 id=1048 data-nosnippet>1048</a>            <span class="kw">let </span>child = current_children.get(index)<span class="question-mark">?</span>;
+<a href=#1049 id=1049 data-nosnippet>1049</a>            inputs.push(child.clone());
+<a href=#1050 id=1050 data-nosnippet>1050</a>            child_tags.push(current_tags.get(index).cloned().unwrap_or_default());
+<a href=#1051 id=1051 data-nosnippet>1051</a>        }
+<a href=#1052 id=1052 data-nosnippet>1052</a>        <span class="kw">let </span><span class="kw-2">mut </span>child_source_ids = segment
+<a href=#1053 id=1053 data-nosnippet>1053</a>            .sources
+<a href=#1054 id=1054 data-nosnippet>1054</a>            .iter()
+<a href=#1055 id=1055 data-nosnippet>1055</a>            .map(|<span class="kw-2">&amp;</span>index| current_source_ids.get(index).copied().flatten())
+<a href=#1056 id=1056 data-nosnippet>1056</a>            .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+<a href=#1057 id=1057 data-nosnippet>1057</a>        <span class="kw">for </span>cut <span class="kw">in </span><span class="kw-2">&amp;</span>segment.cut {
+<a href=#1058 id=1058 data-nosnippet>1058</a>            <span class="comment">// A cut may wrap a global consumer in a pointwise rewrite or a later merge. Segment
+<a href=#1059 id=1059 data-nosnippet>1059</a>            // that subtree first so its inner canonical boundary stays below the consumer. A local
+<a href=#1060 id=1060 data-nosnippet>1060</a>            // canonical merge instead goes directly to the boundary builder.
+<a href=#1061 id=1061 data-nosnippet>1061</a>            </span><span class="kw">let </span>canonical = <span class="macro">matches!</span>(cut.expr, NativeExpr::Merge { .. });
+<a href=#1062 id=1062 data-nosnippet>1062</a>            <span class="kw">let </span>built = <span class="kw">if </span>first_iteration &amp;&amp; contains_global_consumer(cut) {
+<a href=#1063 id=1063 data-nosnippet>1063</a>                <span class="kw">let </span>cut_tree = NativeTree::try_new(cut.clone()).ok()<span class="question-mark">?</span>;
+<a href=#1064 id=1064 data-nosnippet>1064</a>                <span class="kw">let </span>plan = segment_tree(
+<a href=#1065 id=1065 data-nosnippet>1065</a>                    Arc::clone(<span class="kw-2">&amp;</span>promql),
+<a href=#1066 id=1066 data-nosnippet>1066</a>                    <span class="kw-2">&amp;</span>cut_tree,
+<a href=#1067 id=1067 data-nosnippet>1067</a>                    <span class="kw-2">&amp;</span>current_children,
+<a href=#1068 id=1068 data-nosnippet>1068</a>                    <span class="kw-2">&amp;</span>current_tags,
+<a href=#1069 id=1069 data-nosnippet>1069</a>                    bare_scans,
+<a href=#1070 id=1070 data-nosnippet>1070</a>                    per_source,
+<a href=#1071 id=1071 data-nosnippet>1071</a>                    grid,
+<a href=#1072 id=1072 data-nosnippet>1072</a>                    time_index,
+<a href=#1073 id=1073 data-nosnippet>1073</a>                    tags,
+<a href=#1074 id=1074 data-nosnippet>1074</a>                    metric,
+<a href=#1075 id=1075 data-nosnippet>1075</a>                    FusedOutputFormat::SeriesFrame,
+<a href=#1076 id=1076 data-nosnippet>1076</a>                    canonical_segmentation,
+<a href=#1077 id=1077 data-nosnippet>1077</a>                    root_kind,
+<a href=#1078 id=1078 data-nosnippet>1078</a>                    remote_raw_boundary,
+<a href=#1079 id=1079 data-nosnippet>1079</a>                    output_tags_of,
+<a href=#1080 id=1080 data-nosnippet>1080</a>                    field_names,
+<a href=#1081 id=1081 data-nosnippet>1081</a>                    root_schema,
+<a href=#1082 id=1082 data-nosnippet>1082</a>                );
+<a href=#1083 id=1083 data-nosnippet>1083</a>                <span class="kw">match </span>plan {
+<a href=#1084 id=1084 data-nosnippet>1084</a>                    <span class="prelude-val">Some</span>(plan) =&gt; {
+<a href=#1085 id=1085 data-nosnippet>1085</a>                        <span class="kw">let </span>cut_tags = output_tags_of(cut, <span class="kw-2">&amp;</span>current_tags)<span class="question-mark">?</span>;
+<a href=#1086 id=1086 data-nosnippet>1086</a>                        <span class="prelude-val">Some</span>((plan, cut_tags))
+<a href=#1087 id=1087 data-nosnippet>1087</a>                    }
+<a href=#1088 id=1088 data-nosnippet>1088</a>                    <span class="prelude-val">None </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#1089 id=1089 data-nosnippet>1089</a>                }
+<a href=#1090 id=1090 data-nosnippet>1090</a>            } <span class="kw">else if </span>first_iteration &amp;&amp; !canonical &amp;&amp; !remote_raw_boundary {
+<a href=#1091 id=1091 data-nosnippet>1091</a>                build_inner_segment(cut, bare_scans, per_source, grid, output_tags_of)
+<a href=#1092 id=1092 data-nosnippet>1092</a>            } <span class="kw">else </span>{
+<a href=#1093 id=1093 data-nosnippet>1093</a>                <span class="prelude-val">None
+<a href=#1094 id=1094 data-nosnippet>1094</a>            </span>};
+<a href=#1095 id=1095 data-nosnippet>1095</a>            <span class="kw">if </span>built.is_none() &amp;&amp; contains_global_consumer(cut) {
+<a href=#1096 id=1096 data-nosnippet>1096</a>                <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1097 id=1097 data-nosnippet>1097</a>            }
+<a href=#1098 id=1098 data-nosnippet>1098</a>            <span class="comment">// A cut the first iteration cannot build from the scans is built from the frames this
+<a href=#1099 id=1099 data-nosnippet>1099</a>            // loop has already published: the canonical pass inserts a merge under a label rewrite,
+<a href=#1100 id=1100 data-nosnippet>1100</a>            // and that boundary - rebuilt here as a producer, a frame and a router - is what answers
+<a href=#1101 id=1101 data-nosnippet>1101</a>            // one series per label set across partitions. Which cuts are taken is
+<a href=#1102 id=1102 data-nosnippet>1102</a>            // `cut_as_segment`'s decision, and it declines the evaluated-input window the analyzer
+<a href=#1103 id=1103 data-nosnippet>1103</a>            // will not place region-locally, so this fallback only ever sees the cuts it admitted.
+<a href=#1104 id=1104 data-nosnippet>1104</a>            </span><span class="kw">let </span>built = built.or_else(|| {
+<a href=#1105 id=1105 data-nosnippet>1105</a>                build_evaluated_segment(
+<a href=#1106 id=1106 data-nosnippet>1106</a>                    Arc::clone(<span class="kw-2">&amp;</span>promql),
+<a href=#1107 id=1107 data-nosnippet>1107</a>                    cut,
+<a href=#1108 id=1108 data-nosnippet>1108</a>                    <span class="kw-2">&amp;</span>current_children,
+<a href=#1109 id=1109 data-nosnippet>1109</a>                    <span class="kw-2">&amp;</span>current_tags,
+<a href=#1110 id=1110 data-nosnippet>1110</a>                    <span class="kw-2">&amp;</span>current_source_ids,
+<a href=#1111 id=1111 data-nosnippet>1111</a>                    per_source,
+<a href=#1112 id=1112 data-nosnippet>1112</a>                    grid,
+<a href=#1113 id=1113 data-nosnippet>1113</a>                    time_index,
+<a href=#1114 id=1114 data-nosnippet>1114</a>                    root_kind,
+<a href=#1115 id=1115 data-nosnippet>1115</a>                    output_tags_of,
+<a href=#1116 id=1116 data-nosnippet>1116</a>                    field_names,
+<a href=#1117 id=1117 data-nosnippet>1117</a>                )
+<a href=#1118 id=1118 data-nosnippet>1118</a>            });
+<a href=#1119 id=1119 data-nosnippet>1119</a>            <span class="kw">let </span>(plan, cut_tags) = built<span class="question-mark">?</span>;
+<a href=#1120 id=1120 data-nosnippet>1120</a>            inputs.push(plan);
+<a href=#1121 id=1121 data-nosnippet>1121</a>            child_tags.push(cut_tags);
+<a href=#1122 id=1122 data-nosnippet>1122</a>            child_source_ids.push(<span class="prelude-val">None</span>);
+<a href=#1123 id=1123 data-nosnippet>1123</a>        }
+<a href=#1124 id=1124 data-nosnippet>1124</a>        <span class="kw">let </span>parent = NativeTree::try_new(segment.node).ok()<span class="question-mark">?</span>;
+<a href=#1125 id=1125 data-nosnippet>1125</a>        first_iteration = <span class="bool-val">false</span>;
+<a href=#1126 id=1126 data-nosnippet>1126</a>        current_tree = parent;
+<a href=#1127 id=1127 data-nosnippet>1127</a>        current_children = inputs;
+<a href=#1128 id=1128 data-nosnippet>1128</a>        current_tags = child_tags;
+<a href=#1129 id=1129 data-nosnippet>1129</a>        current_source_ids = child_source_ids;
+<a href=#1130 id=1130 data-nosnippet>1130</a>        changed = <span class="bool-val">true</span>;
+<a href=#1131 id=1131 data-nosnippet>1131</a>    }
+<a href=#1132 id=1132 data-nosnippet>1132</a>    <span class="kw">if </span>!changed {
+<a href=#1133 id=1133 data-nosnippet>1133</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1134 id=1134 data-nosnippet>1134</a>    }
+<a href=#1135 id=1135 data-nosnippet>1135</a>    <span class="kw">let </span>parent = current_tree;
+<a href=#1136 id=1136 data-nosnippet>1136</a>    <span class="comment">// Segmentation is useful even when the resulting parent is still single-partition: each
+<a href=#1137 id=1137 data-nosnippet>1137</a>    // exported per-series subtree remains a separate input and is bound to its own source.
+<a href=#1138 id=1138 data-nosnippet>1138</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>inputs = current_children;
+<a href=#1139 id=1139 data-nosnippet>1139</a>    <span class="kw">let </span><span class="kw-2">mut </span>child_tags = current_tags;
+<a href=#1140 id=1140 data-nosnippet>1140</a>    <span class="comment">// A merge at this segment's root still needs its own boundary. An outer rewrite above a
+<a href=#1141 id=1141 data-nosnippet>1141</a>    // recursively cut ranking runs after the ranking, then is canonicalized before its caller.
+<a href=#1142 id=1142 data-nosnippet>1142</a>    </span><span class="kw">if let </span>NativeExpr::Merge { input } = <span class="kw-2">&amp;</span>parent.root().expr {
+<a href=#1143 id=1143 data-nosnippet>1143</a>        <span class="kw">let </span>source_fields = tree_source_fields(<span class="kw-2">&amp;</span>parent).ok();
+<a href=#1144 id=1144 data-nosnippet>1144</a>        <span class="kw">for </span>index <span class="kw">in </span><span class="number">0</span>..inputs.len() {
+<a href=#1145 id=1145 data-nosnippet>1145</a>            <span class="kw">let </span>bound = find_input_node(input, index)<span class="question-mark">?</span>;
+<a href=#1146 id=1146 data-nosnippet>1146</a>            <span class="kw">if </span>bound
+<a href=#1147 id=1147 data-nosnippet>1147</a>                .output
+<a href=#1148 id=1148 data-nosnippet>1148</a>                .samples()
+<a href=#1149 id=1149 data-nosnippet>1149</a>                .is_some_and(|schema| schema.eval_grid.is_none())
+<a href=#1150 id=1150 data-nosnippet>1150</a>                &amp;&amp; !is_raw_series_source(<span class="kw-2">&amp;</span>inputs[index])
+<a href=#1151 id=1151 data-nosnippet>1151</a>            {
+<a href=#1152 id=1152 data-nosnippet>1152</a>                <span class="kw">let </span>source_index = current_source_ids.get(index).copied().flatten()<span class="question-mark">?</span>;
+<a href=#1153 id=1153 data-nosnippet>1153</a>                <span class="kw">let </span>(<span class="prelude-val">Some</span>((<span class="prelude-val">Some</span>(source_metric), <span class="kw">_</span>, source_tags)), <span class="prelude-val">Some</span>(fields)) = (
+<a href=#1154 id=1154 data-nosnippet>1154</a>                    per_source.get(source_index),
+<a href=#1155 id=1155 data-nosnippet>1155</a>                    source_fields.as_ref().and_then(|fields| fields.get(index)),
+<a href=#1156 id=1156 data-nosnippet>1156</a>                ) <span class="kw">else </span>{
+<a href=#1157 id=1157 data-nosnippet>1157</a>                    <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1158 id=1158 data-nosnippet>1158</a>                };
+<a href=#1159 id=1159 data-nosnippet>1159</a>                <span class="kw">let </span><span class="prelude-val">Ok</span>(source) = RawSeriesSource::try_new(
+<a href=#1160 id=1160 data-nosnippet>1160</a>                    Arc::clone(source_metric),
+<a href=#1161 id=1161 data-nosnippet>1161</a>                    source_tags.clone(),
+<a href=#1162 id=1162 data-nosnippet>1162</a>                    fields.clone(),
+<a href=#1163 id=1163 data-nosnippet>1163</a>                    inputs[index].clone(),
+<a href=#1164 id=1164 data-nosnippet>1164</a>                ) <span class="kw">else </span>{
+<a href=#1165 id=1165 data-nosnippet>1165</a>                    <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1166 id=1166 data-nosnippet>1166</a>                };
+<a href=#1167 id=1167 data-nosnippet>1167</a>                inputs[index] = LogicalPlan::Extension(Extension {
+<a href=#1168 id=1168 data-nosnippet>1168</a>                    node: Arc::new(source),
+<a href=#1169 id=1169 data-nosnippet>1169</a>                });
+<a href=#1170 id=1170 data-nosnippet>1170</a>                child_tags[index] = source_tags.clone();
+<a href=#1171 id=1171 data-nosnippet>1171</a>            }
+<a href=#1172 id=1172 data-nosnippet>1172</a>        }
+<a href=#1173 id=1173 data-nosnippet>1173</a>        <span class="kw">return </span>canonical_boundary_stages(
+<a href=#1174 id=1174 data-nosnippet>1174</a>            Arc::clone(<span class="kw-2">&amp;</span>promql),
+<a href=#1175 id=1175 data-nosnippet>1175</a>            <span class="kw-2">&amp;</span>parent,
+<a href=#1176 id=1176 data-nosnippet>1176</a>            <span class="kw-2">&amp;</span>inputs,
+<a href=#1177 id=1177 data-nosnippet>1177</a>            <span class="kw-2">&amp;</span>child_tags,
+<a href=#1178 id=1178 data-nosnippet>1178</a>            grid,
+<a href=#1179 id=1179 data-nosnippet>1179</a>            time_index,
+<a href=#1180 id=1180 data-nosnippet>1180</a>            tags,
+<a href=#1181 id=1181 data-nosnippet>1181</a>            metric,
+<a href=#1182 id=1182 data-nosnippet>1182</a>            format,
+<a href=#1183 id=1183 data-nosnippet>1183</a>            root_kind,
+<a href=#1184 id=1184 data-nosnippet>1184</a>            output_tags_of,
+<a href=#1185 id=1185 data-nosnippet>1185</a>            field_names,
+<a href=#1186 id=1186 data-nosnippet>1186</a>        )
+<a href=#1187 id=1187 data-nosnippet>1187</a>        .map(|(plan, <span class="kw">_</span>)| plan);
+<a href=#1188 id=1188 data-nosnippet>1188</a>    }
+<a href=#1189 id=1189 data-nosnippet>1189</a>    <span class="comment">// Nothing below can fall back once physical planning starts, so every tree this route commits
+<a href=#1190 id=1190 data-nosnippet>1190</a>    // to has to be one the runtime executes. A shape the runtime refuses - a grouping by a value
+<a href=#1191 id=1191 data-nosnippet>1191</a>    // field, an operation with no kernel - therefore keeps the plan it had.
+<a href=#1192 id=1192 data-nosnippet>1192</a>    </span><span class="kw">if </span>!native_tree_supported(<span class="kw-2">&amp;</span>parent) {
+<a href=#1193 id=1193 data-nosnippet>1193</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1194 id=1194 data-nosnippet>1194</a>    }
+<a href=#1195 id=1195 data-nosnippet>1195</a>    <span class="kw">let </span>output_schema = <span class="kw">match </span>format {
+<a href=#1196 id=1196 data-nosnippet>1196</a>        FusedOutputFormat::PlainRows =&gt; {
+<a href=#1197 id=1197 data-nosnippet>1197</a>            root_schema(<span class="kw-2">&amp;</span>promql, <span class="kw-2">&amp;</span>parent, <span class="kw-2">&amp;</span>child_tags, time_index, root_kind)<span class="question-mark">?
+<a href=#1198 id=1198 data-nosnippet>1198</a>        </span>}
+<a href=#1199 id=1199 data-nosnippet>1199</a>        FusedOutputFormat::SeriesFrame =&gt; {
+<a href=#1200 id=1200 data-nosnippet>1200</a>            <span class="kw">let </span><span class="prelude-val">Ok</span>(frame) = FusedSeries::series_frame_schema(<span class="kw-2">&amp;</span>parent) <span class="kw">else </span>{
+<a href=#1201 id=1201 data-nosnippet>1201</a>                <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1202 id=1202 data-nosnippet>1202</a>            };
+<a href=#1203 id=1203 data-nosnippet>1203</a>            <span class="kw">let </span><span class="prelude-val">Ok</span>(schema) = DFSchema::try_from(frame.as_ref().clone()) <span class="kw">else </span>{
+<a href=#1204 id=1204 data-nosnippet>1204</a>                <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1205 id=1205 data-nosnippet>1205</a>            };
+<a href=#1206 id=1206 data-nosnippet>1206</a>            Arc::new(schema)
+<a href=#1207 id=1207 data-nosnippet>1207</a>        }
+<a href=#1208 id=1208 data-nosnippet>1208</a>    };
+<a href=#1209 id=1209 data-nosnippet>1209</a>    <span class="comment">// A recursively constructed segment still has its original source binding. Its parent may
+<a href=#1210 id=1210 data-nosnippet>1210</a>    // combine another metric; giving the segment that parent's metric would relabel both inputs.
+<a href=#1211 id=1211 data-nosnippet>1211</a>    // Direct scan segments keep their established builder and binding unchanged.
+<a href=#1212 id=1212 data-nosnippet>1212</a>    </span><span class="kw">let </span>segment_binding = |source_ids: <span class="kw-2">&amp;</span>[<span class="prelude-ty">Option</span>&lt;usize&gt;]| -&gt; (<span class="prelude-ty">Option</span>&lt;Arc&lt;str&gt;&gt;, String) {
+<a href=#1213 id=1213 data-nosnippet>1213</a>        <span class="kw">let </span><span class="kw-2">mut </span>sources = source_ids.iter().flatten().copied();
+<a href=#1214 id=1214 data-nosnippet>1214</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(source) = sources.next() <span class="kw">else </span>{
+<a href=#1215 id=1215 data-nosnippet>1215</a>            <span class="kw">return </span>(metric.clone(), time_index.to_string());
+<a href=#1216 id=1216 data-nosnippet>1216</a>        };
+<a href=#1217 id=1217 data-nosnippet>1217</a>        <span class="kw">if </span>sources.next().is_some() {
+<a href=#1218 id=1218 data-nosnippet>1218</a>            <span class="kw">return </span>(<span class="prelude-val">None</span>, time_index.to_string());
+<a href=#1219 id=1219 data-nosnippet>1219</a>        }
+<a href=#1220 id=1220 data-nosnippet>1220</a>        per_source.get(source).map_or_else(
+<a href=#1221 id=1221 data-nosnippet>1221</a>            || (metric.clone(), time_index.to_string()),
+<a href=#1222 id=1222 data-nosnippet>1222</a>            |(metric, time, <span class="kw">_</span>)| (metric.clone(), time.clone()),
+<a href=#1223 id=1223 data-nosnippet>1223</a>        )
+<a href=#1224 id=1224 data-nosnippet>1224</a>    };
+<a href=#1225 id=1225 data-nosnippet>1225</a>    <span class="kw">let </span>(segment_metric, segment_time_index) = segment_binding(<span class="kw-2">&amp;</span>current_source_ids);
+<a href=#1226 id=1226 data-nosnippet>1226</a>    <span class="comment">// A segment publishes on the grid its root declares, which is the grid its consumer reads it
+<a href=#1227 id=1227 data-nosnippet>1227</a>    // on. Segmentation recurses into a cut subtree with the caller's grid, and that subtree can sit
+<a href=#1228 id=1228 data-nosnippet>1228</a>    // inside a subquery window: the canonical segmentation of a collapsing rewrite cuts the window's
+<a href=#1229 id=1229 data-nosnippet>1229</a>    // input while its caller still holds the statement's grid. Binding the caller's grid here
+<a href=#1230 id=1230 data-nosnippet>1230</a>    // rejects such a segment, and the rejection aborts the whole route.
+<a href=#1231 id=1231 data-nosnippet>1231</a>    </span><span class="kw">let </span>publish_grid = fused_publish_grid(parent.root(), grid);
+<a href=#1232 id=1232 data-nosnippet>1232</a>    <span class="kw">let </span><span class="prelude-val">Ok</span>(plan) = FusedSeries::try_new_with_format(
+<a href=#1233 id=1233 data-nosnippet>1233</a>        Arc::clone(<span class="kw-2">&amp;</span>promql),
+<a href=#1234 id=1234 data-nosnippet>1234</a>        parent,
+<a href=#1235 id=1235 data-nosnippet>1235</a>        FusedSeriesBinding {
+<a href=#1236 id=1236 data-nosnippet>1236</a>            grid: publish_grid,
+<a href=#1237 id=1237 data-nosnippet>1237</a>            time_index: segment_time_index,
+<a href=#1238 id=1238 data-nosnippet>1238</a>            tags: tags.to_vec(),
+<a href=#1239 id=1239 data-nosnippet>1239</a>            metric_name: segment_metric,
+<a href=#1240 id=1240 data-nosnippet>1240</a>        },
+<a href=#1241 id=1241 data-nosnippet>1241</a>        inputs,
+<a href=#1242 id=1242 data-nosnippet>1242</a>        output_schema,
+<a href=#1243 id=1243 data-nosnippet>1243</a>        format,
+<a href=#1244 id=1244 data-nosnippet>1244</a>    ) <span class="kw">else </span>{
+<a href=#1245 id=1245 data-nosnippet>1245</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1246 id=1246 data-nosnippet>1246</a>    };
+<a href=#1247 id=1247 data-nosnippet>1247</a>    <span class="prelude-val">Some</span>(LogicalPlan::Extension(Extension {
+<a href=#1248 id=1248 data-nosnippet>1248</a>        node: Arc::new(plan),
+<a href=#1249 id=1249 data-nosnippet>1249</a>    }))
+<a href=#1250 id=1250 data-nosnippet>1250</a>}
+</code></pre></div></section></main></body></html>

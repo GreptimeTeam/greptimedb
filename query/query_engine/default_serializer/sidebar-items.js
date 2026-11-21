@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["decode_plan","register_greptime_functions"],"struct":["DefaultPlanDecoder","DefaultSerializer","MergeScanSubstraitConsumer"]};

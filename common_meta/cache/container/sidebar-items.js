@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Invalidation"],"fn":["init"],"struct":["CacheContainer","CacheEntries"],"type":["BatchInitializer","BatchResult","EventHandler","Initializer"]};

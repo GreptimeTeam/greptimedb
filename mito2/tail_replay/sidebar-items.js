@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CHUNK_MEMTABLE_USAGE","LEASE_CHECK_INTERVAL","MAX_BACKOFF","MAX_CONCURRENT_TAIL_REPLAYS","MIN_BACKOFF","TAIL_REPLAY_MEMORY_FACTOR"],"fn":["notify_worker","release_wal_after_tails_edit","should_replay_tails"],"struct":["ChunkReservation","TailReplayEndGuard","TailReplayLimits","TailReplayMemory","TailReplayTask"]};

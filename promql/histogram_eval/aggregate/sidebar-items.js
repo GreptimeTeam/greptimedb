@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["HistogramAggregate"],"fn":["aggregate_histograms","aggregate_point","sum_or_avg"]};

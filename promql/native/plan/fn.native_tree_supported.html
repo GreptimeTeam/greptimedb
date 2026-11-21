@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Whether the native runtime executes `tree`, answered from the tree itself."><title>native_tree_supported in promql::native::plan - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="promql" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">native_tree_supported</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../promql/index.html">promql</a><span class="version">1.4.0-alpha.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">native_<wbr>tree_<wbr>supported</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-is-refused" title="What is refused">What is refused</a></li><li><a href="#what-nativeexecutionstatetry_new-still-decides" title="What `NativeExecutionState::try_new` still decides">What <code>NativeExecutionState::try_new</code> still decides</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In promql::<wbr>native::<wbr>plan</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">promql</a>::<wbr><a href="../index.html">native</a>::<wbr><a href="index.html">plan</a></div><h1>Function <span class="fn">native_<wbr>tree_<wbr>supported</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/promql/native/plan.rs.html#1636-1644">Source</a> </span></div><pre class="rust item-decl"><code>pub fn native_tree_supported(tree: &amp;<a class="struct" href="struct.NativeTree.html" title="struct promql::native::plan::NativeTree">NativeTree</a>) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.bool.html">bool</a></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Whether the native runtime executes <code>tree</code>, answered from the tree itself.</p>
+<p>This is the question the native route asks before it commits a statement: a tree the runtime
+refuses has to keep the plan it had, because a refusal raised during physical planning cannot
+fall back. It used to be answered by building a
+<a href="../execute/struct.NativeExecutionState.html" title="struct promql::native::execute::NativeExecutionState"><code>NativeExecutionState</code></a> over the tree and
+dropping it, which allocates a runtime node per node per partition only to throw it away. Every
+term of the answer is bound on the tree, so the answer is read from the tree instead.</p>
+<h2 id="what-is-refused"><a class="doc-anchor" href="#what-is-refused">§</a>What is refused</h2>
+<p>This lists what <code>RuntimeNode::build</code> (and the root check in
+<code>NativeExecutionState::try_new</code>) refuses, less what <a href="struct.NativeNode.html#method.validate" title="method promql::native::plan::NativeNode::validate"><code>NativeNode::validate</code></a> has already
+refused: a <code>NativeTree</code> exists only through <a href="struct.NativeTree.html#method.try_new" title="associated function promql::native::plan::NativeTree::try_new"><code>NativeTree::try_new</code></a> or <code>Deserialize</code>, and both
+validate, so a compiled tree’s per-node type contracts hold by the time this runs. What is left
+is the shape of the nodes, and the arithmetic each of them leaves to the runtime:</p>
+<ul>
+<li>a root that answers raw samples, which has no positions to answer on;</li>
+<li>an input leaf whose series chunks may interleave, which no consumer of a leaf can order;</li>
+<li><code>scalar()</code> over a vector carrying more than one field;</li>
+<li>a binary node that is neither a vector–vector operation nor a broadcast the runtime performs:
+two constant operands (no series to carry the result), a scalar broadcast carrying
+vector-matching modifiers, or <code>bool</code> on an arithmetic operator, which has no <code>bool</code> form;</li>
+<li>a <code>quantile</code> aggregate at any stage but <code>Complete</code>, which would need a partial state it does
+not keep (<code>validate</code> refuses one for the same reason; this arm keeps the predicate and the
+runtime agreeing on it);</li>
+<li>an aggregate below <code>Final</code> whose <code>by</code> names a value field, which would fold series the
+existing plan keeps apart;</li>
+<li><code>topk</code>, <code>bottomk</code>, <code>limitk</code>, <code>sort</code> and <code>sort_desc</code> over a vector carrying more than one
+field, whose series have no one value to rank;</li>
+<li>a <code>topk</code>, <code>bottomk</code>, <code>limitk</code> or <code>count_values</code> grouping that names a value field, and a
+<code>count_values</code> label that is empty;</li>
+<li>a window whose <code>anchored</code> or <code>smoothed</code> modifier reads evaluated input, names a function its
+kernel does not correct, or carries a negative lookback;</li>
+<li>a window whose timestamps do not fit: the fold offset an <code>@</code> anchor turns into, or the one
+<code>predict_linear</code> adds to a point of the grid, where the sum leaves <code>i64</code>. Not a shape, but it
+is decided by the grid and the window alone, so this is where it is decided (see
+<code>window_instants_fit</code>).</li>
+</ul>
+<h2 id="what-nativeexecutionstatetry_new-still-decides"><a class="doc-anchor" href="#what-nativeexecutionstatetry_new-still-decides">§</a>What <code>NativeExecutionState::try_new</code> still decides</h2>
+<p>Not every refusal is decided by the tree, and the ones below stay where the runtime builds:</p>
+<ul>
+<li>a reservation the memory pool refuses, which no tree carries. Every site that admits a tree
+ran the trial build over an
+<a href="datafusion::execution::memory_pool::UnboundedMemoryPool"><code>UnboundedMemoryPool</code></a>, which
+refuses nothing, and none of them builds a runtime any more, so this is not a refusal
+admission can meet at any site;</li>
+<li>a tree a test assembled directly, whose nodes disagree about their types, which
+<a href="struct.NativeNode.html#method.validate" title="method promql::native::plan::NativeNode::validate"><code>NativeNode::validate</code></a> rejects for every compiled one.</li>
+</ul>
+</div></details></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["gen_partition_from_concurrency","is_deferred_unknown_file","should_delete_file"],"struct":["GcConfig","GcLimiter","LocalGcWorker","ManifestOpenConfig","RegionGcOutcome"],"type":["GcLimiterRef"]};

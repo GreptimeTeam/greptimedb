@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["partition_column_types","physical_regions_disjoint"],"struct":["DistExtensionPlanner","MergeSortExtensionPlanner","TableScanExtractor"]};

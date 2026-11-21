@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["record_sweep","region_write_dirs","spawn_region_sweep"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_candidate_lease_id"],"struct":["MemoryRegionKeeper","OperatingRegion","OperatingRegionGuard"],"type":["MemoryRegionKeeperRef"]};

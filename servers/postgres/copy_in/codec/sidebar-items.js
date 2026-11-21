@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CopyFormat"],"trait":["RecordParser"],"type":["ParsedRow"]};

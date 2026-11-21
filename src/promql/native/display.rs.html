@@ -1,0 +1,619 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/promql/src/native/display.rs`."><title>display.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="promql" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">promql/native/</div>display.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright 2023 Greptime Team
+<a href=#2 id=2 data-nosnippet>2</a>//
+<a href=#3 id=3 data-nosnippet>3</a>// Licensed under the Apache License, Version 2.0 (the "License");
+<a href=#4 id=4 data-nosnippet>4</a>// you may not use this file except in compliance with the License.
+<a href=#5 id=5 data-nosnippet>5</a>// You may obtain a copy of the License at
+<a href=#6 id=6 data-nosnippet>6</a>//
+<a href=#7 id=7 data-nosnippet>7</a>//     http://www.apache.org/licenses/LICENSE-2.0
+<a href=#8 id=8 data-nosnippet>8</a>//
+<a href=#9 id=9 data-nosnippet>9</a>// Unless required by applicable law or agreed to in writing, software
+<a href=#10 id=10 data-nosnippet>10</a>// distributed under the License is distributed on an "AS IS" BASIS,
+<a href=#11 id=11 data-nosnippet>11</a>// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+<a href=#12 id=12 data-nosnippet>12</a>// See the License for the specific language governing permissions and
+<a href=#13 id=13 data-nosnippet>13</a>// limitations under the License.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="doccomment">//! One line per node of a [`NativeTree`].
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! The tree is displayed by recursively visiting its bound expressions. The display is an
+<a href=#18 id=18 data-nosnippet>18</a>//! observation of a compiled tree: it runs nothing, and every line reads as the node it is,
+<a href=#19 id=19 data-nosnippet>19</a>//! making no claim about whether that node could run.
+<a href=#20 id=20 data-nosnippet>20</a>//!
+<a href=#21 id=21 data-nosnippet>21</a>//! A node that recorded figures shows them at the end of its own line, and only its own: the walk
+<a href=#22 id=22 data-nosnippet>22</a>//! carries the path the runtime registered that node under, so the figures of one node are never
+<a href=#23 id=23 data-nosnippet>23</a>//! reported as those of another. A tree whose nodes recorded nothing - one that was never run,
+<a href=#24 id=24 data-nosnippet>24</a>//! which is what `EXPLAIN` shows - prints structure only.
+<a href=#25 id=25 data-nosnippet>25</a>
+<a href=#26 id=26 data-nosnippet>26</a></span><span class="kw">use </span>std::borrow::Cow;
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">use </span>std::fmt::{<span class="self">self</span>, Write};
+<a href=#28 id=28 data-nosnippet>28</a><span class="kw">use </span>std::sync::Arc;
+<a href=#29 id=29 data-nosnippet>29</a>
+<a href=#30 id=30 data-nosnippet>30</a><span class="kw">use </span>common_recordbatch::adapter::{NativeTreeMetrics, format_metric};
+<a href=#31 id=31 data-nosnippet>31</a><span class="kw">use </span>datatypes::series::time::EvalGrid;
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">use </span>datatypes::series::{SeriesLabels, SeriesOrdering};
+<a href=#33 id=33 data-nosnippet>33</a>
+<a href=#34 id=34 data-nosnippet>34</a><span class="kw">use </span><span class="kw">crate</span>::histogram_eval::HistogramFunction;
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">use </span><span class="kw">crate</span>::map::MathOp;
+<a href=#36 id=36 data-nosnippet>36</a><span class="kw">use </span><span class="kw">crate</span>::native::metrics::NodeMetricsSnapshot;
+<a href=#37 id=37 data-nosnippet>37</a><span class="kw">use </span><span class="kw">crate</span>::native::plan::{
+<a href=#38 id=38 data-nosnippet>38</a>    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
+<a href=#39 id=39 data-nosnippet>39</a>    NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
+<a href=#40 id=40 data-nosnippet>40</a>};
+<a href=#41 id=41 data-nosnippet>41</a><span class="kw">use </span><span class="kw">crate</span>::range_eval::RangeFunction;
+<a href=#42 id=42 data-nosnippet>42</a><span class="kw">use </span><span class="kw">crate</span>::select::{MatchOp, SortOrder};
+<a href=#43 id=43 data-nosnippet>43</a><span class="kw">use </span><span class="kw">crate</span>::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp};
+<a href=#44 id=44 data-nosnippet>44</a>
+<a href=#45 id=45 data-nosnippet>45</a><span class="doccomment">/// The path the runtime registers a tree's root node under.
+<a href=#46 id=46 data-nosnippet>46</a>///
+<a href=#47 id=47 data-nosnippet>47</a>/// Every other path is this one and the segments of [`child_segments`], so the walk below asks for
+<a href=#48 id=48 data-nosnippet>48</a>/// a node's figures by the same key its registration used.
+<a href=#49 id=49 data-nosnippet>49</a></span><span class="kw">pub const </span>ROOT_PATH: <span class="kw-2">&amp;</span>str = <span class="string">"root"</span>;
+<a href=#50 id=50 data-nosnippet>50</a>
+<a href=#51 id=51 data-nosnippet>51</a><span class="doccomment">/// One displayed node: its line, the figures it recorded, and the nodes that consume its output.
+<a href=#52 id=52 data-nosnippet>52</a>///
+<a href=#53 id=53 data-nosnippet>53</a>/// The same report feeds the tree's text and, through the operator that owns the tree, the
+<a href=#54 id=54 data-nosnippet>54</a>/// structure a machine-readable `ANALYZE` publishes, so the two cannot describe different trees.
+<a href=#55 id=55 data-nosnippet>55</a></span><span class="attr">#[derive(Clone, Debug, PartialEq, Eq)]
+<a href=#56 id=56 data-nosnippet>56</a></span><span class="kw">pub struct </span>NativeNodeReport {
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="doccomment">/// The node's line without figures, as `&lt;kind&gt;: &lt;what it computes&gt;`.
+<a href=#58 id=58 data-nosnippet>58</a>    </span><span class="kw">pub </span>line: String,
+<a href=#59 id=59 data-nosnippet>59</a>    <span class="doccomment">/// The figures this node recorded, in [`crate::native::metrics::NodeMetric::ALL`] order.
+<a href=#60 id=60 data-nosnippet>60</a>    </span><span class="kw">pub </span>metrics: Vec&lt;(String, usize)&gt;,
+<a href=#61 id=61 data-nosnippet>61</a>    <span class="doccomment">/// The nodes that consume this one's output, in the order the runtime feeds them.
+<a href=#62 id=62 data-nosnippet>62</a>    </span><span class="kw">pub </span>children: Vec&lt;NativeNodeReport&gt;,
+<a href=#63 id=63 data-nosnippet>63</a>}
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a><span class="kw">impl </span>From&lt;NativeNodeReport&gt; <span class="kw">for </span>NativeTreeMetrics {
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="doccomment">/// The same nodes, as the plain data a machine-readable `ANALYZE` publishes.
+<a href=#67 id=67 data-nosnippet>67</a>    ///
+<a href=#68 id=68 data-nosnippet>68</a>    /// The text and that record are built from one report, so a reader of either sees the same
+<a href=#69 id=69 data-nosnippet>69</a>    /// nodes with the same figures.
+<a href=#70 id=70 data-nosnippet>70</a>    </span><span class="kw">fn </span>from(report: NativeNodeReport) -&gt; <span class="self">Self </span>{
+<a href=#71 id=71 data-nosnippet>71</a>        <span class="self">Self </span>{
+<a href=#72 id=72 data-nosnippet>72</a>            line: report.line,
+<a href=#73 id=73 data-nosnippet>73</a>            metrics: report.metrics,
+<a href=#74 id=74 data-nosnippet>74</a>            children: report.children.into_iter().map(<span class="self">Self</span>::from).collect(),
+<a href=#75 id=75 data-nosnippet>75</a>        }
+<a href=#76 id=76 data-nosnippet>76</a>    }
+<a href=#77 id=77 data-nosnippet>77</a>}
+<a href=#78 id=78 data-nosnippet>78</a>
+<a href=#79 id=79 data-nosnippet>79</a><span class="doccomment">/// A grid as `&lt;start&gt;/&lt;step&gt;x&lt;len&gt;`.
+<a href=#80 id=80 data-nosnippet>80</a></span><span class="kw">fn </span>grid_name(grid: <span class="kw-2">&amp;</span>EvalGrid) -&gt; String {
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="kw">let </span>spec = grid.spec();
+<a href=#82 id=82 data-nosnippet>82</a>    <span class="macro">format!</span>(
+<a href=#83 id=83 data-nosnippet>83</a>        <span class="string">"{}/{step}x{len}"</span>,
+<a href=#84 id=84 data-nosnippet>84</a>        spec.start_ms,
+<a href=#85 id=85 data-nosnippet>85</a>        step = spec.step_ms,
+<a href=#86 id=86 data-nosnippet>86</a>        len = spec.len
+<a href=#87 id=87 data-nosnippet>87</a>    )
+<a href=#88 id=88 data-nosnippet>88</a>}
+<a href=#89 id=89 data-nosnippet>89</a>
+<a href=#90 id=90 data-nosnippet>90</a><span class="doccomment">/// A label list in the order it was bound.
+<a href=#91 id=91 data-nosnippet>91</a></span><span class="kw">fn </span>label_list(labels: <span class="kw-2">&amp;</span>[Arc&lt;str&gt;]) -&gt; String {
+<a href=#92 id=92 data-nosnippet>92</a>    labels
+<a href=#93 id=93 data-nosnippet>93</a>        .iter()
+<a href=#94 id=94 data-nosnippet>94</a>        .map(|label| label.to_string())
+<a href=#95 id=95 data-nosnippet>95</a>        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
+<a href=#96 id=96 data-nosnippet>96</a>        .join(<span class="string">", "</span>)
+<a href=#97 id=97 data-nosnippet>97</a>}
+<a href=#98 id=98 data-nosnippet>98</a>
+<a href=#99 id=99 data-nosnippet>99</a><span class="doccomment">/// The ordering an input guarantees, when it is weaker than the scan's default.
+<a href=#100 id=100 data-nosnippet>100</a></span><span class="kw">fn </span>ordering(ordering: SeriesOrdering) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#101 id=101 data-nosnippet>101</a>    <span class="comment">// `KeyThenTime` is what a scan that orders anything at all provides, so it is the
+<a href=#102 id=102 data-nosnippet>102</a>    // uninteresting case; a weaker guarantee is what a consumer has to know about.
+<a href=#103 id=103 data-nosnippet>103</a>    </span><span class="kw">match </span>ordering {
+<a href=#104 id=104 data-nosnippet>104</a>        SeriesOrdering::KeyThenTime =&gt; <span class="string">""</span>,
+<a href=#105 id=105 data-nosnippet>105</a>        SeriesOrdering::Contiguous =&gt; <span class="string">", contiguous"</span>,
+<a href=#106 id=106 data-nosnippet>106</a>        SeriesOrdering::Interleaved =&gt; <span class="string">", interleaved"</span>,
+<a href=#107 id=107 data-nosnippet>107</a>    }
+<a href=#108 id=108 data-nosnippet>108</a>}
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a><span class="doccomment">/// The grid a node's output is evaluated on, or `-` for one that has none.
+<a href=#111 id=111 data-nosnippet>111</a></span><span class="kw">fn </span>grid_of(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; String {
+<a href=#112 id=112 data-nosnippet>112</a>    node.output
+<a href=#113 id=113 data-nosnippet>113</a>        .grid()
+<a href=#114 id=114 data-nosnippet>114</a>        .map_or_else(|| <span class="string">"-"</span>.to_string(), |grid| grid_name(grid))
+<a href=#115 id=115 data-nosnippet>115</a>}
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a><span class="doccomment">/// The operation a node computes, in the words of the query that produced it.
+<a href=#118 id=118 data-nosnippet>118</a></span><span class="kw">fn </span>describe(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; String {
+<a href=#119 id=119 data-nosnippet>119</a>    <span class="kw">match </span><span class="kw-2">&amp;</span>node.expr {
+<a href=#120 id=120 data-nosnippet>120</a>        NativeExpr::Input(input) =&gt; <span class="kw">match </span><span class="kw-2">&amp;</span>input.output {
+<a href=#121 id=121 data-nosnippet>121</a>            NativeType::Samples(schema) <span class="kw">if </span>schema.eval_grid.is_some() =&gt; {
+<a href=#122 id=122 data-nosnippet>122</a>                <span class="macro">format!</span>(
+<a href=#123 id=123 data-nosnippet>123</a>                    <span class="string">"evaluated samples source={}{}"</span>,
+<a href=#124 id=124 data-nosnippet>124</a>                    input.source_index,
+<a href=#125 id=125 data-nosnippet>125</a>                    ordering(input.ordering)
+<a href=#126 id=126 data-nosnippet>126</a>                )
+<a href=#127 id=127 data-nosnippet>127</a>            }
+<a href=#128 id=128 data-nosnippet>128</a>            NativeType::Samples(<span class="kw">_</span>) =&gt; <span class="macro">format!</span>(
+<a href=#129 id=129 data-nosnippet>129</a>                <span class="string">"raw samples source={}{}"</span>,
+<a href=#130 id=130 data-nosnippet>130</a>                input.source_index,
+<a href=#131 id=131 data-nosnippet>131</a>                ordering(input.ordering)
+<a href=#132 id=132 data-nosnippet>132</a>            ),
+<a href=#133 id=133 data-nosnippet>133</a>            NativeType::Scalar(grid) =&gt; <span class="macro">format!</span>(<span class="string">"scalar on grid {}"</span>, grid_name(grid)),
+<a href=#134 id=134 data-nosnippet>134</a>            NativeType::AggregateState(<span class="kw">_</span>) =&gt; <span class="string">"aggregate state"</span>.to_string(),
+<a href=#135 id=135 data-nosnippet>135</a>        },
+<a href=#136 id=136 data-nosnippet>136</a>        NativeExpr::Scalar(scalar) =&gt; scalar.value.to_string(),
+<a href=#137 id=137 data-nosnippet>137</a>        NativeExpr::EvalTime { date: <span class="prelude-val">None </span>} =&gt; <span class="macro">format!</span>(<span class="string">"time() on grid {}"</span>, grid_of(node)),
+<a href=#138 id=138 data-nosnippet>138</a>        NativeExpr::EvalTime { date: <span class="prelude-val">Some</span>(date) } =&gt; {
+<a href=#139 id=139 data-nosnippet>139</a>            <span class="macro">format!</span>(<span class="string">"{}() on grid {}"</span>, date.name(), grid_of(node))
+<a href=#140 id=140 data-nosnippet>140</a>        }
+<a href=#141 id=141 data-nosnippet>141</a>        NativeExpr::VectorOf { .. } =&gt; <span class="string">"vector()"</span>.to_string(),
+<a href=#142 id=142 data-nosnippet>142</a>        NativeExpr::ScalarOf { .. } =&gt; <span class="string">"scalar()"</span>.to_string(),
+<a href=#143 id=143 data-nosnippet>143</a>        NativeExpr::ParameterizedTopK { op, .. } =&gt; <span class="kw">match </span>op {
+<a href=#144 id=144 data-nosnippet>144</a>            BoundVectorOp::TopK { top: <span class="bool-val">true</span>, .. } =&gt; <span class="string">"parameterized topk"</span>.to_string(),
+<a href=#145 id=145 data-nosnippet>145</a>            BoundVectorOp::TopK { top: <span class="bool-val">false</span>, .. } =&gt; <span class="string">"parameterized bottomk"</span>.to_string(),
+<a href=#146 id=146 data-nosnippet>146</a>            <span class="kw">_ </span>=&gt; <span class="string">"parameterized topk"</span>.to_string(),
+<a href=#147 id=147 data-nosnippet>147</a>        },
+<a href=#148 id=148 data-nosnippet>148</a>        NativeExpr::ParameterizedHistogram { op, parameters, .. } =&gt; {
+<a href=#149 id=149 data-nosnippet>149</a>            <span class="macro">format!</span>(
+<a href=#150 id=150 data-nosnippet>150</a>                <span class="string">"{} ({} parameters)"</span>,
+<a href=#151 id=151 data-nosnippet>151</a>                <span class="kw">match </span>op {
+<a href=#152 id=152 data-nosnippet>152</a>                    BoundVectorOp::Histogram(HistogramFunction::Quantile(<span class="kw">_</span>)) =&gt;
+<a href=#153 id=153 data-nosnippet>153</a>                        <span class="string">"histogram_quantile"</span>,
+<a href=#154 id=154 data-nosnippet>154</a>                    BoundVectorOp::Histogram(HistogramFunction::Fraction { .. }) =&gt;
+<a href=#155 id=155 data-nosnippet>155</a>                        <span class="string">"histogram_fraction"</span>,
+<a href=#156 id=156 data-nosnippet>156</a>                    <span class="kw">_ </span>=&gt; <span class="string">"histogram"</span>,
+<a href=#157 id=157 data-nosnippet>157</a>                },
+<a href=#158 id=158 data-nosnippet>158</a>                parameters.len()
+<a href=#159 id=159 data-nosnippet>159</a>            )
+<a href=#160 id=160 data-nosnippet>160</a>        }
+<a href=#161 id=161 data-nosnippet>161</a>        NativeExpr::ParameterizedMap { op, .. } =&gt; <span class="kw">match </span>op {
+<a href=#162 id=162 data-nosnippet>162</a>            ParameterizedOp::Round =&gt; <span class="string">"round"</span>.to_string(),
+<a href=#163 id=163 data-nosnippet>163</a>            ParameterizedOp::Clamp =&gt; <span class="string">"clamp"</span>.to_string(),
+<a href=#164 id=164 data-nosnippet>164</a>            ParameterizedOp::ClampMin =&gt; <span class="string">"clamp_min"</span>.to_string(),
+<a href=#165 id=165 data-nosnippet>165</a>            ParameterizedOp::ClampMax =&gt; <span class="string">"clamp_max"</span>.to_string(),
+<a href=#166 id=166 data-nosnippet>166</a>            ParameterizedOp::MaxOf =&gt; <span class="string">"max_of"</span>.to_string(),
+<a href=#167 id=167 data-nosnippet>167</a>            ParameterizedOp::MinOf =&gt; <span class="string">"min_of"</span>.to_string(),
+<a href=#168 id=168 data-nosnippet>168</a>        },
+<a href=#169 id=169 data-nosnippet>169</a>        NativeExpr::Instant { op, .. } =&gt; {
+<a href=#170 id=170 data-nosnippet>170</a>            <span class="kw">let </span><span class="kw-2">mut </span>text = <span class="macro">format!</span>(
+<a href=#171 id=171 data-nosnippet>171</a>                <span class="string">"lookback {}ms offset {} on grid {}"</span>,
+<a href=#172 id=172 data-nosnippet>172</a>                op.lookback_ms,
+<a href=#173 id=173 data-nosnippet>173</a>                op.offset_ms,
+<a href=#174 id=174 data-nosnippet>174</a>                grid_name(<span class="kw-2">&amp;</span>op.output_grid)
+<a href=#175 id=175 data-nosnippet>175</a>            );
+<a href=#176 id=176 data-nosnippet>176</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(at) = op.at_ms {
+<a href=#177 id=177 data-nosnippet>177</a>                text.push_str(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">" @ {at}ms"</span>));
+<a href=#178 id=178 data-nosnippet>178</a>            }
+<a href=#179 id=179 data-nosnippet>179</a>            <span class="kw">match </span>op.value {
+<a href=#180 id=180 data-nosnippet>180</a>                InstantValue::Sample =&gt; {}
+<a href=#181 id=181 data-nosnippet>181</a>                InstantValue::Timestamp =&gt; text.push_str(<span class="string">" timestamp"</span>),
+<a href=#182 id=182 data-nosnippet>182</a>                InstantValue::InfoTimestamp =&gt; text.push_str(<span class="string">" info timestamp"</span>),
+<a href=#183 id=183 data-nosnippet>183</a>            }
+<a href=#184 id=184 data-nosnippet>184</a>            text
+<a href=#185 id=185 data-nosnippet>185</a>        }
+<a href=#186 id=186 data-nosnippet>186</a>        NativeExpr::Window { op, .. } =&gt; window(op),
+<a href=#187 id=187 data-nosnippet>187</a>        NativeExpr::Merge { .. } =&gt; <span class="string">"canonical label-set merge"</span>.to_string(),
+<a href=#188 id=188 data-nosnippet>188</a>        NativeExpr::Timestamp { .. } =&gt; <span class="string">"evaluation time"</span>.to_string(),
+<a href=#189 id=189 data-nosnippet>189</a>        NativeExpr::Map { op, .. } =&gt; {
+<a href=#190 id=190 data-nosnippet>190</a>            <span class="kw">let </span>ops: Vec&lt;String&gt; = op.ops.iter().map(map_op).collect();
+<a href=#191 id=191 data-nosnippet>191</a>            ops.join(<span class="string">", "</span>)
+<a href=#192 id=192 data-nosnippet>192</a>        }
+<a href=#193 id=193 data-nosnippet>193</a>        NativeExpr::Vector { op, .. } =&gt; <span class="kw">match </span>op {
+<a href=#194 id=194 data-nosnippet>194</a>            BoundVectorOp::TopK { k, top, group } =&gt; <span class="macro">format!</span>(
+<a href=#195 id=195 data-nosnippet>195</a>                <span class="string">"{} {k} {}"</span>,
+<a href=#196 id=196 data-nosnippet>196</a>                <span class="kw">if </span><span class="kw-2">*</span>top { <span class="string">"topk" </span>} <span class="kw">else </span>{ <span class="string">"bottomk" </span>},
+<a href=#197 id=197 data-nosnippet>197</a>                grouping(group)
+<a href=#198 id=198 data-nosnippet>198</a>            ),
+<a href=#199 id=199 data-nosnippet>199</a>            BoundVectorOp::LimitK { k, group } =&gt; <span class="macro">format!</span>(<span class="string">"limitk {k} {}"</span>, grouping(group)),
+<a href=#200 id=200 data-nosnippet>200</a>            BoundVectorOp::LimitRatio { ratio } =&gt; <span class="macro">format!</span>(<span class="string">"limit_ratio {ratio}"</span>),
+<a href=#201 id=201 data-nosnippet>201</a>            BoundVectorOp::Sort(order) =&gt; <span class="kw">match </span>order {
+<a href=#202 id=202 data-nosnippet>202</a>                SortOrder::Asc =&gt; <span class="string">"sort"</span>.to_string(),
+<a href=#203 id=203 data-nosnippet>203</a>                SortOrder::Desc =&gt; <span class="string">"sort_desc"</span>.to_string(),
+<a href=#204 id=204 data-nosnippet>204</a>                SortOrder::ByLabel(labels) =&gt; <span class="macro">format!</span>(<span class="string">"sort_by_label [{}]"</span>, label_list(labels)),
+<a href=#205 id=205 data-nosnippet>205</a>                SortOrder::ByLabelDesc(labels) =&gt; {
+<a href=#206 id=206 data-nosnippet>206</a>                    <span class="macro">format!</span>(<span class="string">"sort_by_label_desc [{}]"</span>, label_list(labels))
+<a href=#207 id=207 data-nosnippet>207</a>                }
+<a href=#208 id=208 data-nosnippet>208</a>            },
+<a href=#209 id=209 data-nosnippet>209</a>            BoundVectorOp::Absent { labels } =&gt; <span class="macro">format!</span>(<span class="string">"absent {{{}}}"</span>, label_pairs(labels)),
+<a href=#210 id=210 data-nosnippet>210</a>            BoundVectorOp::Histogram(HistogramFunction::Quantile(quantile)) =&gt; {
+<a href=#211 id=211 data-nosnippet>211</a>                <span class="macro">format!</span>(<span class="string">"histogram_quantile {quantile}"</span>)
+<a href=#212 id=212 data-nosnippet>212</a>            }
+<a href=#213 id=213 data-nosnippet>213</a>            BoundVectorOp::Histogram(HistogramFunction::Fraction { lower, upper }) =&gt; {
+<a href=#214 id=214 data-nosnippet>214</a>                <span class="macro">format!</span>(<span class="string">"histogram_fraction {lower} {upper}"</span>)
+<a href=#215 id=215 data-nosnippet>215</a>            }
+<a href=#216 id=216 data-nosnippet>216</a>            BoundVectorOp::CountValues { label, group } =&gt; {
+<a href=#217 id=217 data-nosnippet>217</a>                <span class="macro">format!</span>(<span class="string">"count_values {label:?} {}"</span>, grouping(group))
+<a href=#218 id=218 data-nosnippet>218</a>            }
+<a href=#219 id=219 data-nosnippet>219</a>        },
+<a href=#220 id=220 data-nosnippet>220</a>        NativeExpr::Aggregate { op, .. } =&gt; <span class="macro">format!</span>(
+<a href=#221 id=221 data-nosnippet>221</a>            <span class="string">"{} {} [{}] {}"</span>,
+<a href=#222 id=222 data-nosnippet>222</a>            aggregate_kind(op.kind),
+<a href=#223 id=223 data-nosnippet>223</a>            <span class="kw">match </span><span class="kw-2">&amp;</span>op.group {
+<a href=#224 id=224 data-nosnippet>224</a>                Grouping::By(<span class="kw">_</span>) =&gt; <span class="string">"by"</span>,
+<a href=#225 id=225 data-nosnippet>225</a>                Grouping::Without(<span class="kw">_</span>) =&gt; <span class="string">"without"</span>,
+<a href=#226 id=226 data-nosnippet>226</a>            },
+<a href=#227 id=227 data-nosnippet>227</a>            label_list(<span class="kw">match </span><span class="kw-2">&amp;</span>op.group {
+<a href=#228 id=228 data-nosnippet>228</a>                Grouping::By(labels) | Grouping::Without(labels) =&gt; labels,
+<a href=#229 id=229 data-nosnippet>229</a>            }),
+<a href=#230 id=230 data-nosnippet>230</a>            <span class="kw">match </span>op.stage {
+<a href=#231 id=231 data-nosnippet>231</a>                AggregateStage::Complete =&gt; <span class="string">"complete"</span>,
+<a href=#232 id=232 data-nosnippet>232</a>                AggregateStage::Partial =&gt; <span class="string">"partial"</span>,
+<a href=#233 id=233 data-nosnippet>233</a>                AggregateStage::Final =&gt; <span class="string">"final"</span>,
+<a href=#234 id=234 data-nosnippet>234</a>            }
+<a href=#235 id=235 data-nosnippet>235</a>        ),
+<a href=#236 id=236 data-nosnippet>236</a>        NativeExpr::Binary { matching, .. } =&gt; <span class="macro">format!</span>(
+<a href=#237 id=237 data-nosnippet>237</a>            <span class="string">"{}{} {} {}{}"</span>,
+<a href=#238 id=238 data-nosnippet>238</a>            binary_op(matching.op),
+<a href=#239 id=239 data-nosnippet>239</a>            <span class="kw">if </span>matching.return_bool { <span class="string">" bool" </span>} <span class="kw">else </span>{ <span class="string">"" </span>},
+<a href=#240 id=240 data-nosnippet>240</a>            matching_labels(<span class="kw-2">&amp;</span>matching.labels),
+<a href=#241 id=241 data-nosnippet>241</a>            <span class="kw">match </span><span class="kw-2">&amp;</span>matching.cardinality {
+<a href=#242 id=242 data-nosnippet>242</a>                Cardinality::OneToOne =&gt; <span class="string">"one-to-one"</span>.to_string(),
+<a href=#243 id=243 data-nosnippet>243</a>                Cardinality::ManyToOne(labels) =&gt; <span class="macro">format!</span>(<span class="string">"many-to-one [{}]"</span>, label_list(labels)),
+<a href=#244 id=244 data-nosnippet>244</a>                Cardinality::OneToMany(labels) =&gt; <span class="macro">format!</span>(<span class="string">"one-to-many [{}]"</span>, label_list(labels)),
+<a href=#245 id=245 data-nosnippet>245</a>            },
+<a href=#246 id=246 data-nosnippet>246</a>            fill(matching.fill)
+<a href=#247 id=247 data-nosnippet>247</a>        ),
+<a href=#248 id=248 data-nosnippet>248</a>        NativeExpr::Set { op, .. } =&gt; <span class="macro">format!</span>(
+<a href=#249 id=249 data-nosnippet>249</a>            <span class="string">"{} {}"</span>,
+<a href=#250 id=250 data-nosnippet>250</a>            <span class="kw">match </span>op.op {
+<a href=#251 id=251 data-nosnippet>251</a>                SetOp::And =&gt; <span class="string">"and"</span>,
+<a href=#252 id=252 data-nosnippet>252</a>                SetOp::Or =&gt; <span class="string">"or"</span>,
+<a href=#253 id=253 data-nosnippet>253</a>                SetOp::Unless =&gt; <span class="string">"unless"</span>,
+<a href=#254 id=254 data-nosnippet>254</a>            },
+<a href=#255 id=255 data-nosnippet>255</a>            matching_labels(<span class="kw-2">&amp;</span>op.labels)
+<a href=#256 id=256 data-nosnippet>256</a>        ),
+<a href=#257 id=257 data-nosnippet>257</a>        NativeExpr::Info { selector, .. } =&gt; <span class="macro">format!</span>(
+<a href=#258 id=258 data-nosnippet>258</a>            <span class="string">"names [{}] data [{}]{}"</span>,
+<a href=#259 id=259 data-nosnippet>259</a>            selector
+<a href=#260 id=260 data-nosnippet>260</a>                .name_matchers
+<a href=#261 id=261 data-nosnippet>261</a>                .iter()
+<a href=#262 id=262 data-nosnippet>262</a>                .map(|(op, value)| <span class="macro">format!</span>(
+<a href=#263 id=263 data-nosnippet>263</a>                    <span class="string">"__name__{}\"{value}\""</span>,
+<a href=#264 id=264 data-nosnippet>264</a>                    <span class="kw">match </span>op {
+<a href=#265 id=265 data-nosnippet>265</a>                        MatchOp::Equal =&gt; <span class="string">"="</span>,
+<a href=#266 id=266 data-nosnippet>266</a>                        MatchOp::NotEqual =&gt; <span class="string">"!="</span>,
+<a href=#267 id=267 data-nosnippet>267</a>                        MatchOp::Regex =&gt; <span class="string">"=~"</span>,
+<a href=#268 id=268 data-nosnippet>268</a>                        MatchOp::NotRegex =&gt; <span class="string">"!~"</span>,
+<a href=#269 id=269 data-nosnippet>269</a>                    }
+<a href=#270 id=270 data-nosnippet>270</a>                ))
+<a href=#271 id=271 data-nosnippet>271</a>                .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
+<a href=#272 id=272 data-nosnippet>272</a>                .join(<span class="string">", "</span>),
+<a href=#273 id=273 data-nosnippet>273</a>            label_list(<span class="kw-2">&amp;</span>selector.data_labels),
+<a href=#274 id=274 data-nosnippet>274</a>            <span class="kw">if </span>selector.keep_unmatched {
+<a href=#275 id=275 data-nosnippet>275</a>                <span class="string">" keep unmatched"
+<a href=#276 id=276 data-nosnippet>276</a>            </span>} <span class="kw">else </span>{
+<a href=#277 id=277 data-nosnippet>277</a>                <span class="string">""
+<a href=#278 id=278 data-nosnippet>278</a>            </span>}
+<a href=#279 id=279 data-nosnippet>279</a>        ),
+<a href=#280 id=280 data-nosnippet>280</a>    }
+<a href=#281 id=281 data-nosnippet>281</a>}
+<a href=#282 id=282 data-nosnippet>282</a>
+<a href=#283 id=283 data-nosnippet>283</a><span class="kw">fn </span>matching_labels(labels: <span class="kw-2">&amp;</span>MatchingLabels) -&gt; String {
+<a href=#284 id=284 data-nosnippet>284</a>    <span class="kw">match </span>labels {
+<a href=#285 id=285 data-nosnippet>285</a>        MatchingLabels::On(labels) =&gt; <span class="macro">format!</span>(<span class="string">"on [{}]"</span>, label_list(labels)),
+<a href=#286 id=286 data-nosnippet>286</a>        MatchingLabels::Ignoring(labels) =&gt; <span class="macro">format!</span>(<span class="string">"ignoring [{}]"</span>, label_list(labels)),
+<a href=#287 id=287 data-nosnippet>287</a>    }
+<a href=#288 id=288 data-nosnippet>288</a>}
+<a href=#289 id=289 data-nosnippet>289</a>
+<a href=#290 id=290 data-nosnippet>290</a><span class="kw">fn </span>fill(values: FillValues) -&gt; String {
+<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">let </span>side = |name: <span class="kw-2">&amp;</span>str, value: <span class="prelude-ty">Option</span>&lt;f64&gt;| {
+<a href=#292 id=292 data-nosnippet>292</a>        value
+<a href=#293 id=293 data-nosnippet>293</a>            .map(|value| <span class="macro">format!</span>(<span class="string">" {name} {value}"</span>))
+<a href=#294 id=294 data-nosnippet>294</a>            .unwrap_or_default()
+<a href=#295 id=295 data-nosnippet>295</a>    };
+<a href=#296 id=296 data-nosnippet>296</a>    <span class="macro">format!</span>(
+<a href=#297 id=297 data-nosnippet>297</a>        <span class="string">"{}{}"</span>,
+<a href=#298 id=298 data-nosnippet>298</a>        side(<span class="string">"fill_left"</span>, values.lhs),
+<a href=#299 id=299 data-nosnippet>299</a>        side(<span class="string">"fill_right"</span>, values.rhs)
+<a href=#300 id=300 data-nosnippet>300</a>    )
+<a href=#301 id=301 data-nosnippet>301</a>}
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a><span class="doccomment">/// The PromQL name of an aggregate, with the constant argument it was bound to.
+<a href=#304 id=304 data-nosnippet>304</a></span><span class="kw">fn </span>aggregate_kind(kind: AggregateKind) -&gt; String {
+<a href=#305 id=305 data-nosnippet>305</a>    <span class="kw">match </span>kind {
+<a href=#306 id=306 data-nosnippet>306</a>        AggregateKind::Sum =&gt; <span class="string">"sum"</span>.to_string(),
+<a href=#307 id=307 data-nosnippet>307</a>        AggregateKind::Avg =&gt; <span class="string">"avg"</span>.to_string(),
+<a href=#308 id=308 data-nosnippet>308</a>        AggregateKind::Count =&gt; <span class="string">"count"</span>.to_string(),
+<a href=#309 id=309 data-nosnippet>309</a>        AggregateKind::Min =&gt; <span class="string">"min"</span>.to_string(),
+<a href=#310 id=310 data-nosnippet>310</a>        AggregateKind::Max =&gt; <span class="string">"max"</span>.to_string(),
+<a href=#311 id=311 data-nosnippet>311</a>        AggregateKind::Group =&gt; <span class="string">"group"</span>.to_string(),
+<a href=#312 id=312 data-nosnippet>312</a>        AggregateKind::Stddev =&gt; <span class="string">"stddev"</span>.to_string(),
+<a href=#313 id=313 data-nosnippet>313</a>        AggregateKind::Stdvar =&gt; <span class="string">"stdvar"</span>.to_string(),
+<a href=#314 id=314 data-nosnippet>314</a>        AggregateKind::Quantile { quantile } =&gt; <span class="macro">format!</span>(<span class="string">"quantile {quantile}"</span>),
+<a href=#315 id=315 data-nosnippet>315</a>    }
+<a href=#316 id=316 data-nosnippet>316</a>}
+<a href=#317 id=317 data-nosnippet>317</a>
+<a href=#318 id=318 data-nosnippet>318</a><span class="doccomment">/// A window: what it runs, over which range, and where it lands.
+<a href=#319 id=319 data-nosnippet>319</a></span><span class="kw">fn </span>window(op: <span class="kw-2">&amp;</span>BoundWindow) -&gt; String {
+<a href=#320 id=320 data-nosnippet>320</a>    <span class="macro">format!</span>(
+<a href=#321 id=321 data-nosnippet>321</a>        <span class="string">"{} [{}ms]{} offset {} anchor {} on grid {}"</span>,
+<a href=#322 id=322 data-nosnippet>322</a>        function(op.function),
+<a href=#323 id=323 data-nosnippet>323</a>        op.window.range_ms,
+<a href=#324 id=324 data-nosnippet>324</a>        <span class="kw">match </span>op.window.modifier {
+<a href=#325 id=325 data-nosnippet>325</a>            <span class="prelude-val">Some</span>(modifier) =&gt; <span class="macro">format!</span>(<span class="string">" {} lookback {}ms"</span>, modifier.name(), modifier.before_ms()),
+<a href=#326 id=326 data-nosnippet>326</a>            <span class="prelude-val">None </span>=&gt; String::new(),
+<a href=#327 id=327 data-nosnippet>327</a>        },
+<a href=#328 id=328 data-nosnippet>328</a>        op.window.offset_ms,
+<a href=#329 id=329 data-nosnippet>329</a>        <span class="kw">match </span>op.window.anchor_ms {
+<a href=#330 id=330 data-nosnippet>330</a>            <span class="prelude-val">Some</span>(anchor_ms) =&gt; anchor_ms.to_string(),
+<a href=#331 id=331 data-nosnippet>331</a>            <span class="prelude-val">None </span>=&gt; <span class="string">"-"</span>.to_string(),
+<a href=#332 id=332 data-nosnippet>332</a>        },
+<a href=#333 id=333 data-nosnippet>333</a>        grid_name(<span class="kw-2">&amp;</span>op.output_grid)
+<a href=#334 id=334 data-nosnippet>334</a>    )
+<a href=#335 id=335 data-nosnippet>335</a>}
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a><span class="doccomment">/// The PromQL name of a range function, with the constant argument it was bound to.
+<a href=#338 id=338 data-nosnippet>338</a></span><span class="kw">fn </span>function(function: RangeFunction) -&gt; String {
+<a href=#339 id=339 data-nosnippet>339</a>    <span class="kw">match </span>function {
+<a href=#340 id=340 data-nosnippet>340</a>        RangeFunction::Rate =&gt; <span class="string">"rate"</span>.to_string(),
+<a href=#341 id=341 data-nosnippet>341</a>        RangeFunction::Increase =&gt; <span class="string">"increase"</span>.to_string(),
+<a href=#342 id=342 data-nosnippet>342</a>        RangeFunction::Delta =&gt; <span class="string">"delta"</span>.to_string(),
+<a href=#343 id=343 data-nosnippet>343</a>        RangeFunction::Irate =&gt; <span class="string">"irate"</span>.to_string(),
+<a href=#344 id=344 data-nosnippet>344</a>        RangeFunction::Idelta =&gt; <span class="string">"idelta"</span>.to_string(),
+<a href=#345 id=345 data-nosnippet>345</a>        RangeFunction::AvgOverTime =&gt; <span class="string">"avg_over_time"</span>.to_string(),
+<a href=#346 id=346 data-nosnippet>346</a>        RangeFunction::MinOverTime =&gt; <span class="string">"min_over_time"</span>.to_string(),
+<a href=#347 id=347 data-nosnippet>347</a>        RangeFunction::MaxOverTime =&gt; <span class="string">"max_over_time"</span>.to_string(),
+<a href=#348 id=348 data-nosnippet>348</a>        RangeFunction::SumOverTime =&gt; <span class="string">"sum_over_time"</span>.to_string(),
+<a href=#349 id=349 data-nosnippet>349</a>        RangeFunction::CountOverTime =&gt; <span class="string">"count_over_time"</span>.to_string(),
+<a href=#350 id=350 data-nosnippet>350</a>        RangeFunction::LastOverTime =&gt; <span class="string">"last_over_time"</span>.to_string(),
+<a href=#351 id=351 data-nosnippet>351</a>        RangeFunction::PresentOverTime =&gt; <span class="string">"present_over_time"</span>.to_string(),
+<a href=#352 id=352 data-nosnippet>352</a>        RangeFunction::StddevOverTime =&gt; <span class="string">"stddev_over_time"</span>.to_string(),
+<a href=#353 id=353 data-nosnippet>353</a>        RangeFunction::StdvarOverTime =&gt; <span class="string">"stdvar_over_time"</span>.to_string(),
+<a href=#354 id=354 data-nosnippet>354</a>        RangeFunction::QuantileOverTime(quantile) =&gt; <span class="macro">format!</span>(<span class="string">"quantile_over_time {quantile}"</span>),
+<a href=#355 id=355 data-nosnippet>355</a>        RangeFunction::Resets =&gt; <span class="string">"resets"</span>.to_string(),
+<a href=#356 id=356 data-nosnippet>356</a>        RangeFunction::Changes =&gt; <span class="string">"changes"</span>.to_string(),
+<a href=#357 id=357 data-nosnippet>357</a>        RangeFunction::Deriv =&gt; <span class="string">"deriv"</span>.to_string(),
+<a href=#358 id=358 data-nosnippet>358</a>        RangeFunction::PredictLinear(seconds) =&gt; <span class="macro">format!</span>(<span class="string">"predict_linear {seconds}"</span>),
+<a href=#359 id=359 data-nosnippet>359</a>        RangeFunction::DoubleExponentialSmoothing { smoothing, trend } =&gt; {
+<a href=#360 id=360 data-nosnippet>360</a>            <span class="macro">format!</span>(<span class="string">"double_exponential_smoothing {smoothing} {trend}"</span>)
+<a href=#361 id=361 data-nosnippet>361</a>        }
+<a href=#362 id=362 data-nosnippet>362</a>        RangeFunction::FirstOverTime =&gt; <span class="string">"first_over_time"</span>.to_string(),
+<a href=#363 id=363 data-nosnippet>363</a>        RangeFunction::MadOverTime =&gt; <span class="string">"mad_over_time"</span>.to_string(),
+<a href=#364 id=364 data-nosnippet>364</a>        RangeFunction::TsOfFirstOverTime =&gt; <span class="string">"ts_of_first_over_time"</span>.to_string(),
+<a href=#365 id=365 data-nosnippet>365</a>        RangeFunction::TsOfLastOverTime =&gt; <span class="string">"ts_of_last_over_time"</span>.to_string(),
+<a href=#366 id=366 data-nosnippet>366</a>        RangeFunction::TsOfMinOverTime =&gt; <span class="string">"ts_of_min_over_time"</span>.to_string(),
+<a href=#367 id=367 data-nosnippet>367</a>        RangeFunction::TsOfMaxOverTime =&gt; <span class="string">"ts_of_max_over_time"</span>.to_string(),
+<a href=#368 id=368 data-nosnippet>368</a>    }
+<a href=#369 id=369 data-nosnippet>369</a>}
+<a href=#370 id=370 data-nosnippet>370</a>
+<a href=#371 id=371 data-nosnippet>371</a><span class="doccomment">/// The PromQL call a map operation makes, with the constant arguments it was bound to.
+<a href=#372 id=372 data-nosnippet>372</a></span><span class="kw">fn </span>map_op(op: <span class="kw-2">&amp;</span>MapOp) -&gt; String {
+<a href=#373 id=373 data-nosnippet>373</a>    <span class="kw">match </span>op {
+<a href=#374 id=374 data-nosnippet>374</a>        MapOp::Math(op) =&gt; math_op(op),
+<a href=#375 id=375 data-nosnippet>375</a>        MapOp::Histogram(function) =&gt; function.name().to_string(),
+<a href=#376 id=376 data-nosnippet>376</a>        MapOp::Label(rewrite) =&gt; rewrite.to_string(),
+<a href=#377 id=377 data-nosnippet>377</a>    }
+<a href=#378 id=378 data-nosnippet>378</a>}
+<a href=#379 id=379 data-nosnippet>379</a>
+<a href=#380 id=380 data-nosnippet>380</a><span class="doccomment">/// The PromQL name of a math function, with the constant arguments it was bound to.
+<a href=#381 id=381 data-nosnippet>381</a></span><span class="kw">fn </span>math_op(op: <span class="kw-2">&amp;</span>MathOp) -&gt; String {
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="kw">match </span>op {
+<a href=#383 id=383 data-nosnippet>383</a>        MathOp::Abs =&gt; <span class="string">"abs"</span>.to_string(),
+<a href=#384 id=384 data-nosnippet>384</a>        MathOp::Ceil =&gt; <span class="string">"ceil"</span>.to_string(),
+<a href=#385 id=385 data-nosnippet>385</a>        MathOp::Floor =&gt; <span class="string">"floor"</span>.to_string(),
+<a href=#386 id=386 data-nosnippet>386</a>        MathOp::Sqrt =&gt; <span class="string">"sqrt"</span>.to_string(),
+<a href=#387 id=387 data-nosnippet>387</a>        MathOp::Round { nearest } =&gt; <span class="macro">format!</span>(<span class="string">"round {nearest}"</span>),
+<a href=#388 id=388 data-nosnippet>388</a>        MathOp::Exp =&gt; <span class="string">"exp"</span>.to_string(),
+<a href=#389 id=389 data-nosnippet>389</a>        MathOp::Ln =&gt; <span class="string">"ln"</span>.to_string(),
+<a href=#390 id=390 data-nosnippet>390</a>        MathOp::Log2 =&gt; <span class="string">"log2"</span>.to_string(),
+<a href=#391 id=391 data-nosnippet>391</a>        MathOp::Log10 =&gt; <span class="string">"log10"</span>.to_string(),
+<a href=#392 id=392 data-nosnippet>392</a>        MathOp::Sin =&gt; <span class="string">"sin"</span>.to_string(),
+<a href=#393 id=393 data-nosnippet>393</a>        MathOp::Cos =&gt; <span class="string">"cos"</span>.to_string(),
+<a href=#394 id=394 data-nosnippet>394</a>        MathOp::Tan =&gt; <span class="string">"tan"</span>.to_string(),
+<a href=#395 id=395 data-nosnippet>395</a>        MathOp::Asin =&gt; <span class="string">"asin"</span>.to_string(),
+<a href=#396 id=396 data-nosnippet>396</a>        MathOp::Acos =&gt; <span class="string">"acos"</span>.to_string(),
+<a href=#397 id=397 data-nosnippet>397</a>        MathOp::Atan =&gt; <span class="string">"atan"</span>.to_string(),
+<a href=#398 id=398 data-nosnippet>398</a>        MathOp::Sinh =&gt; <span class="string">"sinh"</span>.to_string(),
+<a href=#399 id=399 data-nosnippet>399</a>        MathOp::Cosh =&gt; <span class="string">"cosh"</span>.to_string(),
+<a href=#400 id=400 data-nosnippet>400</a>        MathOp::Tanh =&gt; <span class="string">"tanh"</span>.to_string(),
+<a href=#401 id=401 data-nosnippet>401</a>        MathOp::Asinh =&gt; <span class="string">"asinh"</span>.to_string(),
+<a href=#402 id=402 data-nosnippet>402</a>        MathOp::Acosh =&gt; <span class="string">"acosh"</span>.to_string(),
+<a href=#403 id=403 data-nosnippet>403</a>        MathOp::Atanh =&gt; <span class="string">"atanh"</span>.to_string(),
+<a href=#404 id=404 data-nosnippet>404</a>        MathOp::Deg =&gt; <span class="string">"deg"</span>.to_string(),
+<a href=#405 id=405 data-nosnippet>405</a>        MathOp::Rad =&gt; <span class="string">"rad"</span>.to_string(),
+<a href=#406 id=406 data-nosnippet>406</a>        MathOp::Sgn =&gt; <span class="string">"sgn"</span>.to_string(),
+<a href=#407 id=407 data-nosnippet>407</a>        MathOp::Clamp { min, max } =&gt; <span class="macro">format!</span>(<span class="string">"clamp {min} {max}"</span>),
+<a href=#408 id=408 data-nosnippet>408</a>        MathOp::ClampMin { min } =&gt; <span class="macro">format!</span>(<span class="string">"clamp_min {min}"</span>),
+<a href=#409 id=409 data-nosnippet>409</a>        MathOp::ClampMax { max } =&gt; <span class="macro">format!</span>(<span class="string">"clamp_max {max}"</span>),
+<a href=#410 id=410 data-nosnippet>410</a>        MathOp::Date(function) =&gt; function.name().to_string(),
+<a href=#411 id=411 data-nosnippet>411</a>    }
+<a href=#412 id=412 data-nosnippet>412</a>}
+<a href=#413 id=413 data-nosnippet>413</a>
+<a href=#414 id=414 data-nosnippet>414</a><span class="doccomment">/// The PromQL symbol of a binary operator.
+<a href=#415 id=415 data-nosnippet>415</a></span><span class="kw">fn </span>binary_op(op: BinaryOp) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#416 id=416 data-nosnippet>416</a>    <span class="kw">match </span>op {
+<a href=#417 id=417 data-nosnippet>417</a>        BinaryOp::Add =&gt; <span class="string">"+"</span>,
+<a href=#418 id=418 data-nosnippet>418</a>        BinaryOp::Sub =&gt; <span class="string">"-"</span>,
+<a href=#419 id=419 data-nosnippet>419</a>        BinaryOp::Mul =&gt; <span class="string">"*"</span>,
+<a href=#420 id=420 data-nosnippet>420</a>        BinaryOp::Div =&gt; <span class="string">"/"</span>,
+<a href=#421 id=421 data-nosnippet>421</a>        BinaryOp::Mod =&gt; <span class="string">"%"</span>,
+<a href=#422 id=422 data-nosnippet>422</a>        BinaryOp::Pow =&gt; <span class="string">"^"</span>,
+<a href=#423 id=423 data-nosnippet>423</a>        BinaryOp::Atan2 =&gt; <span class="string">"atan2"</span>,
+<a href=#424 id=424 data-nosnippet>424</a>        BinaryOp::Eq =&gt; <span class="string">"=="</span>,
+<a href=#425 id=425 data-nosnippet>425</a>        BinaryOp::Ne =&gt; <span class="string">"!="</span>,
+<a href=#426 id=426 data-nosnippet>426</a>        BinaryOp::Gt =&gt; <span class="string">"&gt;"</span>,
+<a href=#427 id=427 data-nosnippet>427</a>        BinaryOp::Lt =&gt; <span class="string">"&lt;"</span>,
+<a href=#428 id=428 data-nosnippet>428</a>        BinaryOp::Ge =&gt; <span class="string">"&gt;="</span>,
+<a href=#429 id=429 data-nosnippet>429</a>        BinaryOp::Le =&gt; <span class="string">"&lt;="</span>,
+<a href=#430 id=430 data-nosnippet>430</a>    }
+<a href=#431 id=431 data-nosnippet>431</a>}
+<a href=#432 id=432 data-nosnippet>432</a>
+<a href=#433 id=433 data-nosnippet>433</a><span class="doccomment">/// The labels of `metric` as `name="value"` pairs, the metric name first.
+<a href=#434 id=434 data-nosnippet>434</a></span><span class="kw">fn </span>label_pairs(metric: <span class="kw-2">&amp;</span>SeriesLabels) -&gt; String {
+<a href=#435 id=435 data-nosnippet>435</a>    metric
+<a href=#436 id=436 data-nosnippet>436</a>        .name()
+<a href=#437 id=437 data-nosnippet>437</a>        .map(|name| <span class="macro">format!</span>(<span class="string">"__name__={name:?}"</span>))
+<a href=#438 id=438 data-nosnippet>438</a>        .into_iter()
+<a href=#439 id=439 data-nosnippet>439</a>        .chain(
+<a href=#440 id=440 data-nosnippet>440</a>            metric
+<a href=#441 id=441 data-nosnippet>441</a>                .tags()
+<a href=#442 id=442 data-nosnippet>442</a>                .iter()
+<a href=#443 id=443 data-nosnippet>443</a>                .map(|tag| <span class="macro">format!</span>(<span class="string">"{}={:?}"</span>, tag.name, tag.value)),
+<a href=#444 id=444 data-nosnippet>444</a>        )
+<a href=#445 id=445 data-nosnippet>445</a>        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
+<a href=#446 id=446 data-nosnippet>446</a>        .join(<span class="string">", "</span>)
+<a href=#447 id=447 data-nosnippet>447</a>}
+<a href=#448 id=448 data-nosnippet>448</a>
+<a href=#449 id=449 data-nosnippet>449</a><span class="doccomment">/// A grouping as `by [labels]` or `without [labels]`.
+<a href=#450 id=450 data-nosnippet>450</a></span><span class="kw">fn </span>grouping(group: <span class="kw-2">&amp;</span>Grouping) -&gt; String {
+<a href=#451 id=451 data-nosnippet>451</a>    <span class="kw">match </span>group {
+<a href=#452 id=452 data-nosnippet>452</a>        Grouping::By(labels) =&gt; <span class="macro">format!</span>(<span class="string">"by [{}]"</span>, label_list(labels)),
+<a href=#453 id=453 data-nosnippet>453</a>        Grouping::Without(labels) =&gt; <span class="macro">format!</span>(<span class="string">"without [{}]"</span>, label_list(labels)),
+<a href=#454 id=454 data-nosnippet>454</a>    }
+<a href=#455 id=455 data-nosnippet>455</a>}
+<a href=#456 id=456 data-nosnippet>456</a>
+<a href=#457 id=457 data-nosnippet>457</a><span class="doccomment">/// What kind of node this is, as its line names it.
+<a href=#458 id=458 data-nosnippet>458</a></span><span class="kw">fn </span>kind(expr: <span class="kw-2">&amp;</span>NativeExpr) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#459 id=459 data-nosnippet>459</a>    <span class="kw">match </span>expr {
+<a href=#460 id=460 data-nosnippet>460</a>        NativeExpr::Input(<span class="kw">_</span>) =&gt; <span class="string">"Input"</span>,
+<a href=#461 id=461 data-nosnippet>461</a>        NativeExpr::Scalar(<span class="kw">_</span>) =&gt; <span class="string">"Scalar"</span>,
+<a href=#462 id=462 data-nosnippet>462</a>        NativeExpr::Instant { .. } =&gt; <span class="string">"Instant"</span>,
+<a href=#463 id=463 data-nosnippet>463</a>        NativeExpr::Window { .. } =&gt; <span class="string">"Window"</span>,
+<a href=#464 id=464 data-nosnippet>464</a>        NativeExpr::Merge { .. } =&gt; <span class="string">"Merge"</span>,
+<a href=#465 id=465 data-nosnippet>465</a>        NativeExpr::Map { .. } =&gt; <span class="string">"Map"</span>,
+<a href=#466 id=466 data-nosnippet>466</a>        NativeExpr::Timestamp { .. } =&gt; <span class="string">"Timestamp"</span>,
+<a href=#467 id=467 data-nosnippet>467</a>        NativeExpr::Aggregate { .. } =&gt; <span class="string">"Aggregate"</span>,
+<a href=#468 id=468 data-nosnippet>468</a>        NativeExpr::Vector { .. } =&gt; <span class="string">"Vector"</span>,
+<a href=#469 id=469 data-nosnippet>469</a>        NativeExpr::Binary { .. } =&gt; <span class="string">"Binary"</span>,
+<a href=#470 id=470 data-nosnippet>470</a>        NativeExpr::EvalTime { .. } =&gt; <span class="string">"EvalTime"</span>,
+<a href=#471 id=471 data-nosnippet>471</a>        NativeExpr::VectorOf { .. } =&gt; <span class="string">"VectorOf"</span>,
+<a href=#472 id=472 data-nosnippet>472</a>        NativeExpr::ScalarOf { .. } =&gt; <span class="string">"ScalarOf"</span>,
+<a href=#473 id=473 data-nosnippet>473</a>        NativeExpr::ParameterizedMap { .. } =&gt; <span class="string">"ParameterizedMap"</span>,
+<a href=#474 id=474 data-nosnippet>474</a>        NativeExpr::ParameterizedTopK { .. } =&gt; <span class="string">"ParameterizedTopK"</span>,
+<a href=#475 id=475 data-nosnippet>475</a>        NativeExpr::ParameterizedHistogram { .. } =&gt; <span class="string">"ParameterizedHistogram"</span>,
+<a href=#476 id=476 data-nosnippet>476</a>        NativeExpr::Set { .. } =&gt; <span class="string">"Set"</span>,
+<a href=#477 id=477 data-nosnippet>477</a>        NativeExpr::Info { .. } =&gt; <span class="string">"Info"</span>,
+<a href=#478 id=478 data-nosnippet>478</a>    }
+<a href=#479 id=479 data-nosnippet>479</a>}
+<a href=#480 id=480 data-nosnippet>480</a>
+<a href=#481 id=481 data-nosnippet>481</a><span class="doccomment">/// The child nodes of `node` and the path segment each is registered under, in child order.
+<a href=#482 id=482 data-nosnippet>482</a>///
+<a href=#483 id=483 data-nosnippet>483</a>/// The segments are the ones the runtime registers, not the names the bound tree happens to give
+<a href=#484 id=484 data-nosnippet>484</a>/// the operands: `info` binds its operands as `base` and `info`, while the runtime registers them
+<a href=#485 id=485 data-nosnippet>485</a>/// as the kernel's `left` and `right`, so the display asks for the figures where they were put.
+<a href=#486 id=486 data-nosnippet>486</a></span><span class="kw">fn </span>child_segments(node: <span class="kw-2">&amp;</span>NativeNode) -&gt; Vec&lt;(<span class="kw-2">&amp;</span>NativeNode, Cow&lt;<span class="lifetime">'static</span>, str&gt;)&gt; {
+<a href=#487 id=487 data-nosnippet>487</a>    <span class="kw">let </span><span class="kw-2">mut </span>children = Vec::new();
+<a href=#488 id=488 data-nosnippet>488</a>    <span class="kw">fn </span>child&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#489 id=489 data-nosnippet>489</a>        children: <span class="kw-2">&amp;mut </span>Vec&lt;(<span class="kw-2">&amp;</span><span class="lifetime">'a </span>NativeNode, Cow&lt;<span class="lifetime">'static</span>, str&gt;)&gt;,
+<a href=#490 id=490 data-nosnippet>490</a>        segment: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#491 id=491 data-nosnippet>491</a>        node: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>NativeNode,
+<a href=#492 id=492 data-nosnippet>492</a>    ) {
+<a href=#493 id=493 data-nosnippet>493</a>        children.push((node, Cow::Borrowed(segment)));
+<a href=#494 id=494 data-nosnippet>494</a>    }
+<a href=#495 id=495 data-nosnippet>495</a>    <span class="kw">match </span><span class="kw-2">&amp;</span>node.expr {
+<a href=#496 id=496 data-nosnippet>496</a>        NativeExpr::Input(<span class="kw">_</span>) | NativeExpr::Scalar(<span class="kw">_</span>) | NativeExpr::EvalTime { .. } =&gt; {}
+<a href=#497 id=497 data-nosnippet>497</a>        NativeExpr::Instant { input, .. }
+<a href=#498 id=498 data-nosnippet>498</a>        | NativeExpr::Window { input, .. }
+<a href=#499 id=499 data-nosnippet>499</a>        | NativeExpr::Merge { input }
+<a href=#500 id=500 data-nosnippet>500</a>        | NativeExpr::Map { input, .. }
+<a href=#501 id=501 data-nosnippet>501</a>        | NativeExpr::Timestamp { input }
+<a href=#502 id=502 data-nosnippet>502</a>        | NativeExpr::Aggregate { input, .. }
+<a href=#503 id=503 data-nosnippet>503</a>        | NativeExpr::Vector { input, .. }
+<a href=#504 id=504 data-nosnippet>504</a>        | NativeExpr::VectorOf { input }
+<a href=#505 id=505 data-nosnippet>505</a>        | NativeExpr::ScalarOf { input } =&gt; child(<span class="kw-2">&amp;mut </span>children, <span class="string">"input"</span>, input),
+<a href=#506 id=506 data-nosnippet>506</a>        NativeExpr::ParameterizedTopK {
+<a href=#507 id=507 data-nosnippet>507</a>            input, parameter, ..
+<a href=#508 id=508 data-nosnippet>508</a>        } =&gt; {
+<a href=#509 id=509 data-nosnippet>509</a>            child(<span class="kw-2">&amp;mut </span>children, <span class="string">"input"</span>, input);
+<a href=#510 id=510 data-nosnippet>510</a>            child(<span class="kw-2">&amp;mut </span>children, <span class="string">"parameter"</span>, parameter);
+<a href=#511 id=511 data-nosnippet>511</a>        }
+<a href=#512 id=512 data-nosnippet>512</a>        NativeExpr::ParameterizedHistogram {
+<a href=#513 id=513 data-nosnippet>513</a>            input, parameters, ..
+<a href=#514 id=514 data-nosnippet>514</a>        } =&gt; {
+<a href=#515 id=515 data-nosnippet>515</a>            child(<span class="kw-2">&amp;mut </span>children, <span class="string">"input"</span>, input);
+<a href=#516 id=516 data-nosnippet>516</a>            <span class="kw">for </span>(index, parameter) <span class="kw">in </span>parameters.iter().enumerate() {
+<a href=#517 id=517 data-nosnippet>517</a>                children.push((parameter, Cow::Owned(<span class="macro">format!</span>(<span class="string">"parameter{index}"</span>))));
+<a href=#518 id=518 data-nosnippet>518</a>            }
+<a href=#519 id=519 data-nosnippet>519</a>        }
+<a href=#520 id=520 data-nosnippet>520</a>        NativeExpr::ParameterizedMap {
+<a href=#521 id=521 data-nosnippet>521</a>            input, parameters, ..
+<a href=#522 id=522 data-nosnippet>522</a>        } =&gt; {
+<a href=#523 id=523 data-nosnippet>523</a>            child(<span class="kw-2">&amp;mut </span>children, <span class="string">"input"</span>, input);
+<a href=#524 id=524 data-nosnippet>524</a>            <span class="kw">for </span>(index, parameter) <span class="kw">in </span>parameters.iter().enumerate() {
+<a href=#525 id=525 data-nosnippet>525</a>                children.push((parameter, Cow::Owned(<span class="macro">format!</span>(<span class="string">"parameter{index}"</span>))));
+<a href=#526 id=526 data-nosnippet>526</a>            }
+<a href=#527 id=527 data-nosnippet>527</a>        }
+<a href=#528 id=528 data-nosnippet>528</a>        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } =&gt; {
+<a href=#529 id=529 data-nosnippet>529</a>            child(<span class="kw-2">&amp;mut </span>children, <span class="string">"left"</span>, left);
+<a href=#530 id=530 data-nosnippet>530</a>            child(<span class="kw-2">&amp;mut </span>children, <span class="string">"right"</span>, right);
+<a href=#531 id=531 data-nosnippet>531</a>        }
+<a href=#532 id=532 data-nosnippet>532</a>        NativeExpr::Info { base, info, .. } =&gt; {
+<a href=#533 id=533 data-nosnippet>533</a>            child(<span class="kw-2">&amp;mut </span>children, <span class="string">"left"</span>, base);
+<a href=#534 id=534 data-nosnippet>534</a>            child(<span class="kw-2">&amp;mut </span>children, <span class="string">"right"</span>, info);
+<a href=#535 id=535 data-nosnippet>535</a>        }
+<a href=#536 id=536 data-nosnippet>536</a>    }
+<a href=#537 id=537 data-nosnippet>537</a>    children
+<a href=#538 id=538 data-nosnippet>538</a>}
+<a href=#539 id=539 data-nosnippet>539</a>
+<a href=#540 id=540 data-nosnippet>540</a><span class="doccomment">/// The node at `path` and everything below it, with the figures each node recorded.
+<a href=#541 id=541 data-nosnippet>541</a></span><span class="kw">fn </span>report_node(node: <span class="kw-2">&amp;</span>NativeNode, path: <span class="kw-2">&amp;</span>str, metrics: <span class="kw-2">&amp;</span>NodeMetricsSnapshot) -&gt; NativeNodeReport {
+<a href=#542 id=542 data-nosnippet>542</a>    NativeNodeReport {
+<a href=#543 id=543 data-nosnippet>543</a>        line: <span class="macro">format!</span>(<span class="string">"{}: {}"</span>, kind(<span class="kw-2">&amp;</span>node.expr), describe(node)),
+<a href=#544 id=544 data-nosnippet>544</a>        metrics: metrics.described(path),
+<a href=#545 id=545 data-nosnippet>545</a>        children: child_segments(node)
+<a href=#546 id=546 data-nosnippet>546</a>            .into_iter()
+<a href=#547 id=547 data-nosnippet>547</a>            .map(|(child, segment)| report_node(child, <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{path}.{segment}"</span>), metrics))
+<a href=#548 id=548 data-nosnippet>548</a>            .collect(),
+<a href=#549 id=549 data-nosnippet>549</a>    }
+<a href=#550 id=550 data-nosnippet>550</a>}
+<a href=#551 id=551 data-nosnippet>551</a>
+<a href=#552 id=552 data-nosnippet>552</a><span class="kw">impl </span>NativeTree {
+<a href=#553 id=553 data-nosnippet>553</a>    <span class="doccomment">/// This tree, one report per node, carrying the figures each node recorded.
+<a href=#554 id=554 data-nosnippet>554</a>    ///
+<a href=#555 id=555 data-nosnippet>555</a>    /// A snapshot with no entries reports the tree's structure only, which is what a plan that was
+<a href=#556 id=556 data-nosnippet>556</a>    /// never executed has to show.
+<a href=#557 id=557 data-nosnippet>557</a>    </span><span class="kw">pub fn </span>report(<span class="kw-2">&amp;</span><span class="self">self</span>, metrics: <span class="kw-2">&amp;</span>NodeMetricsSnapshot) -&gt; NativeNodeReport {
+<a href=#558 id=558 data-nosnippet>558</a>        report_node(<span class="self">self</span>.root(), ROOT_PATH, metrics)
+<a href=#559 id=559 data-nosnippet>559</a>    }
+<a href=#560 id=560 data-nosnippet>560</a>
+<a href=#561 id=561 data-nosnippet>561</a>    <span class="doccomment">/// This tree rendered from column zero, with each node's own figures when `metrics` holds them.
+<a href=#562 id=562 data-nosnippet>562</a>    </span><span class="kw">pub fn </span>display_with&lt;<span class="lifetime">'a</span>&gt;(<span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>, metrics: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>NodeMetricsSnapshot) -&gt; NativeTreeDisplay&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#563 id=563 data-nosnippet>563</a>        NativeTreeDisplay {
+<a href=#564 id=564 data-nosnippet>564</a>            tree: <span class="self">self</span>,
+<a href=#565 id=565 data-nosnippet>565</a>            metrics,
+<a href=#566 id=566 data-nosnippet>566</a>        }
+<a href=#567 id=567 data-nosnippet>567</a>    }
+<a href=#568 id=568 data-nosnippet>568</a>}
+<a href=#569 id=569 data-nosnippet>569</a>
+<a href=#570 id=570 data-nosnippet>570</a><span class="doccomment">/// A tree as it appears below the operator line: one node per line, two spaces per depth, and each
+<a href=#571 id=571 data-nosnippet>571</a>/// node's figures on its own line.
+<a href=#572 id=572 data-nosnippet>572</a></span><span class="kw">pub struct </span>NativeTreeDisplay&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#573 id=573 data-nosnippet>573</a>    tree: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>NativeTree,
+<a href=#574 id=574 data-nosnippet>574</a>    metrics: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>NodeMetricsSnapshot,
+<a href=#575 id=575 data-nosnippet>575</a>}
+<a href=#576 id=576 data-nosnippet>576</a>
+<a href=#577 id=577 data-nosnippet>577</a><span class="kw">impl </span>fmt::Display <span class="kw">for </span>NativeTreeDisplay&lt;<span class="lifetime">'_</span>&gt; {
+<a href=#578 id=578 data-nosnippet>578</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; fmt::Result {
+<a href=#579 id=579 data-nosnippet>579</a>        <span class="comment">// The root starts at column zero: the block the caller brackets the tree in carries the
+<a href=#580 id=580 data-nosnippet>580</a>        // indentation, so each line here is depth-relative to that block rather than to the
+<a href=#581 id=581 data-nosnippet>581</a>        // caller's own place in the plan.
+<a href=#582 id=582 data-nosnippet>582</a>        </span>write_report(f, <span class="kw-2">&amp;</span><span class="self">self</span>.tree.report(<span class="self">self</span>.metrics), <span class="number">0</span>)
+<a href=#583 id=583 data-nosnippet>583</a>    }
+<a href=#584 id=584 data-nosnippet>584</a>}
+<a href=#585 id=585 data-nosnippet>585</a>
+<a href=#586 id=586 data-nosnippet>586</a><span class="kw">fn </span>write_report(
+<a href=#587 id=587 data-nosnippet>587</a>    f: <span class="kw-2">&amp;mut </span>fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#588 id=588 data-nosnippet>588</a>    report: <span class="kw-2">&amp;</span>NativeNodeReport,
+<a href=#589 id=589 data-nosnippet>589</a>    depth: usize,
+<a href=#590 id=590 data-nosnippet>590</a>) -&gt; fmt::Result {
+<a href=#591 id=591 data-nosnippet>591</a>    <span class="macro">write!</span>(f, <span class="string">"{:indent$}{}"</span>, <span class="string">""</span>, report.line, indent = depth * <span class="number">2</span>)<span class="question-mark">?</span>;
+<a href=#592 id=592 data-nosnippet>592</a>    <span class="kw">if </span>!report.metrics.is_empty() {
+<a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">let </span>figures = report
+<a href=#594 id=594 data-nosnippet>594</a>            .metrics
+<a href=#595 id=595 data-nosnippet>595</a>            .iter()
+<a href=#596 id=596 data-nosnippet>596</a>            .map(|(name, value)| format_metric(name, <span class="kw-2">*</span>value))
+<a href=#597 id=597 data-nosnippet>597</a>            .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
+<a href=#598 id=598 data-nosnippet>598</a>            .join(<span class="string">", "</span>);
+<a href=#599 id=599 data-nosnippet>599</a>        <span class="macro">write!</span>(f, <span class="string">", metrics=[{figures}]"</span>)<span class="question-mark">?</span>;
+<a href=#600 id=600 data-nosnippet>600</a>    }
+<a href=#601 id=601 data-nosnippet>601</a>    <span class="kw">for </span>child <span class="kw">in </span><span class="kw-2">&amp;</span>report.children {
+<a href=#602 id=602 data-nosnippet>602</a>        f.write_char(<span class="string">'\n'</span>)<span class="question-mark">?</span>;
+<a href=#603 id=603 data-nosnippet>603</a>        write_report(f, child, depth + <span class="number">1</span>)<span class="question-mark">?</span>;
+<a href=#604 id=604 data-nosnippet>604</a>    }
+<a href=#605 id=605 data-nosnippet>605</a>    <span class="prelude-val">Ok</span>(())
+<a href=#606 id=606 data-nosnippet>606</a>}
+<a href=#607 id=607 data-nosnippet>607</a>
+<a href=#608 id=608 data-nosnippet>608</a><span class="kw">impl </span>fmt::Display <span class="kw">for </span>NativeTree {
+<a href=#609 id=609 data-nosnippet>609</a>    <span class="doccomment">/// One line per node, outermost first, from column zero with two spaces per depth and without
+<a href=#610 id=610 data-nosnippet>610</a>    /// figures: this is the tree's own shape, which is what a display that holds no metrics
+<a href=#611 id=611 data-nosnippet>611</a>    /// snapshot can show.
+<a href=#612 id=612 data-nosnippet>612</a>    </span><span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; fmt::Result {
+<a href=#613 id=613 data-nosnippet>613</a>        write_report(f, <span class="kw-2">&amp;</span><span class="self">self</span>.report(<span class="kw-2">&amp;</span>NodeMetricsSnapshot::default()), <span class="number">0</span>)
+<a href=#614 id=614 data-nosnippet>614</a>    }
+<a href=#615 id=615 data-nosnippet>615</a>}
+<a href=#616 id=616 data-nosnippet>616</a>
+<a href=#617 id=617 data-nosnippet>617</a><span class="attr">#[cfg(test)]
+<a href=#618 id=618 data-nosnippet>618</a></span><span class="kw">mod </span>tests;
+</code></pre></div></section></main></body></html>

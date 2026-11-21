@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BLOCK_BYTES","MANIFEST_LIMIT","MAX_FIELDS","MAX_ROWS","OPERATION","PRIMARY_KEY","SEQUENCE","VERSION"],"enum":["TimestampUnit"],"fn":["samples_prefix","valid_rows"],"mod":["codec","metadata","reader","writer"],"struct":["ColumnarSamplesFormat","Manifest","Part","TimestampColumn","ValueColumn"]};

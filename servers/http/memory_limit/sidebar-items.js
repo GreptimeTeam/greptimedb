@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ChargeOutcome"],"fn":["decoded_body_accounting_middleware","limit_exceeded_error","memory_limit_middleware","quota_exceeded_response"],"struct":["AccountedBody","BodyMemoryAccounting","ContentEncoded"],"type":["AcquireFuture"]};

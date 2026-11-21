@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["physical_column"],"struct":["ColumnMetadataInterner","ScopedColumnMetadata"],"type":["LogicalColumns"]};

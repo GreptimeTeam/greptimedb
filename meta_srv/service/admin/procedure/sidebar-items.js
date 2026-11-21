@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ProcedureManagerStatus"],"fn":["pause","procedure_status","resume","status"],"struct":["ProcedureManagerHandler","ProcedureManagerStatusResponse","ProcedureStatusRequest","ProcedureStatusResponse"]};

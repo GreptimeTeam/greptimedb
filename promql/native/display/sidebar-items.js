@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ROOT_PATH"],"fn":["aggregate_kind","binary_op","child_segments","describe","fill","function","grid_name","grid_of","grouping","kind","label_list","label_pairs","map_op","matching_labels","math_op","ordering","report_node","window","write_report"],"struct":["NativeNodeReport","NativeTreeDisplay"]};

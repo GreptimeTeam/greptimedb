@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["collect_inputs","filter_visibility","invalid","predicate_conjuncts","same_labels","sample_merge_schema","sample_projection","sample_to_flat","series_read_request","unaccounted_scan_pool","validate_inputs"],"struct":["Candidate","ColumnarPreparedSource","Preparation"]};

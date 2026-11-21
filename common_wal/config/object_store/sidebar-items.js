@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FIXED_DIRECTORY_GENERATION"],"enum":["AckMode","CorruptedSegmentAction"],"struct":["EnableObjectStoreWal","ObjectStoreWalConfig"]};

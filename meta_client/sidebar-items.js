@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MetaClientType"],"fn":["create_meta_client"],"mod":["client","error"],"struct":["MetaClientOptions"],"type":["MetaClientRef"]};

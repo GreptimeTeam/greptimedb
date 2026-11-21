@@ -1,0 +1,45 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Whether this tree can hand over two series that share one canonical label set."><title>duplicates_canonical_labels in promql::native::plan - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="promql" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">duplicates_canonical_labels</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../promql/index.html">promql</a><span class="version">1.4.0-alpha.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In promql::<wbr>native::<wbr>plan</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">promql</a>::<wbr><a href="../index.html">native</a>::<wbr><a href="index.html">plan</a></div><h1>Function <span class="fn">duplicates_<wbr>canonical_<wbr>labels</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/promql/native/plan.rs.html#1350-1413">Source</a> </span></div><pre class="rust item-decl"><code>pub fn duplicates_canonical_labels(
+    node: &amp;<a class="struct" href="struct.NativeNode.html" title="struct promql::native::plan::NativeNode">NativeNode</a>,
+    source_tags: &amp;[<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>&gt;],
+) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.bool.html">bool</a></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Whether this tree can hand over two series that share one canonical label set.</p>
+<p>A canonical label set is the identity a <a href="enum.NativeExpr.html#variant.Merge" title="variant promql::native::plan::NativeExpr::Merge"><code>NativeExpr::Merge</code></a> groups by: the metric name plus the
+ordinary labels, which is exactly what [<code>SeriesLabels</code>] holds. One scan partition holds one
+series per such set - a stored series is one identity, and the scan splits rows by storage key
+rather than by label set - so only a computation that <em>writes</em> an existing label can turn two of
+those identities into one. A <code>label_replace</code> or <code>label_join</code> does exactly that, and it may name
+the very label that told its input’s series apart.</p>
+<p>The rewrite is judged by the labels it writes and the ones its input carries, which is why the
+caller supplies what it knows about each source’s tags, indexed by the <code>source_index</code> the leaves
+were bound to: a destination that names no ordinary label of the input writes a fresh one, and a
+fresh ordinary label cannot make two series equal. That is the difference between
+<code>label_replace(x, "dst", "$1", "host", "(.*)")</code> - which no merge has to collect - and
+<code>label_replace(x, "host", "same", "host", ".*")</code>, which folds every series of <code>x</code> into one label
+set.</p>
+<p>A source’s entry is its complete runtime label set, so <code>__name__</code> is one of its labels whenever
+its series carry a name - a scan bound to one metric names every series from its binding. That is
+what makes <code>label_replace(x, "__name__", "same", "__name__", ".*")</code> a rewrite of an existing
+label: two metrics whose ordinary labels are equal can be told apart by name alone, and rewriting
+that name folds them into one identity. A name write is collected even when the derived set no
+longer carries <code>__name__</code> - after <code>abs</code>, a <code>timestamp</code> or a range function dropped it - because
+the scan below those kernels can still hold several metrics whose ordinary labels are equal, and
+writing one name puts them under one identity; the walk has no proof that the input reads a
+single metric, so the conservative answer is the one that collects.</p>
+<p>Everything else either keeps the set it read or answers a set of its own:</p>
+<ul>
+<li>A map of math drops the metric name, and an arithmetic broadcast does too, but within one
+metric the remaining tags are the primary key: two stored series of one metric that agree on
+every other label are the same series, so dropping the name cannot make them one. Each of
+those nodes hands its input’s answer on rather than claiming one of its own.</li>
+<li>An <code>Aggregate</code> answers its groups, a <code>Vector</code> that folds series answers its result sets, and a
+<code>Binary</code> that reads whole vectors files its rows by the label set a sample <em>ends</em> under and
+refuses two values of a field at one point. A <code>Set</code> does the same, and <code>info</code> merges the
+results that share a label set. Each answers one series per set it names.</li>
+<li>A node that hands its input’s series over unchanged - a selection, a window, a timestamp, a
+parameterized map, <code>topk</code> and its ranking siblings - passes the answer on: an alias below it is
+still an alias above it.</li>
+</ul>
+<p>This is the fact <a href="../canonicalize/fn.merge_label_rewrites.html" title="fn promql::native::canonicalize::merge_label_rewrites"><code>merge_label_rewrites</code></a>
+inserts a <code>Merge</code> for: a consumer that reads a whole label set cannot answer from pieces, and this
+says where pieces of one set can exist at all. A <code>Merge</code> is the collection itself, so it answers
+<code>false</code> - which is what makes the pass idempotent.</p>
+</div></details></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["LabelStorage","SeriesOrdering"],"fn":["invalid_series"],"mod":["aggregate_state","frame","histogram","raw","samples","time"],"struct":["BatchLabels","Label","SeriesLabelBatch","SeriesLabels"]};

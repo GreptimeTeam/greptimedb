@@ -1,0 +1,31 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The native plan, wrapped in the projection that publishes `legacy`’s columns over it."><title>publish_legacy_schema in query::planner - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="query" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">publish_legacy_schema</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../query/index.html">query</a><span class="version">1.4.0-alpha.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In query::<wbr>planner</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">query</a>::<wbr><a href="index.html">planner</a></div><h1>Function <span class="fn">publish_<wbr>legacy_<wbr>schema</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/query/planner.rs.html#303-446">Source</a> </span></div><pre class="rust item-decl"><code>fn publish_legacy_schema(
+    native: LogicalPlan,
+    legacy: &amp;LogicalPlan,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;LogicalPlan&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The native plan, wrapped in the projection that publishes <code>legacy</code>’s columns over it.</p>
+<p>A hybrid CTE registers the plan as a table the outer SQL query reads, so the columns this plan
+publishes <em>are</em> the CTE’s columns: their names, their order, their types, their nullability and
+the metadata they carry are what the statement’s SQL sees, and a column list the CTE declares is
+applied to them by position. The two routes do not agree on that schema - the fused node takes
+its names from the compiled tree and publishes the time index first, while the existing planner
+names each value column after the expression it planned and publishes the labels first - so a CTE
+answered natively would make one statement mean different things depending on which route planned
+it. This wraps the native plan in the projection that publishes the existing planner’s answer for
+the same statement instead.</p>
+<p>One column follows the answer rather than the existing planner: a native rows answer declares the
+per-row metric name, which the existing planner never publishes, and that column is part of what
+the statement answers. It is appended after the existing planner’s columns, so those keep their
+names, order, types and metadata, while a column list the CTE declares needs one more name - and a
+statement whose answer declares no name column (a scalar-typed answer) publishes none here. A CTE
+answered by the existing planner publishes exactly the columns it always has.</p>
+<p>The projection is made of expressions - an alias per column, and a cast where the two routes carry
+the same values in different Arrow types - because that is what survives analysis: the analyzer
+rebuilds a projection’s schema from its expressions, so anything the projection declared but its
+expressions did not carry would be gone by the time the CTE’s columns are read.</p>
+<p>The mapping is the identity on every column both plans publish alike - the time index and the
+label columns, which carry the same metadata on both routes now - and is a cast for a column
+whose identity is unambiguous: one native column of the same type once both are unencoded, no
+per-column metadata to lose and the same nullability. <code>None</code> says the two plans admit no such
+mapping - a differently named time index, an ambiguous set of columns left over, or a column a
+cast cannot reproduce faithfully - and the caller then keeps the existing plan rather than publish
+a column it cannot fill faithfully.</p>
+</div></details></section></div></main></body></html>

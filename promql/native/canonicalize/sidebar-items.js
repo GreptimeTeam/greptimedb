@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["canonical","merge_label_rewrites","rewrite"]};

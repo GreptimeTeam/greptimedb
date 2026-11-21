@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["HEAD_FORMAT_VERSION"],"fn":["required_owner"],"struct":["AuthorityHead","NodeIdentity"]};

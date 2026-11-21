@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BuiltinIndexHandler"],"fn":["builtin_is_current","column_target_id","normalize_entries","target_column_id"],"mod":["bloom","fulltext","inverted"]};

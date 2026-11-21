@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["avg","hll","uddsketch","welford"],"struct":["ApproximateFunction"]};

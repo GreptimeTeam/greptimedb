@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["mixed_sample_fields","reuse_constant_column","row_bytes","widest_list_row"],"struct":["InstantManipulate","InstantManipulateExec","InstantManipulateStream","UnfixIndices"]};

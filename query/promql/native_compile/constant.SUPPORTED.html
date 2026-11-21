@@ -1,0 +1,39 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The shapes this compiler accepts, quoted in every rejection."><title>SUPPORTED in query::promql::native_compile - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="query" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc constant"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">SUPPORTED</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../query/index.html">query</a><span class="version">1.4.0-alpha.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In query::<wbr>promql::<wbr>native_<wbr>compile</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">query</a>::<wbr><a href="../index.html">promql</a>::<wbr><a href="index.html">native_compile</a></div><h1>Constant <span class="constant">SUPPORTED</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/query/promql/native_compile.rs.html#245-278">Source</a> </span></div><pre class="rust item-decl"><code>const SUPPORTED: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.str.html">str</a> = &quot;a selector — `x`, optionally with an `offset` — a range function over \
+                         a matrix, where a matrix is `&lt;selector&gt;[&lt;range&gt;]` as in `rate(x[5m])` or \
+                         `&lt;expression&gt;[&lt;range&gt;:&lt;step&gt;]` as in `rate(x[5m:1m])`, with the step \
+                         optionally omitted as `[&lt;range&gt;:]`, where the subquery&#39;s `&lt;expression&gt;` \
+                         is any shape here, so a subquery nests on a grid of its own as in \
+                         `rate(rate(x[5m:1m])[10m:30s])`, and where either matrix shape carries the \
+                         `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; a math \
+                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), with \
+                         `round` and the `clamp` functions also taking scalars \
+                         (`round(x, time() / 10)`), a native \
+                         histogram function over any of them (`histogram_count(x)`), a label \
+                         function over any of them \
+                         (`label_replace(x, \&quot;a\&quot;, \&quot;$1\&quot;, \&quot;b\&quot;, \&quot;(.*)\&quot;)`), a binary \
+                         operation between one of them and a scalar (`2 / (x + 1)`, \
+                         `x &gt; bool time()`, `time() - timestamp(x)`), a scalar — a constant, \
+                         `time()` or a binary operation between scalars — \
+                         `vector(&lt;scalar&gt;)`, a date function without an argument (`hour()`), a \
+                         negation of one of them (`-x`), a set operation between two of them \
+                         (`x and on(job) y`, `x or y`, `x unless y`), `info` over any of them with \
+                         one info metric (`info(x, {version=~\&quot;.+\&quot;})`), or one of the \
+                         aggregators that folds a group&#39;s values into one value per grid point — \
+                         `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
+                         `quantile(&lt;constant&gt;, &lt;expression&gt;)` — over any of them, optionally \
+                         grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
+                         `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
+                         them, as in `topk(3, x) by(job)` and `count_values(\&quot;v\&quot;, x)`; a \
+                         sort, `absent`, `absent_over_time` or `histogram_quantile` / \
+                         `histogram_fraction` over any of them (`sort_desc(x)`, \
+                         `absent(x{job=\&quot;a\&quot;})`, `absent_over_time(x{job=\&quot;a\&quot;}[5m])`, \
+                         `histogram_quantile(0.9, rate(x[5m]))`); a range function&#39;s own \
+                         constants sit where that function takes them, before \
+                         the matrix for `quantile_over_time(0.9, x[5m])` and after it for \
+                         `predict_linear(x[5m], 300)` and \
+                         `double_exponential_smoothing(x[5m], 0.5, 0.1)`&quot;;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The shapes this compiler accepts, quoted in every rejection.</p>
+<p>It is one sentence of grammar rather than a list of examples, because it is what a refused query
+reads: the shapes have to be true of every query the compiler binds, and the examples only show
+them. The two matrix shapes and the recursion through them are stated first, because that
+recursion is what a reader is most likely to get wrong.</p>
+</div></details></section></div></main></body></html>

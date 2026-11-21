@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_arrow_codec","decompressed_size","frame_prefix","frame_target","lz4_workspace_size","validate_lz4_output","visit_compressed_buffers"],"struct":["ArrowCopyState","ArrowOptions"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["attributable","check_definition","column_definition","default_physical_columns","invalid","table_columns","timestamp_column","validate_physical_columns","validate_value"],"struct":["MetricInsertPreflight","PhysicalColumns","RowValidationPlan"]};

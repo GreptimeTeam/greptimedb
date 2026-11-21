@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["info_sample_times","instant_candidate_span","project_selection","select_instant_at","select_instants","timestamp_of_evaluated","timestamp_of_selection"],"struct":["InstantCandidateSpan"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MANIFEST_LIMIT","VERSION"],"fn":["invalid","require","unsupported"],"mod":["codec","metadata","reader","writer"],"struct":["ColumnarSeriesFormat","Manifest","Part","Tag"]};

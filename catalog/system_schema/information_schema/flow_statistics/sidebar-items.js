@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FLOW_ID","FLOW_NAME","INIT_CAPACITY","LAST_EXECUTION_TIME","START_TIME","STATE_SIZE","UPTIME_SECONDS"],"struct":["InformationSchemaFlowStatistics","InformationSchemaFlowStatisticsBuilder"]};

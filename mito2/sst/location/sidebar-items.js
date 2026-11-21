@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["index_dir","index_file_path","index_file_path_legacy","is_narthex_file_dir","narthex_file_dir","parse_file_id_type_from_path","parse_index_file_info","parse_narthex_file_id","region_dir_from_table_dir","sst_file_path"]};

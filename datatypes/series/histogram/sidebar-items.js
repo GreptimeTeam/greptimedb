@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CounterResetHint"],"fn":["append32","append64","arrow_result","fields","invalid","lb32","lb64","preflight","validate_spans"],"struct":["BucketSideView","HistogramBatch","HistogramBatchBuilder","HistogramList","HistogramView"]};

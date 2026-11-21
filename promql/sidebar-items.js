@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["aggregate","error","evaluated","extension_plan","functions","go_format","go_sort","grid_series","histogram_eval","info","instant_eval","map","map_label","map_time","metrics","native","range_array","range_eval","select","source","vector_match"]};

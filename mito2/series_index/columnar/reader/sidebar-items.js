@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Decoded"],"fn":["get_column","load_column_chunk","load_metadata_page","matches_range","matches_statistics","read_block","read_range"],"struct":["ColumnarReader","ProjectedBlock"]};

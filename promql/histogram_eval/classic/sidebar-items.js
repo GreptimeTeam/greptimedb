@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SMALL_DELTA_TOLERANCE"],"fn":["almost_equal","bucket_fraction","bucket_quantile","coalesce","ensure_monotonic","go_search","parse_bound","underscores_ok"],"struct":["Bucket"]};

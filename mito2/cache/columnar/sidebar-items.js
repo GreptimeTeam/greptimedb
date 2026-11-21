@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COLUMNAR_META"],"fn":["columnar_meta_weight","load"],"struct":["DecodedKey","DecodedValue","MetadataCache","PayloadCache","PayloadPartCache"]};

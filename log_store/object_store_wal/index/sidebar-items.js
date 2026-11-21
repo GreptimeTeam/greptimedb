@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_KEPT_RELEASE_BYTES","RECOVERY_TAIL_WINDOW"],"fn":["chain_ending_at","chain_from","ensure_vanished_below","fetch_footer","fetch_footer_window","fetch_footer_with_releases","fetch_footers","fetch_listed","is_not_found","locate_footer","select_chain"],"struct":["FetchedFooter","FetchedObject","FetchedObjects","FooterWindow"]};
