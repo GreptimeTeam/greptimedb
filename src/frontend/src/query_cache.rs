@@ -52,11 +52,21 @@
 //!
 //! # Validity
 //!
-//! An admitted entry is served while it is younger than
-//! [`RollupCacheConfig::max_age`], counted from the instant the fill captured
-//! *before* it read storage, so a slow fill is charged for the time it took. Nothing
-//! else is checked on the lookup path: the sequence probe runs in the background,
-//! never inside a request.
+//! Freshness is the background refresher's job. A chunk is served while a round has
+//! proved its table and while no later round's dirty hull reached its input
+//! dependency; a lookup checks nothing about freshness itself, since it reads the
+//! table's readiness and one entry and never probes a sequence.
+//!
+//! [`RollupCacheConfig::max_age`] is the last-resort backstop on top of that,
+//! counted from the instant the fill captured *before* it read storage, so a slow fill
+//! is charged for the time it took. It exists for what a sequence probe cannot
+//! describe — a truncate, a TTL or compaction removal, a DELETE mixed with a distant
+//! PUT, a physical table renamed or reused — and for a refresher that stalled without
+//! failing: neither is detected, so this bound is what eventually takes such an entry
+//! out. It is not the freshness guarantee and not the primary eviction, so it is a
+//! backstop rather than a tuning knob, and an in-memory cache needs no more than the
+//! default hour for it; an entry that reaches it is an age miss
+//! ([`MissReason::Expired`]), not a chunk that went stale in the ordinary sense.
 //!
 //! # Invalidation
 //!
@@ -96,8 +106,8 @@
 //! fill registered: there is nothing to compare, and the read's own vector is the only bound
 //! there is. Whatever is resident is the second bound: a read replaces it only when it reports
 //! the same regions, is at least as far everywhere, and is strictly further somewhere — an
-//! entry past its age bound is the one exception, and a read of the same sequence may refresh
-//! it.
+//! entry past the age backstop is the one exception, and a read of the same sequence may
+//! refresh it.
 //!
 //! A payload materialized before an invalidation can therefore never be published after it,
 //! and a read that finished later but got less far cannot replace a newer payload. A read that
@@ -108,7 +118,8 @@
 //! entries the hull reaches and moves the watermark of every query of the table to the
 //! probe's high watermark — even when it dropped nothing — and that is the whole of an
 //! invalidation: the hull is the round's input and nothing more, no range is remembered,
-//! and a lookup decides on the readiness of its table and the age of the entry alone.
+//! and a lookup decides on the readiness of its table and, as a last resort, the age of
+//! the entry.
 //!
 //! [`QueryState::version`] counts the changes to a query's cache: every published payload
 //! and every committed invalidation advances it once. Nothing admits or refuses a fill by
@@ -187,8 +198,8 @@
 //! A rename or a reuse of a physical table, a truncate, a TTL or compaction removal,
 //! and a DELETE mixed with a distant PUT can all erase or move input that the
 //! timestamp hull of a sequence probe does not describe. None of them is detected: an
-//! entry that survives such a write is served until something dirties its dependency
-//! or it ages out.
+//! entry that survives such a write is served until something dirties its dependency,
+//! or, as the last resort, until it reaches [`RollupCacheConfig::max_age`].
 
 #![allow(dead_code)] // The planning and identity helpers are exercised by the tests below.
 
@@ -230,7 +241,8 @@ const IDLE_TABLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// A scan is a pass over the entries and a read of every publication number, so even a
 /// busy table settles in a few of them. A query that is still moving after the last scan
 /// keeps the payloads it published beyond it: they are the newest ones, and the next
-/// round that reaches them, or [`RollupCacheConfig::max_age`], is what takes them out.
+/// round that reaches them — or, as the last resort,
+/// [`RollupCacheConfig::max_age`] — is what takes them out.
 const INVALIDATE_SCANS: usize = 4;
 
 /// The planner that evaluated a PromQL query.
@@ -455,8 +467,9 @@ impl TimeChunk {
 /// The two have to report the same regions: a read that touched fewer cannot be shown to
 /// describe the same data, so it replaces nothing. Then `current` has to be at least as far
 /// everywhere and strictly further in at least one region — a read of the same sequence says
-/// nothing new about the source. An entry past its age bound is the exception: refreshing it
-/// is worth a read of the same sequence, because the payload is stale by age alone.
+/// nothing new about the source. An entry past the last-resort age backstop is the exception:
+/// refreshing it is worth a read of the same sequence, because nothing else would ever replace
+/// it.
 fn may_replace(
     current: &BTreeMap<u64, u64>,
     resident: &BTreeMap<u64, u64>,
@@ -839,7 +852,11 @@ fn push_direct_span(
 pub enum MissReason {
     /// No entry holds this chunk.
     NotFound,
-    /// The entry was filled longer ago than the hard age bound allows.
+    /// The entry was filled longer ago than the last-resort age backstop allows.
+    ///
+    /// This is an age miss, not a freshness miss: freshness is the background rounds'
+    /// job, and an entry only reaches this age when what the sequence probe cannot
+    /// describe — or the refresher itself — left it resident.
     Expired {
         /// How long ago the fill captured its read.
         age: Duration,
@@ -1098,7 +1115,7 @@ pub enum ConfigError {
     Chunk,
     /// The refresh period must leave the cache time to run a round at all.
     RefreshInterval,
-    /// The age bound must accept an entry at all.
+    /// The last-resort age backstop must accept an entry at all.
     MaxAge,
 }
 
@@ -1186,8 +1203,12 @@ impl RollupCacheConfig {
         self.refresh_interval
     }
 
-    /// How old an entry may be before it stops being served, counted from the
-    /// instant its fill captured before reading storage.
+    /// The last-resort age backstop: how old an entry may grow before it stops being
+    /// served, counted from the instant its fill captured before reading storage.
+    ///
+    /// It is not the freshness bound; the background rounds are. It is what takes an
+    /// entry out when neither a round nor the idle timeout ever would, so it is a
+    /// backstop, and the default hour is enough for an in-memory cache.
     pub fn max_age(&self) -> Duration {
         self.max_age
     }
@@ -1467,6 +1488,11 @@ impl RollupCache {
     /// fails while the request runs stops the serving at the next chunk. This is local
     /// and infallible: it reads at most one entry, never storage, and never waits for
     /// an in-flight fill or for cache maintenance.
+    ///
+    /// The age check is the last-resort backstop only: an entry older than
+    /// [`RollupCacheConfig::max_age`] is a [`MissReason::Expired`] age miss, but a
+    /// younger entry is not thereby fresh — freshness is what the background rounds
+    /// established, and a lookup never re-establishes it.
     pub fn lookup(&self, admission: &Admission, key: &TimeChunkKey, now: SystemTime) -> Lookup {
         if key.chunk().is_empty() {
             return Lookup::Bypass(BypassReason::EmptyChunk);
@@ -1560,7 +1586,7 @@ impl RollupCache {
     /// invalidated watermark covers and is at least as far in every one of them, and at least
     /// as far as whatever the chunk holds with at least one region strictly further. A payload
     /// a round overtook is therefore refused, and so is one of another region domain and one
-    /// that would replace a newer payload; an entry past its age bound may still be refreshed
+    /// that would replace a newer payload; an entry past the age backstop may still be refreshed
     /// by a read of the same sequence. The request that read a refused payload still gets it;
     /// the cache just does not keep it.
     ///
@@ -1615,7 +1641,9 @@ impl RollupCache {
         let key = TimeChunkKey::new(fill.identity.clone(), fill.chunk);
         if let Some(resident) = self.entries.get(&key) {
             // The resident payload's age is measured at the instant this request captured,
-            // which is the request's own clock and not the wall clock of the insertion.
+            // which is the request's own clock and not the wall clock of the insertion. It
+            // decides only whether the last-resort age backstop was reached, which is what
+            // lets a read of the same sequence still replace such a payload.
             let age = fill
                 .captured_at
                 .duration_since(resident.filled_at)
@@ -2576,7 +2604,7 @@ mod tests {
         let admission = opened(&cache);
         let key = chunk_key();
         // The resident payload was read long before this request captured its instant, so it
-        // is stale by age alone.
+        // is past the last-resort age backstop and nothing else would replace it.
         let old = cache.begin_fill(&admission, &key, key.chunk(), at(HEAD_MS));
         assert_eq!(
             cache.insert(&old, &BTreeMap::from([(1, 20)]), payload(), Arc::default()),

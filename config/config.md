@@ -291,7 +291,7 @@
 | `rollup_cache.chunk` | String | `5m` | The canonical chunk duration. A query whose step does not divide it bypasses the cache. |
 | `rollup_cache.tail` | String | `10m` | Output points this close to wall-clock now may still be receiving data, so they are executed directly and never cached. |
 | `rollup_cache.refresh_interval` | String | `1s` | How often the background refresher probes an active source table. It bounds how stale a served chunk can be; no request waits for, or measures, a round. |
-| `rollup_cache.max_age` | String | `1h` | How old a cached chunk may be before it is evicted, independent of source changes. |
+| `rollup_cache.max_age` | String | `1h` | The last-resort age backstop for a cached chunk, not a freshness bound.<br/>Freshness comes from the background refresher: it proves a source table's sequence<br/>every `refresh_interval`, seconds rather than hours, and drops every chunk whose input<br/>the new rows reach. This bound only covers what that probe cannot describe (a<br/>truncate, a TTL or compaction removal, a DELETE mixed with a distant PUT, a physical<br/>table renamed or reused) and a refresher that stalled without failing. The cache is in<br/>memory, so an hour is enough for that role; shortening it only adds misses. |
 
 
 ## Distributed Mode
@@ -461,7 +461,7 @@
 | `rollup_cache.chunk` | String | `5m` | The canonical chunk duration. A query whose step does not divide it bypasses the cache. |
 | `rollup_cache.tail` | String | `10m` | Output points this close to wall-clock now may still be receiving data, so they are executed directly and never cached. |
 | `rollup_cache.refresh_interval` | String | `1s` | How often the background refresher probes an active source table. It bounds how stale a served chunk can be; no request waits for, or measures, a round. |
-| `rollup_cache.max_age` | String | `1h` | How old a cached chunk may be before it is evicted, independent of source changes. |
+| `rollup_cache.max_age` | String | `1h` | The last-resort age backstop for a cached chunk, not a freshness bound.<br/>Freshness comes from the background refresher: it proves a source table's sequence<br/>every `refresh_interval`, seconds rather than hours, and drops every chunk whose input<br/>the new rows reach. This bound only covers what that probe cannot describe (a<br/>truncate, a TTL or compaction removal, a DELETE mixed with a distant PUT, a physical<br/>table renamed or reused) and a refresher that stalled without failing. The cache is in<br/>memory, so an hour is enough for that role; shortening it only adds misses. |
 
 
 ### Metasrv

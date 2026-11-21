@@ -209,22 +209,25 @@ one case compares an uncached and a cached frontend:
 max_bytes = "256MB"
 chunk = "5m"
 tail = "0s"
-refresh_interval = "50ms"
+refresh_interval = "1s"
 max_age = "1h"
 
 [scenario.remote_write.prom_store.candidate_rollup_cache] # candidate only
 max_bytes = "512MB"
 chunk = "5m"
 tail = "0s"
-refresh_interval = "50ms"
+refresh_interval = "1s"
 max_age = "1h"
 ```
 
-Every field is optional and defaults to the frontend's own default, except
-`enable`, which defaults to `true` because naming the table means the cache is
-meant to be on. Values are the strings the frontend parses itself: `max_bytes` is
-a `ReadableSize` (`256MB`), and `chunk`, `tail`, `refresh_interval`, and
-`max_age` are `humantime` durations (`5m`, `0s`, `50ms`, `1h`).
+Every field is optional. `enable` defaults to `true`, because naming the table
+means the cache is meant to be on; the other fields fall back to the values in
+`src/cmd/src/bin/query_perf_fixture/case.rs`. Name `max_age` explicitly in a
+case: it is the last-resort backstop behind the refresher (an hour in the
+frontend's own default), not the freshness bound, and a case reads better when it
+says so. Values are the strings the frontend parses itself: `max_bytes` is a
+`ReadableSize` (`256MB`), and `chunk`, `tail`, `refresh_interval`, and `max_age`
+are `humantime` durations (`5m`, `0s`, `50ms`, `1h`).
 
 Rendering is per target: `query_regression_runner render-remote-config --target
 base|candidate` applies `rollup_cache` to the base and prefers
@@ -240,11 +243,17 @@ opposite mistake would pass quietly.
 The cache only serves PromQL range queries whose expression is in the
 `selector`/`rate`/`sum` allowlist (`src/query/src/promql/window.rs`), whose
 `chunk` is a whole multiple of the step, whose points are all older than
-`now - tail`, and whose source table a background round has proved. Use
+`now - tail`, and whose source table a background round has proved. A bare
+top-level selector is on that allowlist but bypasses the cache
+(`windowed_expr_is_bare_selector` in `src/frontend/src/instance.rs`), because
+serving it out of a cached payload measured slower than scanning it. Use
 `kind = "prom_http"` queries (the Prometheus HTTP range API marks the output
 unordered, which is the path the cache serves), historical data so the points are
 really older than the tail, and `settle_ms` after the warmup so a round can
-publish the table before the measured iterations.
+publish the table before the measured iterations. `max_age` only bounds how long
+an entry may survive what the sequence probe cannot describe, so it is the last
+resort rather than a freshness setting (see above); it is not what makes a warm
+range fresh.
 
 Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
 time. For each chunk, `prepare-remote` invokes `query_perf_fixture prom-remote-write` with the
@@ -296,20 +305,39 @@ float selective controls over a 262144-row direct SST fixture.
 `tests/perf/query_cases/prom_rollup_cache_warm_range/case.toml` measures the
 frontend rollup cache serving warm historical PromQL ranges. It writes 2048
 series × 720 one-minute samples starting 2024-01-01 through remote-write, then
-evaluates 2024-01-01T02:00Z–03:00Z at a `1m` step through the Prometheus HTTP
-range API with a named selector, `rate(...)`, and `sum by (host) (rate(...))` —
-the three shapes in the cache's expression allowlist. A `5m` chunk is a whole
-multiple of the step and the data is historical, so `tail = "0s"` leaves the
-range cacheable; the chunks are complete except for the trailing point, so every
-measured iteration should be a real hit.
+evaluates 2024-01-01T02:00Z–08:00Z at a `5m` step through the Prometheus HTTP
+range API with `rate(...)`, `sum by (host) (rate(...))`, and a bare named
+selector. The range is six hours inclusive, so it is 73 points; a `5m` chunk is a
+whole multiple of the step and holds one grid point per chunk, so all 73 are
+cacheable and the request has zero direct spans. The data is historical and
+`tail = "0s"`, so nothing falls into the tail either, and every measured
+iteration of the two cached shapes should be a real hit.
 
 The cache is configured for the candidate only (`candidate_rollup_cache`), so the
-base runs the same build's uncached path. The `prom_http` measurements carry
-`min_candidate_latency_speedup_pct` (25% for the selector and the `sum` fold, 40%
-for `rate`, which reads more input per output point) so a candidate whose cache
-did not take effect fails instead of passing with base-equal latency. The TQL
-`rate` control is not cached on either target and keeps its normal
-`max_candidate_latency_regression_pct = 25` gate.
+base runs the same build's uncached path. The two cached shapes carry
+`min_candidate_latency_speedup_pct` — 10% for `rate`, whose first measurement was
+18.5%, and 25% for the `sum` fold, whose first measurement was 58% — so a
+candidate whose cache did not take effect fails instead of passing with
+base-equal latency.
+
+The bare selector no longer exercises the cache: a bare top-level selector
+bypasses it, because serving 2048 series × 73 points from a cached payload
+measured slower than scanning them. It stays in the case as
+`prom_range_selector_6h_5m_bypass_control`, a no-regression control carrying
+`max_candidate_latency_regression_pct = 25`: both targets run the same path, so
+it catches a cache that slowed the selector down, not one that failed to cache
+it. The TQL `rate` control is likewise uncached on both targets and carries
+`max_candidate_latency_regression_pct = 50`, which is loose only because that
+path is noisy run to run.
+
+`max_age` is not a freshness bound here either. Freshness comes from the
+background refresher, which proves a source table's sequence every
+`refresh_interval` and drops the chunks whose input the new rows reach; `max_age`
+is only the last-resort backstop for what that probe cannot describe (a truncate,
+a TTL or compaction removal, a mixed DELETE/PUT, a physical table renamed or
+reused) and for a refresher that stalled silently. The case sets it to `1h`, the
+frontend's own default, which is far longer than the run: shortening it would not
+make a warm range fresher, only add misses.
 
 The case is in the `heavy` group, not in the routine `all` default set: it is a
 feature-presence measurement of a candidate-only capability rather than a
