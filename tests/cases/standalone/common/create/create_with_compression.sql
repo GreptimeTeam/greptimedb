@@ -19,6 +19,10 @@ SELECT ts, trace_id, prompt, reply, tokens FROM spans ORDER BY ts;
 
 ALTER TABLE spans MODIFY COLUMN tokens STRING;
 
+ALTER TABLE spans ADD COLUMN note STRING COMPRESSION WITH (level = 5);
+
+SHOW CREATE TABLE spans;
+
 DROP TABLE spans;
 
 CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (level = 0));

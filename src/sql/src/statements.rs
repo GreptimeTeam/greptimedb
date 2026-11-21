@@ -36,6 +36,7 @@ pub mod truncate;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::column_def::options_from_compression;
 use api::v1::{ColumnOptions, SemanticType};
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
@@ -219,7 +220,7 @@ pub fn sql_col_to_grpc_col_def(
         .extensions
         .build_json_settings()?
         .unwrap_or_else(JsonSettings::new_v2);
-    let options = json2_extension(&col.data_type, settings).map(|extension| {
+    let mut options = json2_extension(&col.data_type, settings).map(|extension| {
         let mut options = ColumnOptions::default();
         options.options.insert(
             EXTENSION_TYPE_NAME_KEY.to_string(),
@@ -232,6 +233,15 @@ pub fn sql_col_to_grpc_col_def(
         }
         options
     });
+    // ADD COLUMN builds the column from this definition, so it must carry SST column options.
+    if let Some(compression) = column.extensions.build_compression_options()? {
+        let compression =
+            options_from_compression(&compression).context(ConvertToGrpcDataTypeSnafu)?;
+        options
+            .get_or_insert_with(ColumnOptions::default)
+            .options
+            .extend(compression.options);
+    }
 
     Ok(api::v1::ColumnDef {
         name,
