@@ -34,6 +34,7 @@ use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
+    COLUMN_STORAGE_OPT_KEY_THRESHOLD, COLUMN_STORAGE_OPT_KEY_TYPE,
 };
 use snafu::{ResultExt, ensure};
 use sqlparser::dialect::Dialect;
@@ -385,6 +386,14 @@ pub fn validate_column_compression_create_option(key: &str) -> bool {
         COLUMN_COMPRESSION_OPT_KEY_LEVEL,
         COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE,
         COLUMN_COMPRESSION_OPT_KEY_ENCODING,
+    ]
+    .contains(&key)
+}
+
+pub fn validate_column_storage_create_option(key: &str) -> bool {
+    [
+        COLUMN_STORAGE_OPT_KEY_TYPE,
+        COLUMN_STORAGE_OPT_KEY_THRESHOLD,
     ]
     .contains(&key)
 }

@@ -52,6 +52,7 @@ use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::location::{self, region_dir_from_table_dir};
+use crate::sst::parquet::blob::blob_path;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::{ParquetWriter, SstWriteContext};
 use crate::sst::parquet::{SstInfo, WriteOptions};
@@ -271,16 +272,18 @@ impl AccessLayer {
 
         let attempted_files = file_ids.to_vec();
         // Deleter does not normalize leading slashes like Operator::delete does.
+        // Each SST may have a blob sidecar; deleting a missing one is a no-op.
         let paths: Vec<_> = file_ids
             .iter()
-            .map(|file_id| {
-                location::sst_file_path(
+            .flat_map(|file_id| {
+                let sst = location::sst_file_path(
                     &self.table_dir,
                     RegionFileId::new(region_id, *file_id),
                     self.path_type,
                 )
                 .trim_start_matches('/')
-                .to_string()
+                .to_string();
+                [blob_path(&sst), sst]
             })
             .collect();
 
@@ -481,7 +484,11 @@ impl AccessLayer {
             })
             .with_write_guard(guard)
             .with_cancellation(cancellation)
-            .with_memory_limits(limits);
+            .with_memory_limits(limits)
+            .with_blob_target(
+                self.object_store.clone(),
+                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
+            );
             match request.sst_write_format {
                 FormatType::PrimaryKey => {
                     writer

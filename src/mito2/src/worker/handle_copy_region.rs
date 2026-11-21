@@ -309,21 +309,23 @@ fn remap_copied_file_meta(file_meta: &FileMeta, target_region_id: RegionId) -> F
 }
 
 fn file_descriptors_for_meta(file_meta: &FileMeta) -> Vec<FileDescriptor> {
-    let data = FileDescriptor::Data {
+    let mut descriptors = vec![FileDescriptor::Data {
         file_id: file_meta.file_id,
         size: file_meta.file_size,
-    };
+    }];
+    if file_meta.blob_file_size > 0 {
+        descriptors.push(FileDescriptor::Blob {
+            file_id: file_meta.file_id,
+            size: file_meta.blob_file_size,
+        });
+    }
     if file_meta.exists_index() {
         let region_index_id = file_meta.index_id();
-        vec![
-            data,
-            FileDescriptor::Index {
-                file_id: region_index_id.file_id.file_id(),
-                version: region_index_id.version,
-                size: file_meta.index_file_size(),
-            },
-        ]
-    } else {
-        vec![data]
+        descriptors.push(FileDescriptor::Index {
+            file_id: region_index_id.file_id.file_id(),
+            version: region_index_id.version,
+            size: file_meta.index_file_size(),
+        });
     }
+    descriptors
 }

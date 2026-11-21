@@ -227,7 +227,7 @@ impl SstVersion {
             .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }
 
-    /// Returns the space occupied by SST data files owned by `region_id`.
+    /// Returns the space occupied by SST data files and their sidecars owned by `region_id`.
     pub(crate) fn owned_sst_usage(&self, region_id: RegionId) -> u64 {
         self.levels
             .iter()
@@ -238,7 +238,7 @@ impl SstVersion {
                     .filter(|file_handle| file_handle.region_id() == region_id)
                     .map(|file_handle| {
                         let meta = file_handle.meta_ref();
-                        meta.file_size
+                        meta.file_size + meta.blob_file_size
                     })
                     .sum::<u64>()
             })

@@ -52,6 +52,7 @@ use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu,
     RecordBatchSnafu, Result, UnexpectedSnafu,
 };
+use crate::sst::parquet::blob::blob_columns;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::{PrimaryKeyArray, StatValues};
@@ -438,7 +439,10 @@ pub(crate) fn build_reader_filter_plan(
     // `SkipFields` keeps field predicates in the normal read path to avoid a
     // second read of projected field columns, while tags/timestamp can still
     // participate in prefiltering.
-    let field_prefilter_enabled = pre_filter_mode == PreFilterMode::All;
+    // Out-of-line columns hold references until the row group reader resolves them, so
+    // field predicates must wait for the normal read path.
+    let field_prefilter_enabled =
+        pre_filter_mode == PreFilterMode::All && blob_columns(parquet_metadata).is_empty();
     // When true, tag columns are encoded in the primary key column and are NOT
     // stored as separate parquet columns. Tag predicates must go through PK
     // decoding rather than direct column reads.

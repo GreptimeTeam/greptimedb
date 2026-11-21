@@ -391,10 +391,18 @@ pub struct FileMeta {
     /// Physical encoding, omitted for legacy Parquet files.
     #[serde(default, skip_serializing_if = "FileFormat::is_parquet")]
     pub format: FileFormat,
+    /// Size of the blob sidecar that holds the file's external values, at the SST path with a
+    /// `.blob` extension. 0 means the file has no sidecar.
+    #[serde(default, skip_serializing_if = "is_zero_size")]
+    pub blob_file_size: u64,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero_size(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Formats a debug field with a custom closure, as a stable replacement for
@@ -444,6 +452,9 @@ impl Debug for FileMeta {
                 .field("available_indexes", &self.available_indexes)
                 .field("indexes", &self.indexes)
                 .field("index_file_size", &ReadableSize(self.index_file_size));
+        }
+        if self.blob_file_size > 0 {
+            debug_struct.field("blob_file_size", &ReadableSize(self.blob_file_size));
         }
         debug_struct
             .field("num_rows", &self.num_rows)

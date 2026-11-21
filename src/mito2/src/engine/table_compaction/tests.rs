@@ -13,12 +13,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use api::v1::Rows;
+use api::v1::helper::row;
+use api::v1::value::ValueData;
+use api::v1::{Rows, SemanticType};
 use bytes::Bytes;
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::StorageOptions;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{RegionRequest, RegionTruncateRequest};
@@ -34,6 +39,7 @@ use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use crate::region::MitoRegionRef;
 use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 use crate::sst::location;
+use crate::sst::parquet::blob::blob_path;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
@@ -1136,4 +1142,105 @@ async fn test_failed_verification_does_not_notify_hook() {
         engine.table_compaction_snapshot(region_id).unwrap().inputs
     );
     assert_eq!(6, row_count(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_output_missing_its_sidecar_is_not_published() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let mut create = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::string_datatype())
+        .build();
+    let field = create
+        .column_metadatas
+        .iter_mut()
+        .find(|column| column.semantic_type == SemanticType::Field)
+        .unwrap();
+    field.column_schema = field
+        .column_schema
+        .clone()
+        .with_storage_options(StorageOptions {
+            threshold: Some(ReadableSize(16)),
+            ..Default::default()
+        })
+        .unwrap();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create.clone()))
+        .await
+        .unwrap();
+    let rows = (0..3)
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue(i.to_string()),
+                ValueData::StringValue("v".repeat(64)),
+                ValueData::TimestampMillisecondValue(i * 1000),
+            ])
+        })
+        .collect();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&create),
+            rows,
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let access = &region.access_layer;
+    let path = |file: &FileMeta| {
+        location::sst_file_path(access.table_dir(), file.file_id(), access.path_type())
+    };
+    let copy_sidecar = |source: FileMeta, target: FileMeta| async move {
+        access
+            .object_store()
+            .copy(&blob_path(&path(&source)), &blob_path(&path(&target)))
+            .await
+            .unwrap();
+    };
+    let original = region.version().ssts.levels()[0]
+        .files()
+        .next()
+        .unwrap()
+        .meta_ref()
+        .clone();
+    let shared = copy_sst(&region, &original, LEVEL_SHARED).await;
+    copy_sidecar(original.clone(), shared.clone()).await;
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![shared],
+                files_to_remove: vec![original],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
+    let output = copy_sst(&region, &snapshot.inputs[0], 0).await;
+
+    assert!(
+        engine
+            .publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        snapshot.inputs,
+        engine.table_compaction_snapshot(region_id).unwrap().inputs
+    );
+
+    copy_sidecar(snapshot.inputs[0].clone(), output.clone()).await;
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, snapshot, vec![output])
+            .await
+            .unwrap()
+    );
+    assert_eq!(3, row_count(&engine, region_id).await);
 }

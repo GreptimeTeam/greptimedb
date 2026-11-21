@@ -24,6 +24,8 @@ use crate::compaction::multi_region::{
 };
 use crate::config::{FulltextIndexConfig, MitoConfig};
 use crate::error::{IndexOptionsSnafu, MultiRegionCompactionResourceSnafu, Result};
+use crate::sst::parquet::blob::{MAX_RESOLVED_BATCH_BYTES, blob_columns};
+use crate::sst::parquet::max_row_group_value_bytes;
 use crate::sst::parquet::writer::SstWriteLimits;
 
 pub(crate) const BATCH_SIZE: usize = 64;
@@ -226,7 +228,15 @@ fn reader_bytes(footer: &ParquetMetaData) -> u64 {
         })
         .max()
         .unwrap_or(0);
-    pages.saturating_add(footer.memory_size() as u64)
+    // Readers materialize external values outside the Parquet pages, one bounded chunk at a time.
+    let external = if blob_columns(footer).is_empty() {
+        0
+    } else {
+        max_row_group_value_bytes(footer).min(MAX_RESOLVED_BATCH_BYTES as u64)
+    };
+    pages
+        .saturating_add(external)
+        .saturating_add(footer.memory_size() as u64)
 }
 
 /// Retained state and temporary finish allocations share the admission budget.
