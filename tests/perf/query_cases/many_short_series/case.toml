@@ -1,0 +1,360 @@
+# Many short series: 100,000 series x 8 samples in 8 non-overlapping SSTs.
+#
+# This is the "wide and shallow" companion to promql_constant_tag_concat_ms_100k
+# (100,000 series, 8 samples per series per file, 32 SSTs). Here every series
+# holds only eight samples in total, one per file, so a five-minute window spans
+# every file and the query cost is dominated by per-series setup rather than by
+# points per series.
+#
+# It is also the only direct-SST case whose table is *not* `append_mode`: the
+# native fused-series route admits a region only when its time index is
+# `TIMESTAMP(3)` and the table is copy-on-write (see the raw-series preflight in
+# `src/query/src/promql/planner/native.rs`, the
+# `timestamp_millisecond_datatype` / `APPEND_MODE_KEY` checks). A `TIMESTAMP(9)`
+# or `append_mode` fixture would send every query below down the legacy plan.
+#
+# Layout arithmetic (timestamp-major generation: every series occurs once per
+# scrape timestamp, and every file holds one timestamp for all series):
+#   sst_count 8 x rows_per_sst 100,000 = 800,000 rows
+#   series_count 100,000 -> 8 samples per series
+#   step 15s -> 00:00:00Z, 00:00:15Z, ... 00:01:45Z (a 105-second span)
+# Measured on the generated fixture: 800,000 rows, 100,000 distinct
+# (host, instance) pairs, 16 distinct hosts, 8 distinct timestamps, and exactly
+# 8 samples per series.
+#
+# Label cardinality: the generator derives each tag value as
+# `series % cardinality`, so the number of distinct (host, instance) series is
+# the least common multiple of the two cardinalities, capped by series_count.
+# The requested 16 hosts x 6,250 instances is not expressible: lcm(16, 6250) is
+# 50,000, which would silently halve the series count. `instance` therefore
+# declares 6,251 values, which is coprime with 16 (it is odd), so
+# 16 x 6,251 = 100,016 >= 100,000 and all 100,000 series keep a distinct label
+# pair: 16 hosts with 6,250 or 6,251 instances each, the closest expressible
+# shape to the request.
+#
+# Query matrix: one entry per plan shape the native fused-series route is meant
+# to answer, plus the controls that keep a shape's timing honest. Every query is
+# measured as `TQL ANALYZE VERBOSE FORMAT JSON` because the framework reads
+# `execution_time_ms` out of the ANALYZE output (a bare `TQL EVAL` returns rows
+# only; see `query_regression_runner::measure`), and every entry sets
+# `require_native = true` so the runner also states the
+# `query.experimental_native_promql` hint and asserts the native route from the
+# statement's JSON plan tree before it times the query. The assertion reads node
+# names only (`FusedSeries`/`FusedSeriesExec`) and fails the run on any other
+# plan; the text form cannot prove the route, because a plan line may begin with
+# a label value. Warmup 3 / iterations 9 throughout.
+#
+# Two deviations from a literal reading of "binary + matching", both required to
+# keep the query *valid* rather than to reach the native route (the route
+# declines or admits these on its own):
+#   * `rate(m[5m]) / ignoring(instance) rate(m[5m])` matches on `host` alone, so
+#     each side contributes 6,250-6,251 series per group and the match is
+#     many-to-many. Prometheus rejects that, and so does GreptimeDB's vector
+#     match (`src/promql/src/vector_match.rs`: "many-to-one matching must be
+#     explicit (group_left/group_right)"). The identity-match form of the same
+#     100,000-way shape is `... / on(host, instance) ...` (7a).
+#   * `sum by (host) (rate(m[5m])) / ignoring(instance) sum by (host) (...)`
+#     (7b) is the aggregated form: 16 series per side, matched one-to-one.
+
+[case]
+name = "many_short_series"
+description = "100,000 short series (8 samples each) in 8 SSTs: wide-and-shallow PromQL shape coverage for the native fused-series route"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 20480
+
+[[scenario.tables]]
+database = "public"
+name = "many_short_series"
+engine = "mito"
+# Copy-on-write on purpose: `append_mode` stays unset, and mito's default is
+# false. The native route declines an append-only region outright.
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 6_251, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 1000.0 }
+
+# Milliseconds, not nanoseconds: the native route binds a raw-series source only
+# for a `TIMESTAMP(3)` time index.
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(3)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 8
+rows_per_sst = 100_000
+row_group_size = 8_192
+series_count = 100_000
+start_unix_nanos = 1_704_067_200_000_000_000 # 2024-01-01T00:00:00Z
+step_nanos = 15_000_000_000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+# Evaluation grid: 00:00:45Z-00:01:45Z at a 15-second step, five evaluations.
+# The plain shapes scan [1704066945, 1704067305] -- all eight files and all
+# 100,000 series -- and their five evaluations read a growing prefix of that one
+# scan. The shapes below that pin, offset or filter by host read fewer
+# files/series by construction; each says so where it appears.
+
+# 1. Bare selector: the control group.
+[[scenario.queries]]
+name = "selector_all_control"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') many_short_series"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 2. Rate over a window that holds every sample of every series.
+[[scenario.queries]]
+name = "rate_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m])"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 3. Whole-vector sum: the split shape (the per-series prefix plus a Partial
+# aggregate in the first producer, SeriesRepartitionExec, then the Final
+# aggregate in a second producer).
+[[scenario.queries]]
+name = "sum_rate_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') sum(rate(many_short_series[5m]))"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 4. Grouped sum: 16 groups, state-routed like the whole-vector sum.
+[[scenario.queries]]
+name = "sum_by_host_rate_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') sum by (host) (rate(many_short_series[5m]))"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 5. Grouped count: `count` carries no per-series state, so it is the split
+# shape with the least per-series work.
+[[scenario.queries]]
+name = "count_by_host_rate_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') count by (host) (rate(many_short_series[5m]))"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 6. topk over the whole vector: a global reduction over 100,000 series.
+[[scenario.queries]]
+name = "topk_5_rate_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') topk(5, rate(many_short_series[5m]))"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 7a. Binary between two full vectors with an explicit identity match: every
+# series matches itself, so this is the 100,000-way matching and repartition
+# shape.
+[[scenario.queries]]
+name = "rate_ratio_on_host_instance"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m]) / on(host, instance) rate(many_short_series[5m])"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 7b. The aggregated form of the same binary: 16 one-to-one matches, each side a
+# split aggregate. `ignoring(instance)` is a no-op here because neither side
+# carries `instance` any more; it spells out the requested matching explicitly.
+[[scenario.queries]]
+name = "sum_by_host_ratio_ignoring_instance"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') sum by (host) (rate(many_short_series[5m])) / ignoring(instance) sum by (host) (rate(many_short_series[5m]))"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 8. Three range-function reductions: mean, extremum, and a quantile that needs
+# the whole window rather than a running fold.
+[[scenario.queries]]
+name = "avg_over_time_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') avg_over_time(many_short_series[1m])"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "max_over_time_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') max_over_time(many_short_series[5m])"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "quantile_over_time_09_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') quantile_over_time(0.9, many_short_series[5m])"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 9. Label rewrite over the evaluated vector: 100,000 output label sets.
+[[scenario.queries]]
+name = "label_replace_dst_from_host"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') label_replace(rate(many_short_series[5m]), 'dst', '$1', 'host', '(.*)')"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 10. Comparison, as a filter and as `bool`: the filter drops samples, while the
+# `bool` form keeps every series and writes 0 or 1.
+[[scenario.queries]]
+name = "rate_gt_05_filter"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m]) > 0.5"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "rate_gt_bool_05"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m]) > bool 0.5"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 11. Set operation: `and` keeps the left side's samples where the right side
+# has a match, so it is the join-shaped vector operation without arithmetic.
+[[scenario.queries]]
+name = "rate_and_rate"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m]) and rate(many_short_series[5m])"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 12. Subquery: a ten-minute window at a one-minute step holds ten aligned inner
+# points per outer one (the window is left-open), so the outer grid is kept to
+# two points -- twenty inner evaluations -- instead of the five used elsewhere.
+[[scenario.queries]]
+name = "max_over_time_rate_10m_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '1m') max_over_time(rate(many_short_series[5m])[10m:1m])"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 13. Window modifiers. `offset 1m` shifts the window back, so the early
+# evaluations hold fewer samples than the late ones. `@ 1704067200` pins every
+# evaluation to the first sample's instant: that five-minute window holds
+# exactly one sample per series, so `rate` returns no series at all. The query
+# still plans and scans the shifted window, which is what this control measures.
+[[scenario.queries]]
+name = "rate_5m_offset_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m] offset 1m)"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "rate_5m_at_1704067200_empty_control"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m] @ 1704067200)"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 14. Instant query. `TQL` has no bare instant form (every statement takes the
+# `(start, end, step[, lookback])` parameters, see
+# `src/sql/src/parsers/tql_parser.rs`), so a single evaluation is the framework's
+# equivalent: start == end, one step. `host1` holds 6,250 series.
+[[scenario.queries]]
+name = "instant_selector_host1"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067305, 1704067305, '15s') many_short_series{host=\"host1\"}"
+require_native = true
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
