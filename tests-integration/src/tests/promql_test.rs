@@ -16921,3 +16921,155 @@ async fn native_promql_matrix_root_matches_legacy() {
     let legacy = run(&instance, &observer, sql, false).await;
     assert_eq!(native, legacy);
 }
+
+/// Pointwise wrappers over an evaluated window keep the existing planner's answers (#10531).
+///
+/// Each host is a distinct linear counter sampled every 20 seconds, with slopes 1, 1.5 and 2 per
+/// second. The bare evaluated window and raw-window wrapper remain native; the chained statements
+/// are compared with the same query with native planning disabled, both at an instant and over a
+/// range. A fixture whose ordinary labels are distinct does not prove uniqueness in general.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_pointwise_over_subquery_answers_prometheus() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_pointwise_subquery")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let mut rows = Vec::new();
+    for (host, step) in [("a", 20.0), ("b", 30.0), ("c", 40.0)] {
+        for (index, ts) in (180..=420).step_by(20).enumerate() {
+            rows.push(format!(
+                "('{host}', {}, {})",
+                ts * 1000,
+                step * index as f64
+            ));
+        }
+    }
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE native_pointwise (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)); \
+             INSERT INTO native_pointwise (host, ts, val) VALUES {}",
+            rows.join(", ")
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // What Prometheus answers for these samples: the rate of each series, and `ceil` of it.
+    let answer = [("a", 1.0, 1.0), ("b", 1.5, 2.0), ("c", 2.0, 2.0)];
+    let expected = |ceil: bool| {
+        answer
+            .iter()
+            .map(|(host, rate, rounded)| {
+                (
+                    300_000_i64,
+                    host.to_string(),
+                    if ceil { *rounded } else { *rate },
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let instant = |query: &str| format!("TQL EVAL (300, 300, '1s') {query}");
+    for (query, ceil, fused) in [
+        (
+            "abs(min_over_time(rate(native_pointwise[1m])[1m:1m]))",
+            false,
+            false,
+        ),
+        (
+            "min_over_time(rate(native_pointwise[1m])[1m:1m])",
+            false,
+            true,
+        ),
+        ("abs(rate(native_pointwise[1m]))", false, true),
+        (
+            "abs(ceil(min_over_time(rate(native_pointwise[1m])[1m:1m])))",
+            true,
+            false,
+        ),
+    ] {
+        let sql = instant(query);
+        observer.clear();
+        let (rows, names) =
+            native_rows_and_names(native_tql_output(&instance, &sql, true).await, Some("host"))
+                .await;
+        assert_eq!(rows, expected(ceil), "{sql}");
+        if fused {
+            assert_eq!(
+                names,
+                Some(expected(ceil).iter().map(|_| None).collect()),
+                "{sql}: native rows declare an empty metric name"
+            );
+            assert!(
+                observer.fused().is_some(),
+                "{sql} did not execute a FusedSeriesExec: {:#?}",
+                observer.root_plan()
+            );
+        } else {
+            let existing = native_rows(
+                native_tql_output(&instance, &sql, false).await,
+                Some("host"),
+            )
+            .await;
+            assert_eq!(
+                rows, existing,
+                "{sql}: native enabled must keep the existing answer"
+            );
+        }
+    }
+
+    // The same statement answers the same values at every point of a range.
+    let range = "TQL EVAL (300, 420, '1m') abs(min_over_time(rate(native_pointwise[1m])[1m:1m]))";
+    observer.clear();
+    let rows = native_rows(
+        native_tql_output(&instance, range, true).await,
+        Some("host"),
+    )
+    .await;
+    let expected_range = [300_000_i64, 360_000, 420_000]
+        .into_iter()
+        .flat_map(|step| {
+            answer
+                .iter()
+                .map(move |(host, rate, _)| (step, host.to_string(), *rate))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows, expected_range, "{range}");
+    let existing = native_rows(
+        native_tql_output(&instance, range, false).await,
+        Some("host"),
+    )
+    .await;
+    assert_eq!(
+        rows, existing,
+        "{range}: native enabled must keep the existing answer"
+    );
+
+    // Partitioning the scan does not change the answer: one partition and four agree with it.
+    let single = instant("abs(min_over_time(rate(native_pointwise[1m])[1m:1m]))");
+    let mut partitioned = Vec::new();
+    for parallelism in [1, 4] {
+        let rows = native_rows(
+            instance
+                .do_query(&single, native_query_context(true, parallelism))
+                .await
+                .remove(0)
+                .unwrap(),
+            Some("host"),
+        )
+        .await;
+        partitioned.push(rows);
+    }
+    assert_eq!(
+        partitioned[0], partitioned[1],
+        "{single}: partitioning changed the answer"
+    );
+    assert_eq!(partitioned[1], expected(false), "{single}");
+}
