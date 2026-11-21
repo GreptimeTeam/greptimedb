@@ -388,6 +388,7 @@ where
 /// [`visit_sequence_range_timestamps`]. Timestamps retain their original units,
 /// query order and duplicates. This variant buffers all rows; use the visitor
 /// directly when only a bounded summary of the timestamps is required.
+#[cfg(test)]
 pub async fn capture_sequence_range_timestamps(
     engine: &QueryEngineRef,
     frontend_client: &FrontendClient,

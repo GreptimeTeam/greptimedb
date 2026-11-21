@@ -47,8 +47,7 @@
 //! complete cursor domain for it. A request never probes: every lookup checks the
 //! table's current readiness under its lock, and a cold table, a table no round has
 //! proved yet, and a table whose last round failed all bypass instead of waiting.
-//! A later successful round opens the table again. `last_success` is observation
-//! only; it is not an admission deadline.
+//! A later successful round opens the table again.
 //!
 //! # Validity
 //!
@@ -88,8 +87,7 @@
 //! evaluation read; overlap is half-open on both spans, so adjacent spans do not
 //! invalidate each other.
 //!
-//! The source sequence decides what may be published, and the version only counts cache
-//! changes. Two per-query values carry that:
+//! The source sequence decides what may be published. Two per-query values carry that:
 //!
 //! - [`QueryState::invalidated_watermark`] is the source sequence the last invalidation of
 //!   the query was committed at, a complete per-region vector — never one number, which
@@ -121,17 +119,13 @@
 //! and a lookup decides on the readiness of its table and, as a last resort, the age of
 //! the entry.
 //!
-//! [`QueryState::version`] counts the changes to a query's cache: every published payload
-//! and every committed invalidation advances it once. Nothing admits or refuses a fill by
-//! it; it is what tells an observer how many times the cache changed.
-//!
 //! # Round proofs
 //!
 //! A round's vector is compared with the cursors the table committed before anything is
 //! committed, whatever the round found — a quiet round included. The key sets have to be the
 //! same and no region may go back: a region that went back is a vector of something the cache
-//! cannot describe, so the table stops being served and neither the cursors, the watermarks nor
-//! the version move.
+//! cannot describe, so the table stops being served and neither the cursors nor the watermarks
+//! move.
 //!
 //! A route that gained or lost a region re-keys the cursors, which makes the round's vector and
 //! everything committed under the old domain incomparable. The table then forgets its entries,
@@ -201,8 +195,6 @@
 //! entry that survives such a write is served until something dirties its dependency,
 //! or, as the last resort, until it reaches [`RollupCacheConfig::max_age`].
 
-#![allow(dead_code)] // The planning and identity helpers are exercised by the tests below.
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -234,16 +226,6 @@ const ENTRY_OVERHEAD_BYTES: u64 = 256;
 /// frontend that once saw many tables does not probe them forever. The next request
 /// for it registers it again and bypasses until a background round proves it.
 const IDLE_TABLE_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// How many times one invalidation rescans to order the fills that started while it
-/// scanned.
-///
-/// A scan is a pass over the entries and a read of every publication number, so even a
-/// busy table settles in a few of them. A query that is still moving after the last scan
-/// keeps the payloads it published beyond it: they are the newest ones, and the next
-/// round that reaches them — or, as the last resort,
-/// [`RollupCacheConfig::max_age`] — is what takes them out.
-const INVALIDATE_SCANS: usize = 4;
 
 /// The planner that evaluated a PromQL query.
 ///
@@ -406,25 +388,22 @@ impl QuerySpan {
         Self { start_ms, end_ms }
     }
 
-    /// The coverage `stmt` evaluates.
-    pub fn of(stmt: &EvalStmt) -> Result<Self, BypassReason> {
-        let grid = EvalGrid::of(stmt).map_err(BypassReason::from)?;
-        Ok(Self::new(grid.start_ms(), grid.last_ms()))
-    }
-
     /// The first requested grid point.
+    ///
+    /// Only the tests read the coverage back; a caller consumes the spans planned
+    /// from it.
+    #[cfg(test)]
     pub fn start_ms(&self) -> i64 {
         self.start_ms
     }
 
     /// The last requested grid point.
+    ///
+    /// Only the tests read the coverage back; a caller consumes the spans planned
+    /// from it.
+    #[cfg(test)]
     pub fn end_ms(&self) -> i64 {
         self.end_ms
-    }
-
-    /// Whether `ms` is inside the coverage.
-    pub fn contains_ms(&self, ms: i64) -> bool {
-        self.start_ms <= ms && ms <= self.end_ms
     }
 }
 
@@ -642,9 +621,9 @@ impl From<WindowError> for BypassReason {
 
 /// The cacheable chunks and the direct spans of one statement.
 ///
-/// [`ChunkSpans::chunks`] and [`ChunkSpans::direct`] partition the requested
-/// coverage exactly once each, in increasing order of time: the direct spans are
-/// disjoint, and together with the chunks they leave neither a gap nor an overlap.
+/// The chunks and the direct spans partition the requested coverage exactly once
+/// each, in increasing order of time: the direct spans are disjoint, and together
+/// with the chunks they leave neither a gap nor an overlap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkSpans {
     span: QuerySpan,
@@ -654,26 +633,6 @@ pub struct ChunkSpans {
 }
 
 impl ChunkSpans {
-    /// The coverage every span below partitions.
-    pub fn span(&self) -> QuerySpan {
-        self.span
-    }
-
-    /// The complete canonical chunks, in time order.
-    pub fn chunks(&self) -> &[TimeChunk] {
-        &self.chunks
-    }
-
-    /// The spans to execute without the cache, in time order.
-    pub fn direct(&self) -> &[DirectSpan] {
-        &self.direct
-    }
-
-    /// The part of the coverage at or after `now - tail`.
-    pub fn tail(&self) -> Option<TimeChunk> {
-        self.tail
-    }
-
     /// The coverage, chunks, direct spans, and tail.
     pub fn into_parts(
         self,
@@ -970,9 +929,6 @@ struct TableStateInner {
     /// once it goes idle, so it is bounded by the identities read in the last
     /// [`IDLE_TABLE_TIMEOUT`].
     queries: HashMap<QueryIdentity, QueryState>,
-    /// When the last round proved the table, which is what finds a failing
-    /// refresher. It is observation only: it gates nothing.
-    last_success: Option<Instant>,
     /// When a request last admitted this table, which is what keeps it active.
     last_used: Option<Instant>,
 }
@@ -1009,11 +965,6 @@ struct QueryState {
     /// committing a watermark over it, because nothing bounds a read taken under no domain — and
     /// only a round moves it.
     invalidated_watermark: BTreeMap<u64, u64>,
-    /// How many times this query's cache changed.
-    ///
-    /// It advances on every published payload and on every committed invalidation, and it
-    /// admits nothing: it is the count of changes, not a token a fill has to hold.
-    version: u64,
     /// When a fill of this query last registered, or when a round last found a payload of it
     /// resident.
     ///
@@ -1139,8 +1090,9 @@ impl std::error::Error for ConfigError {}
 /// positive.
 ///
 /// `chunk` cannot be validated against the step here, because the step belongs to
-/// the query, not the cache: [`RollupCacheConfig::chunk_steps`] reports whether a
-/// given step suits it, and planning bypasses the cache when it does not.
+/// the query, not the cache: planning compares the two and bypasses the cache
+/// ([`BypassReason::MisalignedChunk`]) when the chunk is not a whole number of the
+/// statement's steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollupCacheConfig {
     max_bytes: u64,
@@ -1212,16 +1164,6 @@ impl RollupCacheConfig {
     pub fn max_age(&self) -> Duration {
         self.max_age
     }
-
-    /// The configured chunk as a whole number of steps of `step_ms`.
-    ///
-    /// `None` means the chunk is not a whole multiple of the step, so canonical
-    /// chunk bounds would fall between the statement's grid points; planning
-    /// rejects such a combination ([`BypassReason::MisalignedChunk`]) rather than
-    /// caching spans the evaluator never produced.
-    pub fn chunk_steps(&self, step_ms: i64) -> Option<u64> {
-        chunk_steps(self.chunk, step_ms)
-    }
 }
 
 /// A statement planned into the chunk keys a lookup uses, plus what to read
@@ -1236,6 +1178,10 @@ pub struct PlannedChunks {
 
 impl PlannedChunks {
     /// The coverage every span below partitions.
+    ///
+    /// Only the tests read it back; a caller consumes the chunks and the direct
+    /// spans a plan returns.
+    #[cfg(test)]
     pub fn span(&self) -> QuerySpan {
         self.span
     }
@@ -1251,6 +1197,10 @@ impl PlannedChunks {
     }
 
     /// The part of the coverage at or after `now - tail`.
+    ///
+    /// Only the tests read it back; a caller consumes the chunks and the direct
+    /// spans a plan returns.
+    #[cfg(test)]
     pub fn tail(&self) -> Option<TimeChunk> {
         self.tail
     }
@@ -1563,7 +1513,6 @@ impl RollupCache {
                 .entry(key.identity().clone())
                 .or_insert_with(|| QueryState {
                     invalidated_watermark: watermark,
-                    version: 0,
                     last_used: now,
                     lifecycle: Arc::new(()),
                 });
@@ -1589,9 +1538,6 @@ impl RollupCache {
     /// that would replace a newer payload; an entry past the age backstop may still be refreshed
     /// by a read of the same sequence. The request that read a refused payload still gets it;
     /// the cache just does not keep it.
-    ///
-    /// A publication is a cache change, so it advances the query's version counter, which
-    /// admits nothing and only records that the cache changed.
     ///
     /// The publication also requires the table to still be registered under the state the
     /// request was admitted under and that state to still hold the registration this fill made, so
@@ -1653,8 +1599,6 @@ impl RollupCache {
                 return Insert::Rejected;
             }
         }
-        // The publication is a cache change, so the version counts it.
-        query.version = query.version.saturating_add(1);
         let entry = Entry {
             weight: Entry::weigh(&payload, &annotations),
             payload,
@@ -1790,7 +1734,6 @@ impl RollupCache {
                 cursors,
                 source_version,
                 source_table_id,
-                now,
             );
             return true;
         }
@@ -1811,7 +1754,6 @@ impl RollupCache {
         inner.ready = true;
         inner.source_version = Some(source_version);
         inner.source_table_id = Some(source_table_id);
-        inner.last_success = Some(now);
         // Committed under the table lock, so a fill that registers after this round — or a query
         // that is still being read — is seen by the reclamation of this one.
         self.reclaim_queries(table, &mut inner, now);
@@ -1835,8 +1777,8 @@ impl RollupCache {
     ///
     /// The registry stays held while the entries are dropped, so no publication — of the old state
     /// or of the replacement — can slip between the swap and the removals.
-    // The restart is the round: its vector, its version, its table id and its instant are exactly
-    // the proof being committed, and bundling them into another type would only rename them.
+    // The restart is the round: its vector, its version and its table id are exactly the proof
+    // being committed, and bundling them into another type would only rename them.
     #[allow(clippy::too_many_arguments)]
     fn reset_table(
         &self,
@@ -1846,7 +1788,6 @@ impl RollupCache {
         cursors: BTreeMap<u64, u64>,
         source_version: u64,
         source_table_id: u32,
-        now: Instant,
     ) {
         let last_used = inner.last_used;
         inner.ready = false;
@@ -1862,7 +1803,6 @@ impl RollupCache {
                     source_table_id: Some(source_table_id),
                     ready: true,
                     queries: HashMap::new(),
-                    last_success: Some(now),
                     last_used,
                 }),
             }),
@@ -1875,7 +1815,7 @@ impl RollupCache {
 
     /// Drops the query states of `table` that nothing keeps any more.
     ///
-    /// A query state is a watermark, a version and a marker, registered by every fill and removed
+    /// A query state is a watermark and a marker, registered by every fill and removed
     /// by none, so a table read by many identities would keep one per identity for as long as the
     /// table is active. A state is kept while a payload of it is resident, or while a fill of it
     /// registered within [`IDLE_TABLE_TIMEOUT`]; dropping it is safe, because a fill that is
@@ -2011,12 +1951,11 @@ impl RollupCache {
         // sequence this round proved, so a fill that is still reading — and whose read did
         // not get that far — is refused when it tries to publish. A query with nothing
         // resident moves too, and so does one whose entries were all spared: the fill the
-        // watermark has to refuse is one the cache cannot see. The version counts the change.
+        // watermark has to refuse is one the cache cannot see.
         // The watermark is assigned rather than merged, because the round's vector is
         // complete and a region that fell behind must not keep an older bound.
         for query in inner.queries.values_mut() {
             query.invalidated_watermark = high.clone();
-            query.version = query.version.saturating_add(1);
         }
         debug!(
             "Rollup cache dropped {} entries of table {} for {} and advanced {} query watermarks",
