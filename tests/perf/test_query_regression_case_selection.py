@@ -13,13 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Coverage for query-regression case group selection."""
+"""Coverage for query-regression case group selection and case gate structure."""
 
 import importlib.util
 import re
 import sys
 import unittest
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib
 
 
 RUNNER_PATH = Path(__file__).parents[2] / ".github/scripts/query-regression-run.py"
@@ -64,6 +69,137 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
     def test_explicit_paths_remain_selectable(self) -> None:
         case = "tests/perf/query_cases/sql_topk_order_by/case.toml"
         self.assertEqual(runner.split_cases([case]), [case])
+
+    def test_dyn_filter_join_gates_membership_instead_of_latency_only(self) -> None:
+        case = tomllib.loads(
+            (Path(__file__).parent / "query_cases/dyn_filter_join/case.toml").read_text()
+        )
+        scenario = case["scenario"]
+        query = scenario["queries"][0]
+        checks = query["plan_checks"]
+        thresholds = query["thresholds"]
+
+        # Plan shapes are only available from an analyzed, verbose plan.
+        self.assertIn("EXPLAIN ANALYZE VERBOSE", query["query"])
+
+        require = checks["require"]
+        self.assertTrue(any("DynamicFilter" in pattern for pattern in require), require)
+        self.assertTrue(
+            any("trace_id" in pattern and "IN" in pattern for pattern in require), require
+        )
+
+        forbid = checks["forbid"]
+        self.assertTrue(any("empty" in pattern for pattern in forbid), forbid)
+        self.assertTrue(any("true" in pattern for pattern in forbid), forbid)
+
+        # The store-work gates must be strictly narrower than a full probe scan,
+        # and the row gate must also fail a bounds-only scan that decodes one
+        # whole probe row group (the shape a candidate without the wire recovery
+        # produces). Otherwise the gate would pass for a candidate whose
+        # membership list was degraded to bounds.
+        rows_per_sst = scenario["layout"]["rows_per_sst"]
+        row_group_size = scenario["layout"]["row_group_size"]
+        self.assertGreater(rows_per_sst, 0)
+        self.assertLess(thresholds["max_candidate_num_sst_rows"], rows_per_sst)
+        self.assertLess(thresholds["max_candidate_num_sst_rows"], row_group_size)
+        self.assertGreater(thresholds["max_candidate_page_size_to_fetch_store_bytes"], 0)
+        self.assertLessEqual(
+            thresholds["max_candidate_page_size_to_fetch_store_bytes"], 16 * 1024 * 1024
+        )
+
+        # The 1M-row probe table must be the right operand: this DataFusion
+        # version builds the left hash-join input, so the other order would
+        # build 1M rows and leave nothing for the membership filter to prune.
+        self.assertIn(
+            "FROM dyn_filter_traces b JOIN dyn_filter_logs p", query["query"]
+        )
+
+        # The latency gate still exists, so the case keeps its non-regression role.
+        self.assertIn("max_candidate_latency_regression_pct", thresholds)
+
+    def test_dynamic_membership_plan_checks_are_probe_scan_scoped(self) -> None:
+        cases = [
+            {
+                "name": "dyn_filter_join",
+                # The synthetic case anchors on the logs scan projection prefix:
+                # the JOIN key first, then the projected f1..f6 fields.
+                "anchor": r'"projection": \["trace_id", "f1"',
+                "probe_prefix": (
+                    'RegionScanExec: {"region_id": 1}, '
+                    '"projection": ["trace_id", "f1", "f2", "f3", "f4", "f5", "f6"]'
+                ),
+            },
+            {
+                "name": "dyn_filter_join_target",
+                "anchor": (
+                    r'"projection": \["trace_id", "severity_text", "body", "timestamp"\]'
+                ),
+                "probe_prefix": (
+                    'RegionScanExec: {"region_id": 1}, '
+                    '"projection": ["trace_id", "severity_text", "body", "timestamp"]'
+                ),
+            },
+        ]
+        build_placeholder = (
+            'RegionScanExec: {"region_id": 2}, '
+            '"projection": ["trace_id", "timestamp"], '
+            '"dyn_filters": ["DynamicFilter [ true ]"]'
+        )
+        membership_elsewhere = (
+            'RegionScanExec: {"region_id": 2}, '
+            '"projection": ["trace_id", "timestamp"], '
+            '"dyn_filters": ["DynamicFilter [ trace_id@0 IN (SET) ([trace0]) ]"]'
+        )
+        for spec in cases:
+            with self.subTest(case=spec["name"]):
+                case = tomllib.loads(
+                    (Path(__file__).parent / "query_cases" / spec["name"] / "case.toml").read_text()
+                )
+                checks = case["scenario"]["queries"][0]["plan_checks"]
+                self.assertTrue(checks["require"])
+                self.assertTrue(checks["forbid"])
+
+                # Every probe-specific pattern is bound to the probe scan line;
+                # a global pattern would pass or fail on the wrong scan.
+                for pattern in checks["require"] + checks["forbid"]:
+                    self.assertIn(spec["anchor"], pattern)
+
+                probe = (
+                    spec["probe_prefix"]
+                    + ', "dyn_filters": ["DynamicFilter [ CASE hash_repartition % 3 '
+                    "WHEN 0 THEN trace_id@0 >= trace101 AND trace_id@0 <= trace98 "
+                    'AND trace_id@0 IN (SET) ([trace6, trace7]) ]"]'
+                )
+                # A good probe plan passes even with the build-side unsolved
+                # `DynamicFilter [ true ]` placeholder, and the require has no
+                # exact partition-count rule.
+                for partitions in (1, 3):
+                    plan = "\n".join([probe] * partitions + [build_placeholder])
+                    for pattern in checks["require"]:
+                        self.assertRegex(plan, pattern, plan)
+                    for pattern in checks["forbid"]:
+                        self.assertNotRegex(plan, pattern, plan)
+
+                # A degraded probe fails even when membership appears on another
+                # scan line and the build placeholder is present.
+                for degraded in (
+                    'DynamicFilter [ empty ]',
+                    'DynamicFilter [ true ]',
+                    'DynamicFilter [ trace_id@0 >= trace101 AND trace_id@0 <= trace98 AND true ]',
+                ):
+                    plan = "\n".join(
+                        [
+                            membership_elsewhere,
+                            spec["probe_prefix"] + f', "dyn_filters": ["{degraded}"]',
+                            build_placeholder,
+                        ]
+                    )
+                    self.assertFalse(
+                        any(re.search(pattern, plan) for pattern in checks["require"]), plan
+                    )
+                    self.assertTrue(
+                        any(re.search(pattern, plan) for pattern in checks["forbid"]), plan
+                    )
 
     def test_sst_float_bss_omits_base_encoding_for_older_binaries(self) -> None:
         case_path = Path(__file__).parent / "query_cases/sst_float_bss/case.toml"

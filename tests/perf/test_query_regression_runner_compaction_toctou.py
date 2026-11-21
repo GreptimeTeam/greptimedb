@@ -113,6 +113,165 @@ class RemoteWriteLifecycleTest(unittest.TestCase):
         self.assertIn("stop:candidate:frontend", events)
 
 
+class DirectQueryParallelismTest(unittest.TestCase):
+    """Direct-SST cases may pin the frontend `[query] parallelism`."""
+
+    def setUp(self) -> None:
+        self.args = SimpleNamespace(http_timeout="1", allow_large_fixture="false")
+        self.ports = list(range(10000, 10016))
+
+    def test_query_parallelism_is_read_from_the_normalized_plan(self) -> None:
+        self.assertIsNone(runner.direct_query_parallelism({}))
+        self.assertIsNone(runner.direct_query_parallelism({"scenario": {"kind": "direct_readable_sst"}}))
+        self.assertIsNone(runner.direct_query_parallelism({"scenario": {"query_parallelism": None}}))
+        self.assertEqual(runner.direct_query_parallelism({"scenario": {"query_parallelism": 3}}), 3)
+        for value in (0, -1, "3", True, 2.5):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                runner.direct_query_parallelism({"scenario": {"query_parallelism": value}})
+
+    def run_direct(self, tmpdir: str, query_parallelism: int | None) -> tuple[list[str], dict[str, list[str]]]:
+        events: list[str] = []
+        frontends: dict[str, list[str]] = {}
+
+        def run(command, **_kwargs):
+            phase = command[1]
+            events.append(phase)
+            if phase == "prepare-direct":
+                output = Path(command[command.index("--output") + 1])
+                output.write_text(json.dumps({"fixtures": [{"fixture_dir": "fixture/0"}]}))
+            return SimpleNamespace(returncode=0)
+
+        def start(target, component, _procs):
+            events.append(f"start:{target.name}:{component}")
+            if component == "frontend":
+                frontends[target.name] = runner.component_command(target, "frontend")
+
+        plan = {"scenario": {"kind": "direct_readable_sst"}}
+        if query_parallelism is not None:
+            plan["scenario"]["query_parallelism"] = query_parallelism
+        with (
+            patch.object(runner, "allocate_ports", return_value=self.ports),
+            patch.object(runner, "start_component", side_effect=start),
+            patch.object(runner, "stop_component"),
+            patch.object(runner.subprocess, "run", side_effect=run),
+        ):
+            self.assertEqual(
+                runner.run_direct_case(
+                    self.args, Path("case.toml"), Path(tmpdir), Path("base"),
+                    Path("candidate"), Path("fixture"), Path("runner"), plan,
+                ),
+                0,
+            )
+        return events, frontends
+
+    def test_query_parallelism_renders_a_per_target_frontend_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _events, frontends = self.run_direct(tmpdir, 3)
+            for name in ("base", "candidate"):
+                config = Path(tmpdir) / name / "frontend-query.toml"
+                self.assertEqual(config.read_text(), "[query]\nparallelism = 3\n")
+                command = frontends[name]
+                self.assertEqual(command[command.index("--config-file") + 1], str(config))
+
+    def test_missing_query_parallelism_keeps_the_default_frontend_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _events, frontends = self.run_direct(tmpdir, None)
+            for name in ("base", "candidate"):
+                self.assertFalse((Path(tmpdir) / name / "frontend-query.toml").exists())
+                self.assertNotIn("--config-file", frontends[name])
+
+
+class DirectMeasureRetryTest(unittest.TestCase):
+    """A completed measure report is the verdict; only a crash is retried."""
+
+    def setUp(self) -> None:
+        self.args = SimpleNamespace(http_timeout="1", allow_large_fixture="false")
+        self.ports = list(range(10000, 10016))
+        self.plan = {"scenario": {"kind": "direct_readable_sst"}}
+
+    def run_direct(
+        self, tmpdir: str, measure_results: list[tuple[int, dict | None]]
+    ) -> tuple[int, list[str], Path]:
+        events: list[str] = []
+        measure_calls = 0
+
+        def run(command, **_kwargs):
+            nonlocal measure_calls
+            phase = command[1]
+            events.append(phase)
+            if phase == "prepare-direct":
+                output = Path(command[command.index("--output") + 1])
+                output.write_text(json.dumps({"fixtures": [{"fixture_dir": "fixture/0"}]}))
+                return SimpleNamespace(returncode=0)
+            if phase == "measure":
+                returncode, payload = measure_results[measure_calls]
+                measure_calls += 1
+                if payload is not None:
+                    output = Path(command[command.index("--output") + 1])
+                    output.write_text(json.dumps(payload))
+                return SimpleNamespace(returncode=returncode)
+            return SimpleNamespace(returncode=0)
+
+        def restart(target, component, _procs):
+            events.append(f"restart:{target.name}:{component}")
+
+        with (
+            patch.object(runner, "allocate_ports", return_value=self.ports),
+            patch.object(runner, "start_component"),
+            patch.object(runner, "stop_component"),
+            patch.object(runner, "restart_component", side_effect=restart),
+            patch.object(runner.subprocess, "run", side_effect=run),
+        ):
+            status = runner.run_direct_case(
+                self.args, Path("case.toml"), Path(tmpdir), Path("base"),
+                Path("candidate"), Path("fixture"), Path("runner"), self.plan,
+            )
+        return status, events, Path(tmpdir) / "query-regression-report.json"
+
+    def test_completed_failed_report_is_kept_without_a_warm_retry(self) -> None:
+        failed = {
+            "status": "failed",
+            "targets": [{"name": "candidate", "status": "failed"}],
+            "thresholds": [
+                {
+                    "query": "dyn_membership_join_target",
+                    "threshold": "max_candidate_page_size_to_fetch_store_bytes",
+                    "status": "failed",
+                    "reason": "scan metric not found in plan text",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status, events, report = self.run_direct(tmpdir, [(1, failed)])
+            self.assertEqual(status, 1)
+            self.assertEqual(events.count("measure"), 1)
+            self.assertFalse(any(event.startswith("restart:") for event in events), events)
+            self.assertEqual(json.loads(report.read_text()), failed)
+
+    def test_missing_report_retries_cold_and_keeps_the_real_failure(self) -> None:
+        failed = {
+            "status": "failed",
+            "targets": [{"name": "candidate", "measurements": []}],
+            "thresholds": [{"threshold": "max_candidate_num_sst_rows", "status": "failed"}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status, events, report = self.run_direct(tmpdir, [(1, None), (1, failed)])
+            self.assertEqual(status, 1)
+            self.assertEqual(events.count("measure"), 2)
+            first = events.index("measure")
+            second = events.index("measure", first + 1)
+            self.assertEqual(
+                events[first + 1:second],
+                [
+                    "restart:base:datanode",
+                    "restart:base:frontend",
+                    "restart:candidate:datanode",
+                    "restart:candidate:frontend",
+                ],
+            )
+            self.assertEqual(json.loads(report.read_text()), failed)
+
+
 class DockerTargetTest(unittest.TestCase):
     image_id = "sha256:" + "a" * 64
 
