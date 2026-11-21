@@ -1092,9 +1092,22 @@ async fn edit_region(
             );
 
             let file_size = file_meta.file_size;
-            let blob_file_size = file_meta.blob_file_size;
-            let blob_key = IndexKey::new(region_id, file_meta.file_id, FileType::Blob);
-            let blob_remote_path = blob_path(&remote_path);
+            let blobs: Vec<_> = file_meta
+                .blob_files()
+                .map(|blob| {
+                    // Sidecars sit next to the SSTs of the file's own region.
+                    let path = blob_path(&location::sst_file_path(
+                        layer.table_dir(),
+                        file::RegionFileId::new(file_meta.region_id, blob.file_id),
+                        layer.path_type(),
+                    ));
+                    (
+                        IndexKey::new(file_meta.region_id, blob.file_id, FileType::Blob),
+                        path,
+                        blob.size,
+                    )
+                })
+                .collect();
             common_runtime::spawn_global(async move {
                 WRITE_CACHE_INFLIGHT_DOWNLOAD.add(1);
 
@@ -1115,20 +1128,22 @@ async fn edit_region(
                         )
                         .await;
                 }
-                if blob_file_size > 0
-                    && write_cache.cache_blobs()
-                    && let Err(err) = write_cache
+                for (blob_key, blob_remote_path, blob_file_size) in
+                    blobs.iter().filter(|_| write_cache.cache_blobs())
+                {
+                    if let Err(err) = write_cache
                         .download_if_absent(
-                            blob_key,
-                            &blob_remote_path,
+                            *blob_key,
+                            blob_remote_path,
                             layer.object_store(),
-                            blob_file_size,
+                            *blob_file_size,
                         )
                         .await
-                {
-                    common_telemetry::error!(
-                        err; "Failed to download blob file, region_id: {}, blob_remote_path: {}", region_id, blob_remote_path
-                    );
+                    {
+                        common_telemetry::error!(
+                            err; "Failed to download blob file, region_id: {}, blob_remote_path: {}", region_id, blob_remote_path
+                        );
+                    }
                 }
                 if has_downloadable_index {
                     // also download puffin file

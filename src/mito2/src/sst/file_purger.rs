@@ -17,13 +17,13 @@ use std::sync::Arc;
 
 use common_telemetry::error;
 use store_api::region_request::PathType;
-use store_api::storage::FileId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{self, FileMeta, delete_files};
+use crate::sst::file::{self, FileMeta, RegionFileId, delete_blobs, delete_files};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::range_index::RangeIndexDeleter;
 
@@ -35,6 +35,10 @@ pub trait FilePurger: Send + Sync + fmt::Debug {
 
     /// Retire cached scan results immediately, without waiting for physical deletion.
     fn invalidate_file(&self, _: &FileMeta) {}
+
+    /// Purges a blob sidecar that no file references and no reader holds.
+    /// Purgers that leave SSTs to global GC leave sidecars to it too.
+    fn purge_blob(&self, _region_id: RegionId, _file_id: FileId) {}
 
     /// Returns the reference manager used by SST metadata views.
     /// Purgers without a manager do not track GC references.
@@ -218,6 +222,27 @@ impl FilePurger for LocalFilePurger {
     fn invalidate_file(&self, file_meta: &FileMeta) {
         if let Some(cache) = &self.cache_manager {
             cache.invalidate_range_results(file_meta.file_id);
+        }
+    }
+
+    fn purge_blob(&self, region_id: RegionId, file_id: FileId) {
+        let sst_layer = self.sst_layer.clone();
+        let cache_manager = self.cache_manager.clone();
+        if let Err(e) = self.scheduler.schedule(Box::pin(async move {
+            let sidecar = RegionFileId::new(region_id, file_id);
+            match sst_layer.is_file_protected(sidecar).await {
+                Ok(false) => {}
+                Ok(true) => return,
+                Err(error) => {
+                    error!(error; "File protection unavailable; retaining blob {}", sidecar);
+                    return;
+                }
+            }
+            if let Err(e) = delete_blobs(region_id, &[file_id], &sst_layer, &cache_manager).await {
+                error!(e; "Failed to delete blob {} from storage", sidecar);
+            }
+        })) {
+            error!(e; "Failed to schedule the blob purge request");
         }
     }
 

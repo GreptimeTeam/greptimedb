@@ -207,6 +207,7 @@ impl<'a> TargetWriter<'a> {
             preserve_row_sequence: self.preserve_row_sequence,
             format: info.format.clone(),
             blob_file_size: info.blob_file_size(),
+            blob_refs: Vec::new(),
         })
     }
 }

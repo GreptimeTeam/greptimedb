@@ -261,6 +261,51 @@ impl AccessLayer {
         Ok(())
     }
 
+    fn sst_object_path(&self, region_id: RegionId, file_id: FileId) -> String {
+        location::sst_file_path(
+            &self.table_dir,
+            RegionFileId::new(region_id, file_id),
+            self.path_type,
+        )
+        .trim_start_matches('/')
+        .to_string()
+    }
+
+    /// Deletes blob sidecars; deleting a missing one is a no-op.
+    pub(crate) async fn delete_blobs(
+        &self,
+        region_id: RegionId,
+        file_ids: &[FileId],
+    ) -> Result<(), crate::error::Error> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+        let paths: Vec<_> = file_ids
+            .iter()
+            .map(|file_id| blob_path(&self.sst_object_path(region_id, *file_id)))
+            .collect();
+        let mut deleter = self
+            .object_store
+            .deleter()
+            .await
+            .with_context(|_| DeleteSstsSnafu {
+                region_id,
+                file_ids: file_ids.to_vec(),
+            })?;
+        deleter
+            .delete_iter(paths)
+            .await
+            .with_context(|_| DeleteSstsSnafu {
+                region_id,
+                file_ids: file_ids.to_vec(),
+            })?;
+        deleter.close().await.with_context(|_| DeleteSstsSnafu {
+            region_id,
+            file_ids: file_ids.to_vec(),
+        })?;
+        Ok(())
+    }
+
     pub(crate) async fn delete_ssts(
         &self,
         region_id: RegionId,
@@ -272,19 +317,9 @@ impl AccessLayer {
 
         let attempted_files = file_ids.to_vec();
         // Deleter does not normalize leading slashes like Operator::delete does.
-        // Each SST may have a blob sidecar; deleting a missing one is a no-op.
         let paths: Vec<_> = file_ids
             .iter()
-            .flat_map(|file_id| {
-                let sst = location::sst_file_path(
-                    &self.table_dir,
-                    RegionFileId::new(region_id, *file_id),
-                    self.path_type,
-                )
-                .trim_start_matches('/')
-                .to_string();
-                [blob_path(&sst), sst]
-            })
+            .map(|file_id| self.sst_object_path(region_id, *file_id))
             .collect();
 
         let mut deleter = self

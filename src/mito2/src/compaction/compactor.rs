@@ -918,6 +918,7 @@ impl DefaultSstMerger {
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
                     format: sst_info.format.clone(),
                     blob_file_size: sst_info.blob_file_size(),
+                    blob_refs: Vec::new(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;

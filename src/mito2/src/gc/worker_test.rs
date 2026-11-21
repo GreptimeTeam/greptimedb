@@ -1932,7 +1932,10 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
         threshold,
     );
     assert_eq!(delete, vec![removed]);
-    env.worker.delete_files(region_id, &delete).await.unwrap();
+    env.worker
+        .delete_files(region_id, &delete, &HashSet::new())
+        .await
+        .unwrap();
     assert!(!layer.object_store().exists(&prefix).await.unwrap());
     for path in paths {
         assert!(!layer.object_store().exists(&path).await.unwrap());
@@ -2009,8 +2012,46 @@ async fn test_orphan_blob_sidecars_are_collected_with_their_ssts() {
     expected.sort_by_key(|file| file.file_id());
     assert_eq!(delete, expected);
 
-    env.worker.delete_files(region_id, &delete).await.unwrap();
+    env.worker
+        .delete_files(region_id, &delete, &HashSet::new())
+        .await
+        .unwrap();
     for path in paths {
         assert!(!store.exists(&path).await.unwrap(), "{path} survives GC");
     }
+}
+
+#[tokio::test]
+async fn test_gc_keeps_sidecars_that_other_files_reference() {
+    let env = IndexGcTestEnv::new(true).await;
+    let layer = &env.region.access_layer;
+    let region_id = env.meta.region_id;
+    let id = FileId::random();
+    let sst = location::sst_file_path(
+        layer.table_dir(),
+        crate::sst::file::RegionFileId::new(region_id, id),
+        layer.path_type(),
+    );
+    let sidecar = crate::sst::parquet::blob::blob_path(&sst);
+    for path in [&sst, &sidecar] {
+        layer
+            .object_store()
+            .write(path, "x".as_bytes())
+            .await
+            .unwrap();
+    }
+    let removed = [RemovedFile::File(id, None)];
+
+    env.worker
+        .delete_files(region_id, &removed, &HashSet::from([id]))
+        .await
+        .unwrap();
+    assert!(!layer.object_store().exists(&sst).await.unwrap());
+    assert!(layer.object_store().exists(&sidecar).await.unwrap());
+
+    env.worker
+        .delete_files(region_id, &removed, &HashSet::new())
+        .await
+        .unwrap();
+    assert!(!layer.object_store().exists(&sidecar).await.unwrap());
 }

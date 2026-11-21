@@ -17,7 +17,7 @@ use serde_json::json;
 use crate::manifest::action::{
     RegionCheckpoint, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
-use crate::sst::file::FileMeta;
+use crate::sst::file::{BlobFileRef, FileMeta};
 
 const EDIT: &str =
     include_str!("../../../../../tests/compatibility/manifest/table_compaction/legacy-edit.json");
@@ -69,6 +69,35 @@ fn test_file_only_manifest_compatibility() {
             "level {level}"
         );
     }
+}
+
+#[test]
+fn test_sidecar_fields_are_optional_in_manifests() {
+    let actions = RegionMetaActionList::decode(EDIT.as_bytes()).unwrap();
+    let RegionMetaAction::Edit(edit) = &actions.actions[0] else {
+        panic!("expected edit")
+    };
+    // Files written before sidecars read as having none, and re-encode without the fields.
+    let legacy = &edit.files_to_add[0];
+    assert_eq!(0, legacy.blob_file_size);
+    assert!(legacy.blob_refs.is_empty());
+    let encoded = serde_json::to_value(legacy).unwrap();
+    assert!(encoded.get("blob_file_size").is_none());
+    assert!(encoded.get("blob_refs").is_none());
+
+    let file = FileMeta {
+        blob_file_size: 4096,
+        blob_refs: vec![BlobFileRef {
+            file_id: edit.files_to_add[1].file_id,
+            size: 8192,
+            referenced_bytes: 1024,
+        }],
+        ..legacy.clone()
+    };
+    let encoded = serde_json::to_value(&file).unwrap();
+    assert_eq!(json!(4096), encoded["blob_file_size"]);
+    assert_eq!(json!(8192), encoded["blob_refs"][0]["size"], "{encoded}");
+    assert_eq!(file, serde_json::from_value::<FileMeta>(encoded).unwrap());
 }
 
 #[rstest::rstest]

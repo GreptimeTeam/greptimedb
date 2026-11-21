@@ -395,6 +395,19 @@ pub struct FileMeta {
     /// `.blob` extension. 0 means the file has no sidecar.
     #[serde(default, skip_serializing_if = "is_zero_size")]
     pub blob_file_size: u64,
+    /// Sidecars of other SSTs in the same region that this file references values in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blob_refs: Vec<BlobFileRef>,
+}
+
+/// A blob sidecar that an SST references, named by the id of the SST that wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobFileRef {
+    pub file_id: FileId,
+    /// Size of the whole sidecar.
+    pub size: u64,
+    /// Compressed bytes of the values that the referencing SST points to.
+    pub referenced_bytes: u64,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -455,6 +468,9 @@ impl Debug for FileMeta {
         }
         if self.blob_file_size > 0 {
             debug_struct.field("blob_file_size", &ReadableSize(self.blob_file_size));
+        }
+        if !self.blob_refs.is_empty() {
+            debug_struct.field("blob_refs", &self.blob_refs);
         }
         debug_struct
             .field("num_rows", &self.num_rows)
@@ -534,6 +550,18 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
+    /// Returns every blob sidecar the file references, its own first.
+    pub fn blob_files(&self) -> impl Iterator<Item = BlobFileRef> + '_ {
+        (self.blob_file_size > 0)
+            .then_some(BlobFileRef {
+                file_id: self.file_id,
+                size: self.blob_file_size,
+                referenced_bytes: self.blob_file_size,
+            })
+            .into_iter()
+            .chain(self.blob_refs.iter().copied())
+    }
+
     /// Returns whether this file's row sequences are trusted in the target region.
     ///
     /// Foreign files use their target-local sequence barrier; local files require
@@ -719,10 +747,19 @@ pub(crate) fn known_max_input_sequence<'a>(
 impl FileHandle {
     /// Creates a new logical SST reference. Index replacements must reuse its lifetime.
     pub fn new(meta: impl Into<FileMetaRef>, file_purger: FilePurgerRef) -> FileHandle {
+        Self::with_blobs(meta, file_purger, Vec::new())
+    }
+
+    /// Creates a file that keeps the sidecars it references alive.
+    pub(crate) fn with_blobs(
+        meta: impl Into<FileMetaRef>,
+        file_purger: FilePurgerRef,
+        blobs: Vec<BlobLifetimeRef>,
+    ) -> FileHandle {
         let meta = meta.into();
         let pk_range = meta.primary_key_range();
         FileHandle {
-            inner: Arc::new(FileHandleInner::new(meta, file_purger, pk_range)),
+            inner: Arc::new(FileHandleInner::new(meta, file_purger, pk_range, blobs)),
         }
     }
 
@@ -737,6 +774,7 @@ impl FileHandle {
                 meta.into(),
                 file_purger,
                 primary_key_range,
+                Vec::new(),
             )),
         }
     }
@@ -977,6 +1015,7 @@ impl FileHandleInner {
         meta: FileMetaRef,
         file_purger: FilePurgerRef,
         primary_key_range: Option<(Bytes, Bytes)>,
+        blobs: Vec<BlobLifetimeRef>,
     ) -> Self {
         let file_ref_manager = file_purger.file_ref_manager();
         // Normalize expressions while metadata is still exclusively owned.
@@ -986,6 +1025,7 @@ impl FileHandleInner {
             deleted: AtomicBool::new(false),
             file_purger,
             file_ref_manager,
+            _blobs: blobs,
         });
         Self::from_registered_metadata(meta, lifetime, primary_key_range)
     }
@@ -1038,6 +1078,64 @@ struct SstLifetime {
     file_purger: FilePurgerRef,
     /// Tracks each metadata view's readers independently for object-store index GC.
     file_ref_manager: Option<FileReferenceManagerRef>,
+    /// Sidecars the file references; readers of the file keep them alive.
+    _blobs: Vec<BlobLifetimeRef>,
+}
+
+/// Keeps a blob sidecar until no file of the version references it and its readers are done.
+///
+/// A sidecar outlives the SST that wrote it while other SSTs reference its values, so it has its
+/// own lifetime instead of being deleted with that SST.
+#[derive(Debug)]
+pub(crate) struct BlobLifetime {
+    region_id: RegionId,
+    file_id: FileId,
+    size: u64,
+    /// Sidecars of files shared with other regions are left to global GC, like the files.
+    shared: AtomicBool,
+    deleted: AtomicBool,
+    file_purger: FilePurgerRef,
+}
+
+pub(crate) type BlobLifetimeRef = Arc<BlobLifetime>;
+
+impl BlobLifetime {
+    pub(crate) fn new(region_id: RegionId, blob: BlobFileRef, file_purger: FilePurgerRef) -> Self {
+        Self {
+            region_id,
+            file_id: blob.file_id,
+            size: blob.size,
+            shared: AtomicBool::new(false),
+            deleted: AtomicBool::new(false),
+            file_purger,
+        }
+    }
+
+    /// Hands the sidecar to global GC once any referencing file is shared with other regions.
+    pub(crate) fn mark_shared(&self) {
+        self.shared.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn region_id(&self) -> RegionId {
+        self.region_id
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Deletes the sidecar once the last holder is dropped.
+    pub(crate) fn mark_deleted(&self) {
+        self.deleted.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for BlobLifetime {
+    fn drop(&mut self) {
+        if self.deleted.load(Ordering::Acquire) && !self.shared.load(Ordering::Acquire) {
+            self.file_purger.purge_blob(self.region_id, self.file_id);
+        }
+    }
 }
 
 impl Drop for SstLifetime {
@@ -1104,6 +1202,24 @@ pub async fn delete_files(
             *index_version,
         )
         .await;
+    }
+    Ok(())
+}
+
+/// Deletes blob sidecars of a region from storage and the write cache.
+pub async fn delete_blobs(
+    region_id: RegionId,
+    file_ids: &[FileId],
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+) -> crate::error::Result<()> {
+    access_layer.delete_blobs(region_id, file_ids).await?;
+    if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
+        for file_id in file_ids {
+            write_cache
+                .remove(IndexKey::new(region_id, *file_id, FileType::Blob))
+                .await;
+        }
     }
     Ok(())
 }
@@ -1239,6 +1355,15 @@ impl UncommittedSsts {
             &self.cache_manager,
         )
         .await?;
+        // An uncommitted SST's own sidecar is referenced by nothing else.
+        let ids: Vec<_> = file_ids.iter().map(|(id, _)| *id).collect();
+        delete_blobs(
+            self.region_id,
+            &ids,
+            &self.access_layer,
+            &self.cache_manager,
+        )
+        .await?;
         failure.map_or(Ok(()), Err)
     }
 
@@ -1338,12 +1463,9 @@ async fn purge_index_cache_stager(
                 .await;
         }
 
-        // Remove the SST file and its blob sidecar from the cache.
+        // Remove the SST file from the cache.
         write_cache
             .remove(IndexKey::new(region_id, file_id, FileType::Parquet))
-            .await;
-        write_cache
-            .remove(IndexKey::new(region_id, file_id, FileType::Blob))
             .await;
     }
 
