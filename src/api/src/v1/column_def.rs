@@ -18,7 +18,7 @@ use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_K
 use datatypes::schema::{
     COMMENT_KEY, COMPRESSION_KEY, ColumnDefaultConstraint, ColumnSchema, CompressionOptions,
     FULLTEXT_KEY, FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
-    SKIPPING_INDEX_KEY, STORAGE_KEY, SkippingIndexOptions, SkippingIndexType, StorageOptions,
+    SKIPPING_INDEX_KEY, STORAGE_KEY, SkippingIndexOptions, SkippingIndexType,
 };
 use greptime_proto::v1::{
     Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
@@ -273,14 +273,6 @@ pub fn options_from_compression(compression: &CompressionOptions) -> Result<Colu
     let mut options = ColumnOptions::default();
     let v = serde_json::to_string(compression).context(error::SerializeJsonSnafu)?;
     options.options.insert(COMPRESSION_GRPC_KEY.to_string(), v);
-    Ok(options)
-}
-
-/// Tries to construct a `ColumnOptions` from the given `StorageOptions`.
-pub fn options_from_storage(storage: &StorageOptions) -> Result<ColumnOptions> {
-    let mut options = ColumnOptions::default();
-    let v = serde_json::to_string(storage).context(error::SerializeJsonSnafu)?;
-    options.options.insert(STORAGE_GRPC_KEY.to_string(), v);
     Ok(options)
 }
 
