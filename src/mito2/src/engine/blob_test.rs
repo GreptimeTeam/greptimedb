@@ -31,6 +31,8 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::compact;
+use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::{PARQUET_EXTERNAL_METADATA_KEY, PARQUET_METADATA_KEY};
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, delete_rows, delete_rows_schema, flush_region, put_rows,
     rows_schema,
@@ -96,6 +98,32 @@ async fn scan(
     }
     rows.sort();
     rows
+}
+
+/// Returns the footer key-value keys of every SST.
+async fn sst_footer_keys(env: &TestEnv) -> Vec<Vec<String>> {
+    let store = env.get_object_store().unwrap();
+    let mut keys = Vec::new();
+    for entry in store.list_with("").recursive(true).await.unwrap() {
+        if !entry.path().ends_with(".parquet") {
+            continue;
+        }
+        let size = store.stat(entry.path()).await.unwrap().content_length();
+        let footer = MetadataLoader::new(store.clone(), entry.path(), size)
+            .load(&mut Default::default())
+            .await
+            .unwrap();
+        keys.push(
+            footer
+                .file_metadata()
+                .key_value_metadata()
+                .unwrap()
+                .iter()
+                .map(|kv| kv.key.clone())
+                .collect(),
+        );
+    }
+    keys
 }
 
 async fn blob_files(env: &TestEnv) -> usize {
@@ -166,6 +194,11 @@ async fn test_large_values_survive_flush_filter_and_compaction() {
     put(&engine, region_id, &schema, &[4, 5, 6, 7], 0).await;
     flush_region(&engine, region_id, None).await;
     assert_eq!(2, blob_files(&env).await);
+    // Readers without external storage support must fail on these SSTs, not read references.
+    for keys in sst_footer_keys(&env).await {
+        assert!(keys.iter().any(|k| k == PARQUET_EXTERNAL_METADATA_KEY));
+        assert!(keys.iter().all(|k| k != PARQUET_METADATA_KEY));
+    }
     // Size estimates (compaction batch size and memory) must count values in the sidecar.
     // Each file holds two long values.
     {
@@ -177,6 +210,7 @@ async fn test_large_values_survive_flush_filter_and_compaction() {
                     file.meta_ref().max_row_group_uncompressed_size
                         >= 2 * payload(0, 0).len() as u64
                 );
+                assert!(file.meta_ref().blob_file_size > 0);
             }
         }
     }

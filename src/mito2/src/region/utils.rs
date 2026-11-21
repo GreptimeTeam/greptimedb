@@ -18,9 +18,8 @@ use std::time::Instant;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
 use futures::future::try_join_all;
-use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, IndexVersion, RegionId};
@@ -35,8 +34,7 @@ use crate::region::options::RegionOptions;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::file_metadata::FileMetadataInternerRef;
 use crate::sst::location;
-use crate::sst::parquet::blob::{blob_columns, blob_file_size, blob_path};
-use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::blob::blob_path;
 
 /// A loader for loading metadata from a region dir.
 #[derive(Debug, Clone)]
@@ -117,13 +115,15 @@ pub enum FileDescriptor {
     },
     /// A data file.
     Data { file_id: FileId, size: u64 },
+    /// The blob sidecar of a data file.
+    Blob { file_id: FileId, size: u64 },
 }
 
 impl FileDescriptor {
     pub fn size(&self) -> u64 {
         match self {
             FileDescriptor::Index { size, .. } => *size,
-            FileDescriptor::Data { size, .. } => *size,
+            FileDescriptor::Data { size, .. } | FileDescriptor::Blob { size, .. } => *size,
         }
     }
 
@@ -139,46 +139,13 @@ impl FileDescriptor {
             FileDescriptor::Data { file_id, .. } => {
                 location::sst_file_path(table_dir, RegionFileId::new(region_id, file_id), path_type)
             }
+            FileDescriptor::Blob { file_id, .. } => blob_path(&location::sst_file_path(
+                table_dir,
+                RegionFileId::new(region_id, file_id),
+                path_type,
+            )),
         }
     }
-}
-
-/// Copies the sidecar of the SST at `source_path` when its footer declares one.
-async fn copy_sidecar(
-    object_store: &ObjectStore,
-    source_path: &str,
-    target_path: &str,
-    size: u64,
-) -> Result<()> {
-    let footer = MetadataLoader::new(object_store.clone(), source_path, size)
-        .load(&mut Default::default())
-        .await?;
-    if blob_columns(&footer).is_empty() {
-        return Ok(());
-    }
-    let source_blob = blob_path(source_path);
-    let expected = blob_file_size(&footer).with_context(|| error::UnexpectedSnafu {
-        reason: format!("SST {source_path} declares external columns without a sidecar size"),
-    })?;
-    let actual = object_store
-        .stat(&source_blob)
-        .await
-        .context(error::OpenDalSnafu)?
-        .content_length();
-    ensure!(
-        actual == expected,
-        error::UnexpectedSnafu {
-            reason: format!(
-                "sidecar {source_blob} has {actual} bytes, but its SST expects {expected}"
-            ),
-        }
-    );
-    object_store
-        .copy(&source_blob, &blob_path(target_path))
-        .await
-        .inspect_err(|e| error!(e; "Failed to copy file {} to {}", source_blob, target_path))
-        .context(error::OpenDalSnafu)?;
-    Ok(())
 }
 
 /// Builds the source and target file paths for a given file descriptor.
@@ -268,6 +235,23 @@ impl RegionFileCopier {
                         path_type,
                     );
                     let now = Instant::now();
+                    // A sidecar that does not match its manifest entry leaves the copy
+                    // unreadable, so fail here instead of at query time.
+                    if let FileDescriptor::Blob { size, .. } = file_desc {
+                        let actual = object_store
+                            .stat(&source_path)
+                            .await
+                            .context(error::OpenDalSnafu)?
+                            .content_length();
+                        ensure!(
+                            actual == size,
+                            error::UnexpectedSnafu {
+                                reason: format!(
+                                    "sidecar {source_path} has {actual} bytes, expected {size}"
+                                ),
+                            }
+                        );
+                    }
                     object_store
                         .copy(&source_path, &target_path)
                         .await
@@ -275,9 +259,6 @@ impl RegionFileCopier {
                             |e| error!(e; "Failed to copy file {} to {}", source_path, target_path),
                         )
                         .context(error::OpenDalSnafu)?;
-                    if let FileDescriptor::Data { size, .. } = file_desc {
-                        copy_sidecar(&object_store, &source_path, &target_path, size).await?;
-                    }
                     let file_size = ReadableSize(file_desc.size());
                     info!(
                         "Copied file {} to {}, file size: {}, elapsed: {:?}",
@@ -308,12 +289,8 @@ impl RegionFileCopier {
         let object_store = self.access_layer.object_store();
         let delete_file_path = file_ids
             .into_iter()
-            .flat_map(|file_descriptor| {
-                let path =
-                    build_delete_file_path(target_region_id, file_descriptor, table_dir, path_type);
-                let blob = matches!(file_descriptor, FileDescriptor::Data { .. })
-                    .then(|| blob_path(&path));
-                std::iter::once(path).chain(blob)
+            .map(|file_descriptor| {
+                build_delete_file_path(target_region_id, file_descriptor, table_dir, path_type)
             })
             .collect::<Vec<_>>();
         debug!(

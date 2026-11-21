@@ -93,11 +93,22 @@ async fn verify_file(
     );
     let footer = cached.parquet_metadata();
     verify_statistics(&footer, metadata, file)?;
-    if !blob_columns(&footer).is_empty() {
-        let expected = blob_file_size(&footer).context(InvalidRequestSnafu {
+    let footer_blob_size = if blob_columns(&footer).is_empty() {
+        0
+    } else {
+        blob_file_size(&footer).context(InvalidRequestSnafu {
             region_id,
             reason: "Output declares external columns without a sidecar size",
-        })?;
+        })?
+    };
+    ensure!(
+        footer_blob_size == file.blob_file_size,
+        InvalidRequestSnafu {
+            region_id,
+            reason: "Output sidecar size differs from its footer"
+        }
+    );
+    if file.blob_file_size > 0 {
         let blob_size = access
             .object_store()
             .stat(&blob_path(&path))
@@ -105,7 +116,7 @@ async fn verify_file(
             .context(OpenDalSnafu)?
             .content_length();
         ensure!(
-            blob_size == expected,
+            blob_size == file.blob_file_size,
             InvalidRequestSnafu {
                 region_id,
                 reason: "Output sidecar size mismatch"

@@ -64,6 +64,16 @@ pub mod writer;
 /// Key of metadata in parquet SST.
 pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
 
+/// Key of metadata in SSTs of regions with external columns, used instead of
+/// [PARQUET_METADATA_KEY]. Readers without external storage support require
+/// [PARQUET_METADATA_KEY], so they reject these SSTs rather than return references as values.
+pub const PARQUET_EXTERNAL_METADATA_KEY: &str = "greptime:metadata_external";
+
+/// Returns whether `key` holds the region metadata of an SST.
+pub fn is_region_metadata_key(key: &str) -> bool {
+    key == PARQUET_METADATA_KEY || key == PARQUET_EXTERNAL_METADATA_KEY
+}
+
 /// Default batch size to read parquet files.
 ///
 /// This is a runtime-only scan granularity, so we align it with DataFusion's
@@ -468,6 +478,16 @@ pub struct SstInfo {
     pub num_series: u64,
     /// Physical encoding and inventory of the finalized output.
     pub format: FileFormat,
+}
+
+impl SstInfo {
+    /// Size of the blob sidecar recorded in the footer, 0 when the SST has none.
+    pub(crate) fn blob_file_size(&self) -> u64 {
+        self.file_metadata
+            .as_deref()
+            .and_then(blob::blob_file_size)
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

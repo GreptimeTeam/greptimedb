@@ -610,11 +610,17 @@ impl MergeOutput {
     }
 
     pub fn input_file_size(&self) -> u64 {
-        self.files_to_remove.iter().map(|f| f.file_size).sum()
+        self.files_to_remove
+            .iter()
+            .map(|f| f.file_size + f.blob_file_size)
+            .sum()
     }
 
     pub fn output_file_size(&self) -> u64 {
-        self.files_to_add.iter().map(|f| f.file_size).sum()
+        self.files_to_add
+            .iter()
+            .map(|f| f.file_size + f.blob_file_size)
+            .sum()
     }
 }
 
@@ -911,6 +917,7 @@ impl DefaultSstMerger {
                     primary_key_max,
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
                     format: sst_info.format.clone(),
+                    blob_file_size: sst_info.blob_file_size(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;

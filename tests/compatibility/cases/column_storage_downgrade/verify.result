@@ -1,0 +1,5 @@
+-- SQLNESS ARG expect_error=true
+-- SQLNESS REPLACE \S+\.parquet <sst>
+SELECT ts, length(payload) FROM external_blob ORDER BY ts;
+
+Error: 3001(EngineExecuteQuery), Invalid parquet SST file <sst>, reason: key greptime:metadata not found

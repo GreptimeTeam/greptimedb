@@ -358,6 +358,7 @@ impl ParquetbenchCommand {
                 primary_key_max: None,
                 preserve_row_sequence: false,
                 format: Default::default(),
+                blob_file_size: 0,
             },
             Arc::new(NoopFilePurger),
         );

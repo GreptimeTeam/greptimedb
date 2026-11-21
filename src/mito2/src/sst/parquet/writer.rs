@@ -68,9 +68,10 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
-    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo, WriteOptions,
-    apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
-    large_value_fields, max_row_group_decoded_size, skip_statistics,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_EXTERNAL_METADATA_KEY, PARQUET_METADATA_KEY,
+    RowGroupValueBytes, SstInfo, WriteOptions, apply_column_compression,
+    apply_float_field_encoding, apply_internal_column_encoding, large_value_fields,
+    max_row_group_decoded_size, skip_statistics,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -970,7 +971,12 @@ where
             Ok(w)
         } else {
             let json = self.metadata.to_json().context(InvalidMetadataSnafu)?;
-            let key_value_meta = vec![KeyValue::new(PARQUET_METADATA_KEY.to_string(), json)];
+            let metadata_key = if external_columns(&self.metadata)?.is_empty() {
+                PARQUET_METADATA_KEY
+            } else {
+                PARQUET_EXTERNAL_METADATA_KEY
+            };
+            let key_value_meta = vec![KeyValue::new(metadata_key.to_string(), json)];
 
             // TODO(yingwen): Find and set proper column encoding for internal columns: op type and tsid.
             let props_builder = WriterProperties::builder()

@@ -17,6 +17,11 @@ INSERT INTO stored_blob SELECT * FROM legacy_blob;
 
 Affected Rows: 1
 
+-- Above the threshold, so the value goes to the blob sidecar.
+INSERT INTO stored_blob SELECT 3::TIMESTAMP, arrow_cast(repeat('y', 4096), 'Binary');
+
+Affected Rows: 1
+
 ADMIN FLUSH_TABLE('stored_blob');
 
 +----------------------------------+
@@ -53,7 +58,7 @@ ADMIN FLUSH_TABLE('stored_blob');
 | 0                                |
 +----------------------------------+
 
-SELECT ts, CAST(payload AS STRING) FROM stored_blob ORDER BY ts;
+SELECT ts, CAST(payload AS STRING) FROM stored_blob WHERE ts <> 3 ORDER BY ts;
 
 +-------------------------+---------------------+
 | ts                      | stored_blob.payload |
@@ -61,3 +66,11 @@ SELECT ts, CAST(payload AS STRING) FROM stored_blob ORDER BY ts;
 | 1970-01-01T00:00:00.001 | before upgrade      |
 | 1970-01-01T00:00:00.002 | after restart       |
 +-------------------------+---------------------+
+
+SELECT ts, length(CAST(payload AS STRING)) FROM stored_blob WHERE ts = 3;
+
++-------------------------+-------------------------------------------+
+| ts                      | length(CAST(stored_blob.payload AS Utf8)) |
++-------------------------+-------------------------------------------+
+| 1970-01-01T00:00:00.003 | 4096                                      |
++-------------------------+-------------------------------------------+

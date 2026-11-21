@@ -1014,6 +1014,7 @@ impl MemtableSstWriter {
             primary_key_max,
             preserve_row_sequence,
             format: sst_info.format.clone(),
+            blob_file_size: sst_info.blob_file_size(),
         })
     }
 
