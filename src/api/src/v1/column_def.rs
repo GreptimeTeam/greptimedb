@@ -114,16 +114,12 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         })?
         .is_some()
     {
-        // Tag values are encoded into the primary key, so they can't live outside SSTs.
-        let role = match column_def.semantic_type() {
-            SemanticType::Field => None,
-            SemanticType::Tag => Some("primary key"),
-            SemanticType::Timestamp => Some("time index"),
-        };
-        if let Some(role) = role {
+        // Tag values are encoded into the primary key, so they can't live outside SSTs. Time
+        // index columns are rejected by the type check above.
+        if column_def.semantic_type() == SemanticType::Tag {
             return error::StorageOnNonFieldColumnSnafu {
                 column: &column_def.name,
-                role,
+                role: "primary key",
             }
             .fail();
         }

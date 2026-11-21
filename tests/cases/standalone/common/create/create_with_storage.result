@@ -64,6 +64,38 @@ ALTER TABLE blobs ADD COLUMN region STRING PRIMARY KEY STORAGE WITH (threshold =
 
 Error: 1004(InvalidArguments), STORAGE option is only supported on field columns, but column region is a primary key column
 
+ALTER TABLE blobs ADD COLUMN n BIGINT STORAGE WITH (threshold = '4KiB');
+
+Error: 1004(InvalidArguments), Invalid storage option: storage options are only supported on string and binary columns, but column n is Int64
+
+CREATE TABLE blobs_like LIKE blobs;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE blobs_like;
+
++------------+------------------------------------------------------------------------------------------------------------------------+
+| Table      | Create Table                                                                                                           |
++------------+------------------------------------------------------------------------------------------------------------------------+
+| blobs_like | CREATE TABLE IF NOT EXISTS "blobs_like" (                                                                              |
+|            |   "ts" TIMESTAMP(3) NOT NULL,                                                                                          |
+|            |   "host" STRING NULL,                                                                                                  |
+|            |   "payload" VARBINARY NULL STORAGE WITH(threshold = '64KiB', type = 'external'),                                       |
+|            |   "body" STRING NULL COMPRESSION WITH(level = '3', type = 'zstd') STORAGE WITH(threshold = '1MiB', type = 'external'), |
+|            |   "note" STRING NULL STORAGE WITH(type = 'external'),                                                                  |
+|            |   "extra" STRING NULL STORAGE WITH(threshold = '4KiB', type = 'external'),                                             |
+|            |   TIME INDEX ("ts"),                                                                                                   |
+|            |   PRIMARY KEY ("host")                                                                                                 |
+|            | )                                                                                                                      |
+|            |                                                                                                                        |
+|            | ENGINE=mito                                                                                                            |
+|            |                                                                                                                        |
++------------+------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE blobs_like;
+
+Affected Rows: 0
+
 SHOW CREATE TABLE blobs;
 
 +-------+------------------------------------------------------------------------------------------------------------------------+

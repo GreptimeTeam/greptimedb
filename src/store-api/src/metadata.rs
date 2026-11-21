@@ -586,10 +586,19 @@ impl RegionMetadata {
             .column_schema
             .compression_options()
             .context(InvalidSchemaSnafu)?;
-        column_metadata
+        let storage = column_metadata
             .column_schema
             .storage_options()
             .context(InvalidSchemaSnafu)?;
+        ensure!(
+            storage.is_none() || column_metadata.semantic_type == SemanticType::Field,
+            InvalidMetaSnafu {
+                reason: format!(
+                    "STORAGE is only supported on field columns, but column `{}` is not",
+                    column_metadata.column_schema.name
+                ),
+            }
+        );
         if column_metadata.semantic_type == SemanticType::Timestamp {
             ensure!(
                 column_metadata.column_schema.data_type.is_timestamp(),
@@ -1747,6 +1756,38 @@ mod test {
                 .contains("semantic type of column a should be Tag, not Field"),
             "unexpected err: {err}",
         );
+    }
+
+    #[test]
+    fn test_storage_only_on_field_columns() {
+        for (semantic_type, valid) in [(SemanticType::Field, true), (SemanticType::Tag, false)] {
+            let mut builder = create_builder();
+            builder
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 1,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "s",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    )
+                    .with_storage_options(Default::default())
+                    .unwrap(),
+                    semantic_type,
+                    column_id: 2,
+                });
+            if semantic_type == SemanticType::Tag {
+                builder.primary_key(vec![2]);
+            }
+            assert_eq!(valid, builder.build().is_ok(), "{semantic_type:?}");
+        }
     }
 
     #[test]
