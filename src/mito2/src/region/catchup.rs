@@ -30,6 +30,8 @@ pub struct RegionCatchupTask<S> {
     region: Arc<MitoRegion>,
     replay_checkpoint_entry_id: Option<u64>,
     expected_last_entry_id: Option<u64>,
+    /// The largest entry id the region acknowledged on this node.
+    acknowledged_entry_id: u64,
     allow_stale_entries: bool,
     wal: Wal<S>,
 }
@@ -41,6 +43,7 @@ impl<S: LogStore> RegionCatchupTask<S> {
             region,
             replay_checkpoint_entry_id: None,
             expected_last_entry_id: None,
+            acknowledged_entry_id: 0,
             allow_stale_entries,
             wal,
         }
@@ -52,6 +55,13 @@ impl<S: LogStore> RegionCatchupTask<S> {
         expected_last_entry_id: Option<u64>,
     ) -> Self {
         self.expected_last_entry_id = expected_last_entry_id;
+        self
+    }
+
+    /// Sets the largest entry id the region acknowledged on this node, which the replay of a
+    /// remote WAL waits to be durable.
+    pub(crate) fn with_acknowledged_entry_id(mut self, acknowledged_entry_id: u64) -> Self {
+        self.acknowledged_entry_id = acknowledged_entry_id;
         self
     }
 
@@ -96,6 +106,11 @@ impl<S: LogStore> RegionCatchupTask<S> {
         )
         .await?;
         let timer = Instant::now();
+        // The replay reads only what the log store has made durable.
+        self.wal
+            .durability_barrier(region_id, &self.region.provider)
+            .wait(self.acknowledged_entry_id)
+            .await?;
         let wal_entry_reader = self
             .entry_receiver
             .take()

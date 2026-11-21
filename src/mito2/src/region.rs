@@ -324,6 +324,7 @@ impl MitoRegion {
 
     /// Stop background managers for this region.
     pub(crate) async fn stop(&self) {
+        self.manifest_ctx.promotion_fence.lock().unwrap().stopped = true;
         self.manifest_ctx
             .manifest_manager
             .write()
@@ -516,6 +517,12 @@ impl MitoRegion {
             }
             RegionRoleState::Leader(_) => RegionRole::Leader,
         }
+    }
+
+    /// Returns whether the region is a leader that no longer awaits its Leader lease, see
+    /// [ManifestContext::is_confirmed_leader].
+    pub(crate) fn is_confirmed_leader(&self) -> bool {
+        self.manifest_ctx.is_confirmed_leader()
     }
 
     /// Sets the altering state.
@@ -1496,6 +1503,8 @@ impl ManifestContext {
             promotion_fence: Mutex::new(PromotionFence {
                 downgrade_started_at: Instant::now(),
                 reload_pending: false,
+                catching_up: false,
+                stopped: false,
             }),
             catchup_promoted_at: AtomicU64::new(0),
             replay_publication_uncertain: AtomicBool::new(false),
@@ -2195,25 +2204,29 @@ impl ManifestContext {
         self.set_role(RegionRole::DowngradingLeader, region_id);
     }
 
-    /// Promotes the region to a writable leader unless a downgrade started after `issued_at` or
-    /// the region waits for a reload. `promoted` is false if the promotion is ignored for one of
-    /// these reasons; otherwise the role changes as [`Self::set_role`] allows. `ended_wait` tells
-    /// whether this lease ended the region's wait for its Leader lease, whether or not it promoted
-    /// the region.
+    /// Promotes the region to a writable leader unless a downgrade started after `issued_at`, a
+    /// catchup runs on it, it waits for a reload or it was stopped. `promoted` is false if the promotion is ignored
+    /// for one of these reasons; otherwise the role changes as [`Self::set_role`] allows.
+    /// `ended_wait` tells whether this lease ended the region's wait for its Leader lease. A lease
+    /// ignored for a downgrade or a catchup ends no wait.
     pub(crate) fn promote_unless_downgrade_started_after(
         &self,
         issued_at: Instant,
         region_id: RegionId,
     ) -> LeaderLeasePromotion {
-        // A writable leader needs no change; a staging leader is promoted below.
-        if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable) {
+        // A writable leader that received its Leader lease needs no change and takes no lock. One
+        // that awaits it takes the lock, so a catchup either demotes it first or finds the wait
+        // ended, see [Self::begin_catchup]; a staging leader is promoted below.
+        if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
+            && self.leader_lease_received()
+        {
             return LeaderLeasePromotion {
                 promoted: true,
-                ended_wait: self.record_leader_lease(issued_at),
+                ended_wait: None,
             };
         }
         let fence = self.promotion_fence.lock().unwrap();
-        if issued_at < fence.downgrade_started_at {
+        if issued_at < fence.downgrade_started_at || fence.catching_up {
             return LeaderLeasePromotion {
                 promoted: false,
                 ended_wait: None,
@@ -2226,11 +2239,55 @@ impl ManifestContext {
         }
     }
 
-    /// Promotes a region that caught up to a writable leader. Returns false if the region waits
-    /// for a reload.
+    /// Promotes a region that caught up to a writable leader and ends its catchup. Returns false
+    /// if the region waits for a reload or was stopped.
     pub(crate) fn promote_after_catchup(&self, region_id: RegionId) -> bool {
-        let fence = self.promotion_fence.lock().unwrap();
+        let mut fence = self.promotion_fence.lock().unwrap();
+        fence.catching_up = false;
         self.promote_unless_reload_pending(&fence, region_id, true)
+    }
+
+    /// Returns whether the region was stopped, so no catchup promotes it.
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.promotion_fence.lock().unwrap().stopped
+    }
+
+    /// Begins a catchup unless the region is writable (a writable or staging leader, as
+    /// [MitoRegion::is_writable]) and does not [await its Leader lease](Self::awaits_leader_lease),
+    /// and returns whether it demoted a writable region, None if it begins none. Until the catchup ends, Leader leases do not promote the
+    /// region, see [Self::promote_after_catchup] and [Self::end_catchup]; the caller ends it on
+    /// every path. A writable region is demoted to Follower and ignores the Leader leases sent
+    /// before. A lease that ends the wait of a writable region holds the same lock.
+    pub(crate) fn begin_catchup(&self, region_id: RegionId) -> Option<bool> {
+        let mut fence = self.promotion_fence.lock().unwrap();
+        let writable = matches!(
+            self.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable | RegionLeaderState::Staging)
+        );
+        if writable && !self.awaits_leader_lease() {
+            return None;
+        }
+        fence.catching_up = true;
+        if writable {
+            fence.downgrade_started_at = Instant::now();
+            self.set_role(RegionRole::Follower, region_id);
+        }
+        Some(writable)
+    }
+
+    /// Records a StagingLeader lease as [Self::record_leader_lease] does, unless a catchup runs on
+    /// the region.
+    pub(crate) fn record_staging_leader_lease(&self, issued_at: Instant) -> Option<Duration> {
+        let fence = self.promotion_fence.lock().unwrap();
+        if fence.catching_up {
+            return None;
+        }
+        self.record_leader_lease(issued_at)
+    }
+
+    /// Ends a catchup that does not promote the region, so the next Leader lease promotes it.
+    pub(crate) fn end_catchup(&self) {
+        self.promotion_fence.lock().unwrap().catching_up = false;
     }
 
     /// Makes the region wait for its Leader lease as a catchup on a node whose writes need a lease
@@ -2245,14 +2302,15 @@ impl ManifestContext {
         assert!(self.awaits_leader_lease());
     }
 
-    /// Promotes the region unless it waits for a reload. The caller holds the fence lock.
+    /// Promotes the region unless it waits for a reload or was stopped. The caller holds the fence
+    /// lock.
     fn promote_unless_reload_pending(
         &self,
         fence: &PromotionFence,
         region_id: RegionId,
         by_catchup: bool,
     ) -> bool {
-        if fence.reload_pending {
+        if fence.reload_pending || fence.stopped {
             return false;
         }
         if by_catchup {
@@ -2267,10 +2325,9 @@ impl ManifestContext {
     /// Counts an applied Leader lease (or StagingLeader lease, on a node whose writes need a lease)
     /// of a heartbeat sent at `issued_at` as received since the
     /// last catchup promotion. A heartbeat sent before the promotion does not count: its lease
-    /// may have been granted before an earlier downgrade of this node, which the fast path of
-    /// [Self::promote_unless_downgrade_started_after] does not check, and the lease of the next
-    /// heartbeat counts instead. It reads one atomic, since every lease of a writable leader
-    /// comes here. On a node whose writes need a lease, returns how long the region
+    /// may have been granted before an earlier downgrade of this node, which
+    /// [Self::record_staging_leader_lease] does not check, and the lease of the next heartbeat
+    /// counts instead. On a node whose writes need a lease, returns how long the region
     /// [awaited](Self::awaits_leader_lease) its Leader lease if this lease ended the wait: of the
     /// leases that apply together, only the one that ends it returns it.
     pub(crate) fn record_leader_lease(&self, issued_at: Instant) -> Option<Duration> {
@@ -2290,6 +2347,16 @@ impl ManifestContext {
         self.node_lease
             .is_enabled()
             .then(|| Duration::from_nanos(lease_nanos(Instant::now()).saturating_sub(promoted_at)))
+    }
+
+    /// Returns whether the region is a leader that no longer awaits its Leader lease. It reads both
+    /// under the fence lock, under which a catchup demotes and promotes the region and a lease ends
+    /// its wait. The changes made without the lock only demote the region, move it between leader
+    /// states, skip a leader whose lease came, or promote it directly before ending its wait, so no
+    /// read sees an instance a catchup touched as confirmed before a lease confirms it.
+    pub(crate) fn is_confirmed_leader(&self) -> bool {
+        let _fence = self.promotion_fence.lock().unwrap();
+        self.state.load() != RegionRoleState::Follower && !self.awaits_leader_lease()
     }
 
     /// Returns whether a Leader lease (or a StagingLeader lease, on a node whose writes need a
@@ -2544,6 +2611,12 @@ struct PromotionFence {
     /// Whether another writer advanced the manifest, so this instance stays a Follower until a
     /// reload replaces it.
     reload_pending: bool,
+    /// Whether a catchup runs on this instance. Until it ends, a Leader lease does not promote
+    /// the region: only the catchup's own promotion does.
+    catching_up: bool,
+    /// Whether the region was stopped (closed, dropped or its worker cleaned up), so no promotion
+    /// applies. The manifest manager also knows it, but a promotion decides under this lock only.
+    stopped: bool,
 }
 
 /// Regions indexed by ids.
@@ -3219,6 +3292,158 @@ mod tests {
             .unwrap();
         });
         assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap());
+    }
+
+    /// Makes the test region a writable leader that awaits its Leader lease.
+    fn await_leader_lease(region: &MitoRegion) {
+        let manifest_ctx = &region.manifest_ctx;
+        manifest_ctx.node_lease.enable();
+        manifest_ctx
+            .leader_deadline
+            .extend(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        region.set_role(RegionRole::Follower);
+        assert!(manifest_ctx.promote_after_catchup(region.region_id));
+        assert!(region.is_writable());
+        assert!(manifest_ctx.awaits_leader_lease());
+    }
+
+    /// A Leader lease of a writable leader that awaits it takes the fence lock, so it cannot end
+    /// the wait between a catchup's flag and its demotion.
+    #[tokio::test]
+    async fn test_lease_awaited_by_writable_leader_waits_for_catchup_demotion() {
+        let env = SchedulerEnv::new().await;
+        let region = Arc::new(build_test_region(&env).await);
+        await_leader_lease(&region);
+        let mut fence = region.manifest_ctx.promotion_fence.lock().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let promoted = region.clone();
+        std::thread::spawn(move || {
+            let issued_at = std::time::Instant::now();
+            ready_tx.send(()).unwrap();
+            let promotion = promoted
+                .manifest_ctx
+                .promote_unless_downgrade_started_after(issued_at, promoted.region_id);
+            tx.send((promotion.promoted, promotion.ended_wait)).unwrap();
+        });
+        // The lease is about to apply to the writable region; it must wait for the lock.
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(200))
+                .is_err()
+        );
+        // What a catchup does under the lock.
+        fence.catching_up = true;
+        region
+            .manifest_ctx
+            .set_role(RegionRole::Follower, region.region_id);
+        drop(fence);
+        let (promoted, ended_wait) = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(!promoted);
+        assert!(ended_wait.is_none());
+        assert!(region.manifest_ctx.awaits_leader_lease());
+    }
+
+    /// The readiness of an upgrade reads the role and the wait for a Leader lease under the fence
+    /// lock, so it sees a change of both made under that lock as a whole.
+    #[tokio::test]
+    async fn test_confirmed_leader_read_waits_for_fence_lock() {
+        let env = SchedulerEnv::new().await;
+        let region = Arc::new(build_test_region(&env).await);
+        await_leader_lease(&region);
+        let fence = region.manifest_ctx.promotion_fence.lock().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let read = region.clone();
+        std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            tx.send(read.is_confirmed_leader()).unwrap();
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(200))
+                .is_err()
+        );
+        // A lease ends the wait under the lock; a read made before it would answer false.
+        region
+            .manifest_ctx
+            .catchup_promoted_at
+            .store(0, Ordering::Relaxed);
+        drop(fence);
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap());
+    }
+
+    /// A catchup begins on no writable leader whose wait a Leader lease ended, and demotes one that
+    /// still awaits it.
+    #[tokio::test]
+    async fn test_catchup_begins_only_on_writable_leader_awaiting_lease() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let manifest_ctx = &region.manifest_ctx;
+        await_leader_lease(&region);
+        assert_eq!(manifest_ctx.begin_catchup(region.region_id), Some(true));
+        assert!(region.is_follower());
+        // Neither lease ends the wait while the catchup runs.
+        let issued_at = std::time::Instant::now();
+        assert!(
+            manifest_ctx
+                .record_staging_leader_lease(issued_at)
+                .is_none()
+        );
+        let promotion =
+            manifest_ctx.promote_unless_downgrade_started_after(issued_at, region.region_id);
+        assert!(!promotion.promoted && promotion.ended_wait.is_none());
+        assert!(manifest_ctx.awaits_leader_lease());
+
+        assert!(manifest_ctx.promote_after_catchup(region.region_id));
+        let issued_at = std::time::Instant::now();
+        let promotion =
+            manifest_ctx.promote_unless_downgrade_started_after(issued_at, region.region_id);
+        assert!(promotion.promoted && promotion.ended_wait.is_some());
+        assert_eq!(manifest_ctx.begin_catchup(region.region_id), None);
+        assert!(region.is_writable());
+    }
+
+    /// A StagingLeader lease ends the wait when no catchup runs.
+    #[tokio::test]
+    async fn test_staging_leader_lease_ends_wait_without_catchup() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        await_leader_lease(&region);
+        let issued_at = std::time::Instant::now();
+        assert!(
+            region
+                .manifest_ctx
+                .record_staging_leader_lease(issued_at)
+                .is_some()
+        );
+        assert!(!region.manifest_ctx.awaits_leader_lease());
+    }
+
+    /// Neither a catchup nor a Leader lease promotes a stopped region.
+    #[tokio::test]
+    async fn test_catchup_promotes_no_stopped_region() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        region.set_role(RegionRole::Follower);
+        assert_eq!(
+            region.manifest_ctx.begin_catchup(region.region_id),
+            Some(false)
+        );
+        region.stop().await;
+        assert!(region.manifest_ctx.is_stopped());
+        assert!(!region.manifest_ctx.promote_after_catchup(region.region_id));
+        // Nor does a Leader lease, while the stopped instance is still registered.
+        let issued_at = std::time::Instant::now();
+        let promotion = region
+            .manifest_ctx
+            .promote_unless_downgrade_started_after(issued_at, region.region_id);
+        assert!(!promotion.promoted);
+        assert!(region.is_follower());
     }
 
     #[tokio::test]

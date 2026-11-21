@@ -799,9 +799,9 @@ impl EventListener for ReloadSwapBlocker {
 
 /// Holds a catchup before it reopens the region until released.
 #[derive(Default)]
-struct CatchupReopenBlocker {
-    entered: Notify,
-    release: Notify,
+pub(crate) struct CatchupReopenBlocker {
+    pub(crate) entered: Notify,
+    pub(crate) release: Notify,
 }
 
 #[async_trait]
@@ -1191,6 +1191,59 @@ async fn test_fence_during_catchup_refuses_reopen() {
     let error = catchup.await.unwrap().unwrap_err();
     assert!(error.retry_hint().is_retryable(), "{error:?}");
     assert!(Arc::ptr_eq(&region, &engine.get_region(region_id).unwrap()));
+}
+
+/// A catchup that ends without promoting the region, because it failed or does not make the
+/// region writable, lets the next Leader lease promote it.
+#[rstest]
+#[case::failed(true)]
+#[case::not_set_writable(false)]
+#[tokio::test]
+async fn test_leader_lease_after_catchup_without_promotion_promotes(#[case] failed: bool) {
+    let mut env = TestEnv::with_prefix("lease-after-catchup").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, _log_store, _, schema, deadline) = create_leased_region(&mut env, region_id).await;
+    put_range(&engine, region_id, &schema, 0, 3).await;
+    flush_region(&engine, region_id, None).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    // A source that reported an entry the replay cannot reach fails the catchup.
+    let request = RegionCatchupRequest {
+        set_writable: failed,
+        entry_id: failed.then(|| region.version().flushed_entry_id + 1),
+        ..Default::default()
+    };
+    let caught_up = engine
+        .handle_request(region_id, RegionRequest::Catchup(request))
+        .await;
+    if failed {
+        let error = caught_up.unwrap_err();
+        assert!(
+            matches!(
+                error.as_any().downcast_ref::<crate::error::Error>(),
+                Some(crate::error::Error::Unexpected { reason, .. })
+                    if reason.contains("expected to replay to")
+            ),
+            "{error:?}"
+        );
+    } else {
+        caught_up.unwrap();
+    }
+    assert!(region.is_follower());
+
+    let promoted = engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            Instant::now(),
+            deadline,
+            None,
+        )
+        .unwrap();
+    assert!(promoted);
+    assert!(region.is_writable());
 }
 
 #[tokio::test]

@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::v1::Rows;
 use common_base::readable_size::ReadableSize;
@@ -57,13 +57,17 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::lease_test::promote_to_await_leader_lease;
+use crate::engine::object_store_wal_test::is_replaced;
 use crate::engine::pending_tail_test::{set_pending_tails, tail};
 use crate::manifest::action::{PendingTail, UptoKind};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::request::WorkerRequest;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, put_rows,
     rows_schema,
 };
+use crate::wal::entry_distributor::WalEntryReceiver;
 
 /// The root the store derives its node prefix from.
 const ROOT: &str = "cluster-a/wal";
@@ -1435,6 +1439,343 @@ async fn test_flush_waits_until_the_wal_is_durable() {
         region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(3, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
+/// A catchup of a region that awaits its Leader lease catches it up again from the WAL, which
+/// holds the rows written between the two catchups. In the `enqueued` mode the replay waits until
+/// the entry the region acknowledged is durable.
+#[rstest]
+#[case::durable(AckMode::Durable)]
+#[case::enqueued(AckMode::Enqueued)]
+#[tokio::test]
+async fn test_catchup_again_replays_rows_written_after_the_first(#[case] ack_mode: AckMode) {
+    let mut env = TestEnv::with_prefix("object-store-wal-catchup-again").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    engine.require_write_lease();
+    let (_, schema) = create_region(&engine, REGION_A, &[]).await;
+    promote_to_await_leader_lease(&engine, REGION_A).await;
+    let enqueued = ack_mode == AckMode::Enqueued;
+    if enqueued {
+        // The write is acknowledged on admission; its object is not created while creates
+        // are held.
+        store.hold_creates();
+        put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    } else {
+        SealedWriter::new(&store)
+            .put_and_seal(&engine, vec![(REGION_A, rows(&schema, 0, 3))])
+            .await;
+    }
+    let first = region(&engine, REGION_A);
+
+    let catchup = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            let request = RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            };
+            engine
+                .handle_request(REGION_A, RegionRequest::Catchup(request))
+                .await
+        })
+    };
+    if enqueued {
+        let seal = spawn_seal(&store);
+        wait_for(store.wait_for_parked_creates(1)).await;
+        wait_for(store.wait_for_durability_waits(1)).await;
+        assert!(!catchup.is_finished());
+        store.release_creates();
+        tokio::time::timeout(WAIT, seal)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    tokio::time::timeout(WAIT, catchup)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // The memtable held the rows, so the catchup reopened the region and replayed them.
+    assert!(is_replaced(&engine, &first));
+    assert_eq!(
+        3,
+        region_recovery_state(&engine, REGION_A).await.memtable_rows
+    );
+}
+
+/// A Leader lease that arrives while a catchup again waits for the durability of the entries the
+/// region acknowledged does not promote the region: it stays a follower if the wait fails, and
+/// becomes writable only when the catchup ends.
+#[rstest]
+#[case::wait_fails(true)]
+#[case::wait_succeeds(false)]
+#[tokio::test]
+async fn test_leader_lease_during_durability_wait_does_not_promote(#[case] wait_fails: bool) {
+    let mut env = TestEnv::with_prefix("object-store-wal-lease-during-durability-wait").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Enqueued).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    engine.require_write_lease();
+    let (_, schema) = create_region(&engine, REGION_A, &[]).await;
+    promote_to_await_leader_lease(&engine, REGION_A).await;
+    store.hold_creates();
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    let waiting = region(&engine, REGION_A);
+    assert!(!waiting.is_confirmed_leader());
+    let sent_before_catchup = Instant::now();
+    let catchup = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            let request = RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            };
+            engine
+                .handle_request(REGION_A, RegionRequest::Catchup(request))
+                .await
+        })
+    };
+    let seal = spawn_seal(&store);
+    wait_for(store.wait_for_parked_creates(1)).await;
+    wait_for(store.wait_for_durability_waits(1)).await;
+
+    let promoted = engine
+        .set_region_role_with_lease(
+            REGION_A,
+            RegionRole::Leader,
+            Instant::now(),
+            Instant::now() + WAIT,
+            None,
+        )
+        .unwrap();
+    assert!(!promoted);
+    let caught_up = region(&engine, REGION_A);
+    assert!(caught_up.is_follower());
+    // Neither the demoted instance nor the reopened one reads as a confirmed leader.
+    assert!(!Arc::ptr_eq(&waiting, &caught_up));
+    assert!(!waiting.is_confirmed_leader());
+    assert_eq!(engine.is_confirmed_leader(REGION_A), Some(false));
+
+    if wait_fails {
+        store.crash().await;
+        let error = tokio::time::timeout(WAIT, catchup)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.as_any().downcast_ref::<crate::error::Error>(),
+                Some(crate::error::Error::WaitWalDurable { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(seal.await.unwrap().is_err());
+        assert!(!engine.is_region_catching_up(REGION_A));
+        // An upgrade reports a region ready without a catchup only if it is a confirmed leader,
+        // which a follower never is.
+        assert!(caught_up.is_follower());
+        assert_eq!(Some(RegionRole::Follower), engine.role(REGION_A));
+        // The failed catchup no longer holds leases back: one sent before it still does not
+        // promote the region, one sent after it does.
+        let lease_sent_at = |sent_at| {
+            engine
+                .set_region_role_with_lease(
+                    REGION_A,
+                    RegionRole::Leader,
+                    sent_at,
+                    Instant::now() + WAIT,
+                    None,
+                )
+                .unwrap()
+        };
+        assert!(!lease_sent_at(sent_before_catchup));
+        assert!(caught_up.is_follower());
+        assert!(lease_sent_at(Instant::now()));
+        assert!(caught_up.is_writable());
+    } else {
+        assert!(!catchup.is_finished());
+        store.release_creates();
+        tokio::time::timeout(WAIT, seal)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(WAIT, catchup)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(caught_up.is_writable());
+        // The lease held back during the wait ends no wait: the catchup's promotion starts one.
+        assert!(caught_up.manifest_ctx.awaits_leader_lease());
+        assert_eq!(engine.is_confirmed_leader(REGION_A), Some(false));
+        assert_eq!(
+            3,
+            region_recovery_state(&engine, REGION_A).await.memtable_rows
+        );
+    }
+}
+
+/// A region closed while its catchup again waits for durability is not registered again when the
+/// wait ends, and the catchup answers RegionNotFound without making the closed instance writable,
+/// also when the wait fails. A drop is refused meanwhile, since the catchup demoted the region.
+#[rstest]
+#[case::close(false, false)]
+#[case::drop(true, false)]
+#[case::close_wait_fails(false, true)]
+#[tokio::test]
+async fn test_close_during_catchup_again_durability_wait(
+    #[case] drop: bool,
+    #[case] wait_fails: bool,
+) {
+    let mut env = TestEnv::with_prefix("object-store-wal-close-during-durability-wait").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Enqueued).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    engine.require_write_lease();
+    let (_, schema) = create_region(&engine, REGION_A, &[]).await;
+    promote_to_await_leader_lease(&engine, REGION_A).await;
+    store.hold_creates();
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    let catchup = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            let request = RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            };
+            engine
+                .handle_request(REGION_A, RegionRequest::Catchup(request))
+                .await
+        })
+    };
+    let seal = spawn_seal(&store);
+    wait_for(store.wait_for_parked_creates(1)).await;
+    wait_for(store.wait_for_durability_waits(1)).await;
+    let caught_up = region(&engine, REGION_A);
+
+    if drop {
+        let request = RegionRequest::Drop(RegionDropRequest {
+            fast_path: false,
+            force: false,
+            partial_drop: false,
+        });
+        let error = engine.handle_request(REGION_A, request).await.unwrap_err();
+        assert_eq!(StatusCode::RegionNotReady, error.status_code(), "{error:?}");
+    } else {
+        engine
+            .handle_request(
+                REGION_A,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
+            .await
+            .unwrap();
+    }
+
+    if wait_fails {
+        store.crash().await;
+        assert!(seal.await.unwrap().is_err());
+    } else {
+        store.release_creates();
+        tokio::time::timeout(WAIT, seal)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    let caught_up_result = tokio::time::timeout(WAIT, catchup).await.unwrap().unwrap();
+    assert!(!engine.is_region_catching_up(REGION_A));
+    if drop {
+        caught_up_result.unwrap();
+        assert!(Arc::ptr_eq(&caught_up, &region(&engine, REGION_A)));
+        assert!(caught_up.is_writable());
+    } else {
+        let error = caught_up_result.unwrap_err();
+        assert_eq!(StatusCode::RegionNotFound, error.status_code(), "{error:?}");
+        assert!(engine.get_region(REGION_A).is_none());
+        assert!(!caught_up.is_writable());
+    }
+}
+
+/// A Leader lease that arrives while a catchup replays the WAL does not promote the region, and
+/// neither it nor a StagingLeader lease ends its wait; the catchup promotes it when the replay ends.
+#[tokio::test]
+async fn test_leader_lease_during_replay_does_not_promote() {
+    let mut env = TestEnv::with_prefix("object-store-wal-lease-during-replay").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    engine.require_write_lease();
+    create_region(&engine, REGION_A, &[]).await;
+    promote_to_await_leader_lease(&engine, REGION_A).await;
+    // The replay reads from this channel, so it stays in progress until the sender is dropped.
+    let (entry_sender, entry_receiver) = tokio::sync::mpsc::channel(1);
+    let (start_sender, start_receiver) = tokio::sync::oneshot::channel();
+    let (request, response) = WorkerRequest::new_catchup_region_request(
+        REGION_A,
+        RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        },
+        Some(WalEntryReceiver::new(entry_receiver, start_sender)),
+    );
+    engine
+        .inner
+        .workers
+        .submit_to_worker(REGION_A, request)
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, start_receiver)
+        .await
+        .unwrap()
+        .unwrap();
+    // The catchup keeps the instance, which still waits for the lease of its first promotion.
+    let caught_up = region(&engine, REGION_A);
+    assert!(caught_up.manifest_ctx.awaits_leader_lease());
+
+    let lease = || {
+        engine
+            .set_region_role_with_lease(
+                REGION_A,
+                RegionRole::Leader,
+                Instant::now(),
+                Instant::now() + WAIT,
+                None,
+            )
+            .unwrap()
+    };
+    assert!(!lease());
+    assert!(caught_up.is_follower());
+    // A lease held back by the catchup ends no wait, nor does a StagingLeader lease.
+    assert!(caught_up.manifest_ctx.awaits_leader_lease());
+    engine
+        .set_region_role_with_lease(
+            REGION_A,
+            RegionRole::StagingLeader,
+            Instant::now(),
+            Instant::now() + WAIT,
+            None,
+        )
+        .unwrap();
+    assert!(caught_up.is_follower());
+    assert!(caught_up.manifest_ctx.awaits_leader_lease());
+
+    drop(entry_sender);
+    tokio::time::timeout(WAIT, response)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(caught_up.is_writable());
+    // The catchup's own promotion starts a new wait, which the next lease ends.
+    assert!(caught_up.manifest_ctx.awaits_leader_lease());
+    assert!(lease());
+    assert!(!caught_up.manifest_ctx.awaits_leader_lease());
 }
 
 #[tokio::test]

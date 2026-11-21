@@ -42,6 +42,12 @@ use crate::worker::{
 };
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Catches the region up from its WAL. A catchup of a writable region that awaits its Leader
+    /// lease demotes it and catches it up again, reopening it when needed, so its memtable holds
+    /// only the rows its WAL replays: unflushed rows written with `skip_wal`, and unflushed rows
+    /// under a local WAL, are dropped, while flushed rows stay in its SSTs. Only a catchup with
+    /// `set_writable` promotes the region again. The replay first waits until the entries the
+    /// region acknowledged are durable.
     pub(crate) async fn handle_catchup_request(
         &mut self,
         region_id: RegionId,
@@ -54,12 +60,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        if region.is_writable() {
+        if region.is_writable() && !region.manifest_ctx.awaits_leader_lease() {
             debug!("Region {region_id} is writable, skip catchup");
             sender.send(Ok(0));
             return;
         }
 
+        // Before the demotion below, so a catchup in progress keeps the region it promotes.
         if self.catchup_regions.is_region_exists(region_id)
             || region.manifest_ctx.is_reload_pending()
         {
@@ -68,10 +75,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        // A Leader lease may have ended the region's wait since the check above.
+        let Some(catching_up_again) = region.manifest_ctx.begin_catchup(region_id) else {
+            debug!("Region {region_id} is writable, skip catchup");
+            sender.send(Ok(0));
+            return;
+        };
+        if catching_up_again {
+            // Another catchup made the region writable and no Leader lease followed, so the
+            // region may lack what the leader has written since. It catches up again.
+            warn!("Region {region_id} is writable without a Leader lease, catching up again");
+            self.cancel_tail_replay(region_id);
+        }
+
+        // The worker writes a region inline and a Follower takes no writes, so every
+        // acknowledged write has an entry id at or below this one.
+        let last_entry_id = region.version_control.current().last_entry_id;
         // If the memtable is not empty or the manifest has been updated, we need to reopen the region.
-        let region = match self.reopen_region_if_needed(region).await {
+        let region = match self.reopen_region_if_needed(region.clone()).await {
             Ok(region) => region,
             Err(e) => {
+                region.manifest_ctx.end_catchup();
                 sender.send(Err(e));
                 return;
             }
@@ -91,11 +115,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
                 .with_expected_last_entry_id(request.entry_id)
-                .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id));
+                .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id))
+                .with_acknowledged_entry_id(last_entry_id);
 
             match task.run().await {
                 Ok(_) => {
-                    if request.set_writable {
+                    if !request.set_writable {
+                        region.manifest_ctx.end_catchup();
+                    } else {
                         // The region takes writes under the node lease until its next Leader
                         // grant.
                         node_lease.seed(&region.manifest_ctx.leader_deadline);
@@ -123,9 +150,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         }
                     }
                     catchup_regions.remove_region(region_id);
+                    // A close during the catchup stopped the region, which no longer serves it.
                     // A commit during the catchup, including the backfill above, may have found
                     // a newer manifest.
-                    if region.manifest_ctx.is_reload_pending() {
+                    if region.manifest_ctx.is_stopped() {
+                        sender.send(Err(error::RegionNotFoundSnafu { region_id }.build()));
+                    } else if region.manifest_ctx.is_reload_pending() {
                         sender.send(Err(error::RegionBusySnafu { region_id }.build()));
                     } else {
                         sender.send(Ok(0));
@@ -133,18 +163,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 Err(err) => {
                     error!(err; "Failed to catchup region {region_id}");
+                    region.manifest_ctx.end_catchup();
                     catchup_regions.remove_region(region_id);
-                    sender.send(Err(err));
+                    if region.manifest_ctx.is_stopped() {
+                        sender.send(Err(error::RegionNotFoundSnafu { region_id }.build()));
+                    } else {
+                        sender.send(Err(err));
+                    }
                 }
             }
         });
     }
 
-    /// Reopens a region.
-    pub(crate) async fn reopen_region(
-        &mut self,
-        region: &Arc<MitoRegion>,
-    ) -> Result<Arc<MitoRegion>> {
+    /// Reopens a region for its catchup, which keeps Leader leases from promoting the reopened
+    /// instance until it ends.
+    async fn reopen_region(&mut self, region: &Arc<MitoRegion>) -> Result<Arc<MitoRegion>> {
         let region_id = region.region_id;
         // Commits of the old instance wait until the reopened one is registered, so a conflict
         // either fenced the old instance before the check below or happens after it is replaced.
@@ -164,6 +197,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .open(&self.config, &self.wal)
             .await?;
         debug_assert!(!reopened_region.is_writable());
+        // Registered below, where a Leader lease can reach it before the catchup ends.
+        let begun = reopened_region.manifest_ctx.begin_catchup(region.region_id);
+        debug_assert_eq!(begun, Some(false));
         // Preserve allocated sequences without publishing the old memtables.
         reopened_region
             .version_control
@@ -200,6 +236,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .options(region.version().options.clone())
     }
 
+    /// Reopens `region` if its memtable is not empty or its manifest changed. A region that a
+    /// catchup promoted and that awaits its Leader lease may hold rows, also after a failed catchup
+    /// again demoted it; any other region should have none.
     async fn reopen_region_if_needed(
         &mut self,
         region: Arc<MitoRegion>,
@@ -211,7 +250,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Utilizes the short circuit evaluation.
         let region = if !is_empty_memtable || region.manifest_ctx.has_update().await? {
-            if !is_empty_memtable {
+            if !is_empty_memtable && !region.manifest_ctx.awaits_leader_lease() {
                 warn!(
                     "Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
                     region.region_id,

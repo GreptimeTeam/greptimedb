@@ -375,6 +375,15 @@ impl MitoEngine {
             });
     }
 
+    /// Extends the Leader deadline of a region as a Leader or StagingLeader lease that the region
+    /// ignores does. Like [Self::record_granted_lease], it serves a region of a group that received
+    /// the lease as a whole. Does nothing if the region is not open.
+    pub fn extend_leader_deadline(&self, region_id: RegionId, deadline: Instant) {
+        if let Ok(region) = self.inner.find_region(region_id) {
+            region.manifest_ctx.leader_deadline.extend(deadline);
+        }
+    }
+
     /// Freezes the clock of the lease checks at `at`.
     #[cfg(any(test, feature = "test"))]
     pub fn freeze_lease_clock(&self, at: Instant) {
@@ -1379,7 +1388,8 @@ impl EngineInner {
     }
 
     /// Converts the [`RegionRole`]. Unlike lease and catchup promotions, a conversion to Leader
-    /// does not check whether the region waits for a reload.
+    /// does not check whether the region waits for a reload, and unlike a lease it is not held
+    /// back while a catchup runs on the region.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
         let was_leader = region.region_role() == RegionRole::Leader;
@@ -1790,10 +1800,10 @@ impl RegionEngine for MitoEngine {
                 .notify_if_leader_lease_wait_ended(&region, promotion.ended_wait);
             return Ok(promotion.promoted);
         }
-        // The metasrv grants it to the leader of a region whose route is in staging, and it ends
-        // the wait for a Leader lease too.
+        // The metasrv grants it to the leader of a region whose route is in staging, and unless a
+        // catchup runs on the region it ends the wait for a Leader lease too.
         if role == RegionRole::StagingLeader && region.manifest_ctx.awaits_leader_lease() {
-            let ended_wait = region.manifest_ctx.record_leader_lease(sent_at);
+            let ended_wait = region.manifest_ctx.record_staging_leader_lease(sent_at);
             self.inner
                 .notify_if_leader_lease_wait_ended(&region, ended_wait);
         }
@@ -1849,6 +1859,11 @@ impl RegionEngine for MitoEngine {
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.inner.role(region_id)
+    }
+
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        self.find_region(region_id)
+            .map(|region| region.is_confirmed_leader())
     }
 
     fn as_any(&self) -> &dyn Any {

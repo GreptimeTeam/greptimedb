@@ -15,12 +15,15 @@
 use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use object_store::layers::mock::{self, BytesRange, MockLayerBuilder, RpRead, oio};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::logstore::provider::RaftEngineProvider;
@@ -32,6 +35,8 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::lease_test::promote_to_await_leader_lease;
+use crate::engine::object_store_wal_test::CatchupReopenBlocker;
 use crate::error::Error;
 use crate::manifest::action::RegionEdit;
 use crate::test_util::{
@@ -48,6 +53,255 @@ fn get_last_entry_id(resp: SetRegionRoleStateResponse) -> Option<EntryId> {
     } else {
         unreachable!();
     }
+}
+
+/// A Leader lease that arrives while a catchup reopens the region does not promote it; the
+/// catchup promotes the region when it ends.
+#[tokio::test]
+async fn test_leader_lease_during_catchup_does_not_promote() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("lease-during-catchup").await;
+    let listener = Arc::new(CatchupReopenBlocker::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let rows = Rows {
+        schema: rows_schema(&request),
+        rows: build_rows(0, 3),
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Rows left in the memtable make the catchup reopen the region.
+    put_rows(&engine, region_id, rows).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let catchup = {
+        let engine = engine.clone();
+        let request = RegionRequest::Catchup(RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        });
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+
+    listener.entered.notified().await;
+    let promoted = engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            Instant::now(),
+            Instant::now() + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+    assert!(!promoted);
+    assert!(region.is_follower());
+
+    listener.release.notify_one();
+    catchup.await.unwrap().unwrap();
+    assert!(engine.get_region(region_id).unwrap().is_writable());
+}
+
+/// Fails every read of a manifest file while armed.
+struct FailedManifestReader;
+
+impl oio::StreamRead for FailedManifestReader {
+    async fn open(&self, _: BytesRange) -> mock::Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        Err(mock::Error::new(
+            mock::ErrorKind::Unexpected,
+            "mock manifest read failure",
+        ))
+    }
+}
+
+/// A catchup whose reopen fails ends its catchup on the region it keeps, so the next Leader lease
+/// promotes it.
+#[tokio::test]
+async fn test_leader_lease_after_failed_catchup_reopen_promotes() {
+    common_telemetry::init_default_ut_logging();
+    let fail_manifest_reads = Arc::new(AtomicBool::new(false));
+    let armed = fail_manifest_reads.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _args, inner| {
+            if armed.load(Ordering::Relaxed) && path.contains("/manifest/") {
+                Box::new(oio::StreamReader::new(FailedManifestReader))
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::with_prefix("lease-after-failed-reopen")
+        .await
+        .with_mock_layer(layer);
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let rows = Rows {
+        schema: rows_schema(&request),
+        rows: build_rows(0, 3),
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Rows left in the memtable make the catchup reopen the region.
+    put_rows(&engine, region_id, rows).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    fail_manifest_reads.store(true, Ordering::Relaxed);
+    let caught_up = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+    fail_manifest_reads.store(false, Ordering::Relaxed);
+    assert!(caught_up.is_err());
+    assert!(Arc::ptr_eq(&region, &engine.get_region(region_id).unwrap()));
+    assert!(region.is_follower());
+
+    let promoted = engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            Instant::now(),
+            Instant::now() + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+    assert!(promoted);
+    assert!(region.is_writable());
+}
+
+/// A region that a catchup made writable, with no Leader lease since, catches up again: the
+/// leader it took over from may have acknowledged writes after that catchup, for example once the
+/// migration rolled back. With `kept`, the leader flushed before the first catchup, so the region
+/// keeps its instance and replays the later writes up to the expected last entry id.
+#[apply(single_kafka_log_store_factory)]
+async fn test_catchup_again_reads_writes_after_previous_catchup(
+    factory: Option<LogStoreFactory>,
+    #[values(false, true)] kept: bool,
+) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+    let mut env = TestEnv::with_prefix("catchup-again")
+        .await
+        .with_log_store_factory(factory.clone());
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let leader_engine = env.create_engine(MitoConfig::default()).await;
+    let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
+    // The node of the migration target, whose writes need a lease.
+    follower_engine.require_write_lease();
+    follower_engine.renew_node_lease(Instant::now() + Duration::from_secs(10));
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    leader_engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut options = HashMap::new();
+    if let Some(topic) = &topic {
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone()))).unwrap(),
+        );
+    };
+    follower_engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: store_api::region_request::PathType::Bare,
+                options,
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    let put = |start, end| {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(start, end),
+        };
+        put_rows(&leader_engine, region_id, rows)
+    };
+    let catchup = |entry_id| {
+        follower_engine.handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                entry_id,
+                ..Default::default()
+            }),
+        )
+    };
+    let count_rows = || async {
+        let stream = follower_engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    };
+
+    put(0, 3).await;
+    if kept {
+        flush_region(&leader_engine, region_id, None).await;
+    }
+    catchup(None).await.unwrap();
+    let region = follower_engine.get_region(region_id).unwrap();
+    assert!(region.is_writable());
+    assert!(region.manifest_ctx.awaits_leader_lease());
+    assert_eq!(count_rows().await, 3);
+
+    if !kept {
+        // The waiting region acknowledges a write, then the leader writes more.
+        put_rows(
+            &follower_engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: build_rows(10, 11),
+            },
+        )
+        .await;
+    }
+    put(3, 6).await;
+    let leader_last_entry_id = leader_engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current()
+        .last_entry_id;
+    catchup(kept.then_some(leader_last_entry_id)).await.unwrap();
+
+    assert_eq!(count_rows().await, if kept { 6 } else { 7 });
+    let caught_up = follower_engine.get_region(region_id).unwrap();
+    assert_eq!(Arc::ptr_eq(&region, &caught_up), kept);
+    assert!(caught_up.is_writable());
+    assert!(caught_up.manifest_ctx.awaits_leader_lease());
 }
 
 #[apply(single_kafka_log_store_factory)]
@@ -962,8 +1216,13 @@ async fn test_catchup_not_exist_with_format(flat_format: bool) {
     assert_matches!(err.status_code(), StatusCode::RegionNotFound);
 }
 
+/// With `awaiting_leader_lease`, a catchup made the region writable and it awaits its Leader
+/// lease: a catchup refused as busy leaves it as it is, so the catchup in progress keeps it.
+#[rstest]
+#[case::follower(false)]
+#[case::awaiting_leader_lease(true)]
 #[tokio::test]
-async fn test_catchup_region_busy() {
+async fn test_catchup_region_busy(#[case] awaiting_leader_lease: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
@@ -973,9 +1232,14 @@ async fn test_catchup_region_busy() {
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
-    engine
-        .set_region_role(region_id, RegionRole::Follower)
-        .unwrap();
+    if awaiting_leader_lease {
+        engine.require_write_lease();
+        promote_to_await_leader_lease(&engine, region_id).await;
+    } else {
+        engine
+            .set_region_role(region_id, RegionRole::Follower)
+            .unwrap();
+    }
     let worker = engine.inner.workers.worker(region_id);
     let catchup_regions = worker.catchup_regions();
     catchup_regions.insert_region(region_id);
@@ -990,4 +1254,9 @@ async fn test_catchup_region_busy() {
         .await
         .unwrap_err();
     assert_matches!(err.status_code(), StatusCode::RegionBusy);
+    if awaiting_leader_lease {
+        let region = engine.get_region(region_id).unwrap();
+        assert!(region.is_writable());
+        assert!(region.manifest_ctx.awaits_leader_lease());
+    }
 }

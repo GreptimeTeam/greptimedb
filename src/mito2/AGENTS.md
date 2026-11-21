@@ -218,7 +218,11 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   a downgrade's flush. The lease that ends the wait wakes the worker
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
   region is then a writable leader, start a compaction, build missing indexes, re-issue the
-  index build retries the wait refused and persist backfilled metadata.
+  index build retries the wait refused and persist backfilled metadata. A catchup of a waiting
+  writable region demotes it and catches it up again (`handle_catchup_request`); the datanode
+  upgrade handler sends that catchup unless `RegionEngine::is_confirmed_leader` is true, so an
+  engine wrapping mito must implement that method from mito's answers (the metric engine requires
+  both regions of the pair).
 - The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
   region instance, so a reopen during catchup keeps it. Every path that removes a region from
   a worker's region map must also remove its record and its kept index build retries:
