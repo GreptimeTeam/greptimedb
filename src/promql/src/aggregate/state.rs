@@ -99,7 +99,7 @@ pub struct PartialAggregate {
 
 /// One Arrow-backed aggregate state row, independent of executor plumbing.
 #[derive(Clone, Debug)]
-pub(crate) struct StateRow {
+pub struct StateRow {
     pub metric: SeriesLabels,
     pub time: TimeAxis,
     pub fields: StateFieldsBatch,

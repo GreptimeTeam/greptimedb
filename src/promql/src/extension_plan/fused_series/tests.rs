@@ -38,12 +38,17 @@ use std::task::{Context, Poll};
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_query::series_frame::{pack_evaluated_series, unpack_evaluated_series};
+use common_query::native_histogram::NativeHistogram;
+use common_query::series_frame::{
+    frame_schema_with, pack_evaluated_series, unpack_evaluated_series, unpack_raw_series,
+};
 use common_recordbatch::adapter::{NATIVE_TREE_METRIC, format_metric};
 use common_recordbatch::{
     EmptyRecordBatchStream, SendableRecordBatchStream as CommonSendableRecordBatchStream,
 };
-use datafusion::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
+use datafusion::arrow::array::{
+    Array, Float64Array, StringArray, TimestampMillisecondArray, UInt32Array,
+};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -78,8 +83,13 @@ use datatypes::series::frame::{
     LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, StateFrameRow, pack_raw_series_chunk,
     raw_series_frame_schema, series_frame_schema,
 };
+use datatypes::series::histogram::{
+    BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
+};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
-use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{
+    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -94,10 +104,11 @@ mod frame_output;
 
 use super::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, OutputColumn,
-    POLL_BUDGET, series_to_record_batch,
+    POLL_BUDGET, canonical_histogram, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::raw_series_source::tests::{per_series_scan, raw_source};
+use crate::extension_plan::series_execution::{SeriesChunk, series_execution_plan};
 use crate::extension_plan::{RawSeriesSourceExec, SeriesRepartitionExec, SeriesRouting};
 use crate::histogram_eval::HistogramFunction;
 use crate::info::InfoSelector;
@@ -109,6 +120,7 @@ use crate::native::plan::{
     BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr,
     NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
+use crate::native::state::StateChunk;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use common_query::series_frame::series_frame_ordering;
@@ -9697,4 +9709,1346 @@ async fn a_real_three_owner_repartition_between_two_real_fuseds_merges_every_pie
     })
     .await
     .expect("the composition finishes instead of waiting for an owner nobody reads");
+}
+
+// ---------------------------------------------------------------------------
+// The in-process handover
+// ---------------------------------------------------------------------------
+
+// The two ends of the handover, each checked against the frame path it replaces.
+//
+// A raw source decodes a region's frames into chunks, and a fused node decodes frames into the same
+// chunks; between two of our own operators neither has to. The fixtures below are the same for both
+// ends, so the tests live together: what has to hold is that skipping the encode changes nothing a
+// consumer can see - the raw source's frames and its chunks carry the same values, and a tree run
+// over the chunks answers the same batches as one run over the frames.
+//
+// The fixtures carry what a raw frame can carry and a naive comparison would miss: several series,
+// a null sample in each, one series whose field holds native histograms rather than floats, and a
+// series split over two chunks.
+
+/// One sample as these tests compare it.
+#[derive(Clone, Debug, PartialEq)]
+enum DecodedSample {
+    /// No sample at this position.
+    Missing,
+    /// The bits of the value, so a signed zero or a NaN payload is compared rather than coerced.
+    Float(u64),
+    /// A native histogram, in the canonical form both paths encode it as.
+    Histogram(NativeHistogram),
+}
+
+/// One chunk as these tests compare it: the decoded values, in the order they arrived.
+///
+/// The buffers a chunk happens to share are left out on purpose. The two paths may hand over
+/// different buffers, and what has to be identical is what a consumer reads.
+#[derive(Clone, Debug, PartialEq)]
+struct DecodedChunk {
+    /// The key the series was read under, byte for byte.
+    key: Vec<u8>,
+    /// Its complete labels, when the frame named it by them.
+    metric: Option<SeriesLabels>,
+    /// Its timestamps, in the order the chunk carries them.
+    time: Vec<i64>,
+    /// One sample per timestamp, one list per field.
+    fields: Vec<Vec<DecodedSample>>,
+    /// Whether this chunk closes its series.
+    is_last: bool,
+}
+
+/// `chunk` as these tests compare it.
+fn decoded_chunk(chunk: &RawSeriesChunk) -> DecodedChunk {
+    DecodedChunk {
+        key: chunk.primary_key.as_slice().to_vec(),
+        metric: chunk.metric.clone(),
+        time: (0..chunk.time.len())
+            .map(|index| chunk.time.timestamp(index).expect("the index is in range"))
+            .collect(),
+        fields: chunk.fields.iter().map(decoded_field).collect(),
+        is_last: chunk.is_last,
+    }
+}
+
+/// One field of a chunk as these tests compare it.
+fn decoded_field(field: &Samples) -> Vec<DecodedSample> {
+    field.iter().map(decoded_sample).collect()
+}
+
+/// One sample as these tests compare it, whichever way a chunk carries it.
+fn decoded_sample(sample: SampleRef) -> DecodedSample {
+    match sample {
+        SampleRef::Missing => DecodedSample::Missing,
+        SampleRef::Float(value) => DecodedSample::Float(value.to_bits()),
+        SampleRef::Histogram(view) => DecodedSample::Histogram(canonical_histogram(&view)),
+    }
+}
+
+/// The histogram batch `sums` describes, one histogram per entry.
+fn histogram_batch(sums: &[f64]) -> Arc<HistogramBatch> {
+    let mut builder = HistogramBatchBuilder::new();
+    let positive_offsets = [1];
+    let positive_lengths = [2];
+    let positive_buckets = [1.5, 2.5];
+    for (index, sum) in sums.iter().enumerate() {
+        builder
+            .push(HistogramView {
+                schema: 1,
+                zero_threshold: 0.5,
+                sum: *sum,
+                count: 8.0,
+                zero_count: 1.0,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp: Some(index as i64 * 1_000),
+                custom_values: &[],
+                positive: BucketSideView {
+                    span_offsets: &positive_offsets,
+                    span_lengths: &positive_lengths,
+                    buckets: &positive_buckets,
+                },
+                negative: BucketSideView {
+                    span_offsets: &[],
+                    span_lengths: &[],
+                    buckets: &[],
+                },
+            })
+            .expect("the fixture histogram is legal");
+    }
+    builder.finish().expect("the fixture batch finishes")
+}
+
+/// The chunks these tests hand over: four timestamps in all, spread over several series, with a
+/// null sample, a series in two chunks, and one series whose field holds native histograms.
+fn handover_chunks() -> Vec<RawSeriesChunk> {
+    let times = [60_000_i64, 120_000, 180_000, 240_000];
+    // A float series with a hole in it: the field carries one null, which both paths have to keep
+    // as a missing sample rather than as a zero.
+    let floats = |values: Vec<Option<f64>>| vec![values];
+    let mut chunks = vec![
+        chunk_of(
+            &raw_schema(),
+            "web-1",
+            metric(&[(HOST, "web-1")], Some(METRIC)),
+            &times,
+            floats(vec![Some(1.0), None, Some(3.0), Some(4.0)]),
+            false,
+        ),
+        // The same series, closed by a second chunk, so a chain has to be read in order.
+        chunk_of(
+            &raw_schema(),
+            "web-1",
+            metric(&[(HOST, "web-1")], Some(METRIC)),
+            &[300_000, 360_000],
+            floats(vec![Some(5.0), Some(6.0)]),
+            true,
+        ),
+        chunk_of(
+            &raw_schema(),
+            "web-2",
+            metric(&[(HOST, "web-2")], Some(METRIC)),
+            &times,
+            floats(vec![None, Some(2.5), Some(2.5), None]),
+            true,
+        ),
+    ];
+    // The histogram series: two histograms and one position with no sample, in the same field name
+    // the float series use, because a raw frame's field is a payload that can hold either.
+    let histograms = Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(0), None, Some(1), None]),
+        histogram_batch(&[10.5, 20.5]),
+    )
+    .expect("the fixture histograms are aligned with the timestamps");
+    chunks.push(
+        RawSeriesChunk::try_new(
+            &raw_schema(),
+            Buffer::from_slice_ref(b"web-3".as_slice()),
+            Some(metric(&[(HOST, "web-3")], Some(METRIC))),
+            RawTimestamps::try_new(ScalarBuffer::from(times.to_vec())).expect("ascending times"),
+            SeriesFields::try_from_vec(vec![histograms]).expect("one field over four positions"),
+            true,
+        )
+        .expect("the fixture histogram series is a legal chunk"),
+    );
+    chunks
+}
+
+/// `chunks` as one frame batch each, declared under `schema`.
+///
+/// The packer writes the schema it declares, so a caller that wants another one - an ordering this
+/// node does not publish, say - re-declares the packed columns under it.
+fn frames_under(schema: &SchemaRef, chunks: &[RawSeriesChunk]) -> Vec<RecordBatch> {
+    chunks
+        .iter()
+        .map(|chunk| {
+            let packed =
+                pack_raw_series_chunk(&raw_schema(), FrameLabelMode::Explicit, None, chunk)
+                    .expect("a chunk of this schema packs");
+            assert_eq!(1, packed.len(), "one small chunk is one frame batch");
+            RecordBatch::try_new(Arc::clone(schema), packed[0].columns().to_vec())
+                .expect("the packed columns match the declared frame")
+        })
+        .collect()
+}
+
+/// The frame schema of these series under `ordering`.
+fn frame_schema_with_ordering(ordering: SeriesOrdering) -> SchemaRef {
+    frame_schema_with(&raw_schema(), FrameLabelMode::Explicit, None, ordering)
+        .expect("explicit labels are a frame under any ordering")
+}
+
+/// The producer's two entry points decode the same chunks.
+///
+/// The frame path here is the published frame decoded back, which is exactly what a consumer on the
+/// other side of a boundary does with it; the in-process path is what a consumer that is native
+/// like this one receives instead. They have to agree chunk for chunk, including the labels, the
+/// nulls, the finality and the native histograms - otherwise the shortcut would be a second decoder
+/// rather than the same one without the encode.
+#[tokio::test]
+async fn the_raw_source_hands_over_the_chunks_its_frames_decode_to() {
+    // The child's frames arrive two ways. Under `Contiguous` they are already this node's own
+    // frame, so the frame path re-declares them without decoding at all. Under `Interleaved` they
+    // are in an order this node does not publish, so the frame path decodes them and packs them
+    // again - which is where the in-process path and the frame path share their decode.
+    for pass_through in [true, false] {
+        let chunks = handover_chunks();
+        let child = if pass_through {
+            memory_exec(frames_under(&frame_schema(), &chunks))
+        } else {
+            let schema = frame_schema_with_ordering(SeriesOrdering::Interleaved);
+            memory_exec_partitioned_with(Arc::clone(&schema), vec![frames_under(&schema, &chunks)])
+        };
+        let source = raw_source(child);
+        let exec = source
+            .downcast_ref::<RawSeriesSourceExec>()
+            .expect("the fixture root is the region's raw source");
+        let context = SessionContext::default().task_ctx();
+
+        // What a consumer behind a boundary reads: the published frame, decoded.
+        let published = exec
+            .execute(0, Arc::clone(&context))
+            .expect("the node has one partition");
+        let from_frames = unpack_raw_series(published, Some(raw_schema()))
+            .expect("the node publishes a raw frame of these fields")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the published frames decode");
+
+        // What a native consumer reads: the chunks themselves.
+        let handed_over = series_execution_plan(source.as_ref())
+            .expect("the raw source hands its chunks over")
+            .execute_series(0, context)
+            .expect("the node has one partition")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the chunks arrive");
+        let in_process = handed_over
+            .into_iter()
+            .map(|handed| match handed.into_parts().0 {
+                SeriesChunk::Raw(chunk) => decoded_chunk(&chunk),
+                other => panic!("a raw source handed over a chunk it cannot produce: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            handover_chunks().len(),
+            in_process.len(),
+            "every fixture chunk is handed over, pass-through: {pass_through}"
+        );
+        assert_eq!(
+            from_frames.iter().map(decoded_chunk).collect::<Vec<_>>(),
+            in_process,
+            "the in-process chunks are the published frame decoded, pass-through: {pass_through}"
+        );
+    }
+}
+
+/// A tree run over in-process chunks answers the same batches as one run over their frames.
+///
+/// This is the consumer's half of the handover: the node reads chunks instead of decoding frames,
+/// and everything above it - the tree, its kernels, the row conversion - sees the same input, so
+/// the answer has to be identical batch for batch, including where each batch ends.
+#[tokio::test]
+async fn the_in_process_handover_answers_the_batches_the_frames_answer() {
+    let chunks = handover_chunks();
+    // Only the float series: a tree binds one value kind for its whole output, so a fixture that
+    // holds histograms in some series would have to be read by a histogram tree.
+    let chunks = chunks
+        .into_iter()
+        .filter(|chunk| {
+            chunk
+                .metric
+                .as_ref()
+                .and_then(|metric| metric.get(HOST))
+                .is_some_and(|host| host != "web-3")
+        })
+        .collect::<Vec<_>>();
+    let source = raw_source(memory_exec(frames_under(&frame_schema(), &chunks)));
+    let context = SessionContext::default().task_ctx();
+
+    // The same frames the second plan reads, taken from the node that publishes them, so both plans
+    // read one input rather than two that are assumed to be alike.
+    let published = collect(Arc::clone(&source), Arc::clone(&context))
+        .await
+        .expect("the raw source publishes its frames");
+    let framed = memory_exec_partitioned_with(source.schema(), vec![published]);
+
+    let in_process =
+        plan(rate_tree(), Arc::clone(&source)).expect("the runtime executes a rate tree");
+    let over_frames = plan(rate_tree(), framed).expect("the runtime executes a rate tree");
+    assert!(
+        uses_in_process_series(&in_process),
+        "every input of this plan is a native operator, so the node reads it in process"
+    );
+    assert!(
+        !uses_in_process_series(&over_frames),
+        "a memory leaf publishes frames, so the node reads them"
+    );
+
+    let in_process_batches = collect(Arc::clone(&in_process), context.clone())
+        .await
+        .expect("the node runs over the chunks");
+    let frame_batches = collect(Arc::clone(&over_frames), context)
+        .await
+        .expect("the node runs over the frames");
+    assert!(
+        !in_process_batches.is_empty(),
+        "the fixture is a grid the tree answers on"
+    );
+    assert_eq!(
+        frame_batches, in_process_batches,
+        "the two paths answer the same batches, in the same order"
+    );
+    // Nothing a reader observes may change with the representation. The figures the tree records
+    // are recorded per chunk it was fed, and the fast path feeds the producer's own chunks, which
+    // are the ones the frame path decodes back - every fixture chunk here is one dense field
+    // segment, so a frame row is a chunk and the counts agree exactly, not just the rows.
+    assert_eq!(
+        node_counters(&over_frames),
+        node_counters(&in_process),
+        "the tree records the same figures either way"
+    );
+}
+
+/// The counters the fused node of `plan` registered, by name, so two executions can be compared.
+fn node_counters(plan: &Arc<dyn ExecutionPlan>) -> Vec<(String, usize)> {
+    let mut counters = node_metric_set(plan)
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            MetricValue::Count { count, .. } => {
+                Some((metric.value().name().to_string(), count.value()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    counters.sort();
+    counters
+}
+
+// ---------------------------------------------------------------------------
+// The routing in front of a native consumer
+// ---------------------------------------------------------------------------
+
+/// Whether the fused node at the top of `plan` reads any of its inputs in process.
+///
+/// This is the question the node asks itself, one input at a time, before it decides how to read that
+/// input - so a test that says "this plan goes through the handover" states what the node does,
+/// rather than what some build-time flag was set to. There is no content the node reads another way:
+/// every input whose operator answers is read in process, aggregate state included.
+fn uses_in_process_series(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    let fused = plan
+        .downcast_ref::<FusedSeriesExec>()
+        .expect("the plan under test is one fused node");
+    (0..fused.inputs.len())
+        .any(|source| series_execution_plan(fused.inputs[source].0.as_ref()).is_some())
+}
+
+/// The frames each partition of `plan` publishes, in order, read once.
+///
+/// This is what a consumer behind a boundary receives from each owner: the batches exactly as the
+/// producer wrote them, which is the fixture the frame path of these tests is then given.
+async fn published_frames(plan: &Arc<dyn ExecutionPlan>) -> Vec<Vec<RecordBatch>> {
+    let context = SessionContext::default().task_ctx();
+    let mut partitions = Vec::new();
+    for partition in 0..plan.properties().partitioning.partition_count() {
+        let mut stream = plan
+            .execute(partition, Arc::clone(&context))
+            .expect("every partition of the fixture executes");
+        let mut batches = Vec::new();
+        while let Some(batch) = stream.next().await {
+            batches.push(batch.expect("the fixture publishes frames instead of failing"));
+        }
+        partitions.push(batches);
+    }
+    partitions
+}
+
+/// The raw chunks `batches` decode to, as a consumer behind the boundary recovers them.
+async fn raw_frames_decoded(schema: SchemaRef, batches: Vec<RecordBatch>) -> Vec<DecodedChunk> {
+    let leaf = memory_exec_partitioned_with(schema, vec![batches]);
+    let frames = leaf
+        .execute(0, SessionContext::default().task_ctx())
+        .expect("the fixture's frames are re-read");
+    unpack_raw_series(frames, Some(raw_schema()))
+        .expect("the owner publishes a raw frame of these fields")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the frames decode")
+        .iter()
+        .map(decoded_chunk)
+        .collect()
+}
+
+/// One evaluated chunk as these tests compare it.
+///
+/// The samples, the labels and the finality are what a consumer reads; the buffers they sit in are
+/// not, and the two paths are allowed to aim at different ones.
+#[derive(Clone, Debug, PartialEq)]
+struct DecodedSeries {
+    /// The complete labels the series belongs to.
+    metric: SeriesLabels,
+    /// The grid positions it carries, in order.
+    positions: Vec<i64>,
+    /// One list of samples per field.
+    fields: Vec<Vec<DecodedSample>>,
+    /// Whether this chunk closes its series.
+    is_last: bool,
+}
+
+/// `series` as these tests compare it.
+fn decoded_evaluated(series: &Series, is_last: bool) -> DecodedSeries {
+    DecodedSeries {
+        metric: series.metric.clone(),
+        positions: series
+            .time
+            .positions()
+            .map(|(position, _)| position as i64)
+            .collect(),
+        fields: series.fields.as_slice().iter().map(decoded_field).collect(),
+        is_last,
+    }
+}
+
+/// `chunks` joined into whole series, in a fixed order, so two lists of them can be compared.
+///
+/// A frame row never spans two segments of one field, so a series whose values sit in two dense
+/// segments is one chunk in process and two rows in a frame - the split-segment difference the
+/// handover documents. What both paths have to agree on is the series, not how many rows it was
+/// encoded as, so adjacent pieces of one series are joined before they are compared.
+fn join_raw(mut chunks: Vec<DecodedChunk>) -> Vec<DecodedChunk> {
+    chunks.sort_by(|left, right| {
+        (left.key.clone(), left.time.first()).cmp(&(right.key.clone(), right.time.first()))
+    });
+    let mut joined: Vec<DecodedChunk> = Vec::new();
+    for chunk in chunks {
+        match joined.last_mut() {
+            Some(open) if open.key == chunk.key && !open.is_last => {
+                open.time.extend(chunk.time);
+                for (into, from) in open.fields.iter_mut().zip(chunk.fields) {
+                    into.extend(from);
+                }
+                open.is_last = chunk.is_last;
+            }
+            _ => joined.push(chunk),
+        }
+    }
+    joined
+}
+
+/// [`join_raw`] for evaluated pieces.
+fn join_evaluated(mut series: Vec<DecodedSeries>) -> Vec<DecodedSeries> {
+    series.sort_by(|left, right| {
+        (format!("{:?}", left.metric), &left.positions)
+            .cmp(&(format!("{:?}", right.metric), &right.positions))
+    });
+    let mut joined: Vec<DecodedSeries> = Vec::new();
+    for chunk in series {
+        match joined.last_mut() {
+            Some(open) if open.metric == chunk.metric && !open.is_last => {
+                open.positions.extend(chunk.positions);
+                for (into, from) in open.fields.iter_mut().zip(chunk.fields) {
+                    into.extend(from);
+                }
+                open.is_last = chunk.is_last;
+            }
+            _ => joined.push(chunk),
+        }
+    }
+    joined
+}
+
+/// The evaluated series `batches` decode to, as a consumer behind the boundary recovers them.
+async fn evaluated_frames_decoded(
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+) -> Vec<DecodedSeries> {
+    let leaf = memory_exec_partitioned_with(schema, vec![batches]);
+    let frames = leaf
+        .execute(0, SessionContext::default().task_ctx())
+        .expect("the fixture's frames are re-read");
+    unpack_evaluated_series(frames, None)
+        .expect("the owner publishes an evaluated frame")
+        .try_collect::<Vec<(Series, bool)>>()
+        .await
+        .expect("the frames decode")
+        .iter()
+        .map(|(series, is_last)| decoded_evaluated(series, *is_last))
+        .collect()
+}
+
+/// The raw chunks `owner` of `plan` hands over, decoded, as a native consumer receives them.
+async fn handed_raw_chunks(plan: &Arc<dyn ExecutionPlan>, owner: usize) -> Vec<DecodedChunk> {
+    let handed = series_execution_plan(plan.as_ref())
+        .expect("the router hands its chunks over")
+        .execute_series(owner, SessionContext::default().task_ctx())
+        .expect("the owner hands its chunks over")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the chunks arrive");
+    handed
+        .into_iter()
+        .map(|handed| match handed.into_parts().0 {
+            SeriesChunk::Raw(chunk) => decoded_chunk(&chunk),
+            other => panic!("a raw owner handed over {other:?}"),
+        })
+        .collect()
+}
+
+/// The evaluated chunks `owner` of `plan` hands over, decoded, as a native consumer receives them.
+async fn handed_evaluated_chunks(
+    plan: &Arc<dyn ExecutionPlan>,
+    owner: usize,
+) -> Vec<DecodedSeries> {
+    let handed = series_execution_plan(plan.as_ref())
+        .expect("the router hands its chunks over")
+        .execute_series(owner, SessionContext::default().task_ctx())
+        .expect("the owner hands its chunks over")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the chunks arrive");
+    handed
+        .into_iter()
+        .map(|handed| match handed.into_parts().0 {
+            SeriesChunk::Evaluated(chunk) => decoded_evaluated(&chunk.series, chunk.is_last),
+            other => panic!("an evaluated owner handed over {other:?}"),
+        })
+        .collect()
+}
+
+/// A router over `partitions`' raw frames, publishing `owners` outputs.
+fn raw_router(partitions: Vec<Vec<RecordBatch>>, owners: usize) -> Arc<dyn ExecutionPlan> {
+    Arc::new(
+        SeriesRepartitionExec::try_new(
+            memory_exec_partitioned_with(frame_schema(), partitions),
+            owners,
+        )
+        .expect("raw frames route by the stored primary key"),
+    )
+}
+
+/// The raw series the routing tests route: thirteen identities over two input partitions.
+///
+/// Twelve of them are closed chains that arrive whole from one partition each, so what the routing
+/// has to do is send each to its owner and leave it alone. The thirteenth, `web-split`, arrives as
+/// two closed chains of the same stored key, one from each partition - a frame input has to end
+/// between chains, so a chain cannot be left open at the end of a partition - and the owner it is
+/// routed to has to merge them into one identity: the raw form of the merge a router exists for.
+fn routed_raw_partitions() -> Vec<Vec<RecordBatch>> {
+    let times = [60_000_i64, 120_000];
+    let closed = |host: &str| {
+        frame(&chunk_of(
+            &raw_schema(),
+            host,
+            metric(&[(HOST, host)], Some(METRIC)),
+            &times,
+            vec![vec![Some(1.0), Some(2.0)]],
+            true,
+        ))
+    };
+    let piece = |host: &str, time: i64, value: f64, last: bool| {
+        frame(&chunk_of(
+            &raw_schema(),
+            host,
+            metric(&[(HOST, host)], Some(METRIC)),
+            &[time],
+            vec![vec![Some(value)]],
+            last,
+        ))
+    };
+    let mut early = (0..6)
+        .map(|index| closed(&format!("web-{index}")))
+        .collect::<Vec<_>>();
+    let mut late = (6..12)
+        .map(|index| closed(&format!("web-{index}")))
+        .collect::<Vec<_>>();
+    early.push(piece("web-split", 60_000, 1.0, true));
+    late.push(piece("web-split", 120_000, 2.0, true));
+    vec![early, late]
+}
+
+/// The evaluated series the routing tests route, through the window-and-rewrite producer.
+///
+/// Four canonical label sets over two input partitions and three owners: `web-1` and `web-2` are two
+/// raw identities the rewrite folds onto `{host="same"}`, and their pieces sit on disjoint grid
+/// positions, so that one label set only becomes one series once both halves reach one owner.
+fn routed_evaluated_partitions() -> Vec<Vec<RecordBatch>> {
+    let piece = |host: &str, times: &[i64]| frame(&piece_chunk(host, times));
+    vec![
+        vec![
+            piece("web-1", &EARLY_PIECE_MS),
+            piece(PLAIN, &EARLY_PIECE_MS),
+            piece("third", &EARLY_PIECE_MS),
+        ],
+        vec![
+            piece("web-2", &LATE_PIECE_MS),
+            piece("fourth", &EARLY_PIECE_MS),
+        ],
+    ]
+}
+
+/// A three-owner raw router hands over the chunks its frames decode to, owner by owner.
+///
+/// The producer's half of the handover for a router: what it publishes as frames and what it hands
+/// over in process have to be the same series - the same key, labels, samples and finality - and
+/// the merge it performs on an identity that arrived from two partitions has to have happened in
+/// both, not in one. Owner by owner, because which owner an identity lands on is the routing
+/// decision itself, and per owner as whole series, because how many rows one series is encoded as
+/// is the encoder's business.
+#[tokio::test]
+async fn a_three_owner_raw_router_hands_over_what_its_frames_decode_to() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        // The frame side: one router's publication, read owner by owner, which is both what a
+        // boundary consumer reads and the fixture the frame path below is given.
+        let publishing = raw_router(routed_raw_partitions(), 3);
+        let published = published_frames(&publishing).await;
+        assert_eq!(3, published.len(), "one publication per owner");
+        assert_eq!(
+            3,
+            published
+                .iter()
+                .filter(|batches| !batches.is_empty())
+                .count(),
+            "thirteen identities over three owners reach all three, which is the re-routing this \
+             test needs: {published:?}"
+        );
+
+        // The chunk side reads the same fixture through a router of its own.
+        let handing = raw_router(routed_raw_partitions(), 3);
+        let mut in_process = Vec::new();
+        for owner in 0..3 {
+            in_process.push(handed_raw_chunks(&handing, owner).await);
+        }
+        assert_eq!(
+            13,
+            in_process.iter().flatten().count(),
+            "every identity is published once, and the identity that arrived in two halves once"
+        );
+        for (owner, handed) in in_process.iter().enumerate() {
+            // An owner publishes the identities that became ready together in the order they
+            // completed, and neither path promises that order - the frame a consumer decodes is
+            // read for its chains, not for a sequence of keys. So the two are compared as the same
+            // series, sorted by the key that names each one.
+            let from_frames = raw_frames_decoded(frame_schema(), published[owner].clone()).await;
+            assert_eq!(
+                join_raw(from_frames),
+                join_raw(handed.clone()),
+                "owner {owner} hands over the series its frames decode to"
+            );
+        }
+        // The identity that arrived from two partitions is the merge: two halves in, one closed
+        // chunk out, on whichever owner the routing put it on.
+        let split = in_process
+            .iter()
+            .flatten()
+            .filter(|chunk| chunk.key == b"web-split")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            1,
+            split.len(),
+            "the split identity is published once: {in_process:?}"
+        );
+        let mut merged_times = split[0].time.clone();
+        merged_times.sort_unstable();
+        assert_eq!(
+            vec![60_000, 120_000],
+            merged_times,
+            "the two halves are one chunk: {split:?}"
+        );
+        assert!(split[0].is_last, "the identity the owner merged is closed");
+
+        // And the whole composition above it: a real tree over the chunks and the same tree over
+        // the frames answer the same batches.
+        let over_frames = plan(
+            rate_tree(),
+            memory_exec_partitioned_with(frame_schema(), published),
+        )
+        .expect("the runtime executes a rate tree");
+        let in_process =
+            plan(rate_tree(), raw_router(routed_raw_partitions(), 3)).expect("the same here");
+        assert!(
+            uses_in_process_series(&in_process),
+            "the router hands its chunks over, so the node reads them"
+        );
+        assert!(
+            !uses_in_process_series(&over_frames),
+            "a memory leaf publishes frames, so the node reads them"
+        );
+        // Owner by owner, because a row belongs to the owner the routing put its series on, and
+        // per owner the rows are compared as the same rows: an owner answers the identities it was
+        // routed in the order they completed, which is not a promise either path makes.
+        let frame_rows = polled_partition_rows(&over_frames).await;
+        let chunk_rows = polled_partition_rows(&in_process).await;
+        assert_eq!(3, chunk_rows.len(), "the tree runs once per owner");
+        for owner in 0..chunk_rows.len() {
+            assert!(chunk_rows[owner].1, "owner {owner} reports its end");
+            let mut answered_over_frames = frame_rows[owner].0.clone();
+            answered_over_frames
+                .sort_by(|left, right| left.partial_cmp(right).expect("rows compare"));
+            let mut answered_over_chunks = chunk_rows[owner].0.clone();
+            answered_over_chunks
+                .sort_by(|left, right| left.partial_cmp(right).expect("rows compare"));
+            assert_eq!(
+                answered_over_frames, answered_over_chunks,
+                "owner {owner} answers the same rows over the chunks and over the frames"
+            );
+        }
+        assert!(
+            chunk_rows.iter().any(|(rows, _)| !rows.is_empty()),
+            "the fixture answers on the grid"
+        );
+    })
+    .await
+    .expect("the composition finishes");
+}
+
+/// A three-owner evaluated router hands over the chunks its frames decode to, owner by owner.
+///
+/// The same contract as the raw half, on the content a router publishes after an owner merged it: the
+/// owner's merged series is what is handed over, already closed, so the `is_last` a frame carries is
+/// the one the chunk carries. The identity the rewrite folded out of two partitions is one series in
+/// both, and the tree above folds it to the same batches.
+#[tokio::test]
+async fn a_three_owner_evaluated_router_hands_over_what_its_frames_decode_to() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let publishing: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(aliasing_producer(routed_evaluated_partitions()), 3)
+                .expect("the router is built over the producer's evaluated frames"),
+        );
+        let published = published_frames(&publishing).await;
+        assert_eq!(3, published.len(), "one publication per owner");
+        // The router routes by a hash of the label set, so which owners carry a series is not this
+        // test's to fix - only that every label set is published, on whichever owner owns it, and
+        // that the chunks match the frames there. A merged series whose pieces sit on disjoint grid
+        // positions is encoded as one row per dense segment, so the rows of an owner are not the
+        // count of its series and are not compared against it.
+
+        let handing: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(aliasing_producer(routed_evaluated_partitions()), 3)
+                .expect("the router is built over the producer's evaluated frames"),
+        );
+        let mut in_process = Vec::new();
+        for owner in 0..3 {
+            in_process.push(handed_evaluated_chunks(&handing, owner).await);
+        }
+        assert_eq!(
+            4,
+            in_process.iter().flatten().count(),
+            "four canonical label sets, each published once: {in_process:?}"
+        );
+        for (owner, handed) in in_process.iter().enumerate() {
+            // As in the raw half: the order an owner publishes in is the order its series
+            // completed, so the two paths are compared as the same series rather than as one
+            // sequence.
+            let from_frames =
+                evaluated_frames_decoded(publishing.schema(), published[owner].clone()).await;
+            assert_eq!(
+                join_evaluated(from_frames),
+                join_evaluated(handed.clone()),
+                "owner {owner} hands over the series its frames decode to"
+            );
+        }
+        // The merged label set is one closed series carrying both pieces, which is the `is_last` the
+        // frame declares for it as well.
+        let merged = in_process
+            .iter()
+            .flatten()
+            .filter(|series| series.metric.get(HOST).is_some_and(|host| host == ALIASED))
+            .collect::<Vec<_>>();
+        assert_eq!(1, merged.len(), "the aliased label set is published once");
+        assert!(
+            merged[0].is_last,
+            "an owner publishes a merged identity closed"
+        );
+        assert!(
+            merged[0].positions.len() > 1,
+            "both pieces are in the one series: {:?}",
+            merged[0].positions
+        );
+
+        let over_frames =
+            summed_window_over(memory_exec_partitioned_with(publishing.schema(), published));
+        let in_process = summed_window_over(Arc::new(
+            SeriesRepartitionExec::try_new(aliasing_producer(routed_evaluated_partitions()), 3)
+                .expect("the router is built over the producer's evaluated frames"),
+        ) as Arc<dyn ExecutionPlan>);
+        assert!(
+            uses_in_process_series(&in_process),
+            "the router hands its chunks over, so the node reads them"
+        );
+        assert!(
+            !uses_in_process_series(&over_frames),
+            "a memory leaf publishes frames, so the node reads them"
+        );
+        let frame_rows = polled_partition_rows(&over_frames).await;
+        let chunk_rows = polled_partition_rows(&in_process).await;
+        assert_eq!(3, chunk_rows.len(), "the tree runs once per owner");
+        for owner in 0..chunk_rows.len() {
+            assert!(chunk_rows[owner].1, "owner {owner} reports its end");
+            let mut answered_over_frames = frame_rows[owner].0.clone();
+            answered_over_frames
+                .sort_by(|left, right| left.partial_cmp(right).expect("rows compare"));
+            let mut answered_over_chunks = chunk_rows[owner].0.clone();
+            answered_over_chunks
+                .sort_by(|left, right| left.partial_cmp(right).expect("rows compare"));
+            assert_eq!(
+                answered_over_frames, answered_over_chunks,
+                "owner {owner} answers the same rows over the chunks and over the frames"
+            );
+        }
+        assert!(
+            chunk_rows.iter().any(|(rows, _)| !rows.is_empty()),
+            "the fixture answers on the grid"
+        );
+    })
+    .await
+    .expect("the composition finishes");
+}
+
+/// A state input is read in process, like every other content a native operator publishes.
+///
+/// `SeriesChunk::State` is the exported row itself, not a second encoding of it, so the node folds
+/// the row its operator hands over instead of decoding a frame on a state path of its own.
+#[test]
+fn a_state_input_is_read_in_process() {
+    let router: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(state_producer(), 2)
+            .expect("the producer declares aggregate-state frames"),
+    );
+    assert!(
+        series_execution_plan(router.as_ref()).is_some(),
+        "a state publication is a row this crate holds, so it is handed over"
+    );
+    let fused = final_state_over(router);
+    assert!(
+        uses_in_process_series(&fused),
+        "the state input is handed over, not decoded from a frame"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate state over the same handover
+// ---------------------------------------------------------------------------
+
+/// One exported state row as these tests compare it.
+///
+/// Which group it belongs to, where it has contributions, and whether it closes its chain: the
+/// payload is compared where it is read, by the answer the two paths fold.
+#[derive(Clone, Debug, PartialEq)]
+struct DecodedState {
+    metric: SeriesLabels,
+    runs: Vec<(usize, usize)>,
+    is_last: bool,
+}
+
+/// `row` as these tests compare it.
+fn decoded_state(row: &StateFrameRow) -> DecodedState {
+    DecodedState {
+        metric: row.metric().clone(),
+        runs: row
+            .time()
+            .runs()
+            .map(|run| (run.position, run.len))
+            .collect(),
+        is_last: row.is_last(),
+    }
+}
+
+/// `rows` in a fixed order, so two lists of them can be compared as sets.
+fn state_rows_sorted(mut rows: Vec<DecodedState>) -> Vec<DecodedState> {
+    rows.sort_by_key(|row| format!("{:?}|{:?}", row.metric, row.runs));
+    rows
+}
+
+/// A real `Partial` producer over two partitions, both carrying the same group.
+///
+/// Grouping by `job` puts both partitions' state in one group, so the router routes both rows to the
+/// owner that folds them and the `Final` above has to merge what it is given: that merge is what
+/// this differential is about.
+fn state_producer() -> Arc<dyn ExecutionPlan> {
+    let rows = series_samples(1.0);
+    let first = [(HOST, "web-0"), (JOB, "shared")];
+    let second = [(HOST, "web-1"), (JOB, "shared")];
+    let partitions = vec![
+        frames(&[labelled_chunk("web-0", &first, &rows[..4], true)]),
+        vec![frame(&labelled_chunk("web-1", &second, &rows, true))],
+    ];
+    partial_plan(
+        rate_tree(),
+        memory_exec_partitioned(partitions),
+        partial_op(AggregateKind::Sum, &[JOB]),
+        &[JOB],
+    )
+    .expect("a rate tree with a partial sum is executable")
+}
+
+/// A real `Final` fold over `input`, answering rows: the aggregate that reads exported state.
+fn final_state_over(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    let state = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from(JOB)])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+        accumulators: raw_schema().fields.clone(),
+        grid: grid(),
+    });
+    let tree = state_tree(AggregateStage::Final, NativeType::AggregateState(state));
+    plan_of(fused(tree), input).expect("the runtime executes a final fold")
+}
+
+/// The state rows `owner` of `plan` hands over, as these tests compare them.
+async fn handed_state_rows(plan: &Arc<dyn ExecutionPlan>, owner: usize) -> Vec<DecodedState> {
+    let handed = series_execution_plan(plan.as_ref())
+        .expect("the router hands its rows over")
+        .execute_series(owner, SessionContext::default().task_ctx())
+        .expect("the owner hands its rows over")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the rows arrive");
+    handed
+        .into_iter()
+        .map(|handed| match handed.into_parts().0 {
+            SeriesChunk::State(chunk) => match chunk {
+                StateChunk::Series { series, .. } => {
+                    let series = series.first().expect("one group per handed chunk");
+                    DecodedState {
+                        metric: series.metric.clone(),
+                        runs: series
+                            .time
+                            .runs()
+                            .map(|run| (run.position, run.len))
+                            .collect(),
+                        // A handed-over group is a whole publication: the producer folded it
+                        // completely, which is what the frame row it would have been says too.
+                        is_last: true,
+                    }
+                }
+                StateChunk::Row(row) => DecodedState {
+                    metric: row.metric.clone(),
+                    runs: row.time.runs().map(|run| (run.position, run.len)).collect(),
+                    is_last: true,
+                },
+            },
+            other => panic!("a state owner handed over {other:?}"),
+        })
+        .collect()
+}
+
+/// The state rows `batches` decode to, as a consumer behind the boundary recovers them.
+async fn state_rows_decoded(schema: SchemaRef, batches: Vec<RecordBatch>) -> Vec<DecodedState> {
+    let declaration =
+        SeriesFrameDeclaration::parse(schema.as_ref()).expect("the export declares a series frame");
+    let state = declaration
+        .aggregate_state()
+        .expect("the export declares aggregate state");
+    let binding = Arc::new(
+        datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+            state.kind,
+            state.components.to_vec(),
+        )
+        .expect("the declared layout is legal"),
+    );
+    let series = Arc::new(declaration.series().clone());
+    let leaf = memory_exec_partitioned_with(schema, vec![batches]);
+    let frames = leaf
+        .execute(0, SessionContext::default().task_ctx())
+        .expect("the export's frames are re-read");
+    unpack_aggregate_state(frames, Some(binding), Some(series))
+        .expect("the export decodes")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the rows decode")
+        .iter()
+        .map(decoded_state)
+        .collect()
+}
+
+/// A state publication is one publication read two ways: the rows have to be the same, and so does
+/// the fold above them.
+///
+/// The rows are compared per owner - the group they name, the grid positions they carry and their
+/// finality, labels included - and the fold is compared per owner as the rows it answers, because
+/// that is where the payload is read.
+#[tokio::test]
+async fn a_state_router_hands_over_the_rows_its_frames_decode_to() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        // The frame side: one router's export, read owner by owner, which is both what a boundary
+        // consumer decodes and the fixture the frame path below is given.
+        let publishing: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(state_producer(), 2)
+                .expect("the producer declares aggregate-state frames"),
+        );
+        let published = published_frames(&publishing).await;
+        assert_eq!(2, published.len(), "one publication per owner");
+
+        // The chunk side reads the same fixture through a router of its own.
+        let handing: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(state_producer(), 2)
+                .expect("the producer declares aggregate-state frames"),
+        );
+        let mut in_process = Vec::new();
+        for owner in 0..2 {
+            in_process.push(handed_state_rows(&handing, owner).await);
+        }
+        let handed = in_process.iter().flatten().count();
+        assert!(handed > 0, "the producer exports at least one group");
+        for (owner, handed) in in_process.iter().enumerate() {
+            let from_frames =
+                state_rows_decoded(publishing.schema(), published[owner].clone()).await;
+            assert_eq!(
+                state_rows_sorted(from_frames),
+                state_rows_sorted(handed.clone()),
+                "owner {owner} hands over the rows its frames decode to"
+            );
+        }
+        // Every exported row closes its chain: a partial producer exports a group once.
+        assert!(
+            in_process.iter().flatten().all(|row| row.is_last),
+            "the export closes what it publishes: {in_process:?}"
+        );
+
+        // And the fold above: the same tree over the rows and over the frames answers the same rows
+        // per owner, which is where the payload itself is read.
+        let over_frames =
+            final_state_over(memory_exec_partitioned_with(publishing.schema(), published));
+        let in_process = final_state_over(Arc::new(
+            SeriesRepartitionExec::try_new(state_producer(), 2)
+                .expect("the producer declares aggregate-state frames"),
+        ) as Arc<dyn ExecutionPlan>);
+        assert!(
+            uses_in_process_series(&in_process),
+            "a state input is handed over like any other content"
+        );
+        // And so is the framed fixture: a `Final` normalizes every state input onto a router, and a
+        // router now hands its rows over whatever its content, so there is no state consumer left
+        // that decodes a frame here. The frame branch of `execute` stays for the one state producer
+        // this crate does not own - a merge scan reading another process's frames - which a
+        // single-process fixture cannot build, so this comparison runs through the frames the
+        // producer published and the rows they decode back to.
+        assert!(
+            uses_in_process_series(&over_frames),
+            "a state input is normalized onto a router, which hands its rows over"
+        );
+        let frame_rows = polled_partition_rows(&over_frames).await;
+        let chunk_rows = polled_partition_rows(&in_process).await;
+        assert_eq!(2, chunk_rows.len(), "the fold runs once per owner");
+        for owner in 0..chunk_rows.len() {
+            assert!(chunk_rows[owner].1, "owner {owner} reports its end");
+            let mut answered_over_frames = frame_rows[owner].0.clone();
+            answered_over_frames
+                .sort_by(|left, right| left.partial_cmp(right).expect("rows compare"));
+            let mut answered_over_chunks = chunk_rows[owner].0.clone();
+            answered_over_chunks
+                .sort_by(|left, right| left.partial_cmp(right).expect("rows compare"));
+            assert_eq!(
+                answered_over_frames, answered_over_chunks,
+                "owner {owner} folds the same answer over the rows and over the frames"
+            );
+        }
+        assert!(
+            chunk_rows.iter().any(|(rows, _)| !rows.is_empty()),
+            "the fixture folds something"
+        );
+    })
+    .await
+    .expect("the composition finishes");
+}
+
+/// A state chunk's charge is released with the chunk, exactly as an evaluated one's is.
+///
+/// The state frame path keeps the router's reservation until the poll after the batch it backed, so
+/// `Final` can admit what it kept of it. A handed-over row has no batch to flush and no next poll to
+/// wait for: the reservation travels with the row, which is the same moment - the row is admitted by
+/// the push that reads it, and the charge goes when the value it accounts for goes.
+#[tokio::test]
+async fn a_handed_state_chunk_holds_its_charge_until_it_is_dropped() {
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let context = task_context(&pool);
+    let plan: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(state_producer(), 2)
+            .expect("the producer declares aggregate-state frames"),
+    );
+    let mut chunks = series_execution_plan(plan.as_ref())
+        .expect("the router hands its rows over")
+        .execute_series(0, Arc::clone(&context))
+        .expect("the output is claimed once");
+
+    let first = futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+        .await
+        .expect("the producer exports a row")
+        .expect("the row arrives");
+    assert!(
+        matches!(first.chunk(), SeriesChunk::State(_)),
+        "a state owner hands over state rows"
+    );
+    let held = pool.reserved();
+    assert!(
+        held > 0,
+        "a held state row keeps the export it points into charged"
+    );
+
+    drop(first);
+    let after = pool.reserved();
+    assert!(
+        after < held,
+        "dropping the state row releases what it was charged: {held} held, {after} still reserved"
+    );
+
+    // The rest of the export, then the rows themselves: nothing is left charged once both are gone.
+    let mut rest = chunks
+        .by_ref()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the export ends instead of failing");
+    rest.clear();
+    drop(chunks);
+    // The other owner of this router is never claimed, so the read it belongs to ends with the plan.
+    drop(plan);
+    assert_eq!(0, pool.reserved(), "the finished export holds nothing");
+}
+
+/// Whether `plan` is answered by the guard.
+fn guard_answers(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    series_execution_plan(plan.as_ref()).is_some()
+}
+
+/// A frame the guard answers for, and the row table it does not.
+///
+/// A `SeriesFrame` - of values, or of the state a `Partial` folded - is a publication another native
+/// operator reads in process. The row table a statement is answered with is the query's own answer,
+/// and only `execute` hands that out, so the guard says no and no consumer above reads a chunk.
+#[test]
+fn the_guard_answers_for_frames_and_not_for_rows() {
+    let values = aliasing_producer(routed_evaluated_partitions());
+    assert!(
+        guard_answers(&values),
+        "a node publishing a frame of values hands its chunks over"
+    );
+
+    let state = state_producer();
+    assert!(
+        guard_answers(&state),
+        "the state a Partial folds is handed over as the chunk it is"
+    );
+
+    let rows = plan_of(
+        fused(rate_tree()),
+        memory_exec(frames(&[series_chunk("web-0", &series_samples(1.0), true)])),
+    )
+    .expect("the runtime executes a rate tree");
+    assert!(
+        !guard_answers(&rows),
+        "a node answering rows is the query's answer, not a chunk"
+    );
+}
+
+/// A fused node above another reads its chunks, and answers what the frames would have.
+///
+/// The same tree over the same publication: `over_chunks` reads the node below in process, and
+/// `over_frames` decodes what that node publishes for a boundary consumer. The answer has to be the
+/// same batch for batch, which is what makes the handover a saving rather than a second semantics.
+#[tokio::test]
+async fn a_fused_node_hands_over_what_the_frames_above_it_would_decode() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let context = SessionContext::default().task_ctx();
+        // What the node below publishes, taken from the node itself so both plans read one input.
+        let lower = aliasing_producer(routed_evaluated_partitions());
+        let published = published_frames(&lower).await;
+        let lower_frames = memory_exec_partitioned_with(lower.schema(), published);
+
+        let over_chunks = summed_window_over(aliasing_producer(routed_evaluated_partitions()));
+        let over_frames = summed_window_over(lower_frames);
+        assert!(
+            uses_in_process_series(&over_chunks),
+            "the node below is one of ours, so its chunks are read"
+        );
+        assert!(
+            !uses_in_process_series(&over_frames),
+            "a memory leaf publishes frames, so the node above decodes them"
+        );
+
+        let chunk_batches = collect(Arc::clone(&over_chunks), Arc::clone(&context))
+            .await
+            .expect("the chunk path completes");
+        let frame_batches = collect(Arc::clone(&over_frames), context)
+            .await
+            .expect("the frame path completes");
+        assert!(!chunk_batches.is_empty(), "the fixture answers on the grid");
+        assert_eq!(
+            frame_batches, chunk_batches,
+            "the two paths answer the same batches"
+        );
+    })
+    .await
+    .expect("the composition finishes");
+}
+
+// ---------------------------------------------------------------------------
+// The handover's contract, held to the same standard as a frame
+// ---------------------------------------------------------------------------
+
+/// A child's chunks are checked at the order its own plan declares, exactly as its frames are.
+///
+/// The producer here names its keys by an `Interleaved` promise and then closes the same key twice.
+/// Its frames cannot carry that - it publishes them under the contiguous order it declares, and the
+/// packer refuses the recurrence - so a consumer reading its chunks has to refuse it too: the
+/// handover is a way to read a producer, not a way around what it promised.
+#[tokio::test]
+async fn a_router_refuses_the_chunk_sequence_the_frames_refuse() {
+    let closed = |time: i64, last: bool| {
+        chunk_of(
+            &raw_schema(),
+            "web-1",
+            metric(&[(HOST, "web-1")], Some(METRIC)),
+            &[time],
+            vec![vec![Some(1.0)]],
+            last,
+        )
+    };
+    // Two closed chunks of one key, which the contiguous order of the node above forbids.
+    let batches = || {
+        vec![frames_under(
+            &frame_schema_with_ordering(SeriesOrdering::Interleaved),
+            &[closed(60_000, true), closed(120_000, true)],
+        )]
+    };
+    let context = SessionContext::default().task_ctx();
+    let refused = |error: BoxedError| {
+        error
+            .to_string()
+            .contains("raw series key recurred after final chunk")
+    };
+
+    // The frame path: the producer cannot pack this under the order it publishes.
+    let source = raw_source(memory_exec_partitioned_with(
+        frame_schema_with_ordering(SeriesOrdering::Interleaved),
+        batches(),
+    ));
+    let mut frames = source
+        .execute(0, Arc::clone(&context))
+        .expect("the node executes");
+    let error = frames
+        .next()
+        .await
+        .expect("the producer answers instead of ending")
+        .expect_err("the frame path refuses a key that recurs after it closed");
+    assert!(
+        refused(BoxedError::new(common_query::error::Error::from(error))),
+        "the frame path refuses a key that recurs after it closed"
+    );
+
+    // The chunk path: read through a router, which asks the child for its chunks.
+    let router: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(
+            raw_source(memory_exec_partitioned_with(
+                frame_schema_with_ordering(SeriesOrdering::Interleaved),
+                batches(),
+            )),
+            1,
+        )
+        .expect("the child declares a raw frame"),
+    );
+    let chunks = series_execution_plan(router.as_ref())
+        .expect("the router hands its publication over")
+        .execute_series(0, context)
+        .expect("the output is claimed");
+    let error = chunks
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("the chunk path refuses what the frame path refuses");
+    let message = error.to_string();
+    assert!(refused(error), "{message}");
+}
+
+/// A state group is charged for as long as the reader holds it, with no router in between.
+///
+/// The tree's own export carries the fold's reservation; handing the groups of that export over has
+/// to carry it too, or a reader of a `Partial` holds uncharged bytes between the fold and its own
+/// accounting.
+#[tokio::test]
+async fn a_handed_state_group_keeps_the_export_charged() {
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let context = task_context(&pool);
+    let producer = state_producer();
+    let mut chunks = series_execution_plan(producer.as_ref())
+        .expect("a Partial hands its state over")
+        .execute_series(0, Arc::clone(&context))
+        .expect("the output is claimed");
+
+    let group = futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+        .await
+        .expect("the partial exports a group")
+        .expect("the group arrives");
+    assert!(
+        matches!(group.chunk(), SeriesChunk::State(StateChunk::Series { .. })),
+        "a partial hands its folded groups over"
+    );
+    let held = pool.reserved();
+    assert!(
+        held > 0,
+        "a held state group keeps the export it was folded in charged"
+    );
+
+    drop(group);
+    let after = pool.reserved();
+    assert!(
+        after < held,
+        "dropping the group gives its charge back: {held} held, {after} still reserved"
+    );
+
+    drop(futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx)).await);
+    drop(chunks);
+    drop(producer);
+    assert_eq!(0, pool.reserved(), "the finished export holds nothing");
+}
+
+/// The two entry points cannot be mixed on one execution, and the refusal names both.
+///
+/// The child is read once for every output of one execution, so the way it is read is fixed by the
+/// first output that claims it. A later output asking for the other form would be handed a stream it
+/// did not ask for; it is refused instead, naming what the read already is and what it was asked to
+/// become.
+#[tokio::test]
+async fn the_two_entry_points_cannot_be_mixed_on_one_execution() {
+    let context = SessionContext::default().task_ctx();
+    let router: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(
+            raw_source(memory_exec_partitioned(vec![frames(&[series_chunk(
+                "web-0",
+                &series_samples(1.0),
+                true,
+            )])])),
+            2,
+        )
+        .expect("the child declares a raw frame"),
+    );
+    router
+        .execute(0, Arc::clone(&context))
+        .expect("the first output reads frames");
+    let claimed = series_execution_plan(router.as_ref())
+        .expect("the router hands its publication over")
+        .execute_series(1, context);
+    // The refusal is an error, and naming it is what the two assertions below are about.
+    let Err(error) = claimed else {
+        panic!("a second output cannot read the same execution as chunks");
+    };
+    let message = error.to_string();
+    assert!(message.contains("already read as frames"), "{message}");
+    assert!(message.contains("cannot read it as chunks"), "{message}");
 }

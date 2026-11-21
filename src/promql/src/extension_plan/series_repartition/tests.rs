@@ -71,6 +71,7 @@ use futures::TryStreamExt;
 use store_api::region_engine::RawLabelSource;
 
 use super::*;
+use crate::extension_plan::series_execution::series_execution_plan;
 use crate::extension_plan::test_util::prepare_test_data;
 use crate::grid_series::render_label_set;
 use crate::native::execute::merge_workspace_bytes;
@@ -356,6 +357,92 @@ async fn public_frame_retains_large_series_charge_until_remainder_is_dropped() {
         pool.reserved(),
         "dropping delivered batches releases all charges"
     );
+}
+
+/// The charge of a handed-over chunk is released with the chunk.
+///
+/// The frame path keeps an owner's reservation in the packer's handoff until the batch it backs is
+/// flushed; a chunk handed over in process has no packer, so the reservation travels with the value
+/// instead. Both halves of that are asserted here: while a consumer holds the chunk the pool still
+/// holds its bytes, so it cannot hand them out twice, and the moment the consumer drops the chunk
+/// they are back. A release that ran early would let the pool over-commit; one that never ran would
+/// leak the read - `drop` is the whole of what has to happen, so neither can hide behind a call.
+#[tokio::test]
+async fn a_handed_chunk_holds_its_charge_until_it_is_dropped() {
+    const FRAGMENTS: usize = 257;
+    let metric = labels("handed");
+    let eval_grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, FRAGMENTS as u64).unwrap())
+            .unwrap(),
+    );
+    let series_schema = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from("value"),
+        }]),
+        eval_grid: Some(eval_grid),
+    });
+    let steps: Vec<Step> = (0..FRAGMENTS)
+        .map(|position| {
+            let time = TimeAxis::from_grid_spans(
+                series_schema.eval_grid.clone().unwrap(),
+                vec![GridSpan::new(position, 1)],
+            )
+            .unwrap();
+            let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+                position as f64,
+            ])));
+            let series = Series::try_new(&series_schema, metric.clone(), time, fields).unwrap();
+            Step::Chunk(series, position + 1 == FRAGMENTS)
+        })
+        .collect();
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let context = task_context(&pool);
+    let plan = node(
+        Scripted::plan_with_schema(vec![steps], Arc::clone(&series_schema)),
+        1,
+    );
+    let mut chunks = series_execution_plan(plan.as_ref())
+        .expect("a router over evaluated frames hands its chunks over")
+        .execute_series(0, Arc::clone(&context))
+        .expect("the output is claimed once");
+    wait_until("the producer queues the completed series", || {
+        producer_stopped(&execution(&plan))
+    })
+    .await;
+
+    // The owner publishes the one identity this read has once, merged, closed.
+    let handed = futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+        .await
+        .expect("the owner publishes its merged series")
+        .expect("the publication arrives");
+    let payload = FRAGMENTS * std::mem::size_of::<f64>();
+    assert!(
+        pool.reserved() >= payload + merge_workspace_bytes(FRAGMENTS, 1, 1),
+        "a held chunk keeps its payload and its merge workspace: {} against at least {}",
+        pool.reserved(),
+        payload + merge_workspace_bytes(FRAGMENTS, 1, 1)
+    );
+
+    // Dropping the value is what releases it: the reservation rides with the chunk.
+    let held = pool.reserved();
+    drop(handed);
+    let after = pool.reserved();
+    assert!(
+        after + payload <= held,
+        "drop gives back at least the payload: {held} held, {after} still reserved, {payload} of values"
+    );
+    assert!(
+        after < held,
+        "the reservation was released, not merely replaced"
+    );
+    assert!(
+        futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+            .await
+            .is_none(),
+        "the output ends after its one publication"
+    );
+    drop(chunks);
+    assert_eq!(0, pool.reserved(), "the finished read holds nothing");
 }
 
 /// One evaluated chunk: `len` rows from grid position `start`, and whether it closes its series.
@@ -1211,6 +1298,7 @@ async fn aggregate_state_slice_wrappers_remain_charged_until_terminal_cleanup() 
         Arc::clone(&series),
         Some(Arc::clone(&wire)),
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let owner = Routing::new(2).output(&labels("many-slice-wrappers"));
@@ -3383,6 +3471,7 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
         Arc::clone(&schema()),
         None,
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
@@ -5416,6 +5505,7 @@ async fn a_recorded_failure_reaches_every_output_once() {
         Arc::clone(&schema()),
         None,
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let mut streams = Vec::new();
@@ -5743,6 +5833,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
         receivers.push(Some(receiver));
     }
     let shared = Arc::new(SharedExecution {
+        read: InputRead::Frames,
         running: Mutex::new(Running {
             receivers,
             inputs: Arc::clone(&inputs),
@@ -5856,6 +5947,7 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
             receivers.push(Some(receiver));
         }
         Arc::new(SharedExecution {
+            read: InputRead::Frames,
             running: Mutex::new(Running {
                 receivers,
                 inputs: Arc::clone(&inputs),
@@ -6020,6 +6112,7 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
     let inputs = Inputs::new(Arc::clone(&ending), 2, Weak::<SharedExecution>::new());
     let (sender, receiver) = mpsc::unbounded_channel();
     let shared = Arc::new(SharedExecution {
+        read: InputRead::Frames,
         running: Mutex::new(Running {
             receivers: vec![Some(receiver)],
             inputs: Arc::clone(&inputs),
@@ -6608,6 +6701,7 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         Arc::clone(&schema()),
         None,
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
@@ -6914,6 +7008,7 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         Arc::clone(&schema()),
         None,
         &context,
+        InputRead::Frames,
     )
     .unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
@@ -8084,4 +8179,214 @@ async fn histogram_state_router_dispatches_each_row_of_a_packed_batch() {
         }
     }
     assert_eq!(seen, groups.len());
+}
+
+/// The child is asked for its chunks when the consumer reads chunks, and for its frames when not.
+///
+/// The two readings describe one publication, so nothing outside this node can tell them apart - but
+/// the state content can, because a handed group and a decoded batch are different queue items. The
+/// child here is a router over state frames, which is the one shape that answers both ways.
+#[tokio::test]
+async fn the_child_is_read_the_way_the_consumer_reads_this_node() {
+    let grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, GRID_LEN).unwrap()).unwrap(),
+    );
+    let series = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from("value"),
+        }]),
+        eval_grid: Some(grid),
+    });
+    let wire = Arc::new(
+        datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+            AggregateStateKind::Sum,
+            vec![StateComponent::Value, StateComponent::Compensation],
+        )
+        .unwrap(),
+    );
+    let rows = (0..2)
+        .map(|position| {
+            (
+                StateSeries {
+                    metric: labels("handed-state"),
+                    time: TimeAxis::from_grid_spans(
+                        Arc::clone(&series.eval_grid.clone().unwrap()),
+                        vec![GridSpan::new(position, 1)],
+                    )
+                    .unwrap(),
+                    states: vec![vec![Some(StatePayload::Float(AggregateStateValues {
+                        value: position as f64,
+                        mean: position as f64,
+                        compensation: 0.0,
+                        count: 1.0,
+                        incremental_mean: false,
+                    }))]],
+                },
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut frames = common_query::series_frame::pack_aggregate_state(
+        Box::pin(futures::stream::iter(rows.into_iter().map(Ok))),
+        Arc::clone(&wire),
+        Arc::clone(&series),
+    )
+    .unwrap();
+    let batch = frames
+        .next()
+        .await
+        .expect("a state batch is emitted")
+        .expect("the state batch packs");
+    let child_schema = batch.schema();
+    let leaf: Arc<dyn ExecutionPlan> =
+        MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema, None).unwrap();
+    // A router over the frames answers both ways: chunks for a consumer that reads them, frames for
+    // one that does not. One claim per instance, so each reading gets its own child.
+    let child = || {
+        Arc::new(
+            SeriesRepartitionExec::try_new(Arc::clone(&leaf), 2).expect("a state frame routes"),
+        ) as Arc<dyn ExecutionPlan>
+    };
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(usize::MAX)));
+
+    let chunks = child();
+    let handed = routed_input(
+        &chunks,
+        series_execution_plan(chunks.as_ref()),
+        FrameContent::AggregateState,
+        &series,
+        Some(&wire),
+        SeriesOrdering::Contiguous,
+        0,
+        &context,
+    )
+    .unwrap();
+    assert!(
+        matches!(handed, RoutedInput::StateChunks(_)),
+        "a chunk read asks the child for its chunks"
+    );
+
+    let frames = child();
+    let decoded = routed_input(
+        &frames,
+        None,
+        FrameContent::AggregateState,
+        &series,
+        Some(&wire),
+        SeriesOrdering::Contiguous,
+        0,
+        &context,
+    )
+    .unwrap();
+    assert!(
+        matches!(decoded, RoutedInput::State(_, _, _)),
+        "a frame read executes the child and decodes it here"
+    );
+}
+
+/// A merged field is charged for every segment it is made of, not for one view of all of them.
+///
+/// An inner router folds two pieces of one identity into a chunk whose field is two dense segments,
+/// and asking such a field for a single dense view answers `None`. Charging that answer billed the
+/// merged chunk as timestamps alone, so a router that queued it held live bytes nothing accounted
+/// for - and the charge it was merged under was released as soon as the read that produced it ended.
+///
+/// The figure is read at exactly that moment: the inner publication has been read to its end and
+/// dropped, the outer queue has not been consumed, so what the pool still counts is the bytes the
+/// queue is holding. Both are checked against the buffers themselves, so a field that costs
+/// nothing cannot pass on the strength of the timestamps beside it.
+#[tokio::test]
+async fn a_merged_field_is_charged_what_the_queue_holds_once_the_merge_charge_is_gone() {
+    const SEGMENT: usize = 4096;
+    let fragment = |first: i64| {
+        let times: Vec<i64> = (0..SEGMENT as i64).map(|row| first + row).collect();
+        raw_chunk(
+            "k",
+            Some(raw_metric("a")),
+            &times,
+            vec![Some(1.0); SEGMENT],
+            true,
+        )
+    };
+    // Two inputs, one closed piece of one identity each: what the inner router folds them into is one
+    // chunk whose field is the two segments it was merged from.
+    let inner = raw_node(
+        RawScripted::plan(vec![
+            RawPartition {
+                chunks: vec![fragment(0)],
+                gate: None,
+                gate_chunks: false,
+            },
+            RawPartition {
+                chunks: vec![fragment(SEGMENT as i64)],
+                gate: None,
+                gate_chunks: false,
+            },
+        ]),
+        1,
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let context = task_context(&pool);
+    // The inner publication, read the way the outer node reads a child that hands its chunks over.
+    let inner: Arc<dyn ExecutionPlan> = inner;
+    let hand_over =
+        series_execution_plan(inner.as_ref()).expect("a router hands its publication over");
+    let RoutedInput::Raw(mut stream) = routed_input(
+        &inner,
+        Some(hand_over),
+        FrameContent::Raw,
+        &raw_schema(),
+        None,
+        SeriesOrdering::Contiguous,
+        0,
+        &context,
+    )
+    .expect("the child is read as raw series") else {
+        panic!("a raw child is read as a raw series stream");
+    };
+    // The outer node's own queue: filled by its read, and read by nobody.
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let read_ahead = MemoryConsumer::new("OuterQueue").register(&context.runtime_env().memory_pool);
+    let stop = read_raw_chains(&mut stream, 0, &Routing::new(1), &[sender], &read_ahead).await;
+    if let Stop::Failed(error) = stop {
+        panic!("the inner publication could not be read: {error}");
+    }
+    // The read is the inner publication's end, so the charge it carried is gone with it; dropping the
+    // wrapper says so out loud rather than leaving it to when this function returns.
+    drop(stream);
+    let queued = pool.reserved();
+    // Both fragments, both segments: the merged chunk is two of each.
+    let payload = 2 * SEGMENT * std::mem::size_of::<f64>();
+    let timestamps = 2 * SEGMENT * std::mem::size_of::<i64>();
+    assert!(
+        queued >= payload + timestamps,
+        "the queue holds {queued} bytes charged for a chunk of at least {} bytes: the merged field \
+         is two segments of {payload} bytes and the timestamps beside them are {timestamps}",
+        payload + timestamps
+    );
+
+    // What was queued is the merged chunk this figure was about, and not one segment of it.
+    let Queued::Chain {
+        chain: RoutedChain::Raw(chain),
+        ..
+    } = receiver
+        .try_recv()
+        .expect("the queue holds the merged chain")
+    else {
+        panic!("a raw child's chain is queued as raw series");
+    };
+    assert_eq!(1, chain.len(), "one identity is one chain");
+    let (chunk, _charge) = &chain[0];
+    let field = chunk.fields.iter().next().expect("the chunk has its field");
+    assert_eq!(2, field.segments().len(), "the field is two segments");
+    assert!(
+        field.dense().is_none(),
+        "a field of two segments has no single dense view"
+    );
+
+    // And the figure is the queue's to hold: dropping what it queued gives all of it back.
+    drop(chain);
+    drop(receiver);
+    drop(inner);
+    assert_eq!(0, pool.reserved(), "the finished read holds nothing");
 }
