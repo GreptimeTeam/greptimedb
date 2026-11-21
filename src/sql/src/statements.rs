@@ -182,7 +182,7 @@ fn set_json2_extension(column_schema: &mut ColumnSchema, column: &Column) -> Res
 
 /// Converts a SQL [`Column`] to a `ColumnDef` in gRPC proto.
 ///
-/// Goes through [`column_to_schema`], like CREATE TABLE, so ALTER TABLE ADD COLUMN keeps every
+/// Shares `build_column_schema` with [`column_to_schema`], so ALTER TABLE ADD COLUMN keeps every
 /// column option that CREATE TABLE keeps.
 pub fn sql_col_to_grpc_col_def(
     column: &Column,
