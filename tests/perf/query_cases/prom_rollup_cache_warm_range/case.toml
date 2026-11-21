@@ -1,0 +1,140 @@
+# Frontend rollup cache: warm historical range against an uncached base.
+#
+# The cache is a frontend-local, PromQL-range-only cache
+# (src/frontend/src/query_cache.rs). It serves a canonical chunk only after a
+# background round has proved the source table's sequence domain, and it refuses
+# expressions outside the `selector`/`rate`/`sum` allowlist
+# (src/query/src/promql/window.rs). This case therefore:
+#
+# - writes historical data in 2024, so every evaluated point is older than the
+#   wall clock and `tail = "0s"` leaves the whole range cacheable;
+# - evaluates a 1h range at a 1m step, which a 5m chunk cuts into 12 complete
+#   canonical chunks (02:00–03:00); only the trailing point at 03:00 is a
+#   partial chunk and therefore always direct;
+# - queries the Prometheus HTTP range API (`kind = "prom_http"`), the path that
+#   marks the output unordered and is therefore the one the cache serves, with
+#   expressions from the allowlist: a named selector, `rate(...)`, and a `sum`
+#   fold of `rate(...)`;
+# - configures the cache for the candidate only. The shared `prom_store` renders
+#   no `[rollup_cache]` table at all, so the base frontend keeps the default
+#   (cache disabled) and the case compares "cached candidate" with "uncached
+#   base" instead of a cache against itself.
+#
+# The refresher proves a table one `refresh_interval` after the first request for
+# it, and a request never waits for a round, so `settle_ms` sleeps after the
+# warmup iterations and before the measured ones. The warmup queries must fill
+# the chunks (the first one executes and fills, later ones hit) and the settle
+# must let a round publish the table, otherwise the measured iterations would be
+# misses on both targets.
+#
+# `min_candidate_latency_speedup_pct` is what keeps this case honest: a
+# candidate whose cache did not take effect (option ignored, expression outside
+# the allowlist, chunk not a multiple of the step, table never proved) measures
+# the same latency as the base and fails the threshold instead of passing
+# quietly. It is not a regression gate on the scan path; the TQL control is.
+
+[case]
+name = "prom_rollup_cache_warm_range"
+description = "Frontend rollup cache serving warm historical PromQL ranges against an uncached base"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "prom_rollup_cache_warm_range"
+physical_table = "greptime_physical_table"
+series_count = 2048
+samples_per_series = 720
+sample_chunk_size = 240
+flush_every_sample_chunks = 1
+start_unix_millis = 1_704_067_200_000 # 2024-01-01T00:00:00Z
+step_millis = 60_000
+chunk_series_count = 256
+timeout_seconds = 600
+visibility_timeout_seconds = 300
+
+# `linear` is a per-series monotonic counter, so `rate(...)` folds a realistic
+# increasing signal.
+[scenario.remote_write.value]
+pattern = "linear"
+base = 0.0
+step = 0.125
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
+
+# Candidate only. `chunk = "5m"` is a whole multiple of the 1m step, `tail =
+# "0s"` keeps the 2024 data inside the cacheable range, `refresh_interval =
+# "50ms"` lets a round prove the table well inside `settle_ms`, and `max_age`
+# outlives the measurement.
+[scenario.remote_write.prom_store.candidate_rollup_cache]
+max_bytes = "256MB"
+chunk = "5m"
+tail = "0s"
+refresh_interval = "50ms"
+max_age = "1h"
+
+# Named selector: the allowlist admits it, and the cached chunks replace the scan
+# and evaluation of 2048 series x 61 points.
+[[scenario.queries]]
+name = "prom_range_selector_1h"
+kind = "prom_http"
+query = "prom_rollup_cache_warm_range{host=~\"host.*\"}"
+start = "1704074400" # 2024-01-01T02:00:00Z
+end = "1704078000" # 2024-01-01T03:00:00Z
+step = "1m"
+warmup = 3
+settle_ms = 750
+iterations = 7
+
+[scenario.queries.thresholds]
+min_candidate_latency_speedup_pct = 25
+
+# `rate(...)` folds 5m of input per output point, so the uncached base reads far
+# more rows than it returns while the cached candidate returns the same payload.
+# The Prometheus JSON response and the merged rows are the floor either way.
+[[scenario.queries]]
+name = "prom_range_rate_5m_1h"
+kind = "prom_http"
+query = "rate(prom_rollup_cache_warm_range{host=~\"host.*\"}[5m])"
+start = "1704074400"
+end = "1704078000"
+step = "1m"
+warmup = 3
+settle_ms = 750
+iterations = 7
+
+[scenario.queries.thresholds]
+min_candidate_latency_speedup_pct = 40
+
+# `sum` is the one admitted aggregate; grouping by `host` folds 2048 series into
+# 1024 groups, so the base keeps its full input read while both targets return
+# fewer points than the selector above.
+[[scenario.queries]]
+name = "prom_range_sum_rate_by_host_1h"
+kind = "prom_http"
+query = "sum by (host) (rate(prom_rollup_cache_warm_range{host=~\"host.*\"}[5m]))"
+start = "1704074400"
+end = "1704078000"
+step = "1m"
+warmup = 3
+settle_ms = 750
+iterations = 7
+
+[scenario.queries.thresholds]
+min_candidate_latency_speedup_pct = 25
+
+# Control: `TQL` never consults the rollup cache, so both targets run the same
+# storage path. It is where an ordinary scan/execution regression shows up, and
+# it protects the speedup thresholds above from being satisfied by a slower base.
+[[scenario.queries]]
+name = "tql_rate_5m_1h_uncached_control"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704074400, 1704078000, '1m') rate(prom_rollup_cache_warm_range{host=~'host.*'}[5m])"
+warmup = 1
+iterations = 5
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 25

@@ -133,6 +133,24 @@ pub(super) struct PromStore {
     pub(super) max_concurrent_flushes: u64,
     pub(super) worker_channel_capacity: u64,
     pub(super) max_inflight_requests: u64,
+    /// Rollup cache rendered into the frontend configuration of both targets.
+    #[serde(default)]
+    pub(super) rollup_cache: Option<RollupCache>,
+    /// Rollup cache rendered only into the candidate frontend configuration,
+    /// taking precedence over `rollup_cache` there.
+    #[serde(default)]
+    pub(super) candidate_rollup_cache: Option<RollupCache>,
+}
+
+/// The frontend `[rollup_cache]` section as the strings the frontend parses.
+#[derive(Clone, Debug, Deserialize)]
+pub(super) struct RollupCache {
+    pub(super) enable: bool,
+    pub(super) max_bytes: String,
+    pub(super) chunk: String,
+    pub(super) tail: String,
+    pub(super) refresh_interval: String,
+    pub(super) max_age: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -222,6 +240,12 @@ pub(super) struct Query {
     pub(super) step: Option<String>,
     #[serde(default)]
     pub(super) warmup: usize,
+    /// Milliseconds to wait after the warmup iterations and before the first
+    /// measured one. A background cache refresh (such as the frontend rollup
+    /// cache) proves a table on its own schedule, so a case that measures cache
+    /// hits needs to give it that time rather than guess it in the iterations.
+    #[serde(default)]
+    pub(super) settle_ms: u64,
     #[serde(default = "one")]
     pub(super) iterations: usize,
     #[serde(default)]

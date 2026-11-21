@@ -79,7 +79,7 @@ use promql_parser::parser::{
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::{ResultExt, ensure};
-use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
@@ -87,7 +87,9 @@ use crate::promql::native_compile::{
     InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
     info_input, statement_grid, subquery_child_grid,
 };
-use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
+use crate::promql::planner::{
+    DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner, table_id_restriction,
+};
 use crate::query_engine::QueryEngineState;
 
 /// The query option that turns the native fused-series route on for one query.
@@ -2490,23 +2492,11 @@ fn metric_scan_and_table_id(
     let LogicalPlan::Filter(filter) = plan else {
         return None;
     };
-    let Expr::BinaryExpr(binary) = &filter.predicate else {
-        return None;
-    };
-    if binary.op != datafusion::logical_expr::Operator::Eq
-        || !matches!(binary.left.as_ref(), Expr::Column(column) if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
-    {
-        return None;
-    }
-    let Expr::Literal(datafusion::scalar::ScalarValue::UInt32(Some(table_id)), _) =
-        binary.right.as_ref()
-    else {
-        return None;
-    };
+    let table_id = table_id_restriction(&filter.predicate)?;
     let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
         return None;
     };
-    Some((scan.clone(), filter.predicate.clone(), *table_id))
+    Some((scan.clone(), filter.predicate.clone(), table_id))
 }
 
 #[cfg(test)]

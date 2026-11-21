@@ -214,11 +214,13 @@ fn recovery_aggregate_input(plan: &LogicalPlan) -> Result<LogicalPlan, Error> {
     Ok(aggregate.input.as_ref().clone())
 }
 
-fn capture_recovery_batch_windows(
+fn visit_sequence_range_batch_timestamps<F>(
     batch: &common_recordbatch::RecordBatch,
-    time_window_expr: &TimeWindowExpr,
-    windows: &mut BTreeSet<(Timestamp, Timestamp)>,
-) -> Result<(), Error> {
+    on_timestamp: &mut F,
+) -> Result<(), Error>
+where
+    F: FnMut(Timestamp) -> Result<(), Error>,
+{
     if batch.num_columns() != 1 {
         return UnexpectedSnafu {
             reason: format!(
@@ -236,18 +238,179 @@ fn capture_recovery_batch_windows(
             reason: "Recovery timestamp projection returned a null or non-timestamp value"
                 .to_string(),
         })?;
-        let (start, end) = time_window_expr.eval(timestamp)?;
-        let window = (
-            start.context(UnexpectedSnafu {
-                reason: "Recovery time-window expression returned no lower bound".to_string(),
-            })?,
-            end.context(UnexpectedSnafu {
-                reason: "Recovery time-window expression returned no upper bound".to_string(),
-            })?,
-        );
-        windows.insert(window);
+        on_timestamp(timestamp)?;
     }
     Ok(())
+}
+
+/// Queries a timestamp projection over the exact sequence range `(lower, high]`.
+///
+/// The caller must supply a projection of one non-null raw timestamp per relevant
+/// source row, ensure that all sources support sequence-range reads, and provide
+/// nonempty lower bounds for exactly the regions to be scanned. Any filtering or
+/// retention policy belongs in `timestamp_plan`. The projection cannot account for
+/// rows erased after `lower`, so the caller must exclude that possibility or fail
+/// closed. The engine is supplied by the caller that planned the projection; it is
+/// not used when the plan is already built.
+///
+/// The frontend client executes with a fresh internal query context, not the
+/// originating caller's user, permissions, extensions, or snapshot bounds. The
+/// caller must ensure this is suitable for its use.
+///
+/// Each timestamp is passed to `on_timestamp` as the query is consumed, retaining
+/// its original unit and query order. Callback observations are **tentative**: the
+/// caller must discard them on any error and must not publish or act on them until
+/// this function succeeds. Success proves that terminal metrics cover exactly the
+/// regions in `lower` and each returned high watermark is at least its lower bound.
+/// Callback errors stop the query and are returned without validating terminal metrics.
+pub async fn visit_sequence_range_timestamps<F>(
+    _engine: &QueryEngineRef,
+    frontend_client: &FrontendClient,
+    catalog: &str,
+    schema: &str,
+    timestamp_plan: &LogicalPlan,
+    lower: &BTreeMap<u64, u64>,
+    mut on_timestamp: F,
+) -> Result<BTreeMap<u64, u64>, Error>
+where
+    F: FnMut(Timestamp) -> Result<(), Error>,
+{
+    if lower.is_empty() {
+        return UnexpectedSnafu {
+            reason: "Recovery timestamp projection requires nonempty lower sequence bounds"
+                .to_string(),
+        }
+        .fail();
+    }
+    let resolved_plan = timestamp_plan
+        .clone()
+        .transform_down_with_subqueries(|p| {
+            if let LogicalPlan::TableScan(mut table_scan) = p {
+                let resolved = table_scan.table_name.resolve(catalog, schema);
+                table_scan.table_name = resolved.into();
+                Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
+            } else {
+                Ok(Transformed::no(p))
+            }
+        })
+        .with_context(|_| DatafusionSnafu {
+            context: format!(
+                "Failed to fix table ref in recovery timestamp plan, plan={timestamp_plan:?}"
+            ),
+        })?
+        .data;
+    let message = DFLogicalSubstraitConvertor {}
+        .encode(&resolved_plan, DefaultSerializer)
+        .context(SubstraitEncodeLogicalPlanSnafu)?;
+    let request = api::v1::QueryRequest {
+        query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
+    };
+    let lower_json = serde_json::to_string(lower).map_err(|err| {
+        UnexpectedSnafu {
+            reason: format!("Failed to serialize recovery lower sequence bounds: {err}"),
+        }
+        .build()
+    })?;
+    let extensions = [
+        (FLOW_RETURN_REGION_SEQ, "true"),
+        (FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE),
+        (FLOW_INCREMENTAL_AFTER_SEQS, lower_json.as_str()),
+    ];
+    let mut peer_desc = None;
+    let result = frontend_client
+        .query_with_terminal_metrics(
+            catalog,
+            schema,
+            request,
+            &extensions,
+            &HashMap::new(),
+            &mut peer_desc,
+        )
+        .await?;
+    let metrics = result.metrics.clone();
+    match result.output.data {
+        OutputData::AffectedRows(_) => {
+            return UnexpectedSnafu {
+                reason: "Recovery timestamp projection unexpectedly returned affected rows"
+                    .to_string(),
+            }
+            .fail();
+        }
+        OutputData::RecordBatches(batches) => {
+            for batch in batches.iter() {
+                visit_sequence_range_batch_timestamps(batch, &mut on_timestamp)?;
+            }
+        }
+        OutputData::Stream(mut stream) => {
+            while let Some(batch) = stream
+                .try_next()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+            {
+                visit_sequence_range_batch_timestamps(&batch, &mut on_timestamp)?;
+            }
+        }
+    }
+    if !metrics.is_ready() {
+        return UnexpectedSnafu {
+            reason: "Recovery timestamp projection ended without terminal metrics".to_string(),
+        }
+        .fail();
+    }
+    let participating = metrics.participating_regions().context(UnexpectedSnafu {
+        reason: "Recovery timestamp projection has no participating-region proof".to_string(),
+    })?;
+    let high = metrics.region_watermark_map().context(UnexpectedSnafu {
+        reason: "Recovery timestamp projection has no terminal watermark proof".to_string(),
+    })?;
+    if participating.len() != lower.len()
+        || high.len() != lower.len()
+        || participating
+            .iter()
+            .any(|region| !lower.contains_key(region))
+        || lower
+            .iter()
+            .any(|(region, low)| high.get(region).is_none_or(|watermark| watermark < low))
+        || high.keys().any(|region| !participating.contains(region))
+    {
+        return UnexpectedSnafu {
+            reason: format!(
+                "Recovery timestamp projection returned incomplete or regressing terminal proof: lower={lower:?}, participating={participating:?}, high={high:?}"
+            ),
+        }
+        .fail();
+    }
+    Ok(high.into_iter().collect())
+}
+
+/// Collects all timestamps and terminal watermarks from
+/// [`visit_sequence_range_timestamps`]. Timestamps retain their original units,
+/// query order and duplicates. This variant buffers all rows; use the visitor
+/// directly when only a bounded summary of the timestamps is required.
+pub async fn capture_sequence_range_timestamps(
+    engine: &QueryEngineRef,
+    frontend_client: &FrontendClient,
+    catalog: &str,
+    schema: &str,
+    timestamp_plan: &LogicalPlan,
+    lower: &BTreeMap<u64, u64>,
+) -> Result<(BTreeMap<u64, u64>, Vec<Timestamp>), Error> {
+    let mut timestamps = Vec::new();
+    let high = visit_sequence_range_timestamps(
+        engine,
+        frontend_client,
+        catalog,
+        schema,
+        timestamp_plan,
+        lower,
+        |timestamp| {
+            timestamps.push(timestamp);
+            Ok(())
+        },
+    )
+    .await?;
+    Ok((high, timestamps))
 }
 
 fn format_insert_target_columns(plan: &LogicalPlan) -> String {
@@ -818,111 +981,32 @@ impl BatchingTask {
         );
         let catalog = &self.config.sink_table_name[0];
         let schema = &self.config.sink_table_name[1];
-        let timestamp_plan = timestamp_plan
-            .clone()
-            .transform_down_with_subqueries(|p| {
-                if let LogicalPlan::TableScan(mut table_scan) = p {
-                    let resolved = table_scan.table_name.resolve(catalog, schema);
-                    table_scan.table_name = resolved.into();
-                    Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
-                } else {
-                    Ok(Transformed::no(p))
-                }
-            })
-            .with_context(|_| DatafusionSnafu {
-                context: format!(
-                    "Failed to fix table ref in recovery timestamp plan, plan={:?}",
-                    timestamp_plan
-                ),
-            })?
-            .data;
-        let message = DFLogicalSubstraitConvertor {}
-            .encode(&timestamp_plan, DefaultSerializer)
-            .context(SubstraitEncodeLogicalPlanSnafu)?;
-        let request = api::v1::QueryRequest {
-            query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
-        };
-        let lower_json = serde_json::to_string(lower).map_err(|err| {
-            UnexpectedSnafu {
-                reason: format!("Failed to serialize recovery lower sequence bounds: {err}"),
-            }
-            .build()
-        })?;
-        let extensions = [
-            (FLOW_RETURN_REGION_SEQ, "true"),
-            (FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE),
-            (FLOW_INCREMENTAL_AFTER_SEQS, lower_json.as_str()),
-        ];
-        let mut peer_desc = None;
-        let result = frontend_client
-            .query_with_terminal_metrics(
-                catalog,
-                schema,
-                request,
-                &extensions,
-                &HashMap::new(),
-                &mut peer_desc,
-            )
-            .await?;
         let mut aligned_windows = BTreeSet::new();
-        let metrics = result.metrics.clone();
-        match result.output.data {
-            OutputData::AffectedRows(_) => {
-                return UnexpectedSnafu {
-                    reason: "Recovery timestamp projection unexpectedly returned affected rows"
-                        .to_string(),
-                }
-                .fail();
-            }
-            OutputData::RecordBatches(batches) => {
-                for batch in batches.iter() {
-                    capture_recovery_batch_windows(batch, time_window_expr, &mut aligned_windows)?;
-                }
-            }
-            OutputData::Stream(mut stream) => {
-                while let Some(batch) = stream
-                    .try_next()
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?
-                {
-                    capture_recovery_batch_windows(&batch, time_window_expr, &mut aligned_windows)?;
-                }
-            }
-        }
-        if !metrics.is_ready() {
-            return UnexpectedSnafu {
-                reason: "Recovery timestamp projection ended without terminal metrics".to_string(),
-            }
-            .fail();
-        }
-        let participating = metrics.participating_regions().context(UnexpectedSnafu {
-            reason: "Recovery timestamp projection has no participating-region proof".to_string(),
-        })?;
-        let high = metrics.region_watermark_map().context(UnexpectedSnafu {
-            reason: "Recovery timestamp projection has no terminal watermark proof".to_string(),
-        })?;
-        if participating.len() != lower.len()
-            || high.len() != lower.len()
-            || participating
-                .iter()
-                .any(|region| !lower.contains_key(region))
-            || lower
-                .iter()
-                .any(|(region, low)| high.get(region).is_none_or(|watermark| watermark < low))
-            || high.keys().any(|region| !participating.contains(region))
-        {
-            return UnexpectedSnafu {
-                reason: format!(
-                    "Recovery timestamp projection returned incomplete or regressing terminal proof: lower={lower:?}, participating={participating:?}, high={high:?}"
-                ),
-            }
-            .fail();
-        }
-        Ok((
-            high.into_iter().collect(),
-            aligned_windows.into_iter().collect(),
-        ))
+        let high = visit_sequence_range_timestamps(
+            engine,
+            frontend_client,
+            catalog,
+            schema,
+            &timestamp_plan,
+            lower,
+            |timestamp| {
+                let (start, end) = time_window_expr.eval(timestamp)?;
+                let window = (
+                    start.context(UnexpectedSnafu {
+                        reason: "Recovery time-window expression returned no lower bound"
+                            .to_string(),
+                    })?,
+                    end.context(UnexpectedSnafu {
+                        reason: "Recovery time-window expression returned no upper bound"
+                            .to_string(),
+                    })?,
+                );
+                aligned_windows.insert(window);
+                Ok(())
+            },
+        )
+        .await?;
+        Ok((high, aligned_windows.into_iter().collect()))
     }
 
     /// Validates that the sink table schema can accept this flow's ordinary output.

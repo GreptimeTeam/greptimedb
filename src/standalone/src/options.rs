@@ -27,6 +27,7 @@ use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, Sto
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlowConfig;
 use frontend::frontend::FrontendOptions;
+use frontend::service_config::RollupCacheOptions;
 use frontend::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
     PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions, WriteRetryOptions,
@@ -106,6 +107,8 @@ pub struct StandaloneOptions {
     pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
+    /// The frontend-local cache of PromQL range-query chunks.
+    pub rollup_cache: RollupCacheOptions,
     /// Environment variable keys to read and report in heartbeat messages.
     pub heartbeat_env_vars: Vec<String>,
 }
@@ -151,6 +154,7 @@ impl Default for StandaloneOptions {
             memory: MemoryOptions::default(),
             pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
+            rollup_cache: RollupCacheOptions::default(),
             heartbeat_env_vars: vec![],
         }
     }
@@ -214,6 +218,7 @@ impl StandaloneOptions {
             slow_query: cloned_opts.slow_query,
             pipeline: cloned_opts.pipeline,
             event_recorder: cloned_opts.event_recorder,
+            rollup_cache: cloned_opts.rollup_cache,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
             ..Default::default()
         }

@@ -6796,5 +6796,38 @@ enum ScalarFunc {
     GeneratedExpr,
 }
 
+/// The `__table_id = <id>` restriction a metric engine rewrite states on a scan, if `expr` is one.
+///
+/// Neither route reads a metric logical table under its own name: both read the physical table and
+/// say which logical table that read stands for in this restriction, so the id it names is the
+/// logical table's own id -- the identity a caller validating the read against the catalog has to
+/// see, and never the physical table the scan below it happens to be. The existing route states the
+/// restriction in a filter above the scan and the native route keeps it in the scan's filters; the
+/// predicate itself is the same, which is why both readers share this recognition.
+pub(crate) fn table_id_restriction(expr: &DfExpr) -> Option<u32> {
+    let DfExpr::BinaryExpr(binary) = expr else {
+        return None;
+    };
+    match binary.op {
+        Operator::Eq => {
+            let DfExpr::Column(column) = binary.left.as_ref() else {
+                return None;
+            };
+            if column.name != DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                return None;
+            }
+            match binary.right.as_ref() {
+                DfExpr::Literal(ScalarValue::UInt32(Some(table_id)), _) => Some(*table_id),
+                _ => None,
+            }
+        }
+        // A restriction the planner or the optimizer merged with a time or field restriction is
+        // one conjunct of it.
+        Operator::And => table_id_restriction(binary.left.as_ref())
+            .or_else(|| table_id_restriction(binary.right.as_ref())),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod test;

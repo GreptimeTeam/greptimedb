@@ -15,7 +15,7 @@
 use std::error::Error;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 mod direct;
 mod materialize;
@@ -97,8 +97,23 @@ struct RenderRemoteConfigArgs {
     case: PathBuf,
     #[arg(long, value_name = "PATH")]
     fixture_generator: PathBuf,
+    /// Which target's frontend configuration to render. The candidate render
+    /// prefers `candidate_rollup_cache` over `rollup_cache`; the base render
+    /// applies `rollup_cache` only, so a case cannot silently compare a cached
+    /// base against a cached candidate. The default renders the base side,
+    /// because a candidate rendered without its cache fails its thresholds
+    /// loudly while the opposite mistake passes quietly.
+    #[arg(long, value_enum, default_value_t = RemoteTarget::Base)]
+    target: RemoteTarget,
     #[arg(long, value_name = "PATH")]
     output: PathBuf,
+}
+
+/// The cluster a rendered frontend configuration belongs to.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RemoteTarget {
+    Base,
+    Candidate,
 }
 
 #[derive(Debug, Parser)]

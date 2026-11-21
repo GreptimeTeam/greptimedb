@@ -39,6 +39,7 @@ use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
 use query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
+use query::promql::window::windowed_eval_stmt;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -16920,4 +16921,450 @@ async fn native_promql_matrix_root_matches_legacy() {
     );
     let legacy = run(&instance, &observer, sql, false).await;
     assert_eq!(native, legacy);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Windowed evaluation.
+//
+// `query::promql::window::windowed_eval_stmt` splits the output grid of one parsed statement into
+// smaller statements. The test below pins what that split has to preserve when the statements are
+// executed for real: the grid phase, the endpoints, the points a series is missing at, and - the
+// part a count cannot show - the history before a window that its first points still read.
+// ---------------------------------------------------------------------------------------------
+
+/// The evaluation grid of the windowed differential test.
+///
+/// The start is deliberately not a multiple of the step (`1_700_000_000_000 % 7_000 == 6_000`) and
+/// the step is odd, so a window that rounded its bounds to a wall-clock bucket would move every
+/// timestamp instead of agreeing by luck.
+const DIFFERENTIAL_TABLE: &str = "window_diff";
+const DIFFERENTIAL_START_MS: i64 = 1_700_000_000_000;
+const DIFFERENTIAL_STEP_MS: i64 = 7_000;
+/// Grid indices `0..DIFFERENTIAL_POINTS`, so the statement spans `40 * 7s = 280s`.
+const DIFFERENTIAL_POINTS: usize = 41;
+/// A non-trivial split: neither the middle of the grid nor aligned to anything the fixture repeats.
+const DIFFERENTIAL_SPLIT: usize = 17;
+const DIFFERENTIAL_LOOKBACK_MS: i64 = 30_000;
+const DIFFERENTIAL_RANGE: &str = "60s";
+const DIFFERENTIAL_RANGE_MS: i64 = 60_000;
+
+const DIFFERENTIAL_CREATE: &str = "CREATE TABLE window_diff_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table' = 'true'); \
+     CREATE TABLE window_diff (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table' = 'window_diff_phy')";
+
+fn differential_timestamp(index: usize) -> i64 {
+    DIFFERENTIAL_START_MS + index as i64 * DIFFERENTIAL_STEP_MS
+}
+
+/// The grid index of `timestamp`, which the caller first checks in on the grid.
+fn differential_index(timestamp: i64) -> i64 {
+    (timestamp - DIFFERENTIAL_START_MS) / DIFFERENTIAL_STEP_MS
+}
+
+/// The samples of the one metric table: three series over the whole grid, none at the epoch.
+///
+/// - `a` steps a counter by 7 on every grid point and resets at exactly the split index, so the
+///   first point of the second window reads history the window itself does not contain. It also
+///   has no samples at indices `20..=25`: its instant value is missing at 24 and 25 (35s and 42s
+///   after the last sample, past the 30s lookback) while `rate` still answers there from its range.
+/// - `b` samples every other index and carries a pair of samples one millisecond apart around the
+///   open left edge of `rate(...[60s])` at the split index: `t17 - 60s` is outside the range and
+///   `t17 - 60s + 1ms` is inside it.
+/// - `c` samples twice, 140s apart: present at the head of the grid, absent through the middle,
+///   present again from index 20, and absent for the tail.
+fn differential_samples() -> Vec<(&'static str, i64, f64)> {
+    let mut samples = Vec::new();
+    for index in 0..DIFFERENTIAL_POINTS {
+        let timestamp = differential_timestamp(index);
+        if !(20..=25).contains(&index) {
+            let value = if index < DIFFERENTIAL_SPLIT {
+                100.0 + 7.0 * index as f64
+            } else {
+                3.0 + 7.0 * (index - DIFFERENTIAL_SPLIT) as f64
+            };
+            samples.push(("a", timestamp, value));
+        }
+        if index % 2 == 0 {
+            samples.push(("b", timestamp, 2000.0 * index as f64));
+        }
+    }
+    let range_edge = differential_timestamp(DIFFERENTIAL_SPLIT) - DIFFERENTIAL_RANGE_MS;
+    samples.push(("b", range_edge, 17_000.0));
+    samples.push(("b", range_edge + 1, 17_000.5));
+    samples.push(("c", differential_timestamp(0), 5.0));
+    samples.push(("c", differential_timestamp(20), 9.0));
+    samples.sort_by_key(|(_, timestamp, _)| *timestamp);
+    samples
+}
+
+fn differential_insert() -> String {
+    let rows = differential_samples()
+        .into_iter()
+        .map(|(host, timestamp, value)| format!("('{host}', {timestamp}, {value})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("INSERT INTO {DIFFERENTIAL_TABLE} (host, ts, val) VALUES {rows}")
+}
+
+/// The statement `query` builds over the whole differential grid, as a query builds it.
+///
+/// This is the baseline the windows are compared with, and it never passes through
+/// `windowed_eval_stmt`: a helper that moved every span the same way would otherwise agree with
+/// itself instead of with the statement the query really asks for.
+fn differential_full(query: &str) -> QueryStatement {
+    let prom = PromQuery {
+        query: query.to_string(),
+        ..PromQuery::default()
+    };
+    let QueryStatement::Promql(mut statement, _) =
+        QueryLanguageParser::parse_promql(&prom, &QueryContext::arc()).unwrap()
+    else {
+        unreachable!()
+    };
+    statement.start = UNIX_EPOCH + Duration::from_millis(DIFFERENTIAL_START_MS as u64);
+    statement.end =
+        UNIX_EPOCH + Duration::from_millis(differential_timestamp(DIFFERENTIAL_POINTS - 1) as u64);
+    statement.interval = Duration::from_millis(DIFFERENTIAL_STEP_MS as u64);
+    statement.lookback_delta = Duration::from_millis(DIFFERENTIAL_LOOKBACK_MS as u64);
+    QueryStatement::Promql(statement, None)
+}
+
+/// The statement for `query` over the grid indices `[first, last)`, on the differential grid.
+///
+/// Only the span differs from [`differential_full`], and the window is cut by
+/// `windowed_eval_stmt` rather than by the test.
+fn differential_window(query: &str, first: usize, last: usize) -> QueryStatement {
+    let QueryStatement::Promql(statement, _) = differential_full(query) else {
+        unreachable!()
+    };
+    let window = windowed_eval_stmt(&statement, first, last).expect("the span is on the grid");
+    QueryStatement::Promql(window, None)
+}
+
+/// A shape the window allowlist admits, and what a row of its answer is named by.
+#[derive(Clone, Copy, Debug)]
+enum DifferentialShape {
+    /// The bare selector `window_diff`.
+    Selector,
+    /// `rate(window_diff[60s])`.
+    Rate,
+    /// `sum(rate(window_diff[60s]))`, the one aggregate the allowlist admits.
+    SumRate,
+}
+
+impl DifferentialShape {
+    /// What names a row of this shape's answer, in the sense of [`native_rows`].
+    ///
+    /// The first two shapes keep their hosts, so a row is its `host`. The aggregate without a
+    /// grouping clause folds every host away, so there is no `host` label to read and a row is
+    /// whatever label columns the route leaves - all of them, `None` says - and not a name this
+    /// test gets to assume.
+    fn row_label(self) -> Option<&'static str> {
+        match self {
+            Self::Selector | Self::Rate => Some("host"),
+            Self::SumRate => None,
+        }
+    }
+}
+
+/// Executes one statement on the requested route through the frontend statement executor.
+///
+/// `label` names a row exactly as [`native_rows`] does; see [`DifferentialShape::row_label`].
+async fn differential_rows(
+    instance: &Arc<Instance>,
+    statement: QueryStatement,
+    native: bool,
+    label: Option<&str>,
+) -> Vec<(i64, String, f64)> {
+    let output = instance
+        .statement_executor()
+        .execute_stmt(statement, native_query_context(native, 4))
+        .await
+        .unwrap();
+    native_rows(output, label).await
+}
+
+/// The rows of both windows, in the order the comparison expects, refusing an overlap.
+fn differential_merge(
+    first: Vec<(i64, String, f64)>,
+    second: Vec<(i64, String, f64)>,
+) -> Vec<(i64, String, f64)> {
+    let mut merged = first;
+    merged.extend(second);
+    // Both routes answer in this order already; sorting keeps the comparison independent of it.
+    merged.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    for pair in merged.windows(2) {
+        assert!(
+            pair[0].0 != pair[1].0 || pair[0].1 != pair[1].1,
+            "the two windows answered the same point twice: {} at {}",
+            pair[0].1,
+            pair[0].0
+        );
+    }
+    merged
+}
+
+/// Asserts every row sits on the original grid and returns the grid indices they cover.
+fn differential_indices(rows: &[(i64, String, f64)], what: &str) -> Vec<i64> {
+    rows.iter()
+        .map(|(timestamp, host, _)| {
+            assert_eq!(
+                0,
+                (timestamp - DIFFERENTIAL_START_MS) % DIFFERENTIAL_STEP_MS,
+                "{what}: {host} at {timestamp} left the {}ms grid started at {DIFFERENTIAL_START_MS}",
+                DIFFERENTIAL_STEP_MS
+            );
+            let index = differential_index(*timestamp);
+            assert!(
+                (0..DIFFERENTIAL_POINTS as i64).contains(&index),
+                "{what}: {host} at {timestamp} is outside the statement's grid (index {index})"
+            );
+            index
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn windowed_promql_evaluation_matches_full_range_evaluation() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "windowed_promql_differential",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        &format!("{DIFFERENTIAL_CREATE}; {}", differential_insert()),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // A bare selector, a range function, and the `sum` of one: the three shapes the v1 allowlist
+    // admits. Each runs on both routes, and each route is checked against itself only - the
+    // comparison is full range versus the windows of the same route, never one route against the
+    // other.
+    let range_function = format!("rate({DIFFERENTIAL_TABLE}[{DIFFERENTIAL_RANGE}])");
+    let sum_of_range_function = format!("sum({range_function})");
+    for (query, shape) in [
+        (DIFFERENTIAL_TABLE.to_string(), DifferentialShape::Selector),
+        (range_function.clone(), DifferentialShape::Rate),
+        (sum_of_range_function, DifferentialShape::SumRate),
+    ] {
+        for native in [false, true] {
+            let route = if native { "native" } else { "legacy" };
+            let what = |span: &str| format!("{query} on the {route} route, {span}");
+            let label = shape.row_label();
+
+            observer.clear();
+            let full = differential_rows(&instance, differential_full(&query), native, label).await;
+            assert_eq!(
+                native,
+                observer.fused().is_some(),
+                "{}",
+                what("the route did not run what it was asked for")
+            );
+            assert!(!full.is_empty(), "{}", what("answered no rows"));
+
+            observer.clear();
+            let first = differential_rows(
+                &instance,
+                differential_window(&query, 0, DIFFERENTIAL_SPLIT),
+                native,
+                label,
+            )
+            .await;
+            assert_eq!(
+                native,
+                observer.fused().is_some(),
+                "{}",
+                what("the first window did not run the route it was asked for")
+            );
+            observer.clear();
+            let second = differential_rows(
+                &instance,
+                differential_window(&query, DIFFERENTIAL_SPLIT, DIFFERENTIAL_POINTS),
+                native,
+                label,
+            )
+            .await;
+            assert_eq!(
+                native,
+                observer.fused().is_some(),
+                "{}",
+                what("the second window did not run the route it was asked for")
+            );
+
+            let full_indices = differential_indices(&full, &what("the full statement"));
+            let first_indices = differential_indices(&first, &what("the first window"));
+            let second_indices = differential_indices(&second, &what("the second window"));
+            let merged = differential_merge(first, second);
+            let merged_indices = differential_indices(&merged, &what("the merged windows"));
+
+            // The windows are the halves of the grid and neither reaches past its own end.
+            assert!(
+                first_indices
+                    .iter()
+                    .all(|index| *index < DIFFERENTIAL_SPLIT as i64),
+                "{}",
+                what("the first window answered past its end")
+            );
+            assert!(
+                second_indices
+                    .iter()
+                    .all(|index| *index >= DIFFERENTIAL_SPLIT as i64),
+                "{}",
+                what("the second window answered before its start")
+            );
+            // Both halves reach their own last and first grid point, so the split neither drops a
+            // point nor leaves a gap: the two ends meet exactly at the split index.
+            assert_eq!(
+                DIFFERENTIAL_SPLIT as i64 - 1,
+                *first_indices.iter().max().unwrap(),
+                "{}",
+                what("the first window did not include its last grid point")
+            );
+            assert_eq!(
+                DIFFERENTIAL_SPLIT as i64,
+                *second_indices.iter().min().unwrap(),
+                "{}",
+                what("the second window did not include its first grid point")
+            );
+            assert_eq!(
+                DIFFERENTIAL_POINTS as i64 - 1,
+                *merged_indices.iter().max().unwrap(),
+                "{}",
+                what("the statement's last grid point is missing from the windows")
+            );
+            assert_eq!(
+                full_indices.iter().max(),
+                merged_indices.iter().max(),
+                "{}",
+                what("the windows end where the full statement does not")
+            );
+
+            // The whole point: the split changes what each statement reads, not what it answers.
+            assert_eq!(
+                full,
+                merged,
+                "{}",
+                what("the windows do not answer what the full statement answers")
+            );
+
+            match shape {
+                DifferentialShape::Selector => {
+                    // The head of the grid is included exactly once, and it is the statement's start.
+                    assert_eq!(
+                        0,
+                        *merged_indices.iter().min().unwrap(),
+                        "{}",
+                        what("the statement's first grid point is missing")
+                    );
+                    // A selector that reads one sample per point keeps the fixture's holes: `a` has
+                    // nothing inside the lookback at indices 24 and 25, and answers on both sides.
+                    for (index, present) in [(23, true), (24, false), (25, false), (26, true)] {
+                        assert_eq!(
+                            present,
+                            full.iter().any(|(timestamp, host, _)| host == "a"
+                                && differential_index(*timestamp) == index),
+                            "{}",
+                            what(&format!("host a at index {index}"))
+                        );
+                    }
+                    // `c` is the series that is missing for most of the grid.
+                    for (index, present) in [(0, true), (10, false), (20, true), (40, false)] {
+                        assert_eq!(
+                            present,
+                            full.iter().any(|(timestamp, host, _)| host == "c"
+                                && differential_index(*timestamp) == index),
+                            "{}",
+                            what(&format!("host c at index {index}"))
+                        );
+                    }
+                }
+                DifferentialShape::Rate => {
+                    // `rate` answers at the split index even though the window starts there: the reset
+                    // sample and the increments before it are history the second window has to read.
+                    assert!(
+                        full.iter().any(|(timestamp, host, _)| host == "a"
+                            && differential_index(*timestamp) == DIFFERENTIAL_SPLIT as i64),
+                        "{}",
+                        what("rate did not answer at the split index")
+                    );
+                    // Its range still answers through the lookback holes of the selector.
+                    for index in [24, 25] {
+                        assert!(
+                            full.iter().any(|(timestamp, host, _)| host == "a"
+                                && differential_index(*timestamp) == index),
+                            "{}",
+                            what(&format!("rate at index {index}"))
+                        );
+                    }
+                }
+                DifferentialShape::SumRate => {
+                    // An aggregate with no grouping clause folds every host into one series, so each
+                    // grid point it answers is one row. The points `differential_merge` already
+                    // refused to see twice, together with one label everywhere, say exactly that: a
+                    // route that had answered one row per host would fail here.
+                    assert!(
+                        !merged.is_empty(),
+                        "{}",
+                        what("the aggregate answered no rows")
+                    );
+                    let only_label = &merged[0].1;
+                    assert!(
+                        merged.iter().all(|(_, label, _)| label == only_label),
+                        "{}",
+                        what("the aggregate did not fold the hosts into one series")
+                    );
+
+                    // What makes slicing this shape sound, asserted rather than assumed: the value
+                    // at a grid point folds the *complete* candidate vector of that point, which is
+                    // what the unsplit statement folds there too. The per-host `rate` values are
+                    // read from a full execution that never goes through `windowed_eval_stmt`, and
+                    // folding them by hand has to reproduce the aggregate; a window that had read
+                    // only part of the vector would fold strictly less. Floating-point addition is
+                    // associative only up to rounding, so the fold is compared to a hair instead of
+                    // bit for bit - `full == merged` above is the exact comparison.
+                    let per_host = differential_rows(
+                        &instance,
+                        differential_full(&range_function),
+                        native,
+                        Some("host"),
+                    )
+                    .await;
+                    let mut folded = std::collections::BTreeMap::<i64, f64>::new();
+                    for (timestamp, _, value) in &per_host {
+                        *folded.entry(*timestamp).or_default() += value;
+                    }
+                    let answered = {
+                        let mut answered = merged
+                            .iter()
+                            .map(|(timestamp, _, _)| *timestamp)
+                            .collect::<Vec<_>>();
+                        answered.sort_unstable();
+                        answered.dedup();
+                        answered
+                    };
+                    assert_eq!(
+                        folded.keys().copied().collect::<Vec<_>>(),
+                        answered,
+                        "{}",
+                        what(
+                            "the aggregate answered exactly the grid points the per-host rates do"
+                        )
+                    );
+                    for (timestamp, host, value) in &merged {
+                        let expected = folded[timestamp];
+                        assert!(
+                            (expected - value).abs() <= 1e-12 * expected.abs().max(1.0),
+                            "{}",
+                            what(&format!(
+                                "the aggregate answers {value} at {timestamp} for {host}, \
+                             the per-host rates fold to {expected}"
+                            ))
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

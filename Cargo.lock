@@ -5713,6 +5713,7 @@ dependencies = [
  "partition",
  "pipeline",
  "prometheus 0.14.0",
+ "promql",
  "promql-parser",
  "prost 0.14.1",
  "query",

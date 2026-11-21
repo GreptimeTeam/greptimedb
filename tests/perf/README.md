@@ -79,6 +79,11 @@ pending_rows_flush_interval = "1s"
 max_batch_rows = 100000
 ```
 
+A case that measures the frontend rollup cache can add
+`[scenario.remote_write.prom_store.rollup_cache]` (both targets) or
+`[scenario.remote_write.prom_store.candidate_rollup_cache]` (candidate only); see
+[Frontend rollup cache configuration](#frontend-rollup-cache-configuration).
+
 Cases can optionally add `[scenario.remote_write.value]` to control the generated
 sample values without changing label cardinality or the runner lifecycle:
 
@@ -193,6 +198,54 @@ before trusting the query measurements. Use
 `--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper to
 the outer driver.
 
+### Frontend rollup cache configuration
+
+A remote-write case can render the frontend `[rollup_cache]` section
+(`src/frontend/src/query_cache.rs`) into the configs the outer driver writes, so
+one case compares an uncached and a cached frontend:
+
+```toml
+[scenario.remote_write.prom_store.rollup_cache]           # both targets
+max_bytes = "256MB"
+chunk = "5m"
+tail = "0s"
+refresh_interval = "50ms"
+max_age = "1h"
+
+[scenario.remote_write.prom_store.candidate_rollup_cache] # candidate only
+max_bytes = "512MB"
+chunk = "5m"
+tail = "0s"
+refresh_interval = "50ms"
+max_age = "1h"
+```
+
+Every field is optional and defaults to the frontend's own default, except
+`enable`, which defaults to `true` because naming the table means the cache is
+meant to be on. Values are the strings the frontend parses itself: `max_bytes` is
+a `ReadableSize` (`256MB`), and `chunk`, `tail`, `refresh_interval`, and
+`max_age` are `humantime` durations (`5m`, `0s`, `50ms`, `1h`).
+
+Rendering is per target: `query_regression_runner render-remote-config --target
+base|candidate` applies `rollup_cache` to the base and prefers
+`candidate_rollup_cache` over it for the candidate. A target with no cache
+configuration gets no `[rollup_cache]` table at all, which leaves the frontend
+default (disabled). A case that sets only `candidate_rollup_cache` therefore
+compares an uncached base against a cached candidate and cannot silently become a
+cache-against-cache comparison, and a base build that predates the option never
+sees a key it cannot parse. `--target` defaults to `base`, because rendering the
+candidate without its cache fails the case's speedup threshold loudly while the
+opposite mistake would pass quietly.
+
+The cache only serves PromQL range queries whose expression is in the
+`selector`/`rate`/`sum` allowlist (`src/query/src/promql/window.rs`), whose
+`chunk` is a whole multiple of the step, whose points are all older than
+`now - tail`, and whose source table a background round has proved. Use
+`kind = "prom_http"` queries (the Prometheus HTTP range API marks the output
+unordered, which is the path the cache serves), historical data so the points are
+really older than the tail, and `settle_ms` after the warmup so a round can
+publish the table before the measured iterations.
+
 Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
 time. For each chunk, `prepare-remote` invokes `query_perf_fixture prom-remote-write` with the
 same series cardinality but a shorter `--samples-per-series` and an advanced
@@ -237,6 +290,46 @@ The routine default set also includes
 `tests/perf/query_cases/mito_prefilter_all_match/case.toml`. It covers the
 Mito prefilter all-match path, a mixed integer/float filter, and integer and
 float selective controls over a 262144-row direct SST fixture.
+
+### Rollup cache case
+
+`tests/perf/query_cases/prom_rollup_cache_warm_range/case.toml` measures the
+frontend rollup cache serving warm historical PromQL ranges. It writes 2048
+series × 720 one-minute samples starting 2024-01-01 through remote-write, then
+evaluates 2024-01-01T02:00Z–03:00Z at a `1m` step through the Prometheus HTTP
+range API with a named selector, `rate(...)`, and `sum by (host) (rate(...))` —
+the three shapes in the cache's expression allowlist. A `5m` chunk is a whole
+multiple of the step and the data is historical, so `tail = "0s"` leaves the
+range cacheable; the chunks are complete except for the trailing point, so every
+measured iteration should be a real hit.
+
+The cache is configured for the candidate only (`candidate_rollup_cache`), so the
+base runs the same build's uncached path. The `prom_http` measurements carry
+`min_candidate_latency_speedup_pct` (25% for the selector and the `sum` fold, 40%
+for `rate`, which reads more input per output point) so a candidate whose cache
+did not take effect fails instead of passing with base-equal latency. The TQL
+`rate` control is not cached on either target and keeps its normal
+`max_candidate_latency_regression_pct = 25` gate.
+
+The case is in the `heavy` group, not in the routine `all` default set: it is a
+feature-presence measurement of a candidate-only capability rather than a
+routine scan-path gate, so it runs on demand. A `heavy` dispatch (the
+`/query-regression heavy` command or manual workflow dispatch with the `heavy`
+token) runs it together with `prom_remote_write_7913` and the high-cardinality
+`promql_constant_tag_concat_ms_*` cases; a routine `/query-regression` run keeps
+the nine default cases.
+
+```bash
+uv run --no-project python .github/scripts/query-regression-run.py \
+  --cases heavy \
+  --base-bin "$BASE_GREPTIME" --candidate-bin "$CANDIDATE_GREPTIME" \
+  --fixture-generator "$FIXTURE_GENERATOR" --runner "$RUNNER" \
+  --work-dir "$WORK_DIR"
+```
+
+Pass the case path instead of `heavy` to run it alone. The base build may predate
+the `[rollup_cache]` option: the base render never emits it, so such a build only
+ever sees keys it can parse.
 
 ## OTLP trace load scenario
 
@@ -348,6 +441,29 @@ seed = 12345
 The outer driver currently supports `direct_readable_sst`,
 `prom_remote_write_then_query`, and `otlp_trace_load`.
 
+### Query repetitions and latency thresholds
+
+Each `[[scenario.queries]]` entry runs its `warmup` repetitions, then optionally
+sleeps `settle_ms`, then runs its `iterations` measured repetitions against each
+target. `settle_ms` exists for caches filled off the request path: a background
+refresher publishes its table on its own schedule, so the case waits for that
+schedule once instead of spending measured iterations on misses.
+
+Two latency thresholds are supported, both on the candidate median:
+
+- `max_candidate_latency_regression_pct` (default gate): fails when the candidate
+  median is more than this percentage slower than the base median. `25` allows
+  25%.
+- `min_candidate_latency_speedup_pct` (feature gate): fails when the candidate
+  does not save at least this percentage of the base median. `50` requires the
+  candidate to be at least twice as fast. Use it for cases whose whole point is
+  that a candidate-only feature is in effect, so that a silently inert feature
+  (option ignored, expression outside a feature's allowlist, background refresh
+  never proven) fails instead of passing with base-equal latency.
+
+Any other key in a query's `thresholds` table fails the case as an unsupported
+threshold rather than being ignored.
+
 ## Metrics
 
 Primary gates should compare query work rather than plan text:
@@ -377,12 +493,12 @@ stops only both datanodes, writes File-object-store destination TOMLs, invokes
 `measure` (with one frontend restart retry). `materialize` uses OpenDAL and only
 replaces the fixture's exact region prefix in each target data home.
 
-For `prom_remote_write_then_query`, it renders a target frontend configuration
-with `render-remote-config`, starts both clusters, runs `prepare-remote` and
-`measure`, stops both datanodes, then runs `finalize-remote`. Finalization owns
-storage inspection and read-bench against the quiescent data homes. Both paths
-write `query-regression-report.json` in the case work directory and always clean
-up the remaining components.
+For `prom_remote_write_then_query`, it renders one frontend configuration per
+target with `render-remote-config --target <target>`, starts both clusters, runs
+`prepare-remote` and `measure`, stops both datanodes, then runs
+`finalize-remote`. Finalization owns storage inspection and read-bench against
+the quiescent data homes. Both paths write `query-regression-report.json` in the
+case work directory and always clean up the remaining components.
 
 For local orchestration after building the three binaries, invoke the outer
 driver directly:
