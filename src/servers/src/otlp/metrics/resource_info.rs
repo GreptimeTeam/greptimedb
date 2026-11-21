@@ -187,6 +187,7 @@ mod tests {
     fn kv(key: &str, value: &str) -> KeyValue {
         KeyValue {
             key: key.into(),
+            key_strindex: 0,
             value: Some(AnyValue {
                 value: Some(any_value::Value::StringValue(value.into())),
             }),
