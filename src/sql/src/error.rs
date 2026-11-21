@@ -224,13 +224,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to serialize column default constraint"))]
-    SerializeColumnDefaultConstraint {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Failed to convert data type to gRPC data type defined in proto"))]
     ConvertToGrpcDataType {
         #[snafu(implicit)]
@@ -296,6 +289,13 @@ pub enum Error {
 
     #[snafu(display("Failed to set COMPRESSION option"))]
     SetCompressionOption {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set STORAGE option"))]
+    SetStorageOption {
         source: datatypes::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -401,9 +401,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "enterprise")]
             InvalidTriggerWebhookOption { .. } => StatusCode::InvalidArguments,
 
-            SerializeColumnDefaultConstraint { source, .. } | Datatypes { source, .. } => {
-                source.status_code()
-            }
+            Datatypes { source, .. } => source.status_code(),
 
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             SqlCommon { source, .. } => source.status_code(),
@@ -412,7 +410,9 @@ impl ErrorExt for Error {
 
             PermissionDenied { .. } => StatusCode::PermissionDenied,
             SetFulltextOption { .. } | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
-            SetCompressionOption { source, .. } => source.status_code(),
+            SetCompressionOption { source, .. } | SetStorageOption { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

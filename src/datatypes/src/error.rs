@@ -300,6 +300,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid storage option: {}", msg))]
+    InvalidStorageOption {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Inconsistent struct field count {field_len} and item count {item_len}"))]
     InconsistentStructFieldsAndItems {
         field_len: usize,
@@ -384,6 +391,7 @@ impl ErrorExt for Error {
             | InvalidFulltextOption { .. }
             | InvalidSkippingIndexOption { .. }
             | InvalidCompressionOption { .. }
+            | InvalidStorageOption { .. }
             | InvalidSeries { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
