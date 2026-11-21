@@ -44,6 +44,7 @@ use store_api::mito_engine_options::FloatFieldEncoding;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber, SequenceRange};
 use tokio::sync::Semaphore;
 
+use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
 use crate::compaction::{
     Json2RewritePlans, collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema,
 };
@@ -1175,7 +1176,7 @@ impl PartToMerge {
                 Some((part.num_rows() as u64, part.estimated_size() as u64))
             }
             PartToMerge::Encoded { part, .. } => {
-                crate::batch_size::largest_row_group_statistic(&part.metadata().parquet_metadata)
+                largest_row_group_statistic(&part.metadata().parquet_metadata)
             }
         }
     }
@@ -1394,7 +1395,7 @@ impl MemtableCompactor {
             .max()
             .unwrap_or(0);
 
-        let batch_size = crate::batch_size::estimate_batch_size(
+        let batch_size = estimate_batch_size(
             parts_to_merge
                 .iter()
                 .filter_map(PartToMerge::batch_size_statistic),

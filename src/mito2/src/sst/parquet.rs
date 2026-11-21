@@ -231,16 +231,6 @@ impl RowGroupValueBytes {
 ///
 /// Writers and the verifier of compaction outputs must both use this to agree on the value.
 pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
-    let max_value_bytes = metadata
-        .file_metadata()
-        .key_value_metadata()
-        .and_then(|kvs| {
-            kvs.iter()
-                .find(|kv| kv.key == MAX_ROW_GROUP_VALUE_BYTES_KEY)
-        })
-        .and_then(|kv| kv.value.as_deref())
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
     let max_encoded = metadata
         .row_groups()
         .iter()
@@ -253,7 +243,21 @@ pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
         })
         .max()
         .unwrap_or(0);
-    max_encoded.max(max_value_bytes)
+    max_encoded.max(max_row_group_value_bytes(metadata))
+}
+
+/// Returns the [MAX_ROW_GROUP_VALUE_BYTES_KEY] value of the footer, or 0 when it is absent.
+pub(crate) fn max_row_group_value_bytes(metadata: &ParquetMetaData) -> u64 {
+    metadata
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|kvs| {
+            kvs.iter()
+                .find(|kv| kv.key == MAX_ROW_GROUP_VALUE_BYTES_KEY)
+        })
+        .and_then(|kv| kv.value.as_deref())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Values at least this long make min/max statistics of a field column useless for pruning,
@@ -482,6 +486,7 @@ mod tests {
 
     use super::*;
     use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
+    use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
     use crate::cache::index::result_cache::PredicateKey;
     use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy};
@@ -1580,6 +1585,11 @@ mod tests {
         assert_eq!(
             info.max_row_group_uncompressed_size,
             max_row_group_decoded_size(&footer)
+        );
+        // Readers size batches by the decoded 64 KiB values, not the dictionary-encoded size.
+        assert_eq!(
+            1024,
+            estimate_batch_size(largest_row_group_statistic(&footer))
         );
     }
 

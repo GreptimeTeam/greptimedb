@@ -27,6 +27,7 @@ use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::access_layer::AccessLayerRef;
+use crate::batch_size::{estimate_batch_size, row_group_statistics};
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::compaction::json2::{
     Json2RewritePlans, collect_json2_rewrite_plans_from_parquet, rewrite_json2_schema,
@@ -81,18 +82,10 @@ impl CompactionSstReaderBuilder<'_> {
         parquet_metadata: &[Arc<ParquetMetaData>],
         plans: &Json2RewritePlans,
     ) -> Result<ScanInput> {
-        let batch_size = crate::batch_size::estimate_batch_size(
+        let batch_size = estimate_batch_size(
             parquet_metadata
                 .iter()
-                .flat_map(|metadata| metadata.row_groups())
-                .map(|row_group| {
-                    let uncompressed_bytes = row_group
-                        .columns()
-                        .iter()
-                        .map(|column| column.uncompressed_size() as u64)
-                        .sum();
-                    (row_group.num_rows() as u64, uncompressed_bytes)
-                }),
+                .flat_map(|metadata| row_group_statistics(metadata)),
         );
 
         let projection = (0..self.metadata.column_metadatas.len()).collect();

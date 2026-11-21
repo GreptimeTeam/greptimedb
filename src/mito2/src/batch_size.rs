@@ -16,26 +16,41 @@
 
 use parquet::file::metadata::ParquetMetaData;
 
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
+use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, max_row_group_value_bytes};
 
 /// Approximate decoded bytes to produce in one batch.
 pub(crate) const TARGET_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
-/// Returns `(num_rows, uncompressed_bytes)` of the largest row group in a Parquet file, which
-/// bounds the decoded size of a batch read from it.
-pub(crate) fn largest_row_group_statistic(metadata: &ParquetMetaData) -> Option<(u64, u64)> {
-    metadata
+/// Returns `(num_rows, bytes)` estimates of the row groups in a Parquet file: the uncompressed
+/// size of each row group, and the largest decoded string and binary value bytes of a row group
+/// recorded by the writer. Dictionary encoding can make the uncompressed size far smaller than
+/// the decoded values.
+pub(crate) fn row_group_statistics(
+    metadata: &ParquetMetaData,
+) -> impl Iterator<Item = (u64, u64)> + '_ {
+    let encoded = metadata.row_groups().iter().map(|row_group| {
+        let uncompressed_bytes = row_group
+            .columns()
+            .iter()
+            .map(|column| column.uncompressed_size() as u64)
+            .sum();
+        (row_group.num_rows() as u64, uncompressed_bytes)
+    });
+    // All row groups but the last share one row count, the largest one.
+    let rows = metadata
         .row_groups()
         .iter()
-        .map(|row_group| {
-            let uncompressed_bytes = row_group
-                .columns()
-                .iter()
-                .map(|column| column.uncompressed_size() as u64)
-                .sum();
-            (row_group.num_rows() as u64, uncompressed_bytes)
-        })
-        .max_by_key(|(_, uncompressed_bytes)| *uncompressed_bytes)
+        .map(|row_group| row_group.num_rows() as u64)
+        .max()
+        .unwrap_or(0);
+    let value_bytes = max_row_group_value_bytes(metadata);
+    encoded.chain((value_bytes > 0).then_some((rows, value_bytes)))
+}
+
+/// Returns the statistic of [row_group_statistics] with the most bytes, which bounds the decoded
+/// size of a batch read from the file.
+pub(crate) fn largest_row_group_statistic(metadata: &ParquetMetaData) -> Option<(u64, u64)> {
+    row_group_statistics(metadata).max_by_key(|(_, bytes)| *bytes)
 }
 
 /// Estimates a batch size from `(num_rows, estimated_bytes)` pairs.
