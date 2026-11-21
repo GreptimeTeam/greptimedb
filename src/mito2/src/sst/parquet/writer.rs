@@ -48,9 +48,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, SequenceNumber};
 use tokio_util::sync::CancellationToken;
 
-use crate::access_layer::{
-    FilePathProvider, Metrics, RegionFilePathFactory, SstInfoArray, TempFileCleaner,
-};
+use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
 use crate::config::{IndexBuildMode, IndexConfig};
 use crate::error::{
     Error, InvalidMetadataSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, OpenDalSnafu,
@@ -267,8 +265,8 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     write_guard: Option<Arc<dyn SstWriteGuard>>,
     cancellation: Option<CancellationToken>,
     memory: WriteMemory,
-    /// Where externally stored values go.
-    blob_target: Option<(ObjectStore, RegionFilePathFactory)>,
+    /// Store of the blob sidecars and the provider of the SST paths they sit next to.
+    blob_target: Option<(ObjectStore, Arc<dyn FilePathProvider>)>,
     /// Field columns with external storage, read from the region metadata on first use.
     external_columns: Option<Vec<ExternalColumn>>,
     /// Blob sidecar of the current file, created for its first external value.
@@ -483,14 +481,14 @@ where
         }
     }
 
-    /// Stores large string and binary field values in a sidecar object in `store`, next to
-    /// the SST path that `paths` gives.
+    /// Stores external field values in a sidecar in `store`, next to the SST path that
+    /// `sst_paths` gives. The SST itself may be written elsewhere, e.g. to the write cache.
     pub(crate) fn with_blob_target(
         mut self,
         store: ObjectStore,
-        paths: RegionFilePathFactory,
+        sst_paths: Arc<dyn FilePathProvider>,
     ) -> Self {
-        self.blob_target = Some((store, paths));
+        self.blob_target = Some((store, sst_paths));
         self
     }
 
@@ -877,7 +875,7 @@ where
         if columns.is_empty() {
             return Ok(batch.clone());
         }
-        let Some((store, paths)) = &self.blob_target else {
+        let Some((store, sst_paths)) = &self.blob_target else {
             return UnexpectedSnafu {
                 reason: format!(
                     "region {} has external columns but the SST writer has no blob target",
@@ -896,7 +894,7 @@ where
                 continue;
             }
             if self.blob_writer.is_none() {
-                let sst_path = paths.build_sst_file_path(RegionFileId::new(
+                let sst_path = sst_paths.build_sst_file_path(RegionFileId::new(
                     self.metadata.region_id,
                     self.current_file,
                 ));
@@ -908,6 +906,7 @@ where
                 };
                 self.blob_writer = Some(
                     BlobFileWriter::new(
+                        self.current_file,
                         store,
                         &blob_path(&sst_path),
                         opts.write_buffer_size.as_bytes() as usize,
@@ -930,13 +929,13 @@ where
             common_telemetry::warn!(error; "Failed to abort blob writer, file: {}", self.current_file);
         }
         // A sidecar may already be complete when the SST fails to finish.
-        if let Some((store, paths)) = &self.blob_target
+        if let Some((store, sst_paths)) = &self.blob_target
             && self
                 .external_columns
                 .as_ref()
                 .is_some_and(|columns| !columns.is_empty())
         {
-            let sst_path = paths.build_sst_file_path(RegionFileId::new(
+            let sst_path = sst_paths.build_sst_file_path(RegionFileId::new(
                 self.metadata.region_id,
                 self.current_file,
             ));

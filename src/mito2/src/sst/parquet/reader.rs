@@ -53,6 +53,7 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{
     CacheStrategy, CachedSstMeta, SstMetaObservation, SstMetaPreparation, SstMetaResolution,
@@ -76,7 +77,7 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
-use crate::sst::parquet::blob::{BlobResolver, PendingBatch, blob_columns};
+use crate::sst::parquet::blob::{BlobCache, BlobResolver, PendingBatch, blob_columns};
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
@@ -2614,11 +2615,26 @@ impl FlatRowGroupReader {
         let builder = context.reader_builder();
         let blob_columns = blob_columns(builder.parquet_metadata());
         let blob_resolver = (!blob_columns.is_empty()).then(|| {
-            BlobResolver::new(
+            let file = builder.file_handle();
+            let resolver = BlobResolver::new(
+                file.file_id().file_id(),
                 builder.object_store().clone(),
                 builder.file_path(),
                 blob_columns,
-            )
+            );
+            let cache_strategy = builder.cache_strategy();
+            if !cache_strategy
+                .write_cache()
+                .is_some_and(|cache| cache.cache_blobs())
+            {
+                return resolver;
+            }
+            let key = IndexKey::new(file.region_id(), file.file_id().file_id(), FileType::Blob);
+            resolver.with_cache(BlobCache::new(
+                cache_strategy.clone(),
+                key,
+                file.meta_ref().blob_file_size,
+            ))
         });
 
         Self {

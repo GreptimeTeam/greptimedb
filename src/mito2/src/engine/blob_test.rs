@@ -19,15 +19,18 @@ use std::time::Duration;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{Rows, SemanticType};
+use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
+use common_test_util::temp_dir::create_temp_dir;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::StorageOptions;
 use store_api::region_engine::{MitoCopyRegionFromRequest, RegionEngine};
 use store_api::region_request::{RegionCreateRequest, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{FileId, RegionId, ScanRequest};
 
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::compact;
@@ -315,4 +318,127 @@ async fn test_copy_region_requires_declared_sidecars() {
         }
     }
     copy(RegionId::new(1, 3)).await.unwrap_err();
+}
+
+/// Returns the file ids of the region's SSTs.
+fn sst_ids(engine: &MitoEngine, region_id: RegionId) -> Vec<FileId> {
+    engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values().map(|f| f.file_id().file_id()))
+        .collect()
+}
+
+async fn delete_remote_sidecars(env: &TestEnv) {
+    let store = env.get_object_store().unwrap();
+    for entry in store.list_with("").recursive(true).await.unwrap() {
+        if entry.path().ends_with(".blob") {
+            store.delete(entry.path()).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_sidecars_are_served_from_write_cache() {
+    let mut env = TestEnv::new().await;
+    let cache_dir = create_temp_dir("blob_write_cache");
+    let config = MitoConfig::default().enable_write_cache(
+        cache_dir.path().to_str().unwrap().to_string(),
+        ReadableSize::mb(512),
+        None,
+    );
+    let engine = env.create_engine(config).await;
+    let region_id = RegionId::new(1, 1);
+    let request = create_request(true);
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let file_cache = engine.cache_manager().write_cache().unwrap().file_cache();
+    let cached =
+        |file_id| file_cache.contains_key(&IndexKey::new(region_id, file_id, FileType::Blob));
+
+    put(&engine, region_id, &schema, &[0, 1, 2, 3], 0).await;
+    flush_region(&engine, region_id, None).await;
+    put(&engine, region_id, &schema, &[4, 5, 6, 7], 0).await;
+    flush_region(&engine, region_id, None).await;
+    let inputs = sst_ids(&engine, region_id);
+    assert!(inputs.iter().all(|id| cached(*id)));
+    assert_eq!(2, blob_files(&env).await);
+
+    // Scans and compaction read the cached sidecars, not the remote ones.
+    delete_remote_sidecars(&env).await;
+    let expected: Vec<_> = (0..8).map(|i| (i as i64 * 1000, payload(i, 0))).collect();
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+    compact(&engine, region_id).await;
+    let outputs = sst_ids(&engine, region_id);
+    assert!(outputs.iter().all(|id| !inputs.contains(id) && cached(*id)));
+    assert_eq!(1, blob_files(&env).await);
+
+    // Purged inputs leave the cache too.
+    for _ in 0..50 {
+        if inputs.iter().all(|id| !cached(*id)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(inputs.iter().all(|id| !cached(*id)));
+
+    delete_remote_sidecars(&env).await;
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+}
+
+#[tokio::test]
+async fn test_sidecars_bypass_write_cache_when_disabled() {
+    let mut env = TestEnv::new().await;
+    let cache_dir = create_temp_dir("blob_write_cache");
+    let mut config = MitoConfig::default().enable_write_cache(
+        cache_dir.path().to_str().unwrap().to_string(),
+        ReadableSize::mb(512),
+        None,
+    );
+    config.write_cache_blobs = false;
+    let engine = env.create_engine(config).await;
+    let region_id = RegionId::new(1, 1);
+    let request = create_request(true);
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let file_cache = engine.cache_manager().write_cache().unwrap().file_cache();
+    let cached =
+        |file_id| file_cache.contains_key(&IndexKey::new(region_id, file_id, FileType::Blob));
+
+    put(&engine, region_id, &schema, &[0, 1, 2, 3], 0).await;
+    flush_region(&engine, region_id, None).await;
+    put(&engine, region_id, &schema, &[4, 5, 6, 7], 0).await;
+    flush_region(&engine, region_id, None).await;
+    assert_eq!(2, blob_files(&env).await);
+
+    let expected: Vec<_> = (0..8).map(|i| (i as i64 * 1000, payload(i, 0))).collect();
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+    compact(&engine, region_id).await;
+    assert_eq!(1, blob_files(&env).await);
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+    // Reads must not refill the cache with sidecars either.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(sst_ids(&engine, region_id).iter().all(|id| !cached(*id)));
 }

@@ -1098,12 +1098,7 @@ impl LocalGcWorker {
                 continue;
             }
 
-            // A blob sidecar shares its SST's fate: deleting the SST deletes the sidecar too.
-            let parsed = match entry.name().strip_suffix(".blob") {
-                Some(stem) => location::parse_file_id_type_from_path(&format!("{stem}.parquet")),
-                None => location::parse_file_id_type_from_path(entry.name()),
-            };
-            let (file_id, file_type) = match parsed {
+            let (file_id, file_type) = match location::parse_file_id_type_from_path(entry.name()) {
                 Ok((file_id, file_type)) => (file_id, file_type),
                 Err(err) => {
                     error!(err; "Failed to parse file id from path: {}", entry.name());
@@ -1115,7 +1110,8 @@ impl LocalGcWorker {
             };
 
             let should_delete = match file_type {
-                FileType::Parquet => {
+                // A blob sidecar shares its SST's fate: deleting the SST deletes the sidecar too.
+                FileType::Parquet | FileType::Blob => {
                     let is_in_manifest = in_manifest.contains_key(&file_id);
                     let is_in_tmp_ref = referenced_ssts.contains(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
@@ -1171,7 +1167,7 @@ impl LocalGcWorker {
 
             if should_delete {
                 let removed_file = match file_type {
-                    FileType::Parquet => {
+                    FileType::Parquet | FileType::Blob => {
                         if !deleted_ssts.insert(file_id) {
                             continue;
                         }

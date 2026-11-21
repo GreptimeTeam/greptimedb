@@ -17,19 +17,21 @@
 //! A field column with `STORAGE WITH (type = 'external', threshold = ...)` keeps short values in
 //! the parquet column. Each value at least `threshold` long is zstd compressed and appended to a
 //! sidecar blob object next to the SST, and the parquet column holds a reference to it instead:
-//! [REF_PREFIX] followed by `offset:compressed_len:len`. Values that start with [REF_PREFIX] are
-//! stored externally regardless of their size, so a value is a reference if and only if it
-//! starts with the prefix.
+//! [REF_PREFIX] followed by `blob_file_id:offset:compressed_len:len`. Values that start with
+//! [REF_PREFIX] are stored externally regardless of their size, so a value is a reference if and
+//! only if it starts with the prefix.
 //!
 //! An SST with a sidecar lists its external columns in footer keys starting with
 //! [BLOB_COLUMN_KEY_PREFIX] and records the sidecar size under [BLOB_FILE_SIZE_KEY]. The sidecar
-//! shares the SST's file id and is deleted with it.
+//! shares the SST's file id and is deleted with it, so every reference names its own SST. The id
+//! is in the reference so that SSTs can later share blob files without a format change.
 //!
 //! Readers resolve references right after decoding a row group, so filters, merges and
 //! compaction see the original values.
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use common_runtime::spawn_blocking_global;
@@ -42,7 +44,10 @@ use object_store::ObjectStore;
 use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadata;
+use store_api::storage::FileId;
 
+use crate::cache::CacheStrategy;
+use crate::cache::file_cache::IndexKey;
 use crate::error::{Error, JoinSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result, UnexpectedSnafu};
 
 /// Prefix of footer keys that mark a column as stored externally; the column name follows it.
@@ -127,6 +132,7 @@ pub(crate) fn external_columns(metadata: &RegionMetadata) -> Result<Vec<External
 /// Location of one value in a blob object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BlobRef {
+    file_id: FileId,
     offset: u64,
     compressed_len: u64,
     len: u64,
@@ -135,8 +141,8 @@ struct BlobRef {
 impl BlobRef {
     fn encode(&self) -> String {
         format!(
-            "{REF_PREFIX}{}:{}:{}",
-            self.offset, self.compressed_len, self.len
+            "{REF_PREFIX}{}:{}:{}:{}",
+            self.file_id, self.offset, self.compressed_len, self.len
         )
     }
 
@@ -155,9 +161,15 @@ impl BlobRef {
             .build()
         };
         let text = std::str::from_utf8(body).map_err(|_| invalid())?;
-        let mut parts = text.split(':').map(|p| p.parse::<u64>());
+        let mut parts = text.split(':');
+        let file_id = parts
+            .next()
+            .and_then(|p| FileId::parse_str(p).ok())
+            .ok_or_else(invalid)?;
+        let mut parts = parts.map(|p| p.parse::<u64>());
         let mut next = || parts.next().and_then(|p| p.ok()).ok_or_else(invalid);
         let blob_ref = Self {
+            file_id,
             offset: next()?,
             compressed_len: next()?,
             len: next()?,
@@ -216,6 +228,7 @@ pub(crate) async fn compress_external_values(
 
 /// Appends values of one SST to its blob object.
 pub(crate) struct BlobFileWriter {
+    file_id: FileId,
     writer: object_store::Writer,
     offset: u64,
     /// Bytes the uploader can buffer.
@@ -224,6 +237,7 @@ pub(crate) struct BlobFileWriter {
 
 impl BlobFileWriter {
     pub(crate) async fn new(
+        file_id: FileId,
         store: &ObjectStore,
         path: &str,
         chunk: usize,
@@ -236,6 +250,7 @@ impl BlobFileWriter {
             .await
             .context(OpenDalSnafu)?;
         Ok(Self {
+            file_id,
             writer,
             offset: 0,
             buffer_bytes: chunk.saturating_mul(concurrency),
@@ -264,6 +279,7 @@ impl BlobFileWriter {
             refs.push(match value {
                 Some(value) => {
                     let blob_ref = BlobRef {
+                        file_id: self.file_id,
                         offset: self.offset,
                         compressed_len: value.data.len() as u64,
                         len: value.len,
@@ -324,21 +340,57 @@ pub(crate) struct PendingBatch {
 
 /// Resolves references of an SST's external columns.
 pub(crate) struct BlobResolver {
+    file_id: FileId,
     store: ObjectStore,
     path: String,
     columns: Vec<String>,
     /// Upper bound of resolved value bytes in one output batch.
     chunk_bytes: usize,
+    cache: Option<BlobCache>,
+}
+
+/// Where the resolver finds the sidecar in the write cache.
+pub(crate) struct BlobCache {
+    strategy: CacheStrategy,
+    key: IndexKey,
+    /// Size recorded in the manifest, 0 when unknown.
+    file_size: u64,
+    download_requested: AtomicBool,
+}
+
+impl BlobCache {
+    pub(crate) fn new(strategy: CacheStrategy, key: IndexKey, file_size: u64) -> Self {
+        Self {
+            strategy,
+            key,
+            file_size,
+            download_requested: AtomicBool::new(false),
+        }
+    }
 }
 
 impl BlobResolver {
-    pub(crate) fn new(store: ObjectStore, sst_path: &str, columns: Vec<String>) -> Self {
+    pub(crate) fn new(
+        file_id: FileId,
+        store: ObjectStore,
+        sst_path: &str,
+        columns: Vec<String>,
+    ) -> Self {
         Self {
+            file_id,
             store,
             path: blob_path(sst_path),
             columns,
             chunk_bytes: MAX_RESOLVED_BATCH_BYTES,
+            cache: None,
         }
+    }
+
+    /// Reads the sidecar from the write cache when it is there, and on a miss asks for
+    /// it to be downloaded, as the reader does for the SST.
+    pub(crate) fn with_cache(mut self, cache: BlobCache) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// Parses references in `batch`. Returns `None` when the batch holds no reference.
@@ -349,6 +401,15 @@ impl BlobResolver {
                 let refs = byte_values(batch.column(index))?
                     .map(|v| Ok(v.map(BlobRef::decode).transpose()?.flatten()))
                     .collect::<Result<Vec<_>>>()?;
+                if let Some(other) = refs.iter().flatten().find(|r| r.file_id != self.file_id) {
+                    return UnexpectedSnafu {
+                        reason: format!(
+                            "SST {} references blob file {}, but only its own sidecar is supported",
+                            self.file_id, other.file_id
+                        ),
+                    }
+                    .fail();
+                }
                 if refs.iter().any(Option::is_some) {
                     targets.push((index, refs));
                 }
@@ -417,7 +478,26 @@ impl BlobResolver {
 
     /// Fetches `refs` (sorted by offset) with coalesced range requests.
     async fn fetch(&self, refs: &[BlobRef]) -> Result<Vec<(Range<u64>, Bytes)>> {
-        let reads = coalesce_ranges(refs).into_iter().map(|range| async move {
+        let ranges = coalesce_ranges(refs);
+        if let Some(cache) = &self.cache {
+            if let Some(write_cache) = cache.strategy.write_cache()
+                && let Some(data) = write_cache
+                    .file_cache()
+                    .read_ranges(cache.key, &ranges)
+                    .await
+            {
+                return Ok(ranges.into_iter().zip(data).collect());
+            }
+            if cache.file_size > 0 && !cache.download_requested.swap(true, Ordering::Relaxed) {
+                cache.strategy.maybe_download_background(
+                    cache.key,
+                    self.path.clone(),
+                    self.store.clone(),
+                    cache.file_size,
+                );
+            }
+        }
+        let reads = ranges.into_iter().map(|range| async move {
             let data = self
                 .store
                 .read_with(&self.path)
@@ -656,7 +736,8 @@ mod tests {
         let original =
             RecordBatch::try_from_iter([("bin", binary.clone()), ("str", string.clone())]).unwrap();
 
-        let mut writer = BlobFileWriter::new(&store, &blob_path(sst_path), 1024, 1)
+        let file_id = FileId::random();
+        let mut writer = BlobFileWriter::new(file_id, &store, &blob_path(sst_path), 1024, 1)
             .await
             .unwrap();
         let mut stored = Vec::new();
@@ -670,11 +751,17 @@ mod tests {
         let stored = RecordBatch::try_new(original.schema(), stored).unwrap();
         assert_ne!(original, stored);
 
-        let mut resolver = BlobResolver::new(
-            store,
+        let column_names: Vec<_> = columns.iter().map(|c| c.name.clone()).collect();
+        // A reference names its blob file, so an SST cannot read values of another file.
+        let other = BlobResolver::new(
+            FileId::random(),
+            store.clone(),
             sst_path,
-            columns.iter().map(|c| c.name.clone()).collect(),
+            column_names.clone(),
         );
+        assert!(other.prepare(stored.clone()).is_err());
+
+        let mut resolver = BlobResolver::new(file_id, store, sst_path, column_names);
         // Each long value is 60 bytes, so a chunk holds at most two rows of them.
         resolver.chunk_bytes = 130;
         let mut pending = resolver.prepare(stored).unwrap().unwrap();
@@ -692,6 +779,7 @@ mod tests {
     fn test_reference_length_is_checked_before_allocation() {
         let frame = Bytes::from(zstd::bulk::compress(b"value", 1).unwrap());
         let blob_ref = BlobRef {
+            file_id: FileId::random(),
             offset: 0,
             compressed_len: frame.len() as u64,
             len: 1 << 60,
@@ -708,6 +796,7 @@ mod tests {
             offsets
                 .iter()
                 .map(|offset| BlobRef {
+                    file_id: FileId::default(),
                     offset: *offset,
                     compressed_len: len,
                     len,
@@ -736,20 +825,29 @@ mod tests {
 
     #[test]
     fn test_only_prefixed_values_are_references() {
+        let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095").unwrap();
         let blob_ref = BlobRef {
+            file_id,
             offset: 7,
             compressed_len: 3,
             len: 5,
         };
+        // The encoding is persisted in SSTs.
+        assert_eq!(
+            "\0greptime-blob:3368731b-a556-42b8-a5df-9c31ce155095:7:3:5",
+            blob_ref.encode()
+        );
         assert_eq!(
             Some(blob_ref),
             BlobRef::decode(blob_ref.encode().as_bytes()).unwrap()
         );
         assert_eq!(None, BlobRef::decode(b"7:3:5").unwrap());
         for corrupted in [
-            "\0greptime-blob:7:x".to_string(),
-            "\0greptime-blob:7:3:5:1".to_string(),
-            format!("\0greptime-blob:{}:1:1", u64::MAX),
+            format!("\0greptime-blob:{file_id}:7:x"),
+            format!("\0greptime-blob:{file_id}:7:3:5:1"),
+            format!("\0greptime-blob:{file_id}:{}:1:1", u64::MAX),
+            "\0greptime-blob:7:3:5".to_string(),
+            "\0greptime-blob:not-a-file-id:7:3:5".to_string(),
         ] {
             assert!(
                 BlobRef::decode(corrupted.as_bytes()).is_err(),

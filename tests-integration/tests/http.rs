@@ -4898,6 +4898,7 @@ default_region_write_buffer_size = "0KiB"
 enable_write_cache = false
 write_cache_path = ""
 write_cache_size = "5GiB"
+write_cache_blobs = true
 preload_index_cache = true
 index_cache_percent = 20
 enable_refill_cache_on_read = true

@@ -1338,9 +1338,12 @@ async fn purge_index_cache_stager(
                 .await;
         }
 
-        // Remove the SST file from the cache.
+        // Remove the SST file and its blob sidecar from the cache.
         write_cache
             .remove(IndexKey::new(region_id, file_id, FileType::Parquet))
+            .await;
+        write_cache
+            .remove(IndexKey::new(region_id, file_id, FileType::Blob))
             .await;
     }
 

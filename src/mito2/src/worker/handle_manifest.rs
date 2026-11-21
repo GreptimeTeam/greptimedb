@@ -51,6 +51,7 @@ use crate::request::{
 };
 use crate::sst::file::FileFormat;
 use crate::sst::index::IndexBuildType;
+use crate::sst::parquet::blob::blob_path;
 use crate::sst::{file, location};
 use crate::wal::EntryId;
 use crate::worker::handle_close;
@@ -1091,6 +1092,9 @@ async fn edit_region(
             );
 
             let file_size = file_meta.file_size;
+            let blob_file_size = file_meta.blob_file_size;
+            let blob_key = IndexKey::new(region_id, file_meta.file_id, FileType::Blob);
+            let blob_remote_path = blob_path(&remote_path);
             common_runtime::spawn_global(async move {
                 WRITE_CACHE_INFLIGHT_DOWNLOAD.add(1);
 
@@ -1110,6 +1114,21 @@ async fn edit_region(
                             PageIndexPolicy::Optional,
                         )
                         .await;
+                }
+                if blob_file_size > 0
+                    && write_cache.cache_blobs()
+                    && let Err(err) = write_cache
+                        .download_if_absent(
+                            blob_key,
+                            &blob_remote_path,
+                            layer.object_store(),
+                            blob_file_size,
+                        )
+                        .await
+                {
+                    common_telemetry::error!(
+                        err; "Failed to download blob file, region_id: {}, blob_remote_path: {}", region_id, blob_remote_path
+                    );
                 }
                 if has_downloadable_index {
                     // also download puffin file

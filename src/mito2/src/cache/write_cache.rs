@@ -39,7 +39,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
-use crate::sst::parquet::blob::{blob_file_size, blob_path};
+use crate::sst::parquet::blob::blob_path;
 use crate::sst::parquet::writer::{ParquetWriter, SstWriteContext};
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::upload::{self, UploadError};
@@ -74,6 +74,9 @@ pub struct WriteCache {
     manifest_cache: Option<ManifestCache>,
     /// Optional wrapper for remote stores used by uploads.
     upload_store_wrapper: Option<WriteCacheUploadStoreWrapperRef>,
+    /// Whether blob sidecars are cached with their SSTs. When false, sidecars are written to
+    /// and read from the remote store directly.
+    cache_blobs: bool,
 }
 
 pub type WriteCacheRef = Arc<WriteCache>;
@@ -110,6 +113,7 @@ impl WriteCache {
             task_sender,
             manifest_cache,
             upload_store_wrapper: None,
+            cache_blobs: true,
         })
     }
 
@@ -166,6 +170,15 @@ impl WriteCache {
     ) -> Self {
         self.upload_store_wrapper = upload_store_wrapper;
         self
+    }
+
+    pub(crate) fn with_cache_blobs(mut self, cache_blobs: bool) -> Self {
+        self.cache_blobs = cache_blobs;
+        self
+    }
+
+    pub(crate) fn cache_blobs(&self) -> bool {
+        self.cache_blobs
     }
 
     /// Build the puffin manager
@@ -333,12 +346,15 @@ impl WriteCache {
         .await
         .with_file_cleaner(cleaner)
         .with_write_guard(context.guard)
-        .with_cancellation(context.cancellation.clone())
-        // Out-of-line values skip the local cache and go straight to the remote store.
-        .with_blob_target(
-            upload_request.remote_store.clone(),
-            upload_request.dest_path_provider.clone(),
-        );
+        .with_cancellation(context.cancellation.clone());
+        writer = if self.cache_blobs {
+            writer.with_blob_target(store.clone(), Arc::new(path_provider.clone()))
+        } else {
+            writer.with_blob_target(
+                upload_request.remote_store.clone(),
+                Arc::new(upload_request.dest_path_provider.clone()),
+            )
+        };
 
         let sst_info = match write_request.sst_write_format {
             crate::sst::FormatType::PrimaryKey => {
@@ -363,18 +379,9 @@ impl WriteCache {
         }
 
         let mut upload_tracker = UploadTracker::new(region_id);
-        let mut err = None;
-        let op_type = write_request.op_type;
-        let remote_store = &upload_request.remote_store;
-        // Sidecars go to the remote store while the SST is written, so a failed upload must
-        // remove them as well.
-        for sst in &sst_info {
-            if sst
-                .file_metadata
-                .as_deref()
-                .and_then(blob_file_size)
-                .is_some()
-            {
+        if !self.cache_blobs {
+            // These sidecars are already remote, so any failed upload below must remove them.
+            for sst in sst_info.iter().filter(|sst| sst.blob_file_size() > 0) {
                 upload_tracker.push_uploaded_file(blob_path(
                     &upload_request
                         .dest_path_provider
@@ -382,6 +389,9 @@ impl WriteCache {
                 ));
             }
         }
+        let mut err = None;
+        let op_type = write_request.op_type;
+        let remote_store = &upload_request.remote_store;
         for sst in &sst_info {
             if context
                 .cancellation
@@ -395,6 +405,29 @@ impl WriteCache {
             let parquet_path = upload_request
                 .dest_path_provider
                 .build_sst_file_path(RegionFileId::new(region_id, sst.file_id));
+            if self.cache_blobs && sst.blob_file_size() > 0 {
+                let blob_key = IndexKey::new(region_id, sst.file_id, FileType::Blob);
+                let remote_blob_path = blob_path(&parquet_path);
+                let start = Instant::now();
+                if let Err(e) = self
+                    .upload_with_cancellation(
+                        blob_key,
+                        &remote_blob_path,
+                        remote_store,
+                        UploadOptions {
+                            op_type,
+                            write_buffer_size: write_opts.write_buffer_size,
+                        },
+                        context.cancellation.as_ref(),
+                    )
+                    .await
+                {
+                    err = Some(e);
+                    break;
+                }
+                metrics.upload_parquet += start.elapsed();
+                upload_tracker.push_uploaded_file(remote_blob_path);
+            }
             let start = Instant::now();
             if let Err(e) = self
                 .upload_with_cancellation(
@@ -674,6 +707,10 @@ impl UploadTracker {
         for sst in sst_info {
             let parquet_key = IndexKey::new(self.region_id, sst.file_id, FileType::Parquet);
             file_cache.remove(parquet_key).await;
+            if sst.blob_file_size() > 0 {
+                let blob_key = IndexKey::new(self.region_id, sst.file_id, FileType::Blob);
+                file_cache.remove(blob_key).await;
+            }
 
             if sst.index_metadata.file_size > 0 {
                 let puffin_key = IndexKey::new(

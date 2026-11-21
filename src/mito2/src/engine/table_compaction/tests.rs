@@ -24,12 +24,15 @@ use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::StorageOptions;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{RegionRequest, RegionTruncateRequest};
 use store_api::storage::{FileId, RegionId};
 
 use super::{PublicationOutcome, TableCompactionSnapshot};
+use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
+use crate::cache::CacheManager;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::lease_test::promote_to_await_leader_lease;
@@ -37,9 +40,12 @@ use crate::engine::region_hook::{RegionHook, RegionHookRef, VerifiedSstFileInfo}
 use crate::error::Error;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
+use crate::sst::FormatType;
 use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 use crate::sst::location;
-use crate::sst::parquet::blob::blob_path;
+use crate::sst::parquet::WriteOptions;
+use crate::sst::parquet::blob::{BlobResolver, blob_columns, blob_path};
+use crate::test_util::sst_util::new_flat_source_from_record_batches;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
@@ -50,6 +56,67 @@ fn config() -> MitoConfig {
         manifest_checkpoint_distance: 0,
         ..Default::default()
     }
+}
+
+/// Rewrites `source` into a new SST through the SST writer, so its external values
+/// reference its own sidecar, as a compactor output does. A byte copy cannot do this.
+async fn rewrite_sst(region: &MitoRegionRef, source: &FileMeta, level: u8) -> FileMeta {
+    assert_eq!(0, source.index_file_size);
+    let access = &region.access_layer;
+    let path = location::sst_file_path(access.table_dir(), source.file_id(), access.path_type());
+    let bytes = access.object_store().read(&path).await.unwrap().to_bytes();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+    let resolver = BlobResolver::new(
+        source.file_id,
+        access.object_store().clone(),
+        &path,
+        blob_columns(reader.metadata()),
+    );
+    let mut batches = Vec::new();
+    for batch in reader.build().unwrap() {
+        let batch = batch.unwrap();
+        match resolver.prepare(batch.clone()).unwrap() {
+            Some(mut pending) => {
+                while let Some(chunk) = resolver.next_chunk(&mut pending).await.unwrap() {
+                    batches.push(chunk);
+                }
+            }
+            None => batches.push(batch),
+        }
+    }
+    let config = config();
+    let info = access
+        .write_sst(
+            SstWriteRequest {
+                index_build_inputs: None,
+                op_type: OperationType::Compact,
+                metadata: region.version().metadata.clone(),
+                source: new_flat_source_from_record_batches(batches),
+                cache_manager: Arc::new(CacheManager::default()),
+                max_sequence: None,
+                sst_write_format: FormatType::Flat,
+                preserve_row_sequence: source.preserve_row_sequence,
+                index_options: Default::default(),
+                index_config: config.index.clone(),
+                inverted_index_config: config.inverted_index.clone(),
+                fulltext_index_config: config.fulltext_index.clone(),
+                bloom_filter_index_config: config.bloom_filter_index.clone(),
+            },
+            &WriteOptions::default(),
+            &mut Metrics::new(WriteType::Compaction),
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    let mut output = source.clone();
+    output.file_id = info.file_id;
+    output.level = level;
+    output.file_size = info.file_size;
+    output.blob_file_size = info.blob_file_size();
+    output.num_row_groups = info.num_row_groups;
+    output.max_row_group_uncompressed_size = info.max_row_group_uncompressed_size;
+    output.format = info.format;
+    output
 }
 
 async fn copy_sst(region: &MitoRegionRef, source: &FileMeta, level: u8) -> FileMeta {
@@ -1194,21 +1261,13 @@ async fn test_output_missing_its_sidecar_is_not_published() {
     let path = |file: &FileMeta| {
         location::sst_file_path(access.table_dir(), file.file_id(), access.path_type())
     };
-    let copy_sidecar = |source: FileMeta, target: FileMeta| async move {
-        access
-            .object_store()
-            .copy(&blob_path(&path(&source)), &blob_path(&path(&target)))
-            .await
-            .unwrap();
-    };
     let original = region.version().ssts.levels()[0]
         .files()
         .next()
         .unwrap()
         .meta_ref()
         .clone();
-    let shared = copy_sst(&region, &original, LEVEL_SHARED).await;
-    copy_sidecar(original.clone(), shared.clone()).await;
+    let shared = rewrite_sst(&region, &original, LEVEL_SHARED).await;
     engine
         .edit_region(
             region_id,
@@ -1221,7 +1280,11 @@ async fn test_output_missing_its_sidecar_is_not_published() {
         .await
         .unwrap();
     let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
-    let output = copy_sst(&region, &snapshot.inputs[0], 0).await;
+    let output = rewrite_sst(&region, &snapshot.inputs[0], 0).await;
+    let sidecar = blob_path(&path(&output));
+    let stash = format!("{sidecar}.stash");
+    let store = access.object_store();
+    store.rename(&sidecar, &stash).await.unwrap();
 
     assert!(
         engine
@@ -1234,7 +1297,7 @@ async fn test_output_missing_its_sidecar_is_not_published() {
         engine.table_compaction_snapshot(region_id).unwrap().inputs
     );
 
-    copy_sidecar(snapshot.inputs[0].clone(), output.clone()).await;
+    store.rename(&stash, &sidecar).await.unwrap();
     assert_eq!(
         PublicationOutcome::Applied,
         engine
