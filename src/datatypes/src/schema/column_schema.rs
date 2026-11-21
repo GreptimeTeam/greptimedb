@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::{fmt, mem};
 
-use arrow::datatypes::Field;
+use arrow::datatypes::{DataType as ArrowDataType, Field};
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
@@ -635,10 +635,14 @@ impl ColumnSchema {
 
     fn validate_storage_options(&self, options: &StorageOptions) -> Result<()> {
         options.validate()?;
+        // SSTs store external values by rewriting `Utf8` and `Binary` arrays only.
         ensure!(
             matches!(
                 self.data_type,
                 ConcreteDataType::String(_) | ConcreteDataType::Binary(_)
+            ) && matches!(
+                self.data_type.as_arrow_type(),
+                ArrowDataType::Utf8 | ArrowDataType::Binary
             ),
             error::InvalidStorageOptionSnafu {
                 msg: format!(
@@ -2025,6 +2029,8 @@ mod tests {
         for data_type in [
             ConcreteDataType::int64_datatype(),
             ConcreteDataType::json_datatype(),
+            ConcreteDataType::binary_view_datatype(),
+            ConcreteDataType::utf8_view_datatype(),
             ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
         ] {
             assert!(

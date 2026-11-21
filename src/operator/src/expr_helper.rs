@@ -567,6 +567,14 @@ pub fn expr_to_create(expr: &CreateTableExpr, quote_style: Option<char>) -> Resu
             extensions.compression_options = Some(opt.to_options_map().into());
         }
 
+        if let Some(opt) = column_schema
+            .storage_options()
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        {
+            extensions.storage_options = Some(opt.to_options_map().into());
+        }
+
         let sql_column = SqlColumn {
             column_def: ColumnDef {
                 name: Ident::with_quote(quote_style, &column_def.name),

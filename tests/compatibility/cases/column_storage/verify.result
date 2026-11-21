@@ -1,0 +1,63 @@
+SELECT ts, CAST(payload AS STRING) FROM legacy_blob ORDER BY ts;
+
++-------------------------+---------------------+
+| ts                      | legacy_blob.payload |
++-------------------------+---------------------+
+| 1970-01-01T00:00:00.001 | before upgrade      |
++-------------------------+---------------------+
+
+CREATE TABLE stored_blob (
+    ts TIMESTAMP TIME INDEX,
+    payload BINARY STORAGE WITH (threshold = '1KiB')
+);
+
+Affected Rows: 0
+
+INSERT INTO stored_blob SELECT * FROM legacy_blob;
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('stored_blob');
+
++----------------------------------+
+| ADMIN FLUSH_TABLE('stored_blob') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE stored_blob;
+
++-------------+---------------------------------------------------------------------------------+
+| Table       | Create Table                                                                    |
++-------------+---------------------------------------------------------------------------------+
+| stored_blob | CREATE TABLE IF NOT EXISTS "stored_blob" (                                      |
+|             |   "ts" TIMESTAMP(3) NOT NULL,                                                   |
+|             |   "payload" VARBINARY NULL STORAGE WITH(threshold = '1KiB', type = 'external'), |
+|             |   TIME INDEX ("ts")                                                             |
+|             | )                                                                               |
+|             |                                                                                 |
+|             | ENGINE=mito                                                                     |
+|             |                                                                                 |
++-------------+---------------------------------------------------------------------------------+
+
+INSERT INTO stored_blob VALUES (2, 'after restart');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('stored_blob');
+
++----------------------------------+
+| ADMIN FLUSH_TABLE('stored_blob') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+SELECT ts, CAST(payload AS STRING) FROM stored_blob ORDER BY ts;
+
++-------------------------+---------------------+
+| ts                      | stored_blob.payload |
++-------------------------+---------------------+
+| 1970-01-01T00:00:00.001 | before upgrade      |
+| 1970-01-01T00:00:00.002 | after restart       |
++-------------------------+---------------------+

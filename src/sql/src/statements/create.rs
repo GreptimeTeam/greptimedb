@@ -19,7 +19,9 @@ use std::ops::ControlFlow;
 use common_catalog::consts::{FILE_ENGINE, RELATIONAL_ENGINE};
 use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{CompressionOptions, FulltextOptions, SkippingIndexOptions};
+use datatypes::schema::{
+    CompressionOptions, FulltextOptions, SkippingIndexOptions, StorageOptions,
+};
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::ResultExt;
@@ -29,7 +31,7 @@ use sqlparser_derive::{Visit, VisitMut};
 use crate::ast::{ColumnDef, Ident, ObjectName};
 use crate::error::{
     InvalidFlowQuerySnafu, InvalidSqlSnafu, Result, SetCompressionOptionSnafu,
-    SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
+    SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu, SetStorageOptionSnafu,
 };
 use crate::statements::query::Query as GtQuery;
 use crate::statements::statement::Statement;
@@ -163,6 +165,8 @@ pub struct ColumnExtensions {
     pub inverted_index_options: Option<OptionMap>,
     /// SST compression options.
     pub compression_options: Option<OptionMap>,
+    /// SST storage options.
+    pub storage_options: Option<OptionMap>,
     /// JSON2-specific column options.
     pub json2_options: Option<Json2Options>,
 }
@@ -335,6 +339,11 @@ impl Column {
             write!(f, " COMPRESSION WITH({})", format_list_comma!(options))?;
         }
 
+        if let Some(storage_options) = &self.extensions.storage_options {
+            let options = storage_options.kv_pairs();
+            write!(f, " STORAGE WITH({})", format_list_comma!(options))?;
+        }
+
         Ok(())
     }
 }
@@ -367,6 +376,15 @@ impl ColumnExtensions {
 
         let options: HashMap<String, String> = options.clone().into_map();
         Ok(Some(options.try_into().context(SetCompressionOptionSnafu)?))
+    }
+
+    pub fn build_storage_options(&self) -> Result<Option<StorageOptions>> {
+        let Some(options) = self.storage_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let options: HashMap<String, String> = options.clone().into_map();
+        Ok(Some(options.try_into().context(SetStorageOptionSnafu)?))
     }
 
     pub fn build_json_settings(&self) -> Result<Option<JsonSettings>> {

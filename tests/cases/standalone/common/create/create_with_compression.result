@@ -57,6 +57,31 @@ ALTER TABLE spans MODIFY COLUMN tokens STRING;
 
 Error: 1004(InvalidArguments), Invalid compression option: encoding delta_binary_packed requires an integer or timestamp column, but column tokens is String
 
+ALTER TABLE spans ADD COLUMN note STRING COMPRESSION WITH (level = 5);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE spans;
+
++-------+--------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                       |
++-------+--------------------------------------------------------------------------------------------------------------------+
+| spans | CREATE TABLE IF NOT EXISTS "spans" (                                                                               |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                                                      |
+|       |   "trace_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'), |
+|       |   "prompt" STRING NULL COMPRESSION WITH(level = '3', page_size = '8MiB', type = 'zstd'),                           |
+|       |   "reply" STRING NULL COMPRESSION WITH(encoding = 'plain', level = '9', type = 'zstd'),                            |
+|       |   "tokens" BIGINT NULL COMPRESSION WITH(encoding = 'delta_binary_packed', page_size = '64KiB', type = 'zstd'),     |
+|       |   "note" STRING NULL COMPRESSION WITH(level = '5', type = 'zstd'),                                                 |
+|       |   TIME INDEX ("ts")                                                                                                |
+|       | )                                                                                                                  |
+|       |                                                                                                                    |
+|       | ENGINE=mito                                                                                                        |
+|       | WITH(                                                                                                              |
+|       |   append_mode = 'true'                                                                                             |
+|       | )                                                                                                                  |
++-------+--------------------------------------------------------------------------------------------------------------------+
+
 DROP TABLE spans;
 
 Affected Rows: 0

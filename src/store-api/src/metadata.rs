@@ -586,6 +586,10 @@ impl RegionMetadata {
             .column_schema
             .compression_options()
             .context(InvalidSchemaSnafu)?;
+        column_metadata
+            .column_schema
+            .storage_options()
+            .context(InvalidSchemaSnafu)?;
         if column_metadata.semantic_type == SemanticType::Timestamp {
             ensure!(
                 column_metadata.column_schema.data_type.is_timestamp(),

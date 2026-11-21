@@ -21,7 +21,7 @@ use common_query::native_histogram::is_native_histogram_value_type;
 use common_telemetry::info;
 use common_time::{FOREVER, Timestamp};
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{COMPRESSION_KEY, ColumnSchema, SkippingIndexOptions};
+use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
 use mito2::engine::MITO_ENGINE_NAME;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -52,8 +52,8 @@ use crate::error::{
 };
 use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::utils::{
-    self, append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id,
-    to_metadata_region_id,
+    self, append_manifest_info, encode_manifest_info_to_extensions,
+    ensure_no_logical_sst_column_options, to_data_region_id, to_metadata_region_id,
 };
 
 const DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY: u32 = 1024;
@@ -384,12 +384,7 @@ impl MetricEngineInner {
 
         if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
             for column in &request.column_metadatas {
-                ensure!(
-                    !column.column_schema.metadata().contains_key(COMPRESSION_KEY),
-                    UnexpectedRequestSnafu {
-                        reason: "COMPRESSION is not supported on logical tables; configure it on the physical table".to_string(),
-                    }
-                );
+                ensure_no_logical_sst_column_options(&column.column_schema)?;
             }
         }
 

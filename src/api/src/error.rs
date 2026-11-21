@@ -68,6 +68,24 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Invalid storage options for column {column}"))]
+    InvalidColumnStorage {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "STORAGE option is only supported on field columns, but column {column} is a {role} column"
+    ))]
+    StorageOnNonFieldColumn {
+        column: String,
+        role: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize JSON"))]
     SerializeJson {
         #[snafu(source)]
@@ -96,13 +114,15 @@ impl ErrorExt for Error {
         match self {
             Error::UnknownColumnDataType { .. }
             | Error::InvalidTimeUnit { .. }
-            | Error::InconsistentTimeUnit { .. } => StatusCode::InvalidArguments,
+            | Error::InconsistentTimeUnit { .. }
+            | Error::StorageOnNonFieldColumn { .. } => StatusCode::InvalidArguments,
             Error::IntoColumnDataType { .. } | Error::SerializeJson { .. } => {
                 StatusCode::Unexpected
             }
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::InvalidColumnDefaultConstraint { source, .. }
-            | Error::InvalidColumnCompression { source, .. } => source.status_code(),
+            | Error::InvalidColumnCompression { source, .. }
+            | Error::InvalidColumnStorage { source, .. } => source.status_code(),
         }
     }
 

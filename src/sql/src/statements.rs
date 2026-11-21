@@ -36,6 +36,7 @@ pub mod truncate;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::column_def::{options_from_compression, options_from_storage};
 use api::v1::{ColumnOptions, SemanticType};
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
@@ -59,7 +60,7 @@ use crate::ast::{
 use crate::error::{
     self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
     SerializeColumnDefaultConstraintSnafu, SetCompressionOptionSnafu, SetFulltextOptionSnafu,
-    SetSkippingIndexOptionSnafu, SqlCommonSnafu,
+    SetSkippingIndexOptionSnafu, SetStorageOptionSnafu, SqlCommonSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
@@ -155,6 +156,12 @@ pub fn column_to_schema(
             .context(SetCompressionOptionSnafu)?;
     }
 
+    if let Some(options) = column.extensions.build_storage_options()? {
+        column_schema = column_schema
+            .with_storage_options(options)
+            .context(SetStorageOptionSnafu)?;
+    }
+
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
 
     set_json2_extension(&mut column_schema, column)?;
@@ -219,7 +226,7 @@ pub fn sql_col_to_grpc_col_def(
         .extensions
         .build_json_settings()?
         .unwrap_or_else(JsonSettings::new_v2);
-    let options = json2_extension(&col.data_type, settings).map(|extension| {
+    let mut options = json2_extension(&col.data_type, settings).map(|extension| {
         let mut options = ColumnOptions::default();
         options.options.insert(
             EXTENSION_TYPE_NAME_KEY.to_string(),
@@ -232,6 +239,22 @@ pub fn sql_col_to_grpc_col_def(
         }
         options
     });
+    // ADD COLUMN builds the column from this definition, so it must carry SST column options.
+    if let Some(compression) = column.extensions.build_compression_options()? {
+        let compression =
+            options_from_compression(&compression).context(ConvertToGrpcDataTypeSnafu)?;
+        options
+            .get_or_insert_with(ColumnOptions::default)
+            .options
+            .extend(compression.options);
+    }
+    if let Some(storage) = column.extensions.build_storage_options()? {
+        let storage = options_from_storage(&storage).context(ConvertToGrpcDataTypeSnafu)?;
+        options
+            .get_or_insert_with(ColumnOptions::default)
+            .options
+            .extend(storage.options);
+    }
 
     Ok(api::v1::ColumnDef {
         name,
