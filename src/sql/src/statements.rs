@@ -35,18 +35,13 @@ pub mod truncate;
 
 use std::sync::Arc;
 
-use api::helper::ColumnDataTypeWrapper;
-use api::v1::column_def::options_from_compression;
-use api::v1::{ColumnOptions, SemanticType};
-use arrow_schema::extension::{
-    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
-};
+use api::v1::column_def::try_as_column_def;
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
+use datatypes::schema::{COMMENT_KEY, ColumnSchema};
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::types::{JsonFormat, JsonType, TimestampType};
 use datatypes::value::Value;
@@ -58,9 +53,8 @@ use crate::ast::{
     Value as SqlValue,
 };
 use crate::error::{
-    self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
-    SerializeColumnDefaultConstraintSnafu, SetCompressionOptionSnafu, SetFulltextOptionSnafu,
-    SetSkippingIndexOptionSnafu, SqlCommonSnafu,
+    self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result, SetCompressionOptionSnafu,
+    SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu, SqlCommonSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
@@ -181,78 +175,20 @@ fn set_json2_extension(column_schema: &mut ColumnSchema, column: &Column) -> Res
 }
 
 /// Converts a SQL [`Column`] to a `ColumnDef` in gRPC proto.
+///
+/// Goes through [`column_to_schema`], like CREATE TABLE, so ALTER TABLE ADD COLUMN keeps every
+/// column option that CREATE TABLE keeps.
 pub fn sql_col_to_grpc_col_def(
     column: &Column,
     timezone: Option<&Timezone>,
 ) -> Result<api::v1::ColumnDef> {
-    let col = &column.column_def;
-    let name = col.name.value.clone();
-    let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
-
-    let is_nullable = col
-        .options
-        .iter()
-        .all(|o| !matches!(o.option, ColumnOption::NotNull));
-
-    let default_constraint =
-        parse_column_default_constraint(&name, &data_type, &col.options, timezone)
-            .context(SqlCommonSnafu)?
-            .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
-            .transpose()
-            .context(SerializeColumnDefaultConstraintSnafu)?;
-    // convert ConcreteDataType to grpc ColumnDataTypeWrapper
-    let (datatype, datatype_ext) = ColumnDataTypeWrapper::try_from(data_type.clone())
-        .context(ConvertToGrpcDataTypeSnafu)?
-        .to_parts();
-
-    let is_primary_key = col
-        .options
+    // An added column is never the time index.
+    let column_schema = column_to_schema(column, "", timezone)?;
+    let is_primary_key = column
+        .options()
         .iter()
         .any(|o| matches!(o.option, ColumnOption::PrimaryKey(..)));
-
-    let semantic_type = if is_primary_key {
-        SemanticType::Tag
-    } else {
-        SemanticType::Field
-    };
-
-    let settings = column
-        .extensions
-        .build_json_settings()?
-        .unwrap_or_else(JsonSettings::new_v2);
-    let mut options = json2_extension(&col.data_type, settings).map(|extension| {
-        let mut options = ColumnOptions::default();
-        options.options.insert(
-            EXTENSION_TYPE_NAME_KEY.to_string(),
-            Json2ExtensionType::NAME.to_string(),
-        );
-        if let Some(metadata) = extension.serialize_metadata() {
-            options
-                .options
-                .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), metadata);
-        }
-        options
-    });
-    // ADD COLUMN builds the column from this definition, so it must carry SST column options.
-    if let Some(compression) = column.extensions.build_compression_options()? {
-        let compression =
-            options_from_compression(&compression).context(ConvertToGrpcDataTypeSnafu)?;
-        options
-            .get_or_insert_with(ColumnOptions::default)
-            .options
-            .extend(compression.options);
-    }
-
-    Ok(api::v1::ColumnDef {
-        name,
-        data_type: datatype as i32,
-        is_nullable,
-        default_constraint: default_constraint.unwrap_or_default(),
-        semantic_type: semantic_type as _,
-        comment: String::new(),
-        datatype_extension: datatype_ext,
-        options,
-    })
+    try_as_column_def(&column_schema, is_primary_key).context(ConvertToGrpcDataTypeSnafu)
 }
 
 fn json2_extension(data_type: &SqlDataType, settings: JsonSettings) -> Option<Json2ExtensionType> {
@@ -408,9 +344,10 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use api::v1::ColumnDataType;
+    use api::v1::{ColumnDataType, SemanticType};
     use datatypes::schema::{
-        COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, FulltextAnalyzer,
+        COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+        ColumnDefaultConstraint, FulltextAnalyzer,
     };
     use sqlparser::ast::{ColumnOptionDef, Expr, PrimaryKeyConstraint};
 
