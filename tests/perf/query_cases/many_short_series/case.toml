@@ -34,10 +34,15 @@
 #
 # Query matrix: one entry per plan shape the native fused-series route is meant
 # to answer, plus the controls that keep a shape's timing honest. Every query is
-# measured as `TQL ANALYZE VERBOSE` because the framework reads
+# measured as `TQL ANALYZE VERBOSE FORMAT JSON` because the framework reads
 # `execution_time_ms` out of the ANALYZE output (a bare `TQL EVAL` returns rows
-# only; see `query_regression_runner::measure`). Warmup 3 / iterations 9
-# throughout.
+# only; see `query_regression_runner::measure`), and every entry sets
+# `require_native = true` so the runner also states the
+# `query.experimental_native_promql` hint and asserts the native route from the
+# statement's JSON plan tree before it times the query. The assertion reads node
+# names only (`FusedSeries`/`FusedSeriesExec`) and fails the run on any other
+# plan; the text form cannot prove the route, because a plan line may begin with
+# a label value. Warmup 3 / iterations 9 throughout.
 #
 # Two deviations from a literal reading of "binary + matching", both required to
 # keep the query *valid* rather than to reach the native route (the route
@@ -115,7 +120,8 @@ series_layout = "timestamp_major"
 [[scenario.queries]]
 name = "selector_all_control"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') many_short_series"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') many_short_series"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -126,7 +132,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "rate_5m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') rate(many_short_series[5m])"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m])"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -139,7 +146,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "sum_rate_5m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') sum(rate(many_short_series[5m]))"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') sum(rate(many_short_series[5m]))"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -150,7 +158,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "sum_by_host_rate_5m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') sum by (host) (rate(many_short_series[5m]))"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') sum by (host) (rate(many_short_series[5m]))"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -162,7 +171,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "count_by_host_rate_5m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') count by (host) (rate(many_short_series[5m]))"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') count by (host) (rate(many_short_series[5m]))"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -173,7 +183,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "topk_5_rate_5m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') topk(5, rate(many_short_series[5m]))"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') topk(5, rate(many_short_series[5m]))"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -186,7 +197,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "rate_ratio_on_host_instance"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') rate(many_short_series[5m]) / on(host, instance) rate(many_short_series[5m])"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m]) / on(host, instance) rate(many_short_series[5m])"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -199,7 +211,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "sum_by_host_ratio_ignoring_instance"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') sum by (host) (rate(many_short_series[5m])) / ignoring(instance) sum by (host) (rate(many_short_series[5m]))"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') sum by (host) (rate(many_short_series[5m])) / ignoring(instance) sum by (host) (rate(many_short_series[5m]))"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -211,7 +224,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "avg_over_time_1m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') avg_over_time(many_short_series[1m])"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') avg_over_time(many_short_series[1m])"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -221,7 +235,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "max_over_time_5m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') max_over_time(many_short_series[5m])"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') max_over_time(many_short_series[5m])"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -231,7 +246,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "quantile_over_time_09_5m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') quantile_over_time(0.9, many_short_series[5m])"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') quantile_over_time(0.9, many_short_series[5m])"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -242,7 +258,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "label_replace_dst_from_host"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') label_replace(rate(many_short_series[5m]), 'dst', '$1', 'host', '(.*)')"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') label_replace(rate(many_short_series[5m]), 'dst', '$1', 'host', '(.*)')"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -254,7 +271,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "rate_gt_05_filter"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') rate(many_short_series[5m]) > 0.5"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m]) > 0.5"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -264,7 +282,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "rate_gt_bool_05"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') rate(many_short_series[5m]) > bool 0.5"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m]) > bool 0.5"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -276,7 +295,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "rate_and_rate"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') rate(many_short_series[5m]) and rate(many_short_series[5m])"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m]) and rate(many_short_series[5m])"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -289,7 +309,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "max_over_time_rate_10m_1m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '1m') max_over_time(rate(many_short_series[5m])[10m:1m])"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '1m') max_over_time(rate(many_short_series[5m])[10m:1m])"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -304,7 +325,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "rate_5m_offset_1m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') rate(many_short_series[5m] offset 1m)"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m] offset 1m)"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -314,7 +336,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "rate_5m_at_1704067200_empty_control"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067245, 1704067305, '15s') rate(many_short_series[5m] @ 1704067200)"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '15s') rate(many_short_series[5m] @ 1704067200)"
+require_native = true
 warmup = 3
 iterations = 9
 
@@ -328,7 +351,8 @@ max_candidate_latency_regression_pct = 20
 [[scenario.queries]]
 name = "instant_selector_host1"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067305, 1704067305, '15s') many_short_series{host=\"host1\"}"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067305, 1704067305, '15s') many_short_series{host=\"host1\"}"
+require_native = true
 warmup = 3
 iterations = 9
 
