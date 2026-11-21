@@ -252,6 +252,31 @@ fn set_over(left: NativeNode, right: NativeNode, out: Arc<EvalGrid>) -> NativeNo
     }
 }
 
+/// `last_over_time(inner[5m])`, a window that folds `inner` onto `out` and keeps the metric name.
+fn keeping_window_over(
+    inner: NativeNode,
+    input_grid: Option<Arc<EvalGrid>>,
+    out: Arc<EvalGrid>,
+) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 300_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), out),
+    }
+}
+
 /// `rate(inner[5m])`, a window that folds `inner` onto `out` and drops the metric name.
 fn window_over(
     inner: NativeNode,
@@ -328,9 +353,33 @@ fn merges(tree: &NativeTree) -> usize {
 }
 
 /// Runs the pass over `root`, whose sources report `source_tags`.
+///
+/// Nothing is stated about which metric each source reads, so a kernel that drops the metadata
+/// labels over one of them proves nothing and is collected.
 fn passed(root: NativeNode, source_tags: &[Vec<String>]) -> NativeTree {
+    passed_over(root, source_tags, &[])
+}
+
+/// Runs the pass over `root`, whose sources report `source_tags` and read the metric each of
+/// `source_metrics` names, indexed the way `merge_label_rewrites` takes it.
+///
+/// The scans below these fixtures key their series by columns that always decode a value, which is
+/// not what the pass reads: the labels are the whole of a metadata drop's proof, and the nullable-key
+/// fixtures state the pair it leaves outside itself.
+fn passed_over(
+    root: NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+) -> NativeTree {
     let tree = NativeTree::try_new(root).expect("the fixture is a legal tree");
-    merge_label_rewrites(&tree, source_tags).expect("the pass produces a legal tree")
+    merge_label_rewrites(&tree, source_tags, source_metrics)
+        .expect("the pass produces a legal tree")
+}
+
+/// The labels a scan bound to one metric reports: its tag, and the name the binding gives every
+/// series it hands over, which is not a tag column.
+fn named_scan_tags() -> Vec<Vec<String>> {
+    vec![tags(&["host", "__name__"])]
 }
 
 fn tags(names: &[&str]) -> Vec<String> {
@@ -438,7 +487,7 @@ fn presence_and_folding_vector_operations_collect_aliasing_inputs() {
         };
         assert!(matches!(input.expr, NativeExpr::Map { .. }), "{op:?}");
 
-        let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+        let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
         assert_eq!(1, merges(&twice), "{op:?}");
         assert_eq!(tree.to_string(), twice.to_string(), "{op:?}");
     }
@@ -493,7 +542,7 @@ fn rewrites_after_ranking_or_grouping_are_collected() {
             ),
             "{name}"
         );
-        let twice = merge_label_rewrites(&tree, &source_tags).unwrap();
+        let twice = merge_label_rewrites(&tree, &source_tags, &[]).unwrap();
         assert_eq!(tree.to_string(), twice.to_string(), "{name}");
         assert_eq!(1, merges(&twice), "{name}");
     }
@@ -504,7 +553,8 @@ fn a_rewrite_above_a_match_collects_the_matches_own_labels() {
     let out = grid(0, 1000, 2);
     // A match answers one series per label set, but those labels are its operands': renaming `host`
     // to a constant above it puts both sides' results under one set, so the consumer above the
-    // rewrite is the one that has to collect them. The match itself reads its operands as they are.
+    // rewrite is the one that has to collect them. The match itself reads its operands as they are;
+    // the one on the right drops the metadata labels, so its own answer is collected.
     let matched = binary_over(selected(&out), abs_map(selected(&out)), Arc::clone(&out));
     let renamed = map_ops(
         matched,
@@ -513,7 +563,11 @@ fn a_rewrite_above_a_match_collects_the_matches_own_labels() {
         ))],
     );
     let tree = passed(renamed, &scan_tags());
-    assert_eq!(1, merges(&tree));
+    assert_eq!(
+        2,
+        merges(&tree),
+        "the rewrite's own collection, and the one the name-dropping operand hands out: {tree}"
+    );
     let NativeExpr::Merge { input } = &tree.root().expr else {
         panic!("the statement must collect the rewrite above the match");
     };
@@ -524,9 +578,9 @@ fn a_rewrite_above_a_match_collects_the_matches_own_labels() {
         matches!(input.expr, NativeExpr::Binary { .. }),
         "the match is not handed the rewritten operand"
     );
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
     assert_eq!(tree.to_string(), twice.to_string());
-    assert_eq!(1, merges(&twice));
+    assert_eq!(2, merges(&twice));
 }
 
 #[test]
@@ -586,18 +640,21 @@ fn a_pointwise_map_reads_each_piece_as_it_is() {
         abs_map(rewrite(selected(&out), "host", "host")),
         &scan_tags(),
     );
-    assert_eq!(1, merges(&tree));
-    // The map stays the root and its input is the merge: a map reads pieces point-wise, but a point
-    // it reads can be one it drops, so the collection has to happen below it.
-    let NativeExpr::Map { input, .. } = &tree.root().expr else {
+    // Two collections: one below the map, because a map reads pieces point-wise and a point it
+    // reads can be one it drops, and one above it, for the metadata labels the map itself drops.
+    assert_eq!(2, merges(&tree), "{tree}");
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what the map hands out: {tree}");
+    };
+    let NativeExpr::Map { input, .. } = &input.expr else {
         panic!("the root stays the point-wise map");
     };
     let NativeExpr::Merge { input } = &input.expr else {
         panic!("the map is handed one series per label set");
     };
     assert!(matches!(input.expr, NativeExpr::Map { .. }));
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
-    assert_eq!(1, merges(&twice));
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
+    assert_eq!(2, merges(&twice));
     assert_eq!(tree.to_string(), twice.to_string());
 }
 
@@ -613,8 +670,15 @@ fn a_sample_dropping_map_collects_below_itself() {
         ))],
     );
     let tree = passed(histogram_count(aliasing), &scan_tags());
-    assert_eq!(1, merges(&tree), "one merge, below the sample-dropping map");
-    let NativeExpr::Map { input, .. } = &tree.root().expr else {
+    assert_eq!(
+        2,
+        merges(&tree),
+        "one merge below the sample-dropping map, one for the labels it drops"
+    );
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what `histogram_count` hands out: {tree}");
+    };
+    let NativeExpr::Map { input, .. } = &input.expr else {
         panic!("the root stays `histogram_count`");
     };
     let NativeExpr::Merge { input } = &input.expr else {
@@ -633,36 +697,51 @@ fn a_sample_dropping_map_collects_below_itself() {
     );
     // A second pass over the collected tree changes nothing: the merge answers one series per label
     // set, so nothing below the map aliases any more.
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
-    assert_eq!(1, merges(&twice));
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
+    assert_eq!(2, merges(&twice));
     assert_eq!(tree.to_string(), twice.to_string());
 }
 
 #[test]
-fn a_pointwise_map_over_a_clean_input_gains_no_merge() {
+fn a_pointwise_map_collects_its_own_name_drop() {
     let out = grid(0, 1000, 2);
-    // No rewrite anywhere in the tree, so no two pieces can share a label set.
+    // No rewrite anywhere in the tree, so no two pieces were told apart by a label one of them
+    // wrote - but `abs` drops the metadata labels, and the drop is a source of duplicates of its
+    // own: a key column that holds `NULL` in one stored series and `''` in another decodes to an
+    // absent and to an empty label, and both are gone once the empty one goes. Each map's answer is
+    // therefore collected, and both sit above the map that hands them out.
     let tree = passed(abs_map(abs_map(selected(&out))), &scan_tags());
-    assert_eq!(0, merges(&tree));
-    let NativeExpr::Map { input, .. } = &tree.root().expr else {
-        panic!("the root stays the point-wise map");
+    assert_eq!(2, merges(&tree), "{tree}");
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what the outer map hands out: {tree}");
     };
-    assert!(matches!(input.expr, NativeExpr::Map { .. }));
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    let NativeExpr::Map { input, .. } = &input.expr else {
+        panic!("the merge sits above the map, not below it: {tree}");
+    };
+    let NativeExpr::Merge { input } = &input.expr else {
+        panic!("the outer map reads one series per label set: {tree}");
+    };
+    assert!(matches!(input.expr, NativeExpr::Map { .. }), "{tree}");
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
+    assert_eq!(2, merges(&twice));
     assert_eq!(tree.to_string(), twice.to_string());
 }
 
 #[test]
-fn a_sample_dropping_map_over_a_fresh_destination_gains_no_merge() {
+fn a_sample_dropping_map_over_a_fresh_destination_collects_its_own_drop() {
     let out = grid(0, 1000, 2);
     // `dst` names no label the scan reports, so the rewrite cannot alias and the map's input needs
-    // no collection even though the map drops samples.
+    // no collection even though the map drops samples - but the metadata labels `histogram_count`
+    // drops are a source of duplicates of their own, so its answer is collected.
     let tree = passed(
         histogram_count(rewrite(selected(&out), "dst", "host")),
         &scan_tags(),
     );
-    assert_eq!(0, merges(&tree), "a fresh destination cannot alias");
-    let NativeExpr::Map { input, .. } = &tree.root().expr else {
+    assert_eq!(1, merges(&tree), "a fresh destination cannot alias: {tree}");
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what `histogram_count` hands out: {tree}");
+    };
+    let NativeExpr::Map { input, .. } = &input.expr else {
         panic!("the root stays `histogram_count`");
     };
     assert!(matches!(input.expr, NativeExpr::Map { .. }));
@@ -680,10 +759,15 @@ fn a_parameterized_map_collects_below_itself() {
         ),
         &scan_tags(),
     );
-    assert_eq!(1, merges(&tree));
+    // One below the map, for the point a clamp can empty, and one above it, for the metadata labels
+    // the kernel drops.
+    assert_eq!(2, merges(&tree), "{tree}");
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what the clamp hands out: {tree}");
+    };
     let NativeExpr::ParameterizedMap {
         input, parameters, ..
-    } = &tree.root().expr
+    } = &input.expr
     else {
         panic!("the root stays the parameterized map");
     };
@@ -696,8 +780,8 @@ fn a_parameterized_map_collects_below_itself() {
         matches!(parameters[0].expr, NativeExpr::Scalar(_)),
         "a scalar argument is not collected"
     );
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
-    assert_eq!(1, merges(&twice));
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
+    assert_eq!(2, merges(&twice));
     assert_eq!(tree.to_string(), twice.to_string());
 }
 
@@ -709,12 +793,16 @@ fn each_side_of_a_match_is_collected_on_its_own() {
         binary_over(aliasing(), abs_map(selected(&out)), Arc::clone(&out)),
         &scan_tags(),
     );
-    assert_eq!(1, merges(&tree), "only the aliasing side needs collecting");
+    assert_eq!(
+        2,
+        merges(&tree),
+        "the aliasing side and the name-dropping side are each collected: {tree}"
+    );
     let NativeExpr::Binary { left, right, .. } = &tree.root().expr else {
         panic!("the root stays the match");
     };
     assert!(matches!(left.expr, NativeExpr::Merge { .. }));
-    assert!(!matches!(right.expr, NativeExpr::Merge { .. }));
+    assert!(matches!(right.expr, NativeExpr::Merge { .. }));
 }
 
 #[test]
@@ -736,9 +824,10 @@ fn a_set_operation_collects_each_side() {
 #[test]
 fn a_window_collects_an_aliasing_child() {
     let out = grid(0, 1000, 2);
-    // A window over an evaluated vector folds one series' range, so it reads the series whole.
+    // A window over an evaluated vector folds one series' range, so it reads the series whole. The
+    // window keeps the metric name here, so the rewrite below it is the only source of duplicates.
     let tree = passed(
-        window_over(
+        keeping_window_over(
             rewrite(selected(&out), "host", "host"),
             Some(Arc::clone(&out)),
             Arc::clone(&out),
@@ -756,8 +845,575 @@ fn a_window_collects_an_aliasing_child() {
 fn a_window_over_a_raw_scan_collects_nothing() {
     let out = grid(0, 1000, 2);
     // The scan hands over whole storage series, and a merge cannot take raw samples anyway.
-    let tree = passed(window_over(raw_input(0), None, out), &scan_tags());
+    let tree = passed(keeping_window_over(raw_input(0), None, out), &scan_tags());
     assert_eq!(0, merges(&tree));
+}
+
+#[test]
+fn a_name_dropping_window_is_collected_by_its_consumer() {
+    let out = grid(0, 1000, 2);
+    // `rate` drops the metric name, which is part of the identity a merge groups by: a caller that
+    // says nothing about which metric the scan reads collects what the window hands out.
+    let tree = passed(
+        window_over(raw_input(0), None, Arc::clone(&out)),
+        &named_scan_tags(),
+    );
+    assert_eq!(1, merges(&tree));
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what the window hands out: {tree}");
+    };
+    assert!(
+        matches!(input.expr, NativeExpr::Window { .. }),
+        "the merge sits above the window, not below it"
+    );
+}
+
+#[test]
+fn a_name_dropping_window_over_one_metric_streams() {
+    let out = grid(0, 1000, 2);
+    // The scan is bound to one metric, so every series it hands over is named the same thing:
+    // dropping that name tells none of them apart, and the window keeps every partition.
+    //
+    // The key columns are the other half of that proof, and this fixture states the half that holds:
+    // every one of them always decodes a value, so the empty label value the drop removes with the
+    // name never stood for a second stored series.
+    let tree = passed_over(
+        window_over(raw_input(0), None, Arc::clone(&out)),
+        &named_scan_tags(),
+        &[Some(Arc::from("some_metric"))],
+    );
+    assert_eq!(0, merges(&tree), "{tree}");
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Window { .. }),
+        "the root stays the window: {tree}"
+    );
+}
+
+/// Two stored series of one metric that differ only in a tag column holding `NULL` in one and `''`
+/// in the other: `{host="web-1", zone=""}` and `{host="web-1"}` are two series to the scan, and
+/// `rate` drops the metric name and the empty `zone` with it, so both leave the window as
+/// `{host="web-1"}`.
+///
+/// The labels alone cannot tell them apart - they share host, zone is about to go, and the name is
+/// the one every series of the scan shares - but the pair is deliberately outside the drop's proof:
+/// it is a property of a nullable tag column, and every tag column of a metric-engine table is
+/// nullable, so collecting for it would put a canonical merge over every statement whose kernel
+/// drops the metadata labels. Nothing is collected, and the window keeps its partitions; the plan
+/// time count of the statements this leaves unproved is
+/// [`leaves_a_drop_to_the_storage_keys`](crate::native::plan::leaves_a_drop_to_the_storage_keys).
+#[test]
+fn a_nullable_key_tag_does_not_collect_the_window_that_drops_an_empty_value() {
+    let out = grid(0, 1000, 2);
+    // A scan of one metric whose tags are `host` and `zone`, the second of which is a nullable key
+    // column: the pair above is one storage key away from being two.
+    let scan = [tags(&["host", "zone", "__name__"])];
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let tree = passed_over(
+        window_over(raw_input(0), None, Arc::clone(&out)),
+        &scan,
+        &single,
+    );
+    assert_eq!(
+        0,
+        merges(&tree),
+        "a nullable key column is not what the drop is proved by, so nothing is collected: {tree}"
+    );
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Window { .. }),
+        "the root stays the window: {tree}"
+    );
+}
+
+#[test]
+fn a_name_dropping_window_over_several_metrics_is_collected() {
+    let out = grid(0, 1000, 2);
+    // A selector that discovered several metrics binds no single name, so two of its series can be
+    // told apart by the name alone - and dropping it folds them into one label set.
+    let tree = passed_over(
+        window_over(raw_input(0), None, Arc::clone(&out)),
+        &named_scan_tags(),
+        &[None],
+    );
+    assert_eq!(1, merges(&tree), "{tree}");
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Merge { .. }),
+        "the root collects what the window hands out: {tree}"
+    );
+}
+
+#[test]
+fn a_metadata_tag_in_the_binding_fails_closed() {
+    let out = grid(0, 1000, 2);
+    // `__type__` and `__unit__` go with the name, and a scan that carries one of them as a tag can
+    // hold two series that differ only there. A fixed metric name proves nothing about them, so the
+    // drop stays collected.
+    for metadata in ["__type__", "__unit__"] {
+        let scan = vec![tags(&["host", "__name__", metadata])];
+        let tree = passed_over(
+            window_over(raw_input(0), None, Arc::clone(&out)),
+            &scan,
+            &[Some(Arc::from("some_metric"))],
+        );
+        assert_eq!(1, merges(&tree), "{metadata}: {tree}");
+    }
+}
+
+/// The name a name-dropping kernel removes is the one every series of a single-metric scan shares,
+/// and nothing else it drops tells two of them apart, so a math map, a histogram map, a
+/// parameterized math kernel and an arithmetic scalar broadcast handed such a source keep every
+/// partition.
+///
+/// A key column that can spell `NULL` in one series and `''` in another is not part of that proof
+/// (see [`duplicates_canonical_labels`]), so these fixtures answer the same over a metric-engine
+/// table, whose tag columns are all nullable, as they do over the scans stated here.
+#[test]
+fn a_name_dropping_kernel_over_one_metric_keeps_its_partitions() {
+    let out = grid(0, 1000, 2);
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let kept = |name: &str, root: NativeNode| {
+        let tree = passed_over(root, &named_scan_tags(), &single);
+        assert_eq!(0, merges(&tree), "`{name}` cannot alias: {tree}");
+        assert!(
+            !matches!(tree.root().expr, NativeExpr::Merge { .. }),
+            "`{name}` hands over one series per label set already: {tree}"
+        );
+    };
+    // A math map.
+    kept("abs", abs_map(selected(&out)));
+    // A histogram map.
+    kept("histogram_count", histogram_count(selected(&out)));
+    // A parameterized math kernel.
+    kept(
+        "clamp_min",
+        clamp_min(selected(&out), scalar(0.0, Arc::clone(&out))),
+    );
+    // An arithmetic scalar broadcast, `x * 2`.
+    kept(
+        "x * 2",
+        binary_over(
+            selected(&out),
+            scalar(2.0, Arc::clone(&out)),
+            Arc::clone(&out),
+        ),
+    );
+}
+
+/// The same kernels over a binding that carries `__type__` or `__unit__` as a tag are collected at
+/// the root.
+///
+/// Those two go with the name when a kernel drops it, so two series that differ only there meet once
+/// the drop removes them, whatever the scan's key columns read otherwise: this is the labels half
+/// failing, not the key half. It is asked before the key columns are.
+#[test]
+fn a_name_dropping_kernel_over_a_metadata_tag_is_collected() {
+    let out = grid(0, 1000, 2);
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let collected = |name: &str, tags: &[Vec<String>], root: NativeNode| {
+        let tree = passed_over(root, tags, &single);
+        assert_eq!(1, merges(&tree), "`{name}` drops the name: {tree}");
+        assert!(
+            matches!(tree.root().expr, NativeExpr::Merge { .. }),
+            "`{name}` hands out one series per label set: {tree}"
+        );
+    };
+    for metadata in ["__type__", "__unit__"] {
+        let scan = vec![tags(&["host", "__name__", metadata])];
+        collected("abs", &scan, abs_map(selected(&out)));
+        collected("histogram_count", &scan, histogram_count(selected(&out)));
+        collected(
+            "clamp_min",
+            &scan,
+            clamp_min(selected(&out), scalar(0.0, Arc::clone(&out))),
+        );
+        collected(
+            "x * 2",
+            &scan,
+            binary_over(
+                selected(&out),
+                scalar(2.0, Arc::clone(&out)),
+                Arc::clone(&out),
+            ),
+        );
+    }
+}
+
+/// A name-dropping kernel above another one asks for no collection of its own, and neither does a
+/// broadcast above a window that drops the name: `rate(x[5m]) * 2` plans one window and one
+/// broadcast, and `abs(abs(rate(x[5m])))` one window and two maps, with no merge in either.
+///
+/// A key column that can hold `NULL` in one series and `''` in the other is not what the drop is
+/// proved by (see [`duplicates_canonical_labels`]), so this is the answer over a metric-engine table
+/// too. What a chain of drops is collected for is a collision the labels do not prove - one
+/// collection per collision, and none per kernel that repeats a drop nothing can fold: see
+/// [`a_merge_below_a_drop_does_not_answer_the_metadata_labels`].
+#[test]
+fn a_drop_above_a_name_dropping_kernel_needs_no_collection() {
+    let out = grid(0, 1000, 2);
+    // What the planner states for a scan of one metric: its tag columns and the name the binding
+    // gives every series it hands over.
+    let scan = [tags(&["host", "zone", "__name__"])];
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let rate = || window_over(raw_input(0), None, Arc::clone(&out));
+    // `rate(x[5m]) * 2`: the broadcast drops the metadata labels the window dropped already.
+    let broadcast = binary_over(rate(), scalar(2.0, Arc::clone(&out)), Arc::clone(&out));
+    // `abs(abs(rate(x[5m])))`: two math kernels above the window, neither of which can fold a pair
+    // the window left distinct.
+    let nested = abs_map(abs_map(rate()));
+    for (query, root) in [
+        ("rate(x[5m]) * 2", broadcast),
+        ("abs(abs(rate(x[5m])))", nested),
+    ] {
+        let tree = passed_over(root, &scan, &single);
+        assert_eq!(0, merges(&tree), "`{query}` plans a merge: {tree}");
+    }
+}
+
+/// A merge below a drop does not answer the metadata labels: a merge keeps two series that differ in
+/// `__name__`, `__type__` or `__unit__`, and removing those is exactly what a metadata drop does.
+/// Two metrics whose ordinary labels are equal are therefore still collected above a merge, one
+/// merge per collision.
+///
+/// A selector that discovered several metrics is that shape: each metric's window is collected for
+/// the name it drops, and the map above the merge is collected again for the name the merge kept.
+#[test]
+fn a_merge_below_a_drop_does_not_answer_the_metadata_labels() {
+    let out = grid(0, 1000, 2);
+    let scan = [tags(&["host", "__name__"])];
+    // The source may hand over several metrics, which is what leaves the labels half unproved above
+    // the window's merge.
+    let tree = passed_over(
+        abs_map(window_over(raw_input(0), None, Arc::clone(&out))),
+        &scan,
+        &[None],
+    );
+    assert_eq!(
+        2,
+        merges(&tree),
+        "the window's name drop and the map's are two collisions, and the merge between them \
+         cannot fold the names they remove: {tree}"
+    );
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what the map hands out: {tree}");
+    };
+    let NativeExpr::Map { input, .. } = &input.expr else {
+        panic!("the root stays the map: {tree}");
+    };
+    assert!(
+        matches!(input.expr, NativeExpr::Merge { .. }),
+        "the window's answer is collected below the map: {tree}"
+    );
+}
+
+/// A node that only rewrites labels hands its input's identity on, which is what lets a drop above
+/// it be proved by the labels - except when the rewrite writes the metric name itself.
+///
+/// The claim `single_metric_name` makes is that the name the drop removes told none of the node's
+/// series apart, because every one of them carries the name the scan bound. A rewrite whose
+/// destination is `__name__` publishes a name of its own, so that claim no longer holds and the drop
+/// above it is collected; a rewrite of a label the name claim does not read leaves it alone and
+/// costs nothing.
+#[test]
+fn a_rewrite_of_the_metric_name_leaves_the_drop_unproved() {
+    let out = grid(0, 1000, 2);
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    // `abs(label_replace(x, "dst", "$1", "host", "(.*)"))`: the rewrite writes a label the input
+    // does not carry, so the node still reads the one metric the scan bound and the name the drop
+    // removes told none of its series apart.
+    let tree = passed_over(
+        abs_map(rewrite(selected(&out), "dst", "host")),
+        &named_scan_tags(),
+        &single,
+    );
+    assert_eq!(
+        0,
+        merges(&tree),
+        "a rewrite of another label keeps the name the scan bound: {tree}"
+    );
+    // `abs(label_replace(x, "__name__", "$1", "host", "(.*)"))`: the name every series is filed
+    // under is written here, so the rewrite is collected for the names it can fold and the drop above
+    // it is no longer proved - the node below does not hand on the name the scan bound.
+    let tree = passed_over(
+        abs_map(rewrite(selected(&out), "__name__", "host")),
+        &named_scan_tags(),
+        &single,
+    );
+    assert_eq!(
+        2,
+        merges(&tree),
+        "a rewrite of the metric name collects itself and leaves the drop above it unproved: {tree}"
+    );
+}
+
+/// A `Merge` collects what collided below it, and the drop its consumer performs above it is then
+/// asked about labels the merge already told apart: a merge keeps the first piece's label set, so
+/// whether the drop folds two of its series is the labels half alone
+/// (`a_merge_below_a_drop_does_not_answer_the_metadata_labels`). One collision is one collection,
+/// rather than one per kernel that repeats the collapse.
+#[test]
+fn a_drop_above_a_merge_needs_no_collection_of_its_own() {
+    let out = grid(0, 1000, 2);
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    // `label_replace(x, "host", "$1", "host", "(.*)")`: every host is renamed to one value, so the
+    // rewrite folds the scan's series into one label set and the pass collects it there.
+    let aliasing = || rewrite(selected(&out), "host", "host");
+
+    // `label_replace(x, "host", "$1", "host", "(.*)") * 2`: the broadcast drops the metadata labels
+    // above a merge, which cannot fold two series the merge already told apart.
+    let tree = passed_over(
+        binary_over(aliasing(), scalar(2.0, Arc::clone(&out)), Arc::clone(&out)),
+        &named_scan_tags(),
+        &single,
+    );
+    assert_eq!(1, merges(&tree), "`label_replace(...) * 2`: {tree}");
+    let NativeExpr::Binary { left, .. } = &tree.root().expr else {
+        panic!("the root stays the broadcast: {tree}");
+    };
+    let NativeExpr::Merge { input } = &left.expr else {
+        panic!("the vector side is handed one series per label set: {tree}");
+    };
+    assert!(
+        matches!(input.expr, NativeExpr::Map { .. }),
+        "the merge sits above the rewrite, and no second one above the match: {tree}"
+    );
+
+    // `abs(abs(rate(label_replace(...)[5m])))`: the rewrite's collision is the one collection, and
+    // neither map above it asks for another - the name each of them drops is the one metric the
+    // scan bound, so it told none of the series the merge holds apart.
+    let tree = passed_over(
+        abs_map(abs_map(window_over(
+            aliasing(),
+            Some(Arc::clone(&out)),
+            Arc::clone(&out),
+        ))),
+        &named_scan_tags(),
+        &single,
+    );
+    assert_eq!(
+        1,
+        merges(&tree),
+        "`abs(abs(rate(label_replace(...)[5m])))`: {tree}"
+    );
+    let NativeExpr::Map { input, .. } = &tree.root().expr else {
+        panic!("the root stays the outer map: {tree}");
+    };
+    let NativeExpr::Map { input, .. } = &input.expr else {
+        panic!("the two maps are not collected apart: {tree}");
+    };
+    let NativeExpr::Window { input, .. } = &input.expr else {
+        panic!("the inner map reads the window: {tree}");
+    };
+    assert!(
+        matches!(input.expr, NativeExpr::Merge { .. }),
+        "the one merge sits above the rewrite: {tree}"
+    );
+    // A second pass changes nothing: the merge answers one series per label set, and nothing above
+    // it collects again.
+    let twice = merge_label_rewrites(&tree, &named_scan_tags(), &single).unwrap();
+    assert_eq!(1, merges(&twice), "{twice}");
+    assert_eq!(tree.to_string(), twice.to_string());
+}
+
+/// A collection below a merge still happens: two series the tree folds into one label set there are
+/// collected by the merge the pass puts above the rewrite, and the drop above them asks for nothing
+/// more - the merge is what makes the two arrive as one.
+#[test]
+fn a_collision_below_a_merge_is_collected_there() {
+    let out = grid(0, 1000, 2);
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    // `rate(label_replace(x, "host", "$1", "host", "(.*)")[5m])`: every host is renamed to one
+    // value, so the rewrite folds the scan's series into one label set - below the window, whose
+    // `rate` drops the metric name on top of that.
+    let tree = passed_over(
+        window_over(
+            rewrite(selected(&out), "host", "host"),
+            Some(Arc::clone(&out)),
+            Arc::clone(&out),
+        ),
+        &named_scan_tags(),
+        &single,
+    );
+    assert_eq!(
+        1,
+        merges(&tree),
+        "the rewrite's own collection is what collects the collision: {tree}"
+    );
+    let NativeExpr::Window { input, .. } = &tree.root().expr else {
+        panic!("the root stays the window: {tree}");
+    };
+    let NativeExpr::Merge { input } = &input.expr else {
+        panic!("the window reads the collected rewrite: {tree}");
+    };
+    assert!(
+        matches!(input.expr, NativeExpr::Map { .. }),
+        "the merge sits above the rewrite, not above the window: {tree}"
+    );
+    let twice = merge_label_rewrites(&tree, &named_scan_tags(), &single).unwrap();
+    assert_eq!(1, merges(&twice), "{twice}");
+    assert_eq!(tree.to_string(), twice.to_string());
+}
+
+/// A name write is collected even when a merge already holds the series below it: rewriting a name
+/// can still put two metrics whose ordinary labels are equal under one identity, which is the rule
+/// the kernels' name-drop proof states.
+///
+/// `abs(label_replace(label_replace(x, "__name__", "$1", "host", "(.*)"), "host", "", "", ""))`
+/// deletes the host the name was derived from, so the name is the only label still telling two
+/// series apart. `single_metric_name` in `native::plan` is what refuses to carry a written name: it
+/// would otherwise hand the scan's own name back, and a binding whose key columns always decode a
+/// value would then make the drop look injective.
+#[test]
+fn a_written_name_is_not_the_name_the_scan_binds() {
+    let out = grid(0, 1000, 2);
+    // The scan reads one metric, so nothing but the written name is left to tell two of its series
+    // apart.
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let rewritten = map_ops(
+        map_ops(
+            selected(&out),
+            vec![MapOp::Label(Arc::new(
+                LabelRewrite::replace("__name__", "$1", "host", "(.*)").unwrap(),
+            ))],
+        ),
+        vec![MapOp::Label(Arc::new(
+            LabelRewrite::replace("host", "", "", "").unwrap(),
+        ))],
+    );
+    let tree = passed_over(abs_map(rewritten), &named_scan_tags(), &single);
+    // The rewrite of the name and the rewrite of the `host` it was derived from are collected in
+    // their own right, and the root merge is the `abs` above them - the node whose answer the
+    // destination check decides.
+    assert_eq!(3, merges(&tree), "{tree}");
+    let NativeExpr::Merge { input: abs_node } = &tree.root().expr else {
+        panic!("the root collects what `abs` hands out: {tree}");
+    };
+    let NativeExpr::Map { input: below, op } = &abs_node.expr else {
+        panic!("the collected node is the map above the rewrites: {tree}");
+    };
+    assert!(
+        op.ops.iter().any(|op| matches!(op, MapOp::Math(_))),
+        "the root merge sits above `abs`, not above the rewrites: {tree}"
+    );
+    let NativeExpr::Merge { input: delete } = &below.expr else {
+        panic!("`abs` reads the collected rewrite: {tree}");
+    };
+    let NativeExpr::Map {
+        input: name_write, ..
+    } = &delete.expr
+    else {
+        panic!("the merge below `abs` sits above the delete: {tree}");
+    };
+    assert!(
+        matches!(name_write.expr, NativeExpr::Merge { .. }),
+        "the name write is collected below the delete: {tree}"
+    );
+}
+
+#[test]
+fn a_timestamp_is_collected_by_its_consumer() {
+    let out = grid(0, 1000, 2);
+    // `timestamp` reports a sample's own time under the metric name dropped, so a caller that says
+    // nothing about the scan's metric collects its answer at the root as well.
+    let stamped = || NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(selected(&out)),
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let tree = passed(stamped(), &named_scan_tags());
+    assert_eq!(1, merges(&tree));
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Merge { .. }),
+        "the root collects what the timestamp hands out: {tree}"
+    );
+
+    // The scan reads one metric, so the name it drops told none of its series apart: the timestamp
+    // keeps every partition.
+    let tree = passed_over(
+        stamped(),
+        &named_scan_tags(),
+        &[Some(Arc::from("some_metric"))],
+    );
+    assert_eq!(0, merges(&tree), "{tree}");
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Timestamp { .. }),
+        "the root stays the timestamp: {tree}"
+    );
+}
+
+/// The three nodes that drop the metadata labels on their own are judged by the labels: one metric
+/// name over every series, and no metadata tag among them.
+///
+/// A name-dropping window, `timestamp(x)` and a `timestamp` over an evaluated input all drop the
+/// metadata labels. A source bound to one metric names every series it hands over, so that name told
+/// none of them apart and the drop is proved; a source that may hand over several is collected, and
+/// so is one that carries `__type__` or `__unit__` among its tags. A window that keeps the name
+/// drops nothing and hands its input's identity on.
+#[test]
+fn a_name_dropping_node_is_proved_by_the_labels_alone() {
+    let out = grid(0, 1000, 2);
+    let named = named_scan_tags();
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let collected =
+        |name: &str, tags: &[Vec<String>], metrics: &[Option<Arc<str>>], root: NativeNode| {
+            let tree = passed_over(root, tags, metrics);
+            assert_eq!(
+                1,
+                merges(&tree),
+                "`{name}` drops the metadata labels: {tree}"
+            );
+            assert!(
+                matches!(tree.root().expr, NativeExpr::Merge { .. }),
+                "the root collects `{name}`: {tree}"
+            );
+        };
+    let kept = |name: &str, root: NativeNode| {
+        let tree = passed_over(root, &named, &single);
+        assert_eq!(0, merges(&tree), "`{name}` cannot alias: {tree}");
+        assert!(
+            !matches!(tree.root().expr, NativeExpr::Merge { .. }),
+            "the root stays `{name}`: {tree}"
+        );
+    };
+    // `timestamp(x)` over the scan, `rate(x[5m])`, and `timestamp(rate(x[5m]))` over an evaluated
+    // input: the three nodes that drop the metadata labels themselves.
+    let stamps = || selection(raw_input(0), Arc::clone(&out), InstantValue::Timestamp);
+    let drops = || window_over(raw_input(0), None, Arc::clone(&out));
+    let evaluated_stamps = || NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(drops()),
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+
+    // The labels hold: one metric names every series, and no metadata tag is among the tags.
+    kept("timestamp", stamps());
+    kept("rate", drops());
+    kept("timestamp(rate)", evaluated_stamps());
+    // A source that may hand over several metrics is not proved: the name it drops is what tells
+    // two of them apart.
+    collected("timestamp", &named, &[None], stamps());
+    collected("rate", &named, &[None], drops());
+    collected("timestamp(rate)", &named, &[None], evaluated_stamps());
+    // A binding that keys a series by a metadata label is collected: that label goes with the name,
+    // so two series that differ only there meet.
+    for metadata in ["__type__", "__unit__"] {
+        let mut typed = named.clone();
+        typed[0].push(metadata.to_string());
+        collected("timestamp", &typed, &single, stamps());
+        collected("rate", &typed, &single, drops());
+        collected("timestamp(rate)", &typed, &single, evaluated_stamps());
+    }
+    // A window that keeps the name drops nothing, so nothing is asked of it.
+    let tree = passed_over(
+        keeping_window_over(raw_input(0), None, Arc::clone(&out)),
+        &named,
+        &single,
+    );
+    assert_eq!(0, merges(&tree), "`last_over_time` keeps the name: {tree}");
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Window { .. }),
+        "the root stays the name-keeping window: {tree}"
+    );
 }
 
 #[test]
@@ -780,7 +1436,7 @@ fn info_collects_the_side_that_aliases() {
 }
 
 #[test]
-fn a_scalar_side_of_a_broadcast_is_not_collected() {
+fn a_scalar_broadcast_collects_its_own_name_drop() {
     let out = grid(0, 1000, 2);
     let tree = passed(
         binary_over(
@@ -790,7 +1446,23 @@ fn a_scalar_side_of_a_broadcast_is_not_collected() {
         ),
         &scan_tags(),
     );
-    assert_eq!(0, merges(&tree), "a constant holds no label set");
+    // `x + 2` drops the metadata labels, so what it hands out is collected - above the match, not
+    // beside it - and neither operand is collected on its own.
+    assert_eq!(1, merges(&tree), "{tree}");
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what the broadcast hands out: {tree}");
+    };
+    let NativeExpr::Binary { left, right, .. } = &input.expr else {
+        panic!("the root stays the broadcast");
+    };
+    assert!(
+        matches!(left.expr, NativeExpr::Scalar(_)),
+        "a constant holds no label set"
+    );
+    assert!(
+        !matches!(right.expr, NativeExpr::Merge { .. }),
+        "the vector side hands its series over as it reads them"
+    );
 }
 
 #[test]
@@ -813,7 +1485,7 @@ fn aggregate_state_is_not_collected() {
     let tree = passed(state, &scan_tags());
     assert_eq!(0, merges(&tree));
     assert!(matches!(tree.root().output, NativeType::AggregateState(_)));
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
     assert_eq!(tree.to_string(), twice.to_string());
 }
 
@@ -837,7 +1509,7 @@ fn the_pass_is_idempotent() {
         ),
         &scan_tags(),
     );
-    let twice = merge_label_rewrites(&once, &scan_tags()).expect("a collected tree is legal");
+    let twice = merge_label_rewrites(&once, &scan_tags(), &[]).expect("a collected tree is legal");
     assert_eq!(1, merges(&twice));
     assert_eq!(once.to_string(), twice.to_string());
 }
