@@ -30,7 +30,21 @@ use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datafusion_expr::{Expr, UserDefinedLogicalNode};
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
-use promql::functions::register_promql_functions;
+use promql::functions::{
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
+    IDelta, IeeeComparison, IeeeSqrt, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
+    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
+    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
+    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
+    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
+    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
+    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
+    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
+    NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
+    NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
+    NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
+    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
+};
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
@@ -42,7 +56,7 @@ use substrait::substrait_proto_df::proto::{
 };
 use substrait::{DFLogicalSubstraitConvertor, Extensions, SubstraitPlan};
 
-use crate::dist_plan::MergeScanLogicalPlan;
+use crate::dist_plan::{MaterializedBroadcastNode, MergeScanLogicalPlan};
 use crate::query_engine::QueryEngineState;
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
@@ -51,7 +65,13 @@ pub struct DefaultSerializer;
 
 impl SerializerRegistry for DefaultSerializer {
     fn serialize_logical_plan(&self, node: &dyn UserDefinedLogicalNode) -> Result<Vec<u8>> {
-        if node.name() == MergeScanLogicalPlan::name() {
+        if node.name() == MaterializedBroadcastNode::NAME {
+            let node = node
+                .as_any()
+                .downcast_ref::<MaterializedBroadcastNode>()
+                .expect("Failed to downcast MaterializedBroadcastNode");
+            node.encode_batches()
+        } else if node.name() == MergeScanLogicalPlan::name() {
             let merge_scan = node
                 .as_any()
                 .downcast_ref::<MergeScanLogicalPlan>()
@@ -196,6 +216,17 @@ impl SubstraitConsumer for MergeScanSubstraitConsumer<'_> {
         let Some(detail) = rel.detail.as_ref() else {
             return self.inner.consume_extension_leaf(rel).await;
         };
+        if detail.type_url == MaterializedBroadcastNode::NAME {
+            let batches = MaterializedBroadcastNode::decode_batches(detail.value.as_ref())?;
+            let schema = batches
+                .first()
+                .map(|b| b.schema())
+                .unwrap_or_else(|| Arc::new(arrow_schema::Schema::empty()));
+            let schema = DFSchema::try_from(schema.as_ref().clone())?;
+            return Ok(
+                MaterializedBroadcastNode::new(Arc::new(schema), batches).into_logical_plan()
+            );
+        }
         if detail.type_url != MergeScanLogicalPlan::name() {
             return self.inner.consume_extension_leaf(rel).await;
         }
@@ -319,7 +350,84 @@ fn register_greptime_functions(
             .context(RegisterUdfSnafu { name })?;
     }
 
-    register_promql_functions(session_state);
+    let _ = session_state.register_udaf(quantile_udaf());
+
+    for udf in IeeeComparison::all() {
+        let _ = session_state.register_udf(Arc::new(udf));
+    }
+    let _ = session_state.register_udf(Arc::new(IeeeSqrt::scalar_udf()));
+
+    let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
+    let double_exponential_smoothing_udf =
+        DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
+    let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
+
+    for udf in [
+        NativeHistogramAbsentOverTime::scalar_udf(),
+        NativeHistogramAdd::scalar_udf(),
+        NativeHistogramAvg::scalar_udf(),
+        NativeHistogramAvgOverTime::scalar_udf(),
+        NativeHistogramChanges::scalar_udf(),
+        NativeHistogramCount::scalar_udf(),
+        NativeHistogramCountOverTime::scalar_udf(),
+        NativeHistogramDelta::scalar_udf(),
+        NativeHistogramDivScalar::scalar_udf(),
+        NativeHistogramDrop::bool_false_udf(String::new(), None),
+        NativeHistogramDrop::bool_true_udf(String::new(), None),
+        NativeHistogramDrop::float_null_udf(String::new(), None),
+        NativeHistogramEq::scalar_udf(),
+        NativeHistogramFraction::scalar_udf(),
+        NativeHistogramIDelta::scalar_udf(),
+        NativeHistogramIRate::scalar_udf(),
+        NativeHistogramIncrease::scalar_udf(),
+        NativeHistogramLastOverTime::scalar_udf(),
+        MixedRange::float_udf(None),
+        MixedRange::histogram_udf(None),
+        NativeHistogramMulScalar::scalar_udf(),
+        NativeHistogramNeg::scalar_udf(),
+        NativeHistogramNotEq::scalar_udf(),
+        NativeHistogramPresentOverTime::scalar_udf(),
+        NativeHistogramQuantile::scalar_udf(),
+        NativeHistogramRate::scalar_udf(),
+        NativeHistogramResets::scalar_udf(),
+        NativeHistogramScalarMul::scalar_udf(),
+        NativeHistogramStddev::scalar_udf(),
+        NativeHistogramStdvar::scalar_udf(),
+        NativeHistogramSub::scalar_udf(),
+        NativeHistogramSum::scalar_udf(),
+        NativeHistogramSumOverTime::scalar_udf(),
+        NativeHistogramToString::scalar_udf(),
+        PromqlFloatToString::scalar_udf(),
+    ] {
+        let _ = session_state.register_udf(Arc::new(udf));
+    }
+
+    for udaf in [
+        NativeHistogramAggAvg::aggregate_udf(),
+        NativeHistogramAggSum::aggregate_udf(),
+    ] {
+        let _ = session_state.register_udaf(Arc::new(udaf));
+    }
 
     Ok(())
 }
@@ -359,7 +467,7 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use catalog::error::Result as CatalogResult;
+    use catalog::error::{QueryAccessDeniedSnafu, Result as CatalogResult};
     use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_function::aggrs::aggr_wrapper::StateWrapper;
@@ -381,10 +489,6 @@ mod tests {
     use datatypes::data_type::DataType;
     use futures::stream::BoxStream;
     use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
-    use promql::functions::{
-        MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramCount,
-        NativeHistogramDrop, PromqlFloatToString,
-    };
     use session::context::QueryContext;
     use table::TableRef;
     use table::metadata::{TableId, TableInfoRef};
@@ -1063,6 +1167,8 @@ mod tests {
 
     /// How [`InterceptingCatalogManager`] resolves payload tables.
     enum TableResolution {
+        /// Fails with the frontend's cross-catalog access error.
+        AccessDenied,
         /// Records catalog lookup and request context values.
         ObserveContext(Arc<std::sync::Mutex<Vec<[String; 5]>>>),
         /// Resolves once another task on the caller runtime signals.
@@ -1149,7 +1255,11 @@ mod tests {
                     ]);
                     Ok(Some(NumbersTable::table(NUMBERS_TABLE_ID)))
                 }
-
+                TableResolution::AccessDenied => QueryAccessDeniedSnafu {
+                    catalog: catalog.to_string(),
+                    schema: schema.to_string(),
+                }
+                .fail(),
                 TableResolution::AwaitSignal { notify, entered } => {
                     entered.store(true, Ordering::SeqCst);
                     notify.notified().await;
@@ -1233,33 +1343,41 @@ mod tests {
         assert_eq!(decoded.to_string(), plan.to_string());
     }
 
-    /// A missing engine-catalog table does not fall back to the usable request catalog.
+    /// Missing and denied payload tables do not fall back to the usable request catalog.
     #[tokio::test]
-    async fn test_serializer_decode_missing_engine_catalog_table() {
+    async fn test_serializer_decode_payload_negative_engine_catalog_resolution() {
         let missing_manager: CatalogManagerRef =
             catalog::memory::new_memory_catalog_manager().unwrap();
-        let engine = QueryEngineFactory::new(
-            missing_manager,
-            None,
-            None,
-            None,
-            None,
-            false,
-            QueryOptions::default(),
-        )
-        .query_engine();
+        let cases = [
+            (
+                QueryEngineFactory::new(
+                    missing_manager,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    QueryOptions::default(),
+                )
+                .query_engine(),
+                "Table not found: greptime.public.numbers",
+            ),
+            (
+                engine_with_intercepting_catalog(TableResolution::AccessDenied),
+                "Illegal access to catalog",
+            ),
+        ];
         let bytes = encode_plan(&merge_scan(numbers_scan(), false));
 
-        let err = plan_decoder(engine.as_ref())
-            .decode(bytes, request_catalog_list(), false)
-            .await
-            .unwrap_err();
+        for (engine, expected) in cases {
+            let err = plan_decoder(engine.as_ref())
+                .decode(bytes.clone(), request_catalog_list(), false)
+                .await
+                .unwrap_err();
 
-        let err = format!("{err:?}");
-        assert!(
-            err.contains("Table not found: greptime.public.numbers"),
-            "unexpected error: {err}"
-        );
+            let err = format!("{err:?}");
+            assert!(err.contains(expected), "expected {expected:?}, got: {err}");
+        }
     }
 
     /// Manual states use their own catalog and query-context defaults for payloads.

@@ -220,12 +220,63 @@ pub(super) struct Query {
     pub(super) end: Option<String>,
     #[serde(default)]
     pub(super) step: Option<String>,
+    /// Statements the candidate target executes in the same request before `query`.
+    ///
+    /// `/v1/sql` gives every request its own session context, so a statement that configures the
+    /// session, e.g. `SET experimental_dist_join = true`, only affects the statements of the
+    /// request it is sent with. The runner therefore sends these statements and `query` as one
+    /// multi-statement SQL string for every request of this query (validation, warmup and
+    /// measurement). Only the candidate target runs them, so a base build that does not know the
+    /// setting yet still measures the same query without it; use [`Self::base_session_sql`] to
+    /// opt the base target in as well.
+    #[serde(default)]
+    pub(super) candidate_session_sql: Vec<String>,
+    /// Statements the base target executes in the same request before `query`.
+    ///
+    /// Use this to opt the base build into the same session setting as the candidate, e.g. to
+    /// compare two rewrite implementations of the same query instead of the rewrite with the
+    /// default plan. The candidate keeps using [`Self::candidate_session_sql`].
+    #[serde(default)]
+    pub(super) base_session_sql: Vec<String>,
+    /// Opts the direct-SST targets into waiting for their tables' leader/size reports before any
+    /// measurements. Defaults to false.
+    #[serde(default)]
+    pub(super) require_region_statistics: bool,
+    /// An operator that a separate candidate `EXPLAIN ANALYZE` must execute remotely, not in
+    /// stage 0. Failure aborts all candidate measurements. Only SQL queries are supported;
+    /// the preflight uses the same session prefix but proves only its own execution.
+    #[serde(default)]
+    pub(super) candidate_remote_operator: Option<String>,
     #[serde(default)]
     pub(super) warmup: usize,
     #[serde(default = "one")]
     pub(super) iterations: usize,
     #[serde(default)]
     pub(super) thresholds: Map<String, Value>,
+}
+
+impl Query {
+    /// The SQL text of one request of this query for the target: the target's session
+    /// statements followed by `query`, or just `query`.
+    ///
+    /// Statements are joined with `;` separators, so both a prefixed and a bare statement stay
+    /// valid SQL.
+    pub(super) fn request_sql(&self, candidate: bool) -> String {
+        let statements = if candidate {
+            &self.candidate_session_sql
+        } else {
+            &self.base_session_sql
+        };
+        if statements.is_empty() {
+            return self.query.clone();
+        }
+        let prefix = statements
+            .iter()
+            .map(|statement| statement.trim().trim_end_matches(';'))
+            .collect::<Vec<_>>()
+            .join(";\n");
+        format!("{prefix};\n{}", self.query)
+    }
 }
 
 const fn one() -> usize {
@@ -249,4 +300,107 @@ pub(super) struct Measurement {
     pub(super) latency_ms_median: Option<f64>,
     pub(super) latency_ms_p95: Option<f64>,
     pub(super) status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn query(candidate_session_sql: Vec<&str>) -> Query {
+        Query {
+            name: Some("q".to_string()),
+            kind: Some("sql".to_string()),
+            query: "SELECT 1".to_string(),
+            start: None,
+            end: None,
+            step: None,
+            candidate_session_sql: candidate_session_sql
+                .into_iter()
+                .map(ToString::to_string)
+                .collect(),
+            base_session_sql: Vec::new(),
+            require_region_statistics: false,
+            candidate_remote_operator: None,
+            warmup: 0,
+            iterations: 1,
+            thresholds: Map::new(),
+        }
+    }
+
+    #[test]
+    fn request_sql_prefixes_only_the_candidate() {
+        let query = query(vec!["SET experimental_dist_join = true"]);
+        assert_eq!(
+            query.request_sql(true),
+            "SET experimental_dist_join = true;\nSELECT 1"
+        );
+        // The base target keeps the plain statement unless it has its own prefix.
+        assert_eq!(query.request_sql(false), "SELECT 1");
+    }
+
+    #[test]
+    fn request_sql_prefixes_the_base_session() {
+        let mut query = query(vec![]);
+        query.base_session_sql = vec!["SET experimental_dist_join = true".to_string()];
+        assert_eq!(
+            query.request_sql(false),
+            "SET experimental_dist_join = true;\nSELECT 1"
+        );
+        assert_eq!(query.request_sql(true), "SELECT 1");
+    }
+
+    #[test]
+    fn request_sql_without_a_prefix_is_the_plain_statement() {
+        let query = query(vec![]);
+        assert_eq!(query.request_sql(true), "SELECT 1");
+        assert_eq!(query.request_sql(false), "SELECT 1");
+    }
+
+    #[test]
+    fn request_sql_normalizes_statement_separators() {
+        let query = query(vec![
+            "SET experimental_dist_join = true;",
+            " SET statement_timeout = '60s' ",
+        ]);
+        assert_eq!(
+            query.request_sql(true),
+            "SET experimental_dist_join = true;\nSET statement_timeout = '60s';\nSELECT 1"
+        );
+    }
+
+    #[test]
+    fn query_deserializes_without_session_sql() {
+        let query: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
+        assert!(query.candidate_session_sql.is_empty());
+        assert!(query.base_session_sql.is_empty());
+    }
+
+    #[test]
+    fn query_defaults_to_not_requiring_region_statistics() {
+        let query: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
+        assert!(!query.require_region_statistics);
+        let opted_in: Query = serde_json::from_value(json!({
+            "query": "SELECT 1",
+            "require_region_statistics": true,
+        }))
+        .unwrap();
+        assert!(opted_in.require_region_statistics);
+    }
+
+    #[test]
+    fn query_defaults_to_no_candidate_remote_operator() {
+        let query: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
+        assert!(query.candidate_remote_operator.is_none());
+        let configured: Query = serde_json::from_value(json!({
+            "query": "SELECT 1",
+            "candidate_remote_operator": "HashJoinExec",
+        }))
+        .unwrap();
+        assert_eq!(
+            Some("HashJoinExec"),
+            configured.candidate_remote_operator.as_deref()
+        );
+    }
 }
