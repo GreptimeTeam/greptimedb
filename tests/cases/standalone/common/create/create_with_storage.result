@@ -62,7 +62,7 @@ Affected Rows: 0
 
 ALTER TABLE blobs ADD COLUMN region STRING PRIMARY KEY STORAGE WITH (threshold = '4KiB');
 
-Error: 1004(InvalidArguments), STORAGE option is only supported on field columns, but column region is a primary key column
+Error: 1004(InvalidArguments), STORAGE option is only supported on field columns, but column region is not a field column
 
 ALTER TABLE blobs ADD COLUMN n BIGINT STORAGE WITH (threshold = '4KiB');
 
@@ -149,7 +149,7 @@ CREATE TABLE bad (
     host STRING PRIMARY KEY STORAGE WITH (type = 'external')
 );
 
-Error: 1004(InvalidArguments), STORAGE option is only supported on field columns, but column host is a primary key column
+Error: 1004(InvalidArguments), STORAGE option is only supported on field columns, but column host is not a field column
 
 CREATE TABLE bad (ts TIMESTAMP TIME INDEX STORAGE WITH (type = 'external'));
 

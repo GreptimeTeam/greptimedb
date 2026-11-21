@@ -114,9 +114,9 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         })?
         .is_some()
     {
-        // Tag values are encoded into the primary key, so they can't live outside SSTs. Time
-        // index columns are rejected by the type check above.
-        if column_def.semantic_type() == SemanticType::Tag {
+        // Tags are encoded into the primary key, and a string column can still be declared as
+        // the time index here, so check the semantic type rather than the data type.
+        if column_def.semantic_type() != SemanticType::Field {
             return error::StorageOnNonFieldColumnSnafu {
                 column: &column_def.name,
             }
@@ -506,12 +506,16 @@ mod tests {
         let decoded = try_as_column_schema(&column_def).unwrap();
         assert_eq!(Some(options), decoded.storage_options().unwrap());
 
-        let column_def = try_as_column_def(&schema, true).unwrap();
-        let err = try_as_column_schema(&column_def).unwrap_err();
-        assert!(
-            err.to_string().contains("only supported on field columns"),
-            "{err}"
-        );
+        for semantic_type in [SemanticType::Tag, SemanticType::Timestamp] {
+            let mut column_def = try_as_column_def(&schema, false).unwrap();
+            column_def.data_type = ColumnDataType::String as i32;
+            column_def.set_semantic_type(semantic_type);
+            let err = try_as_column_schema(&column_def).unwrap_err();
+            assert!(
+                err.to_string().contains("only supported on field columns"),
+                "{semantic_type:?}: {err}"
+            );
+        }
     }
 
     #[test]
