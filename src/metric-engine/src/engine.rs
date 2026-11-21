@@ -421,14 +421,12 @@ impl RegionEngine for MetricEngine {
                 Ok(true) => {}
                 Ok(false) => {
                     // If the metadata region ignored the grant, the data region is not handed it, so
-                    // record it for the data region. If the data region ignored it, the data region
-                    // has already recorded it.
+                    // record it and extend the deadline for the data region, as an ignored Leader
+                    // lease does. If the data region ignored it, the data region has done both.
                     if x == metadata_region_id {
-                        self.inner.mito.record_granted_lease(
-                            data_region_id,
-                            sent_at,
-                            candidate_lease_id,
-                        );
+                        let mito = &self.inner.mito;
+                        mito.record_granted_lease(data_region_id, sent_at, candidate_lease_id);
+                        mito.extend_leader_deadline(data_region_id, deadline);
                     }
                     return Ok(false);
                 }
@@ -537,6 +535,18 @@ impl RegionEngine for MetricEngine {
         } else {
             None
         }
+    }
+
+    /// A physical region is a confirmed leader only if both regions of the pair are, since one
+    /// may have been promoted without the other.
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        if !self.inner.is_physical_region(region_id) {
+            return None;
+        }
+        let mito = &self.inner.mito;
+        let metadata = mito.is_confirmed_leader(utils::to_metadata_region_id(region_id))?;
+        let data = mito.is_confirmed_leader(utils::to_data_region_id(region_id))?;
+        Some(metadata && data)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1113,6 +1123,182 @@ mod test {
 
         assert!(grant(Instant::now()));
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
+    }
+
+    /// A catchup attempt promoted the metadata region and failed on the data region.
+    #[tokio::test]
+    async fn test_physical_region_is_confirmed_leader_only_with_both_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let (engine, mito) = (env.metric(), env.mito());
+        mito.require_write_lease();
+        mito.renew_node_lease(Instant::now() + LEASE);
+        let physical_region_id = env.default_physical_region_id();
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        for region_id in [
+            metadata_region_id,
+            utils::to_data_region_id(physical_region_id),
+        ] {
+            mito.set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+                .await
+                .unwrap();
+        }
+        let catchup = RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        };
+        mito.handle_request(metadata_region_id, RegionRequest::Catchup(catchup))
+            .await
+            .unwrap();
+
+        // The role is the data region's, but the metadata region waits for its Leader lease.
+        assert_eq!(engine.role(physical_region_id), Some(RegionRole::Follower));
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(false));
+        assert_eq!(
+            engine.is_confirmed_leader(env.default_logical_region_id()),
+            None
+        );
+
+        // The next attempt catches both regions up.
+        engine
+            .handle_batch_catchup_requests(1, vec![(physical_region_id, catchup)])
+            .await
+            .unwrap()
+            .into_iter()
+            .for_each(|(_, result)| {
+                result.unwrap();
+            });
+        assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(false));
+
+        // The data region still waits after the metadata region received its lease.
+        let sent_at = Instant::now();
+        mito.set_region_role_with_lease(
+            metadata_region_id,
+            RegionRole::Leader,
+            sent_at,
+            sent_at + LEASE,
+            None,
+        )
+        .unwrap();
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(false));
+
+        engine
+            .set_region_role_with_lease(
+                physical_region_id,
+                RegionRole::Leader,
+                sent_at,
+                sent_at + LEASE,
+                None,
+            )
+            .unwrap();
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(true));
+
+        // A confirmed data region alone does not make the physical region confirmed.
+        mito.set_region_role(metadata_region_id, RegionRole::Follower)
+            .unwrap();
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(false));
+    }
+
+    /// Holds a catchup that reopens a region until released.
+    #[derive(Default)]
+    struct CatchupReopenBlocker {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl mito2::engine::listener::EventListener for CatchupReopenBlocker {
+        async fn on_catchup_reopen_begin(&self, _region_id: RegionId) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    /// A physical Leader lease that the metadata region holds back while it catches up is still
+    /// recorded for the data region and extends its deadline.
+    #[tokio::test]
+    async fn test_lease_held_back_by_metadata_catchup_extends_data_deadline() {
+        let mut mito_env = mito2::test_util::TestEnv::new().await;
+        let blocker = Arc::new(CatchupReopenBlocker::default());
+        let mito = mito_env
+            .create_engine_with(Default::default(), None, Some(blocker.clone()), None)
+            .await;
+        let env = TestEnv::with_mito_engine(mito_env, mito.clone());
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+        // The catchup reopens the metadata region and drops its unflushed rows: those of a second
+        // logical region, while the first one's are flushed.
+        env.metric()
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+            .unwrap();
+        env.create_logical_region(physical_region_id, RegionId::new(4, 2))
+            .await;
+        let start = Instant::now();
+        mito.require_write_lease();
+        mito.renew_node_lease(start + LEASE);
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        for region_id in [metadata_region_id, data_region_id] {
+            mito.set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+                .await
+                .unwrap();
+        }
+        let catchup = RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        };
+        // The data region's catchup does not reopen it, and sets its deadline to the node lease's.
+        mito.handle_request(data_region_id, RegionRequest::Catchup(catchup))
+            .await
+            .unwrap();
+        mito.renew_node_lease(start + 10 * LEASE);
+
+        let metadata_catchup = {
+            let mito = mito.clone();
+            tokio::spawn(async move {
+                mito.handle_request(metadata_region_id, RegionRequest::Catchup(catchup))
+                    .await
+            })
+        };
+        blocker.entered.notified().await;
+        let promoted = env
+            .metric()
+            .set_region_role_with_lease(
+                physical_region_id,
+                RegionRole::Leader,
+                Instant::now(),
+                start + 5 * LEASE,
+                Some(7),
+            )
+            .unwrap();
+        assert!(!promoted);
+        assert_eq!(mito.role(metadata_region_id), Some(RegionRole::Follower));
+        assert_candidate_lease_id_recorded(&mito, physical_region_id, Some(7));
+        blocker.release.notify_one();
+        metadata_catchup.await.unwrap().unwrap();
+
+        // Past the deadline the data region's catchup set, before the lease's.
+        mito.freeze_lease_clock(start + 2 * LEASE);
+        env.metric()
+            .handle_request(
+                env.default_logical_region_id(),
+                RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
+                    rows: Rows {
+                        schema: row_schema_with_tags(&["job"]),
+                        rows: build_rows(1, 5),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
