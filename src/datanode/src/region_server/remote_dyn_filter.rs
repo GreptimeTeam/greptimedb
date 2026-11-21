@@ -226,7 +226,6 @@ impl RegionServer {
         if matches!(
             outcome,
             RemoteDynFilterUpdateOutcome::AlreadyComplete
-                | RemoteDynFilterUpdateOutcome::PayloadTooLarge
                 | RemoteDynFilterUpdateOutcome::DecodeFailed
         ) {
             warn!(
@@ -351,13 +350,13 @@ mod tests {
     use common_query::request::{
         DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
         InitialDynFilterReg, InitialDynFilterRegs, InitialDynFilterSnapshot,
-        REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
     };
     use common_recordbatch::RecordBatches;
     use datafusion::arrow::datatypes::Schema as ArrowSchema;
     use datafusion::physical_plan::PhysicalExpr;
     use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
-    use datafusion_common::DFSchema;
+    use datafusion_common::{DFSchema, ScalarValue};
     use datafusion_expr::EmptyRelation;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
@@ -813,7 +812,7 @@ mod tests {
     }
 
     fn datafusion_payload_bytes(expr: Arc<dyn PhysicalExpr>) -> Vec<u8> {
-        match DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
+        match DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
             .unwrap()
         {
             DynFilterPayload::Datafusion(bytes) => bytes,
@@ -897,27 +896,33 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_dyn_filter_rejects_oversized_payload_before_buffering() {
+    fn test_remote_dyn_filter_accepts_payload_over_the_removed_application_cap() {
         let regs_by_query = RemoteDynFilterRegistry::new();
         let query_id = test_remote_query_id();
         let filter_id = RemoteDynFilterId::new("filter-1");
         register_empty_remote_dyn_filter(&regs_by_query, &query_id);
 
-        let oversized = vec![0; REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES + 1];
+        // No application-level size cap: a payload larger than the removed 512 KiB cap is
+        // buffered and then applied. gRPC's max message size (and memory) is the real bound.
+        let payload = datafusion_payload_bytes(physical_lit(ScalarValue::Utf8(Some(
+            "x".repeat(1024 * 1024),
+        ))));
+        assert!(payload.len() > 512 * 1024);
+
         let outcome = apply_remote_dyn_filter_update(
             &regs_by_query,
             &query_id,
             &filter_id,
-            &oversized,
+            &payload,
             1,
             false,
         );
-        assert_eq!(outcome, RemoteDynFilterUpdateOutcome::PayloadTooLarge);
-
-        // The rejected generation must not become the pending generation.
-        let outcome =
-            apply_remote_dyn_filter_update(&regs_by_query, &query_id, &filter_id, &[1], 0, false);
         assert_eq!(outcome, RemoteDynFilterUpdateOutcome::Buffered);
+
+        // Installing the wrapper applies the buffered generation instead of dropping it.
+        let dyn_filter = only_remote_dyn_filter(&regs_by_query, &query_id);
+        let current = dyn_filter.current().unwrap().to_string();
+        assert!(current.len() > 512 * 1024);
     }
 
     #[test]

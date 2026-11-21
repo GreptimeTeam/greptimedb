@@ -55,8 +55,20 @@ use crate::error::{
 };
 
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
-/// Shared raw protobuf byte budget for remote dynamic filter payloads.
-pub const REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES: usize = 512 * 1024;
+/// "No application-level cap" for remote dynamic filter payload bytes.
+///
+/// Dynamic filter predicates travel over gRPC, so the real bound on a payload is the gRPC
+/// max message size (configured by `grpc.max_recv_message_size`/`grpc.max_send_message_size`,
+/// 512 MiB by default) plus the memory needed to encode/decode a frame that large. It is not
+/// a number picked in this layer. This crate cannot see the transport limit - it is a
+/// per-node setting and the receiving side may differ - so it applies no cap of its own:
+/// pass this value unless the caller holds a real transport/frame limit, in which case that
+/// limit may be passed instead and surfaces as
+/// [`crate::error::Error::DynFilterPayloadTooLarge`].
+///
+/// Deriving a payload budget from the gRPC frame limit together with planner policy is a
+/// follow-up; until then an oversized payload fails at the transport.
+pub const REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP: usize = usize::MAX;
 
 /// Smallest number of encoded bytes a single `IN` list literal can take.
 ///
@@ -109,7 +121,7 @@ pub enum DynFilterPayload {
 }
 
 impl DynFilterPayload {
-    /// Encodes a DataFusion physical expression into a bounded dynamic filter payload.
+    /// Encodes a DataFusion physical expression into a dynamic filter payload.
     ///
     /// # Narrow contract: a key list used as a positive pruning hint
     ///
@@ -183,6 +195,16 @@ impl DynFilterPayload {
     /// These refusals do not fail the query in either caller: initial capture leaves the
     /// parent filter local, while fanout sends an explicit `true` reset instead of leaving
     /// a stale narrower predicate installed.
+    ///
+    /// # Payload budget
+    ///
+    /// `max_payload_bytes` is a caller-supplied limit, not an application policy cap:
+    /// pass [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`] so that only the gRPC max message
+    /// size (plus the memory needed to encode a frame that large) bounds a payload. This
+    /// crate cannot see the transport limit - it is a per-node setting and the receiver
+    /// may differ - so it applies no cap of its own. A caller that holds a real
+    /// transport/frame limit may pass that limit instead; it then surfaces as
+    /// [`CommonQueryError::DynFilterPayloadTooLarge`].
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
@@ -211,7 +233,8 @@ impl DynFilterPayload {
     /// Decodes a DataFusion dynamic filter payload against the provided input schema.
     ///
     /// The decoded expression is validated to ensure column indexes stay within the receiver-side
-    /// schema, column names are consistent (defensive check), and the payload stays within
+    /// schema, column names are consistent (defensive check), and - when the caller passes a real
+    /// limit instead of [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`] - the payload stays within
     /// `max_payload_bytes`.
     ///
     /// # Precondition: pruning only, never row filtering
@@ -694,6 +717,11 @@ fn utf8_list_literals(values: &ArrayRef, max_values: usize) -> Option<Vec<Arc<dy
         .collect()
 }
 
+/// Decodes a DataFusion physical expression serialized by [`encode_physical_expr_to_bytes`].
+///
+/// `max_payload_bytes` is only a caller-supplied limit; pass
+/// [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`] when the gRPC max message size should be the
+/// only bound.
 pub(crate) fn decode_physical_expr_from_bytes(
     bytes: &[u8],
     task_ctx: &TaskContext,
@@ -712,6 +740,12 @@ pub(crate) fn decode_physical_expr_from_bytes(
     Ok(expr)
 }
 
+/// Enforces a caller-supplied payload limit.
+///
+/// This is not a policy cap: the default path passes
+/// [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`] and relies on the gRPC max message size and
+/// memory to bound a payload. It only rejects when a caller knows a real transport/frame
+/// limit.
 fn validate_payload_size(
     payload_size_bytes: usize,
     max_payload_bytes: usize,
@@ -1041,9 +1075,15 @@ mod tests {
         let expr: Arc<dyn PhysicalExpr> =
             Arc::new(Column::new_with_schema("host", &schema).unwrap());
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
+                .unwrap();
         let decoded = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap();
 
         let original = expr.downcast_ref::<Column>().unwrap();
@@ -1059,7 +1099,11 @@ mod tests {
         let payload = DynFilterPayload::Datafusion(vec![1, 2, 3]);
 
         let err = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap_err();
 
         assert!(matches!(err, DataFusionError::Internal(_)));
@@ -1070,9 +1114,15 @@ mod tests {
         let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
         let expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("service", 0));
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
+                .unwrap();
         let err = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap_err();
 
         let msg = err.to_string();
@@ -1089,9 +1139,15 @@ mod tests {
         let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
         let expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("host", 1));
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
+                .unwrap();
         let err = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap_err();
 
         assert!(matches!(err, DataFusionError::Plan(_)));
@@ -1210,7 +1266,7 @@ mod tests {
             Arc::clone(&in_list),
         )) as Arc<dyn PhysicalExpr>;
 
-        let decoded = decode(&expr, &schema, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES);
+        let decoded = decode(&expr, &schema, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP);
         let display = decoded.to_string();
         assert!(display.contains(">= 10"), "{display}");
         assert!(display.contains("<= 20"), "{display}");
@@ -1459,18 +1515,39 @@ mod tests {
     }
 
     #[test]
-    fn dyn_filter_payload_rejects_oversized_payload() {
+    fn dyn_filter_payload_enforces_caller_supplied_limit() {
+        // A caller that does have a real limit (for example a transport frame limit) still
+        // gets the explicit error; the default path passes no application cap.
         let expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("host", 0));
 
         let err = DynFilterPayload::from_datafusion_expr(&expr, 1).unwrap_err();
 
-        let DataFusionError::External(error) = err else {
-            panic!("expected external common query error, got: {err:?}");
-        };
-        assert!(matches!(
-            error.downcast_ref::<CommonQueryError>(),
-            Some(CommonQueryError::DynFilterPayloadTooLarge { .. })
-        ));
+        assert_too_large(err);
+    }
+
+    #[test]
+    fn dyn_filter_payload_has_no_application_size_cap() {
+        // Larger than the removed 512 KiB application cap: the payload is encoded and
+        // decoded instead of being rejected. Only gRPC's max message size (and memory)
+        // bound a payload; there is no policy cap in this layer.
+        let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
+        let expr: Arc<dyn PhysicalExpr> = lit("x".repeat(1024 * 1024));
+
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
+                .unwrap();
+        let DynFilterPayload::Datafusion(bytes) = payload;
+        assert!(bytes.len() > 512 * 1024);
+
+        let decoded = DynFilterPayload::Datafusion(bytes)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
+            .unwrap();
+
+        assert!(decoded.to_string().len() > 512 * 1024);
     }
 
     #[test]
@@ -1710,7 +1787,7 @@ mod remote_membership_tests {
         let decoded = decode(
             &filter.expr,
             &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         );
         assert!(!has_expr::<HashTableLookupExpr>(&decoded));
         let lists = in_lists(&decoded);
@@ -1759,7 +1836,7 @@ mod remote_membership_tests {
         let decoded = decode(
             &filter.expr,
             &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         );
         let case = decoded.downcast_ref::<CaseExpr>().expect("CASE preserved");
         assert_eq!(case.when_then_expr().len(), 3);
@@ -1902,7 +1979,7 @@ mod remote_membership_tests {
         let decoded = decode(
             &expr,
             &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         );
         let display = decoded.to_string();
         assert!(
@@ -2025,7 +2102,7 @@ mod remote_membership_tests {
         let decoded = decode(
             &filter.expr,
             &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         );
         assert!(!has_expr::<HashTableLookupExpr>(&decoded));
         let lists = in_lists(&decoded);
@@ -2118,7 +2195,7 @@ mod remote_membership_tests {
         let decoded = decode(
             &wrapped,
             &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         );
         let display = decoded.to_string();
         assert!(
@@ -2182,7 +2259,7 @@ mod remote_membership_tests {
         let decoded = decode(
             &filter.expr,
             &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         );
         let display = decoded.to_string();
         assert!(!has_expr::<HashTableLookupExpr>(&decoded), "{display}");
@@ -2232,7 +2309,7 @@ mod remote_membership_tests {
         let decoded = decode(
             &not_lookup,
             &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         );
         let display = decoded.to_string();
         assert!(
@@ -2292,7 +2369,7 @@ mod remote_membership_tests {
         assert_unsupported(
             DynFilterPayload::from_datafusion_expr(
                 &float_filter.expr,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
             )
             .unwrap_err(),
         );
@@ -2333,7 +2410,7 @@ mod remote_membership_tests {
         assert_unsupported(
             DynFilterPayload::from_datafusion_expr(
                 &composite_filter.expr,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
             )
             .unwrap_err(),
         );
@@ -2359,7 +2436,7 @@ mod remote_membership_tests {
         let decoded = decode(
             &dict_filter.expr,
             &dict_filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         );
         // Dictionary keys are not a plain `Utf8` key column either. This producer shape
         // is a flat `bounds AND lookup`, so retention keeps the bounds conjunct that
@@ -2389,7 +2466,7 @@ mod remote_membership_tests {
             let decoded = decode(
                 &filter.expr,
                 &filter.probe_schema,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
             );
             let lists = in_lists(&decoded);
             assert_eq!(lists.len(), 1, "{key_count} keys: {decoded}");
@@ -2408,7 +2485,7 @@ mod remote_membership_tests {
             let decoded = decode(
                 &in_list,
                 &filter.probe_schema,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
             );
             let lists = in_lists(&decoded);
             assert_eq!(lists.len(), 1, "{key_count} static keys: {decoded}");
@@ -2443,7 +2520,7 @@ mod remote_membership_tests {
         let decoded = decode(
             &filter.expr,
             &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         );
         assert_eq!(in_lists(&decoded).len(), 3);
         let case = decoded.downcast_ref::<CaseExpr>().expect("CASE preserved");
@@ -2455,7 +2532,7 @@ mod remote_membership_tests {
         // error instead of an always-true filter. The predicates *are* representable, they
         // only do not fit, so the refusal is a size one and not "no wire form".
         let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
-        assert!(true_size < REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES);
+        assert!(true_size < REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP);
         assert_too_large(
             DynFilterPayload::from_datafusion_expr(&filter.expr, true_size).unwrap_err(),
         );
@@ -2498,7 +2575,7 @@ mod remote_membership_tests {
             vec![(Arc::clone(&trace_id), Arc::clone(&trace_id))],
         )
         .await;
-        let max = REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES;
+        let max = REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP;
 
         // The recovered payload decodes with the default extension codec, which rejects
         // every expression variant it does not know: a new wire variant would fail here.

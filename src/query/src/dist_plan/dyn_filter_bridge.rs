@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_query::request::{
     DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
-    InitialDynFilterRegs, InitialDynFilterSnapshot, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+    InitialDynFilterRegs, InitialDynFilterSnapshot, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
     is_dyn_filter_payload_too_large, is_dyn_filter_unsupported,
 };
 use datafusion::physical_plan::filter_pushdown::PushedDown;
@@ -64,7 +64,8 @@ pub(crate) struct RemoteDynFilterPushdown {
 
 /// Captures `parent_filters` as remote dyn filters. `accepted` holds filters captured by
 /// another pushdown phase; they are sent in the same request, so the initial registration
-/// budget is checked against both and they are kept if the new filters do not fit.
+/// limits (count and unique `filter_id`s; there is no application-level payload size cap) are
+/// checked against both and they are kept if the new filters do not fit.
 pub(crate) fn capture_remote_dyn_filters_for_pushdown(
     remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
     first_producer_local_ordinal: usize,
@@ -344,13 +345,17 @@ fn attach_initial_snapshot(
 
 /// Initial snapshot of a captured filter, or `None` when regions must not be filtered yet.
 ///
-/// A predicate transport cannot represent (or that does not fit the payload budget) is
-/// *not* replaced with `true`: only the initial snapshot is dropped (warn + metric), so the
-/// region starts with no initial predicate but still receives the registration itself
-/// (filter id plus children) and installs its `true` placeholder. Later updates land in
-/// that placeholder - a representable payload, or the explicit `true` reset the registry
-/// publishes when a generation has no wire form. The capture reports `PushedDown::No` so
-/// the parent keeps evaluating the filter itself.
+/// A predicate transport cannot represent (or that does not fit a caller-supplied
+/// transport limit) is *not* replaced with `true`: only the initial
+/// snapshot is dropped (warn + metric), so the region starts with no initial predicate but
+/// still receives the registration itself (filter id plus children) and installs its
+/// `true` placeholder. Later updates land in that placeholder - a representable payload, or
+/// the explicit `true` reset the registry publishes when a generation has no wire form. The
+/// capture reports `PushedDown::No` so the parent keeps evaluating the filter itself.
+///
+/// There is no application-level size cap: the predicate is encoded with
+/// [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`], so only the gRPC max message size (and the
+/// memory needed for a frame that large) bounds it.
 fn initial_snapshot(
     alive_dyn_filter: &DynamicFilterPhysicalExpr,
 ) -> Option<InitialDynFilterSnapshot> {
@@ -365,7 +370,7 @@ fn initial_snapshot(
 
     let payload = match DynFilterPayload::from_datafusion_expr(
         &current,
-        REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
     ) {
         Ok(payload) => payload,
         Err(error) if is_dyn_filter_unsupported(&error) => {
@@ -378,11 +383,13 @@ fn initial_snapshot(
             return None;
         }
         Err(error) if is_dyn_filter_payload_too_large(&error) => {
+            // Unreachable with `REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`; kept so a caller
+            // that passes a real transport limit still reports a size refusal as one.
             REMOTE_DYN_FILTER_ENCODE_TOTAL
                 .with_label_values(&["too_large"])
                 .inc();
             common_telemetry::warn!(
-                error; "Remote dyn filter initial snapshot is dropped because the predicate does not fit the payload budget"
+                error; "Remote dyn filter initial snapshot is dropped because the predicate does not fit the caller-supplied payload limit"
             );
             return None;
         }
@@ -672,7 +679,7 @@ mod tests {
                     arrow_schema::DataType::Utf8,
                     false,
                 )]),
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
             )
             .unwrap()
             .to_string()
@@ -1014,7 +1021,7 @@ mod tests {
             .decode_children(
                 &TaskContext::default(),
                 &schema,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
             )
             .unwrap();
         assert_eq!(children.len(), 1);
@@ -1024,13 +1031,13 @@ mod tests {
         dyn_filter.update(lit(false) as _).unwrap();
         let current = captured.alive_dyn_filter.current().unwrap();
         let payload =
-            DynFilterPayload::from_datafusion_expr(&current, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
+            DynFilterPayload::from_datafusion_expr(&current, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
                 .unwrap();
         let decoded = payload
             .decode_datafusion_expr(
                 &TaskContext::default(),
                 &schema,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
             )
             .unwrap();
         assert_eq!(decoded.to_string(), "false");
@@ -1075,12 +1082,14 @@ mod tests {
     }
 
     #[test]
-    fn capture_remote_dyn_filters_for_pushdown_rejects_oversized_snapshots() {
-        let oversized_total_snapshot_bytes = REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES * 3 / 5;
+    fn capture_remote_dyn_filters_for_pushdown_keeps_large_snapshots() {
+        // Well over the removed ~512 KiB aggregate cap: nothing here is size-limited, only
+        // the registration count and unique filter ids are.
+        let snapshot_bytes = 512 * 1024;
         let parent_filters = vec![
-            test_dyn_filter_with_snapshot_payload("host", 0, oversized_total_snapshot_bytes)
+            test_dyn_filter_with_snapshot_payload("host", 0, snapshot_bytes)
                 as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
-            test_dyn_filter_with_snapshot_payload("pod", 1, oversized_total_snapshot_bytes)
+            test_dyn_filter_with_snapshot_payload("pod", 1, snapshot_bytes)
                 as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
         ];
 
@@ -1091,12 +1100,52 @@ mod tests {
             parent_filters,
         );
 
-        assert_eq!(pushed_down(&pushdown), vec![false, false]);
-        assert!(pushdown.captured_dyn_filters.is_empty());
+        assert_eq!(pushed_down(&pushdown), vec![true, true]);
+        assert_eq!(pushdown.captured_dyn_filters.len(), 2);
+        let total_snapshot_bytes: usize = pushdown
+            .captured_dyn_filters
+            .iter()
+            .map(|captured| {
+                captured
+                    .initial_registration
+                    .initial_snapshot
+                    .as_ref()
+                    .unwrap()
+                    .encoded_payload_bytes()
+            })
+            .sum();
+        assert!(total_snapshot_bytes > 512 * 1024);
     }
 
     #[test]
-    fn capture_remote_dyn_filters_for_pushdown_keeps_accepted_filters_within_budget() {
+    fn capture_remote_dyn_filters_for_pushdown_keeps_large_initial_snapshot() {
+        // A single predicate whose snapshot is larger than the removed application cap is
+        // still captured: gRPC's max message size (and memory) is the real bound.
+        let parent_filters = vec![
+            test_dyn_filter_with_snapshot_payload("host", 0, 1024 * 1024)
+                as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+        ];
+
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            0,
+            &[],
+            parent_filters,
+        );
+
+        assert_eq!(pushed_down(&pushdown), vec![true]);
+        assert_eq!(pushdown.captured_dyn_filters.len(), 1);
+        let snapshot = pushdown.captured_dyn_filters[0]
+            .initial_registration
+            .initial_snapshot
+            .as_ref()
+            .unwrap();
+        assert!(snapshot.encoded_payload_bytes() > 512 * 1024);
+    }
+
+    #[test]
+    fn capture_remote_dyn_filters_for_pushdown_keeps_accepted_filters_within_registration_count_limit()
+     {
         const MAX_INITIAL_REGS: usize = 64;
 
         let accepted = capture_remote_dyn_filters_for_pushdown(
@@ -1354,8 +1403,10 @@ mod tests {
     }
 
     #[test]
-    fn refresh_aggregate_overflow_falls_back_to_original_snapshots() {
-        let payload_bytes = REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES * 3 / 5;
+    fn refresh_keeps_large_snapshots_without_an_application_cap() {
+        // Above the removed aggregate size cap: refresh still ships the live snapshots. Only
+        // the gRPC max message size (and memory) bound them.
+        let payload_bytes = 512 * 1024;
         let first = test_dyn_filter_with_snapshot_payload("first", 0, 1);
         let second = test_dyn_filter_with_snapshot_payload("second", 0, 1);
         let captured = vec![
@@ -1382,11 +1433,14 @@ mod tests {
             .unwrap();
 
         let regs = refreshed_regs(&captured);
+        let mut total_refreshed_bytes = 0;
         for (refreshed, original) in regs.regs.iter().zip(original) {
             let refreshed = refreshed.initial_snapshot.as_ref().unwrap();
-            assert_eq!(refreshed.generation, original.generation);
-            assert_eq!(refreshed.payload, original.payload);
+            assert!(refreshed.generation > original.generation);
+            assert_ne!(refreshed.payload, original.payload);
+            total_refreshed_bytes += refreshed.encoded_payload_bytes();
         }
+        assert!(total_refreshed_bytes > 512 * 1024);
     }
 
     #[test]

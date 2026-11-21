@@ -380,8 +380,8 @@ impl<'a> SubscriberRollbackGuard<'a> {
         Self { registry, added }
     }
 
-    fn disarm(&mut self) {
-        self.added.clear();
+    fn disarm(&mut self) -> Vec<(FilterId, Subscriber)> {
+        std::mem::take(&mut self.added)
     }
 }
 
@@ -825,9 +825,10 @@ impl MergeScanExec {
                     DataFusionError::External(Box::new(BoxedError::new(e)))
                 })?;
 
-                if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
-                    subscriber_rollback.disarm();
-                }
+                let ready_subscribers = subscriber_rollback
+                    .as_mut()
+                    .map(SubscriberRollbackGuard::disarm)
+                    .unwrap_or_default();
                 let mut advertised_schema = stream.schema().arrow_schema().clone();
                 validate_remote_schema(
                     remote_schema.as_ref(),
@@ -840,6 +841,16 @@ impl MergeScanExec {
                 if let Some(remote_dyn_filter_registry_lease) =
                     remote_dyn_filter_registry_lease.as_ref()
                 {
+                    // A watcher started for an earlier region can publish - and watermark -
+                    // the current generation before this region's `do_get` installed its
+                    // registration: the target answers `MissingRegistration` and no watcher
+                    // resends it. Replay the current generation once to this now-ready
+                    // subscriber before (re)starting the watcher, which for a fresh entry is
+                    // skipped and covered by the watcher's first publication instead.
+                    remote_dyn_filter_registry_lease
+                        .registry()
+                        .replay_current_snapshot(region_query_handler.clone(), &ready_subscribers)
+                        .await;
                     remote_dyn_filter_registry_lease
                         .ensure_fanout_task(region_query_handler.clone());
                 }
@@ -1413,6 +1424,7 @@ impl MergeScanMetric {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap as StdHashMap;
+    use std::collections::HashSet;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
@@ -1540,6 +1552,7 @@ mod tests {
     fn remote_dyn_filter_test_exec(
         handler: crate::region_query::RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
+        regions: Vec<RegionId>,
     ) -> MergeScanExec {
         let session_state = SessionStateBuilder::new().build();
         let plan = LogicalPlanBuilder::empty(true)
@@ -1552,7 +1565,7 @@ mod tests {
         MergeScanExec::new(
             &session_state,
             TableName::new("catalog", "schema", "table"),
-            vec![RegionId::new(1024, 1)],
+            regions,
             plan,
             &schema,
             handler,
@@ -1963,7 +1976,11 @@ mod tests {
         let lease = state
             .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         install_remote_dyn_filter(&exec);
         let stream = exec
             .to_stream(task_context_with_engine_state(state, query_ctx), 0)
@@ -1994,7 +2011,11 @@ mod tests {
         let lease = state
             .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         install_remote_dyn_filter(&exec);
 
         register_remote_dyn_filters_for_region(Some(&lease), &exec.captured_remote_dyn_filters());
@@ -2024,7 +2045,11 @@ mod tests {
         let lease = state
             .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         install_remote_dyn_filter(&exec);
 
         let mut stream = exec
@@ -2059,7 +2084,11 @@ mod tests {
         let lease = state
             .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         let dyn_filter = install_remote_dyn_filter(&exec);
 
         let stream = exec
@@ -2093,7 +2122,11 @@ mod tests {
         let handler = Arc::new(ImmediateEofRegionQueryHandler::default());
         let query_ctx = QueryContext::arc();
         let state = query_engine_state(handler.clone());
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         let dyn_filter = install_remote_dyn_filter(&exec);
         dyn_filter.update(physical_lit(false) as _).unwrap();
 
@@ -2117,12 +2150,80 @@ mod tests {
                         arrow_schema::DataType::Boolean,
                         false,
                     )]),
-                    common_query::request::REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                    common_query::request::REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
                 )
                 .unwrap()
                 .to_string(),
             "false"
         );
+    }
+
+    #[tokio::test]
+    async fn late_region_target_receives_the_replayed_remote_dyn_filter_generation() {
+        let handler = Arc::new(LateRegistrationRegionQueryHandler::default());
+        let query_ctx = QueryContext::arc();
+        let state = query_engine_state(handler.clone());
+        let lease = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+        );
+        let dyn_filter = install_remote_dyn_filter(&exec);
+        dyn_filter.update(physical_lit(false) as _).unwrap();
+        let current_generation = dyn_filter.snapshot_generation();
+
+        let stream = exec
+            .to_stream(task_context_with_engine_state(state, query_ctx), 0)
+            .unwrap();
+        let poll = tokio::spawn(async move {
+            let mut stream = stream;
+            stream.next().await
+        });
+
+        // Region 1's `do_get` publishes the current generation to its ready target.
+        handler.wait_for_applied(1, 1).await;
+        assert_eq!(handler.applied_for(1)[0].generation, current_generation);
+
+        // Region 2 registers its subscriber and enters `do_get` while target 2 has no
+        // registration installed yet: the running watcher re-publishes the current generation
+        // (coalesced with the first publication when it has not happened yet) and target 2
+        // drops it as `MissingRegistration`.
+        handler.second_do_get_entered.notified().await;
+        handler.wait_for_dropped(2, 1).await;
+        assert_eq!(handler.dropped_for(2)[0].generation, current_generation);
+        assert!(handler.applied_for(2).is_empty());
+        // Let the publication that just dropped target 2 finish reaching target 1 too, so the
+        // comparison below only observes updates issued by the replay.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let applied_to_ready_target_before_replay = handler.applied_for(1).len();
+
+        // `do_get` now succeeds. The watcher is already running and its watermark already
+        // covers the current generation, so only the explicit replay can deliver it.
+        handler.release_second_do_get.notify_one();
+        handler.wait_for_applied(2, 1).await;
+
+        let replayed = handler.applied_for(2);
+        assert_eq!(
+            replayed.len(),
+            1,
+            "the late target must be replayed exactly once"
+        );
+        assert_eq!(replayed[0].generation, current_generation);
+        assert!(!replayed[0].is_complete);
+        // The normal subscriber was not re-replayed by the late region.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            handler.applied_for(1).len(),
+            applied_to_ready_target_before_replay
+        );
+
+        assert!(poll.await.unwrap().is_none());
+        drop(exec);
+        drop(dyn_filter);
+        drop(lease);
     }
 
     #[test]
@@ -2527,6 +2628,130 @@ mod tests {
             if let Some(tx) = self.unregister_tx.lock().unwrap().take() {
                 let _ = tx.send(());
             }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedRemoteDynFilterUpdate {
+        target: u64,
+        generation: u64,
+        is_complete: bool,
+    }
+
+    /// Models a datanode that installs a remote dynamic filter registration only when its
+    /// `do_get` returns: an earlier update is accepted as `MissingRegistration` (`Ok`) and
+    /// dropped. Region 1 runs on target 1, region 2 on target 2, and region 2's `do_get` is
+    /// held until the test releases it.
+    #[derive(Default)]
+    struct LateRegistrationRegionQueryHandler {
+        second_do_get_entered: Notify,
+        release_second_do_get: Notify,
+        registered_targets: Mutex<HashSet<u64>>,
+        applied: Mutex<Vec<RecordedRemoteDynFilterUpdate>>,
+        dropped: Mutex<Vec<RecordedRemoteDynFilterUpdate>>,
+    }
+
+    impl LateRegistrationRegionQueryHandler {
+        fn applied_for(&self, target: u64) -> Vec<RecordedRemoteDynFilterUpdate> {
+            self.applied
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|update| update.target == target)
+                .cloned()
+                .collect()
+        }
+
+        fn dropped_for(&self, target: u64) -> Vec<RecordedRemoteDynFilterUpdate> {
+            self.dropped
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|update| update.target == target)
+                .cloned()
+                .collect()
+        }
+
+        async fn wait_for_applied(&self, target: u64, expected: usize) {
+            for _ in 0..300 {
+                if self.applied_for(target).len() >= expected {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("timed out waiting for {expected} remote dyn filter updates to target {target}");
+        }
+
+        async fn wait_for_dropped(&self, target: u64, expected: usize) {
+            for _ in 0..300 {
+                if self.dropped_for(target).len() >= expected {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!(
+                "timed out waiting for {expected} dropped remote dyn filter updates to target {target}"
+            );
+        }
+    }
+
+    #[async_trait]
+    impl RegionQueryHandler for LateRegistrationRegionQueryHandler {
+        async fn select_target(
+            &self,
+            _read_preference: ReadPreference,
+            region_id: RegionId,
+        ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            Ok(test_target(region_id.region_number() as u64))
+        }
+
+        async fn do_get(
+            &self,
+            target: &crate::region_query::RegionQueryTarget,
+            request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            if target.peer().id == 2 {
+                self.second_do_get_entered.notify_one();
+                self.release_second_do_get.notified().await;
+            }
+            self.registered_targets
+                .lock()
+                .unwrap()
+                .insert(target.peer().id);
+            Ok(empty_record_batch_stream(&request))
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            let recorded = RecordedRemoteDynFilterUpdate {
+                target: target.peer().id,
+                generation: update.generation,
+                is_complete: update.is_complete,
+            };
+            if self
+                .registered_targets
+                .lock()
+                .unwrap()
+                .contains(&target.peer().id)
+            {
+                self.applied.lock().unwrap().push(recorded);
+            } else {
+                self.dropped.lock().unwrap().push(recorded);
+            }
+            Ok(())
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
             Ok(())
         }
     }
@@ -4083,8 +4308,11 @@ mod tests {
     #[test]
     fn merge_scan_apply_expressions_exposes_remote_dyn_filter_id() {
         let query_ctx = QueryContext::arc();
-        let exec =
-            remote_dyn_filter_test_exec(Arc::new(TestRegionQueryHandler::default()), query_ctx);
+        let exec = remote_dyn_filter_test_exec(
+            Arc::new(TestRegionQueryHandler::default()),
+            query_ctx,
+            vec![RegionId::new(1024, 1)],
+        );
         let dyn_filter = install_remote_dyn_filter(&exec);
         let expected_expression_id = dyn_filter.expression_id();
         let mut expression_ids = Vec::new();
@@ -4145,6 +4373,44 @@ mod tests {
             )
             .unwrap();
 
+        assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
+        assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
+    }
+
+    #[test]
+    fn remote_dyn_filter_preflight_keeps_large_initial_snapshot_without_an_application_cap() {
+        let exec = remote_dyn_filter_test_exec(
+            Arc::new(TestRegionQueryHandler::default()),
+            QueryContext::arc(),
+            vec![RegionId::new(1024, 1)],
+        );
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+            physical_lit(true) as _,
+        ));
+        dyn_filter
+            .update(physical_lit(datafusion_common::ScalarValue::Utf8(Some(
+                "x".repeat(1024 * 1024),
+            ))) as _)
+            .unwrap();
+
+        let propagation = exec
+            .handle_child_pushdown_result(
+                FilterPushdownPhase::Post,
+                ChildPushdownResult {
+                    parent_filters: vec![ChildFilterPushdownResult {
+                        filter: dyn_filter as Arc<dyn datafusion_physical_expr::PhysicalExpr>,
+                        child_results: vec![PushedDown::Yes],
+                    }],
+                    self_filters: Vec::new(),
+                },
+                &ConfigOptions::new(),
+            )
+            .unwrap();
+
+        // The snapshot is larger than the removed 512 KiB application cap but still
+        // encodable, so the filter is captured and pushed down: gRPC's max message size (and
+        // memory) is the only bound.
         assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
         assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
     }

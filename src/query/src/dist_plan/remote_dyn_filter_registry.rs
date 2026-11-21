@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
 use common_query::request::{
-    DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES, is_dyn_filter_payload_too_large,
+    DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP, is_dyn_filter_payload_too_large,
     is_dyn_filter_unsupported,
 };
 use common_runtime::spawn_global;
@@ -91,6 +91,8 @@ pub struct DynFilterEntry {
 #[derive(Debug, Default)]
 struct DynFilterEntryState {
     last_sent_generation: u64,
+    /// Whether a complete snapshot has already been published for this entry.
+    sent_complete: bool,
     unregistered: bool,
     fanout_started: bool,
 }
@@ -136,6 +138,32 @@ impl DynFilterEntry {
 
         state.last_sent_generation = generation;
         true
+    }
+
+    /// Records that a complete snapshot has been published.
+    ///
+    /// Monotonic: a producer that is complete never becomes incomplete, so a replay of the
+    /// current generation to a subscriber that became ready too late can carry completion
+    /// even though the replay itself never published a new generation.
+    fn mark_sent_complete(&self) {
+        self.state.lock().unwrap().sent_complete = true;
+    }
+
+    fn sent_complete(&self) -> bool {
+        self.state.lock().unwrap().sent_complete
+    }
+
+    /// Whether any generation has been published since the last subscriber change.
+    ///
+    /// [`Self::reactivate_for_new_subscriber`] resets `last_sent_generation` to `0`, so
+    /// `false` means the entry's next fanout publication still includes every current
+    /// subscriber: nothing can have been missed yet.
+    fn has_published_generation(&self) -> bool {
+        self.state.lock().unwrap().last_sent_generation > 0
+    }
+
+    fn is_unregistered(&self) -> bool {
+        self.state.lock().unwrap().unregistered
     }
 
     fn try_mark_unregistered(&self) -> bool {
@@ -274,6 +302,70 @@ impl QueryDynFilterRegistry {
         }
     }
 
+    /// Replays the current producer snapshot once to subscribers whose remote `do_get` just
+    /// succeeded.
+    ///
+    /// # Why this exists
+    ///
+    /// [`Self::register_subscriber`] runs *before* the remote `do_get` installs that
+    /// registration at its target, and an entry watcher started for an earlier region keeps
+    /// running across that window. If the watcher publishes the current generation between
+    /// the two, the entry-global watermark has already advanced when the target answers
+    /// `MissingRegistration` (an `Ok`, so nothing is reported to the query),
+    /// [`Self::ensure_fanout_task`] is a no-op for an already started watcher, and the
+    /// subscriber never receives that generation.
+    ///
+    /// This closes the window explicitly and at most once per newly ready subscriber
+    /// instead of through a retry scheduler:
+    ///
+    /// - it never advances `last_sent_generation`, so one registration cannot be replayed
+    ///   twice (a retried `do_get` sees a duplicate subscriber and passes no subscriber);
+    /// - it is skipped when nothing was published since the subscriber registered, where
+    ///   the watcher's next publication already includes the subscriber;
+    /// - a replay that races the watcher sends the same generation, which the receiver
+    ///   applies idempotently (upgrading it to complete when the producer is complete), so
+    ///   duplicates are coalesced at the target.
+    ///
+    /// Best effort: it never fails the query and is bounded by the control RPC timeout per
+    /// subscriber.
+    pub async fn replay_current_snapshot(
+        &self,
+        region_query_handler: RegionQueryHandlerRef,
+        subscribers: &[(FilterId, Subscriber)],
+    ) {
+        if subscribers.is_empty() {
+            return;
+        }
+
+        let mut lifecycle_rx = self.lifecycle_tx.subscribe();
+        for (filter_id, subscriber) in subscribers {
+            let Some(entry) = self.remote_dyn_filter(filter_id) else {
+                debug!(
+                    "Skipped remote dynamic filter replay without an entry, query_id={}, filter_id={}",
+                    self.query_id, filter_id
+                );
+                continue;
+            };
+
+            if !entry.has_published_generation() {
+                continue;
+            }
+
+            if !replay_snapshot_for_subscriber(
+                self.query_id,
+                &region_query_handler,
+                &entry,
+                subscriber,
+                &mut lifecycle_rx,
+                REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT,
+            )
+            .await
+            {
+                break;
+            }
+        }
+    }
+
     #[cfg(test)]
     async fn fanout_snapshot(
         &self,
@@ -388,8 +480,13 @@ async fn run_entry_fanout(
 ///
 /// # Explicit `true` reset instead of a stale predicate
 ///
-/// A generation the wire cannot carry (a predicate with no wire form, or one that stays
-/// over budget after top-level conjunct retention) is **not** skipped any more: the
+/// Payload bytes have no application-level cap (see
+/// [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`]); only the gRPC max message size and memory
+/// bound a snapshot.
+///
+/// A generation the wire cannot carry (a predicate with no wire form, or - for a caller
+/// that passed a real transport limit - one that stays over budget after top-level
+/// conjunct retention) is **not** skipped any more: the
 /// subscriber would keep the previous, usually narrower predicate, and a producer that
 /// then widens its filter would have rows pruned away by that stale predicate. Such a
 /// generation is instead published as a literal-`true` payload at the same generation, so
@@ -414,12 +511,11 @@ async fn fanout_snapshot_for_query(
     // The entry-global watermark advances before best-effort fanout. A timed-out
     // subscriber may miss this generation; later/complete snapshots supersede it,
     // and RDF only prunes.
-    if !is_complete && !entry.mark_generation_sent(generation) {
-        return true;
-    }
-
     if is_complete {
         let _ = entry.mark_generation_sent(generation);
+        entry.mark_sent_complete();
+    } else if !entry.mark_generation_sent(generation) {
+        return true;
     }
 
     let Some(payload) = snapshot_payload(&current) else {
@@ -447,8 +543,13 @@ async fn fanout_snapshot_for_query(
 /// away rows the producer keeps after widening, so it is replaced by the explicit `true`
 /// reset described on [`fanout_snapshot_for_query`]. The producer expression itself is
 /// never rewritten.
+///
+/// There is no application-level size cap: the producer expression is encoded with
+/// [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`], so a snapshot is only bounded by the gRPC max
+/// message size (and the memory needed for a frame that large). The `too_large` arm below
+/// therefore only fires for a caller-supplied transport limit.
 fn snapshot_payload(current: &Arc<dyn PhysicalExpr>) -> Option<Vec<u8>> {
-    let max_payload_bytes = REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES;
+    let max_payload_bytes = REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP;
     match DynFilterPayload::from_datafusion_expr(current, max_payload_bytes) {
         Ok(DynFilterPayload::Datafusion(payload)) => {
             REMOTE_DYN_FILTER_ENCODE_TOTAL
@@ -508,7 +609,7 @@ fn snapshot_payload(current: &Arc<dyn PhysicalExpr>) -> Option<Vec<u8>> {
 /// is reported as `None` so best-effort fanout continues with the query running.
 fn true_reset_payload() -> Option<Vec<u8>> {
     let reset = lit(true) as Arc<dyn PhysicalExpr>;
-    match DynFilterPayload::from_datafusion_expr(&reset, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES) {
+    match DynFilterPayload::from_datafusion_expr(&reset, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP) {
         Ok(DynFilterPayload::Datafusion(payload)) => {
             REMOTE_DYN_FILTER_ENCODE_TOTAL
                 .with_label_values(&["reset"])
@@ -544,10 +645,79 @@ async fn fanout_update_for_query(
     lifecycle_rx: &mut watch::Receiver<()>,
     control_rpc_timeout: Duration,
 ) -> bool {
+    let subscribers = entry.subscribers();
+    fanout_update_to_subscribers(
+        query_id,
+        region_query_handler,
+        entry,
+        &subscribers,
+        generation,
+        is_complete,
+        payload,
+        lifecycle_rx,
+        control_rpc_timeout,
+    )
+    .await
+}
+
+/// Replays the current producer snapshot to one subscriber that just became ready.
+///
+/// See [`QueryDynFilterRegistry::replay_current_snapshot`] for why this exists. Returns
+/// `false` when the registry lifecycle closed, so the caller stops replaying.
+async fn replay_snapshot_for_subscriber(
+    query_id: QueryId,
+    region_query_handler: &RegionQueryHandlerRef,
+    entry: &DynFilterEntry,
+    subscriber: &Subscriber,
+    lifecycle_rx: &mut watch::Receiver<()>,
+    control_rpc_timeout: Duration,
+) -> bool {
+    // An unregistered entry (producer dropped or query lifecycle closed) has already told
+    // its targets to drop the filter; a late update would be refused anyway.
+    if entry.is_unregistered() {
+        return true;
+    }
+
+    let Some(filter) = entry.upgrade_producer_filter() else {
+        return true;
+    };
+    let Some((generation, current)) = current_stable_snapshot(&filter, lifecycle_rx).await else {
+        return true;
+    };
+    let Some(payload) = snapshot_payload(&current) else {
+        return true;
+    };
+
+    fanout_update_to_subscribers(
+        query_id,
+        region_query_handler,
+        entry,
+        std::slice::from_ref(subscriber),
+        generation,
+        entry.sent_complete(),
+        payload,
+        lifecycle_rx,
+        control_rpc_timeout,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fanout_update_to_subscribers(
+    query_id: QueryId,
+    region_query_handler: &RegionQueryHandlerRef,
+    entry: &DynFilterEntry,
+    subscribers: &[Subscriber],
+    generation: u64,
+    is_complete: bool,
+    payload: Vec<u8>,
+    lifecycle_rx: &mut watch::Receiver<()>,
+    control_rpc_timeout: Duration,
+) -> bool {
     let query_id = query_id.to_string();
     let filter_id = entry.filter_id().to_string();
 
-    for subscriber in entry.subscribers() {
+    for subscriber in subscribers {
         let update = RemoteDynFilterUpdate {
             filter_id: filter_id.clone(),
             payload: payload.clone(),
@@ -950,6 +1120,10 @@ mod tests {
     struct RecordingRegionQueryHandler {
         updates: Mutex<Vec<RecordedUpdate>>,
         unregisters: Mutex<Vec<RecordedUnregister>>,
+        /// Targets whose remote registration is not installed yet. The datanode answers
+        /// `MissingRegistration` with `Ok`, so the update is accepted and dropped.
+        unregistered_targets: Mutex<HashSet<u64>>,
+        dropped_updates: Mutex<Vec<RecordedUpdate>>,
         block_next_update: AtomicBool,
         update_blocked: Notify,
         release_update: Notify,
@@ -962,6 +1136,20 @@ mod tests {
 
         fn unregisters(&self) -> Vec<RecordedUnregister> {
             self.unregisters.lock().unwrap().clone()
+        }
+
+        fn dropped_updates(&self) -> Vec<RecordedUpdate> {
+            self.dropped_updates.lock().unwrap().clone()
+        }
+
+        /// Models `do_get` not having installed this target's registration yet.
+        fn hold_target(&self, target: u64) {
+            self.unregistered_targets.lock().unwrap().insert(target);
+        }
+
+        /// Models a successful `do_get` installing this target's registration.
+        fn release_target(&self, target: u64) {
+            self.unregistered_targets.lock().unwrap().remove(&target);
         }
 
         fn block_next_update(&self) {
@@ -1005,6 +1193,16 @@ mod tests {
             }
             panic!("timed out waiting for {expected} remote dyn filter unregisters");
         }
+
+        async fn wait_for_dropped_update_count(&self, expected: usize) {
+            for _ in 0..300 {
+                if self.dropped_updates().len() >= expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("timed out waiting for {expected} dropped remote dyn filter updates");
+        }
     }
 
     async fn wait_for_registry_drop(registry: Weak<QueryDynFilterRegistry>) {
@@ -1041,15 +1239,26 @@ mod tests {
             query_id: String,
             update: RemoteDynFilterUpdate,
         ) -> QueryResult<()> {
-            let should_block = self.block_next_update.swap(false, Ordering::SeqCst);
-            self.updates.lock().unwrap().push(RecordedUpdate {
+            let recorded = RecordedUpdate {
                 target: target.clone(),
                 query_id,
                 filter_id: update.filter_id,
                 generation: update.generation,
                 is_complete: update.is_complete,
                 payload: update.payload,
-            });
+            };
+            if self
+                .unregistered_targets
+                .lock()
+                .unwrap()
+                .contains(&target.peer().id)
+            {
+                self.dropped_updates.lock().unwrap().push(recorded);
+                return Ok(());
+            }
+
+            let should_block = self.block_next_update.swap(false, Ordering::SeqCst);
+            self.updates.lock().unwrap().push(recorded);
             if should_block {
                 self.update_blocked.notify_one();
                 self.release_update.notified().await;
@@ -1132,7 +1341,7 @@ mod tests {
             .decode_datafusion_expr(
                 &TaskContext::default(),
                 schema,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
             )
             .unwrap()
     }
@@ -1544,6 +1753,44 @@ mod tests {
             decode_recorded_payload(&updates[2], &schema).to_string(),
             "false"
         );
+    }
+
+    #[tokio::test]
+    async fn fanout_publishes_large_generation_without_an_application_cap() {
+        let query_id = test_query_id(14);
+        let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            registry.register_subscriber(&filter_id, subscriber),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        let handler_ref = handler.clone() as RegionQueryHandlerRef;
+
+        // A payload over the removed 512 KiB application cap is published as the producer
+        // wrote it: only the gRPC max message size (and memory) bounds it, so fanout neither
+        // drops this generation nor substitutes a `true` reset for it.
+        filter.update(lit("x".repeat(1024 * 1024)) as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].generation, filter.snapshot_generation());
+        let decoded = decode_recorded_payload(&updates[0], &host_schema());
+        assert!(
+            updates[0].payload.len() > 512 * 1024,
+            "the large payload must be published, not shrunk or reset"
+        );
+        assert!(decoded.to_string().len() > 512 * 1024);
     }
 
     #[tokio::test]
@@ -2047,6 +2294,226 @@ mod tests {
 
         registry.unregister_all_once(&handler_ref).await;
         handler.wait_for_unregister_count(1).await;
+    }
+
+    /// Models the lost-update window: the watcher publishes (and watermarks) the current
+    /// generation while a subscriber is registered but its `do_get` has not installed the
+    /// registration at the target yet, so the target answers `MissingRegistration` (`Ok`,
+    /// dropped) and `ensure_fanout_task` cannot help afterwards.
+    #[tokio::test]
+    async fn replay_delivers_generation_published_before_the_target_was_ready() {
+        let query_id = test_query_id(11);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        // Target 2 has no installed registration yet.
+        handler.hold_target(2);
+
+        let first_subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, first_subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+        handler.wait_for_update_count(1).await;
+
+        filter.update(lit(false) as _).unwrap();
+        handler.wait_for_update_count(2).await;
+        let published_generation = filter.snapshot_generation();
+        assert_eq!(handler.updates()[1].generation, published_generation);
+
+        // The second region's subscriber registers while its `do_get` is still in flight. The
+        // running watcher re-publishes the current generation; target 2 drops it.
+        let late_subscriber = Subscriber::new(RegionId::new(1024, 8), test_target(2));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, late_subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+        handler.wait_for_update_count(3).await;
+        handler.wait_for_dropped_update_count(1).await;
+        assert_eq!(handler.updates()[2].generation, published_generation);
+        assert_eq!(
+            handler.dropped_updates()[0].generation,
+            published_generation
+        );
+
+        // `do_get` now succeeds, but the entry watermark already covers the current
+        // generation and the watcher is already running, so only a replay can deliver it.
+        handler.release_target(2);
+        lease
+            .registry()
+            .replay_current_snapshot(
+                handler.clone() as RegionQueryHandlerRef,
+                std::slice::from_ref(&(filter_id.clone(), late_subscriber.clone())),
+            )
+            .await;
+
+        let replayed: Vec<_> = handler
+            .updates()
+            .into_iter()
+            .filter(|update| update.target == late_subscriber.target().clone())
+            .collect();
+        assert_eq!(
+            replayed.len(),
+            1,
+            "the replay must reach the late target exactly once"
+        );
+        assert_eq!(replayed[0].generation, published_generation);
+        assert_eq!(replayed[0].generation, filter.snapshot_generation());
+        assert_eq!(replayed[0].query_id, query_id.to_string());
+        assert!(!replayed[0].is_complete);
+
+        drop(lease);
+        wait_for_registry_drop(registry_weak).await;
+    }
+
+    /// A late target of a completed filter must also learn that the producer completed, so it
+    /// stops waiting for updates it will never receive.
+    #[tokio::test]
+    async fn replay_carries_completion_to_a_target_that_missed_the_final_generation() {
+        let query_id = test_query_id(12);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        handler.hold_target(2);
+
+        let first_subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, first_subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+        handler.wait_for_update_count(1).await;
+
+        filter.update(lit(false) as _).unwrap();
+        handler.wait_for_update_count(2).await;
+
+        let late_subscriber = Subscriber::new(RegionId::new(1024, 8), test_target(2));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, late_subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+        handler.wait_for_update_count(3).await;
+        handler.wait_for_dropped_update_count(1).await;
+
+        // The producer completes while the second region's `do_get` is still in flight.
+        filter.mark_complete();
+        handler.wait_for_complete_update().await;
+        handler.wait_for_dropped_update_count(2).await;
+        let final_generation = filter.snapshot_generation();
+
+        handler.release_target(2);
+        lease
+            .registry()
+            .replay_current_snapshot(
+                handler.clone() as RegionQueryHandlerRef,
+                std::slice::from_ref(&(filter_id.clone(), late_subscriber.clone())),
+            )
+            .await;
+
+        let replayed: Vec<_> = handler
+            .updates()
+            .into_iter()
+            .filter(|update| update.target == late_subscriber.target().clone())
+            .collect();
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].generation, final_generation);
+        assert!(
+            replayed[0].is_complete,
+            "the replayed final generation must carry completion"
+        );
+
+        drop(lease);
+        wait_for_registry_drop(registry_weak).await;
+    }
+
+    /// A normal subscriber needs no replay before the first publication, and a replay never
+    /// advances the entry watermark: it repeats the published generation at most once and the
+    /// next producer generation is still published exactly once.
+    #[tokio::test]
+    async fn replay_is_single_shot_and_skipped_before_the_first_publication() {
+        let query_id = test_query_id(13);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        let handler_ref = handler.clone() as RegionQueryHandlerRef;
+
+        // Nothing has been published yet, so the watcher's first publication already covers
+        // the subscriber: replaying here would only duplicate it.
+        lease
+            .registry()
+            .replay_current_snapshot(
+                handler_ref.clone(),
+                std::slice::from_ref(&(filter_id.clone(), subscriber.clone())),
+            )
+            .await;
+        assert!(handler.updates().is_empty());
+
+        lease.ensure_fanout_task(handler_ref.clone());
+        handler.wait_for_update_count(1).await;
+        let published_generation = handler.updates()[0].generation;
+        assert_eq!(published_generation, filter.snapshot_generation());
+
+        // A replay for a normal subscriber repeats the published generation once.
+        lease
+            .registry()
+            .replay_current_snapshot(
+                handler_ref.clone(),
+                std::slice::from_ref(&(filter_id.clone(), subscriber.clone())),
+            )
+            .await;
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[1].generation, published_generation);
+        assert_eq!(updates[1].payload, updates[0].payload);
+        assert!(!updates[1].is_complete);
+
+        // The replay did not advance the watermark: the next generation is published once.
+        filter.update(lit(false) as _).unwrap();
+        handler.wait_for_update_count(3).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 3);
+        assert!(updates[2].generation > published_generation);
+
+        drop(lease);
+        wait_for_registry_drop(registry_weak).await;
     }
 
     #[tokio::test]

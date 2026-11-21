@@ -249,7 +249,7 @@ mod tests {
     use datafusion_expr::{EmptyRelation, UserDefinedLogicalNodeCore};
 
     use common_query::request::{
-        DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         remote_membership_test_support::{key, one_column_schema, run_real_hash_join, utf8},
     };
 
@@ -368,14 +368,14 @@ mod tests {
         .await;
         let payload = DynFilterPayload::from_datafusion_expr(
             &filter.expr,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         )
         .unwrap();
         let decoded = payload
             .decode_datafusion_expr(
                 &TaskContext::default(),
                 &producer_schema,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
             )
             .unwrap();
 
