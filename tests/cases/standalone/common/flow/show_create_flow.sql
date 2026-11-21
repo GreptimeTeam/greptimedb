@@ -15,7 +15,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 
 SHOW FLOWS LIKE 'filter_numbers_show';
 
-CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number FROM numbers_input_show where number > 10;
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number FROM numbers_input_show where number > 10;
 
 SHOW CREATE FLOW filter_numbers_show;
 
@@ -32,13 +32,13 @@ SHOW FLOWS LIKE 'filter_numbers_show';
 -- also test `CREATE OR REPLACE` and `IF NOT EXISTS`
 
 -- (flow exists, replace, if not exists)=(false, false, false)
-CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > 10;
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > 10;
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
 -- this one should error out
 -- (flow exists, replace, if not exists)=(true, false, false)
-CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > 15;
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > 15;
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
@@ -54,7 +54,7 @@ SELECT number, ts FROM out_num_cnt_show;
 
 -- after this one, the flow SHOULD NOT be replaced
 -- (flow exists, replace, if not exists)=(true, false, true)
-CREATE FLOW IF NOT EXISTS filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > 5;
+CREATE FLOW IF NOT EXISTS filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > 5;
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
@@ -70,7 +70,7 @@ SELECT number, ts FROM out_num_cnt_show;
 
 -- after this, the flow SHOULD be replaced
 -- (flow exists, replace, if not exists)=(true, true, false)
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > 3;
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > 3;
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
@@ -101,14 +101,14 @@ DROP FLOW filter_numbers_show;
 
 -- following always create since didn't exist
 -- (flow exists, replace, if not exists)=(false, true, false)
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > -2;
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > -2;
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
 DROP FLOW filter_numbers_show;
 
 -- (flow exists, replace, if not exists)=(false, false, true)
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number, ts FROM numbers_input_show where number > -3;
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number, ts FROM numbers_input_show where number > -3;
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
@@ -149,7 +149,7 @@ create table out_num_cnt_show (
     PRIMARY KEY(number),
 );
 
-CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number as n1 FROM numbers_input_show where number > 10;
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number as n1 FROM numbers_input_show where number > 10;
 
 INSERT INTO numbers_input_show VALUES (10, 0),(15, 1),(16, 2);
 
@@ -160,11 +160,16 @@ ADMIN FLUSH_FLOW('filter_numbers_show');
 
 SELECT number FROM out_num_cnt_show;
 
+-- The sink schema mismatch is detected on the flownode. In distributed mode the
+-- error crosses gRPC and loses its source chain, so normalize the trailing chain
+-- to keep both environments comparable; the rejection itself is identical.
 -- should mismatch, hence the old flow remains
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2 FROM numbers_input_show where number > 15;
+-- SQLNESS REPLACE (in\x20context:\x20Failed\x20to\x20rewrite\x20plan).* in context: Failed to rewrite plan
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number AS n1, number AS n2 FROM numbers_input_show where number > 15;
 
 -- should mismatch, hence the old flow remains
-CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2, number AS n3 FROM numbers_input_show where number > 15;
+-- SQLNESS REPLACE (in\x20context:\x20Failed\x20to\x20rewrite\x20plan).* in context: Failed to rewrite plan
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show EVAL INTERVAL '1h' AS SELECT number AS n1, number AS n2, number AS n3 FROM numbers_input_show where number > 15;
 
 SELECT flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
@@ -182,6 +187,7 @@ DROP FLOW filter_numbers_show;
 
 CREATE FLOW filter_numbers_show
 SINK TO out_num_cnt_show
+EVAL INTERVAL '1h'
 WITH (defer_on_missing_source = true)
 AS SELECT number AS n1 FROM numbers_input_show where number > 10;
 

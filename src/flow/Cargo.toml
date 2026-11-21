@@ -39,7 +39,6 @@ datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 futures.workspace = true
-get-size2 = "0.1.2"
 greptime-proto.workspace = true
 hostname.workspace = true
 humantime-serde.workspace = true

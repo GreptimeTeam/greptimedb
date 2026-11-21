@@ -36,19 +36,6 @@ use crate::FlowId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display(
-        "Failed to insert into flow: region_id={}, flow_ids={:?}",
-        region_id,
-        flow_ids
-    ))]
-    InsertIntoFlow {
-        region_id: u64,
-        flow_ids: Vec<u64>,
-        source: BoxedError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Flow engine is still recovering"))]
     FlowNotRecovered {
         #[snafu(implicit)]
@@ -309,7 +296,6 @@ impl ErrorExt for Error {
         match self {
             Self::JoinTask { .. }
             | Self::Datafusion { .. }
-            | Self::InsertIntoFlow { .. }
             | Self::NoAvailableFrontend { .. }
             | Self::FlowNotRecovered { .. } => StatusCode::Internal,
             Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
@@ -354,8 +340,7 @@ impl ErrorExt for Error {
                 RetryHint::Retryable
             }
 
-            Self::InsertIntoFlow { source, .. }
-            | Self::CreateFlow { source, .. }
+            Self::CreateFlow { source, .. }
             | Self::CreateSinkTable { source, .. }
             | Self::External { source, .. } => source.retry_hint(),
 
