@@ -578,13 +578,11 @@ fn encode_exponential_histogram(
         .context(error::InternalSnafu {
             err_msg: "missing native histogram schema",
         })?;
-    for (index, data_point) in histogram.data_points.iter().enumerate() {
+    for data_point in &histogram.data_points {
         let (value, timestamp_nanos) = match exponential_histogram_value(data_point, temporality) {
             Ok(value) => value,
             Err(reason) => {
-                reject_data_points(outcome, 1, || {
-                    format!("metric `{name}` data point {index}: {reason}")
-                })?;
+                reject_data_points(outcome, 1, || format!("metric `{name}`: {reason}"))?;
                 OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS
                     .with_label_values(&["invalid_data_point"])
                     .inc();
@@ -1175,11 +1173,9 @@ fn encode_histogram(
         Ok(AggregationTemporality::Delta)
     );
     let stale_value = f64::from_bits(PROMETHEUS_STALE_NAN_BITS);
-    for (index, data_point) in hist.data_points.iter().enumerate() {
-        if let Some(reason) = histogram_data_point_rejection(data_point, is_delta) {
-            reject_data_points(outcome, 1, || {
-                format!("metric `{name}` data point {index}: {reason}")
-            })?;
+    for data_point in &hist.data_points {
+        if let Some(reason) = histogram_data_point_rejection(data_point) {
+            reject_data_points(outcome, 1, || format!("metric `{name}`: {reason}"))?;
             continue;
         }
 
@@ -1206,22 +1202,20 @@ fn encode_histogram(
         } else {
             let mut accumulated_count = 0u64;
             let mut values = Vec::with_capacity(data_point.bucket_counts.len());
-            for (idx, count) in data_point.bucket_counts.iter().enumerate() {
+            for (bound, count) in data_point
+                .explicit_bounds
+                .iter()
+                .copied()
+                .chain(std::iter::once(f64::INFINITY))
+                .zip(&data_point.bucket_counts)
+            {
                 accumulated_count = accumulated_count.checked_add(*count).ok_or_else(|| {
                     error::InvalidParameterSnafu {
-                        reason: format!(
-                            "metric `{name}` data point {index}: bucket prefix overflows u64"
-                        ),
+                        reason: format!("metric `{name}`: bucket prefix overflows u64"),
                     }
                     .build()
                 })?;
-                let bound =
-                    data_point.explicit_bounds.get(idx).copied().or_else(|| {
-                        (idx == data_point.explicit_bounds.len()).then_some(f64::INFINITY)
-                    });
-                if let Some(bound) = bound {
-                    values.push((bound, accumulated_count as f64));
-                }
+                values.push((bound, accumulated_count as f64));
             }
             values
         };
@@ -1331,39 +1325,36 @@ fn encode_histogram(
     Ok(())
 }
 
-pub(crate) fn histogram_data_point_rejection(
-    data_point: &HistogramDataPoint,
-    is_delta: bool,
-) -> Option<String> {
+pub(crate) fn histogram_data_point_rejection(data_point: &HistogramDataPoint) -> Option<String> {
     if has_no_recorded_value(data_point.flags) {
         return None;
     }
 
-    if is_delta {
-        let valid_empty_layout =
-            data_point.bucket_counts.is_empty() && data_point.explicit_bounds.is_empty();
-        let expected_buckets = data_point.explicit_bounds.len().checked_add(1);
-        if !valid_empty_layout && expected_buckets != Some(data_point.bucket_counts.len()) {
-            return Some(format!(
-                "bucket_counts length {} must equal explicit_bounds length {} plus one",
-                data_point.bucket_counts.len(),
-                data_point.explicit_bounds.len()
-            ));
-        }
-        if data_point
+    let valid_empty_layout =
+        data_point.bucket_counts.is_empty() && data_point.explicit_bounds.is_empty();
+    let expected_buckets = data_point.explicit_bounds.len().checked_add(1);
+    if !valid_empty_layout && expected_buckets != Some(data_point.bucket_counts.len()) {
+        return Some(format!(
+            "bucket_counts length {} must equal explicit_bounds length {} plus one",
+            data_point.bucket_counts.len(),
+            data_point.explicit_bounds.len()
+        ));
+    }
+    // OTLP requires strictly increasing explicit_bounds; GreptimeDB also requires finite
+    // bounds so an explicit +Inf cannot duplicate the le="inf" bucket appended above.
+    if data_point
+        .explicit_bounds
+        .iter()
+        .any(|bound| !bound.is_finite())
+        || data_point
             .explicit_bounds
-            .iter()
-            .any(|bound| !bound.is_finite())
-            || data_point
-                .explicit_bounds
-                .windows(2)
-                .any(|bounds| bounds[0] >= bounds[1])
-        {
-            return Some("explicit_bounds must be finite and strictly increasing".to_string());
-        }
-        if data_point.count == 0 && data_point.sum.is_some_and(|sum| sum != 0.0) {
-            return Some("sum must be absent or zero when count is zero".to_string());
-        }
+            .windows(2)
+            .any(|bounds| bounds[0] >= bounds[1])
+    {
+        return Some("explicit_bounds must be finite and strictly increasing".to_string());
+    }
+    if data_point.count == 0 && data_point.sum.is_some_and(|sum| sum != 0.0) {
+        return Some("sum must be absent or zero when count is zero".to_string());
     }
 
     let bucket_total = data_point
@@ -1373,7 +1364,7 @@ pub(crate) fn histogram_data_point_rejection(
     let Some(bucket_total) = bucket_total else {
         return Some("bucket prefix overflows u64".to_string());
     };
-    if is_delta && !data_point.bucket_counts.is_empty() && bucket_total != data_point.count {
+    if !data_point.bucket_counts.is_empty() && bucket_total != data_point.count {
         return Some(format!(
             "buckets contain {bucket_total} observations, declared count is {}",
             data_point.count
@@ -2929,7 +2920,7 @@ mod tests {
         use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
         use prost::Message;
 
-        for mode in ["delta", "empty", "stale", "missing_infinity"] {
+        for mode in ["delta", "cumulative", "empty", "stale"] {
             let mut point = HistogramDataPoint {
                 time_unix_nano: 100,
                 count: 4,
@@ -2960,31 +2951,23 @@ mod tests {
                     point.bucket_counts.clear();
                 }
                 "stale" => point.flags = DataPointFlags::NoRecordedValueMask as u32,
-                "missing_infinity" => {
-                    // Cumulative conversion tolerates a missing infinity bucket.
-                    point.explicit_bounds = vec![1.0];
-                    point.bucket_counts = vec![1];
-                    point.count = 1;
-                }
                 _ => {}
             }
             let mut histogram = Histogram {
                 data_points: vec![point],
-                aggregation_temporality: if mode == "missing_infinity" {
+                aggregation_temporality: if mode == "cumulative" {
                     AggregationTemporality::Cumulative
                 } else {
                     AggregationTemporality::Delta
                 } as i32,
             };
-            if mode != "missing_infinity" {
-                histogram.data_points.push(HistogramDataPoint {
-                    explicit_bounds: vec![1.0],
-                    bucket_counts: vec![4],
-                    count: 4,
-                    exemplars: vec![Exemplar::default()],
-                    ..Default::default()
-                });
-            }
+            histogram.data_points.push(HistogramDataPoint {
+                explicit_bounds: vec![1.0],
+                bucket_counts: vec![4],
+                count: 4,
+                exemplars: vec![Exemplar::default()],
+                ..Default::default()
+            });
             let mut request = gauge_request(vec![], "gauge");
             request.resource_metrics[0].scope_metrics[0]
                 .metrics
@@ -3000,11 +2983,7 @@ mod tests {
             let mut conversion =
                 to_grpc_insert_requests(request.clone(), &mut ctx.clone()).unwrap();
             assert_eq!(conversion.outcome.accepted_data_points, 2, "{mode}");
-            assert_eq!(
-                conversion.outcome.rejected_data_points,
-                i64::from(mode != "missing_infinity"),
-                "{mode}"
-            );
+            assert_eq!(conversion.outcome.rejected_data_points, 1, "{mode}");
 
             // Exemplars must not change either the histogram or the independent gauge payload.
             for point in &mut histogram.data_points {
@@ -3037,7 +3016,6 @@ mod tests {
                     (5, "inf"),
                     (6, "inf"),
                 ],
-                "missing_infinity" => vec![(2, "1"), (3, "1"), (4, "1")],
                 _ => vec![
                     (1, "inf"),
                     (2, "1"),
@@ -3082,6 +3060,37 @@ mod tests {
             actual.sort_unstable();
             assert_eq!(actual, expected, "{mode}");
         }
+
+        let missing_infinity = Histogram {
+            data_points: vec![HistogramDataPoint {
+                explicit_bounds: vec![1.0],
+                bucket_counts: vec![1],
+                count: 1,
+                exemplars: vec![Exemplar {
+                    time_unix_nano: 2,
+                    value: Some(exemplar::Value::AsDouble(0.5)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            aggregation_temporality: AggregationTemporality::Cumulative as i32,
+        };
+        let conversion = to_grpc_insert_requests(
+            metrics_request(vec![Metric {
+                name: "missing_infinity".into(),
+                data: Some(metric::Data::Histogram(missing_infinity)),
+                ..Default::default()
+            }]),
+            &mut OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(conversion.outcome.accepted_data_points, 0);
+        assert_eq!(conversion.outcome.rejected_data_points, 1);
+        assert!(conversion.requests.inserts.is_empty());
+        assert!(conversion.exemplars.is_empty());
     }
 
     fn exponential_metric(
