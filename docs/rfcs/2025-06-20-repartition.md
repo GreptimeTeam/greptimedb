@@ -38,7 +38,8 @@ sequenceDiagram
     Metasrv->>Datanodes: Update region rule, stage version changes from now on
     Region0->>Region0: Compute new manifests for all regions
     Region0->>Datanodes: Submit manifest changes
-    Metasrv->>Datanodes: Recover compaction and snapshot, make staged changes visible
+    Metasrv->>Metasrv: Checkpoint publish after all regions acknowledge apply
+    Metasrv->>Datanodes: Publish staged changes and resume compaction and snapshot
 
     note over Frontend, Datanodes: Reload Cache
     Metasrv->>Metasrv: Release resources (with Paas)
@@ -69,11 +70,9 @@ Every regions and all the ingestion requests to the region server will have a ve
 
 Then region 0 (or let metasrv to pick any operational region) will compute the new manifests for all target regions. This step is done by first reading all old manifests, and remapping the files with new partition rule, to get the content of new manifests. Notice this step only handles the manifests before region rule change on region server, and won't touch those staged manifests, as they are already with the new rule.
 
-Those new manifest will be submitted to the corresponding target regions by region 0 via a `RegionEdit` request. If this request falls after a few retries, region 0 will try to rollback this change by directly overwriting the manifest on object storage. and report this failure to metasrv and let the entire repartition procedure to fail. And we can also optionally compute the new manifest for those staged version changes (like another repartition) and submit them to the target regions to make the also visible even if the repartition fails.
+Region 0 submits the new manifests to the target regions via `RegionEdit`. Once a region applies its manifest, it enters `PendingPublish`. It can still accept writes under the new rule and flush them while other regions in the group apply their manifests. These flushes are recorded in the same staging manifest. The old manifest remains visible to readers, and compaction and snapshot remain stopped.
 
-In the other hand, a successful `RegionEdit` request also acknowledges those staged version changes and make them visible.
-
-After this step, the repartition is done in the data plane. We can start to process compaction and snapshot again.
+Once all regions in the group reach `PendingPublish`, metasrv records the decision to publish before asking any region to make its changes visible. Each region publishes the applied manifest together with its staged writes and can then resume compaction and snapshot.
 
 ## Postprocessing
 
@@ -96,11 +95,11 @@ Here describe the repartition procedure step by step:
   - Update region rule to regions
   - Pick one region to calculate new manifest for all regions in this repartition group
   - Let that region to apply new manifest to each region via `RegionEdit`
-  - If failed after some retries, revert this manifest change to other succeeded regions and mark this failure.
-  - If all succeeded, acknowledge those staged version changes and make them visible.
+  - If apply fails after retries, record the decision to roll back the group and recover its staged writes as described below.
+  - If all succeeded, record the decision to publish the group and make its staged changes visible.
   - Return result
 - Collect results from subprocedure.
-  - For those who failed, we need to restart those regions to force reconstruct their status from manifests
+  - For groups that rolled back, keep their old partition rules.
   - For those who succeeded, collect and merge their rule diff
 - Unlock the table key
 - Report the result to user.
@@ -111,9 +110,17 @@ In addition of sequential step, rollback is also an important part of this proce
 
 If the metadata update is not committed, we can overwrite the metadata to previous version. This step is scoped in the "no ingestion" period, so no new data will be ingested and the status of both datanode and metasrv will be consistent.
 
-If the `RegionEdit` to other regions is not acknowledged, or partial acknowledged, we can directly overwrite the manifest on object storage from the central region (who computes the new manifest), and force region server to reload corresponding region to load its state from object storage to recover.
+If apply fails after the new rule starts accepting writes, metasrv records the rollback decision and fences the union of the old and new regions in the group. This includes a reused region only once. The fence is enforced at the datanode so that requests sent with a cached route cannot enter after the fence. A region that never entered staging still has to acknowledge the fence. It contributes no staged writes.
 
-If the staged version changes are not acknowledged, we can re-compute manifest based on old rule for staged data, and apply them directly like above. This is like another smaller repartition for those staged data.
+Each region drains admitted writes and flushes the remaining staged memtables before acknowledging the fence. It seals the list of its own flush edits for this group, including flushes in `PendingPublish`. Imported files are excluded. An empty sealed list means that the region has no files to remap. A missing reply or an unreadable list must be retried. Metasrv waits for every seal before asking the central region to remap these files under the old partition rules.
+
+Each old region keeps its original manifest and applies its share of the remapped files as one edit. The edit records the group ID and rollback operation together with the file changes, including when there are no files to add. A retry can then acknowledge the same edit without importing files twice. A reused region discards its unpublished forward changes. A newly allocated region stays fenced until its files are safe to release.
+
+After all old regions acknowledge the edit, metasrv restores the group's old routes under the table lock and invalidates the route cache. It restores any table-wide partition metadata only if the surviving groups no longer require it. Before releasing an allocated region, metasrv must preserve any SST and index files still referenced by an old region. The rollback can use copies owned by the old regions, or the existing cross-region file references with the corresponding source-to-destination GC mapping installed before cleanup. Old regions resume writes under the old rule. A failed metadata update, reopen or cleanup is retried from the same rollback decision.
+
+If a datanode restarts during rollback, it rebuilds the staging manifest for the group before accepting writes. It restores the fence and uses the staged flush watermark when replaying the WAL. If the flush list was already sealed, the region returns the same list on retry. If the old region already recorded the rollback edit, it acknowledges the edit without applying it again.
+
+Rollback is scoped to the failed group. For example, if one split publishes and another rolls back, the first keeps its new routes and the second restores its old routes. The DDL reports failure after the rollback completes.
 
 ## Region rule validation and diff calculation
 
