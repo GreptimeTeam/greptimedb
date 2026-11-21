@@ -2582,7 +2582,7 @@ async fn native_zero_match_takes_the_layout_of_its_set_operand() {
 async fn native_absent_over_time_plans_over_discovered_metrics() {
     // Only one of the two metrics carries `no_such_label`, so the matcher that wants a value of it
     // narrows the discovery to that one metric and the route plans. A selector that narrowed to
-    // both would decline: its presence read keeps the names, and one segment could not bind them.
+    // both - checked below - plans as well, since each discovered metric answers for itself.
     let specs = ["alpha_total", "beta_total"]
         .into_iter()
         .map(|name| ((DEFAULT_SCHEMA_NAME.to_string(), name.to_string()), 2, 1))
@@ -2656,9 +2656,9 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
         "a selector that matched no table still answers its matchers: {tree}"
     );
 
-    // The same selector over metrics that all carry the label narrows to several: the presence
-    // read keeps their names and one segment cannot bind them, so the route declines rather than
-    // planning a tree that cannot be built or one that would read two metrics as one series.
+    // The same selector over metrics that all carry the label narrows to several, and it plans: each
+    // discovered metric is read through its own raw source, so the presence read keeps every name
+    // and the fused node is handed the union of those sources rather than a scan to bind.
     let specs = ["alpha_total", "beta_total"]
         .into_iter()
         .map(|name| ((DEFAULT_SCHEMA_NAME.to_string(), name.to_string()), 2, 1))
@@ -2668,19 +2668,72 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
         vec!["tag_0".to_string(), "no_such_label".to_string()],
     ];
     let provider = build_test_table_provider_with_tsid_tag_names(&specs, &tags, None).await;
-    let error = PromPlanner::stmt_to_plan_with_annotations(
-        provider,
-        &build_eval_stmt(r#"absent_over_time({no_such_label="x", tag_0="api"}[5m])"#),
-        &build_query_engine_state(),
-        None,
+    let plan = build_native_fused_plan_with_provider(
+        r#"absent_over_time({no_such_label="x", tag_0="api"}[5m])"#,
         true,
+        provider,
     )
-    .await
-    .expect_err("a nameless selector over several metrics must decline");
+    .await;
+    let display = plan.display_indent().to_string();
+    assert!(display.contains("FusedSeries"), "{display}");
     assert!(
-        error.to_string().contains("metric matcher"),
-        "the decline keeps the existing plan's answer: {error}"
+        !display.contains("prom_absent_over_time"),
+        "the answer must not be the existing per-series UDF: {display}"
     );
+    let fused = find_fused_series(&plan).expect("fused plan");
+    // One input holds the whole discovery: the two metrics are the union's sources, not two inputs.
+    assert_eq!(1, fused.inputs().len(), "{plan:?}");
+    // Each discovered metric is read through its own source, and that source names the metric it
+    // reads: this is why the binding below needs no name of its own.
+    fn source_metrics(plan: &LogicalPlan, out: &mut Vec<String>) {
+        if let LogicalPlan::Extension(extension) = plan
+            && let Some(source) = extension.node.as_any().downcast_ref::<RawSeriesSource>()
+        {
+            out.push(source.metric_name().to_string());
+        }
+        for input in plan.inputs() {
+            source_metrics(input, out);
+        }
+    }
+    let mut sources = Vec::new();
+    for input in fused.inputs() {
+        source_metrics(input, &mut sources);
+    }
+    sources.sort();
+    assert_eq!(vec!["alpha_total", "beta_total"], sources, "{plan:?}");
+    // The tree reads presence through a fold that keeps the name, which is what tells two metrics
+    // apart at runtime; a fold that dropped it would read them as one series.
+    let trees = fused_trees(&plan).join("\n");
+    assert!(
+        trees.contains(r#"Vector: absent {no_such_label="x", tag_0="api"}"#),
+        "the labels are the selector's matchers: {trees}"
+    );
+    assert!(
+        trees.contains("Window: last_over_time [300000ms]"),
+        "the presence read folds the window: {trees}"
+    );
+    assert!(
+        !trees.contains("present_over_time"),
+        "the fold keeps the name rather than dropping it: {trees}"
+    );
+    // The layout still declares the per-row name column, and an `absent` answer names no row: the
+    // column is the nullable one every row leaves empty.
+    let names = plan.schema().fields();
+    let last = names.last().expect("the plan publishes a name column");
+    assert_eq!(METRIC_NAME, last.name().as_str(), "{names:?}");
+    assert_eq!(&ArrowDataType::Utf8, last.data_type(), "{names:?}");
+    assert!(last.is_nullable(), "{names:?}");
+    assert_eq!(
+        1,
+        names
+            .iter()
+            .filter(|field| field.name() == METRIC_NAME)
+            .count(),
+        "the name column is declared once: {names:?}"
+    );
+    // The binding below the node names no metric: the frames it reads name their own, so the lifted
+    // assumption - that such a tree does not need the binding's name - is what is being pinned here.
+    assert!(fused.binding().metric_name.is_none(), "{plan:?}");
 
     // A selector that names its metric answers with that metric's other equality matchers alone.
     let plan =
