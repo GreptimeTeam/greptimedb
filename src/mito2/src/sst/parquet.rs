@@ -175,18 +175,18 @@ pub(crate) fn var_len_value_bytes(batch: &RecordBatch) -> u64 {
         .sum()
 }
 
-/// Footer key holding the decoded bytes of string and binary values in each row group, in
-/// row group order and separated by commas.
-pub(crate) const ROW_GROUP_VALUE_BYTES_KEY: &str = "greptime:row_group_value_bytes";
+/// Footer key holding the decoded bytes of string and binary values in the row group with the
+/// most such bytes.
+pub(crate) const MAX_ROW_GROUP_VALUE_BYTES_KEY: &str = "greptime:max_row_group_value_bytes";
 
-/// Accumulates [var_len_value_bytes] per row group, cutting row groups every
+/// Tracks the largest [var_len_value_bytes] of a row group, cutting row groups every
 /// `row_group_rows` rows from the start of the file like the parquet writers do.
 #[derive(Debug)]
 pub(crate) struct RowGroupValueBytes {
     row_group_rows: usize,
     rows_in_current: usize,
     current: u64,
-    finished: Vec<u64>,
+    max: u64,
 }
 
 impl RowGroupValueBytes {
@@ -195,7 +195,7 @@ impl RowGroupValueBytes {
             row_group_rows: row_group_rows.max(1),
             rows_in_current: 0,
             current: 0,
-            finished: Vec::new(),
+            max: 0,
         }
     }
 
@@ -205,59 +205,55 @@ impl RowGroupValueBytes {
         while offset < batch.num_rows() {
             let len = (self.row_group_rows - self.rows_in_current).min(batch.num_rows() - offset);
             self.current += var_len_value_bytes(&batch.slice(offset, len));
+            self.max = self.max.max(self.current);
             self.rows_in_current += len;
             offset += len;
             if self.rows_in_current == self.row_group_rows {
-                self.finished.push(std::mem::take(&mut self.current));
+                self.current = 0;
                 self.rows_in_current = 0;
             }
         }
     }
 
     /// Returns the footer entry, or `None` when the file has no such values.
-    pub(crate) fn into_key_value(mut self) -> Option<KeyValue> {
-        if self.rows_in_current > 0 {
-            self.finished.push(self.current);
-        }
-        self.finished.iter().any(|bytes| *bytes > 0).then(|| {
+    pub(crate) fn into_key_value(self) -> Option<KeyValue> {
+        (self.max > 0).then(|| {
             KeyValue::new(
-                ROW_GROUP_VALUE_BYTES_KEY.to_string(),
-                self.finished
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
+                MAX_ROW_GROUP_VALUE_BYTES_KEY.to_string(),
+                self.max.to_string(),
             )
         })
     }
 }
 
 /// Returns the size of the largest row group of `metadata`, counting string and binary values
-/// at their decoded size when the footer records it under [ROW_GROUP_VALUE_BYTES_KEY].
+/// at their decoded size when the footer records it under [MAX_ROW_GROUP_VALUE_BYTES_KEY].
 ///
 /// Writers and the verifier of compaction outputs must both use this to agree on the value.
 pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
-    let value_bytes: Vec<u64> = metadata
+    let max_value_bytes = metadata
         .file_metadata()
         .key_value_metadata()
-        .and_then(|kvs| kvs.iter().find(|kv| kv.key == ROW_GROUP_VALUE_BYTES_KEY))
+        .and_then(|kvs| {
+            kvs.iter()
+                .find(|kv| kv.key == MAX_ROW_GROUP_VALUE_BYTES_KEY)
+        })
         .and_then(|kv| kv.value.as_deref())
-        .and_then(|value| value.split(',').map(|v| v.parse().ok()).collect())
-        .unwrap_or_default();
-    metadata
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let max_encoded = metadata
         .row_groups()
         .iter()
-        .enumerate()
-        .map(|(i, row_group)| {
-            let encoded: u64 = row_group
+        .map(|row_group| {
+            row_group
                 .columns()
                 .iter()
                 .map(|column| column.uncompressed_size() as u64)
-                .sum();
-            encoded.max(value_bytes.get(i).copied().unwrap_or(0))
+                .sum::<u64>()
         })
         .max()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    max_encoded.max(max_value_bytes)
 }
 
 /// Values at least this long make min/max statistics of a field column useless for pruning,
