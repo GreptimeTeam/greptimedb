@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/tql/operator.sql

@@ -19,7 +19,7 @@ use clap::{Parser, ValueEnum};
 use sqlness::interceptor::Registry;
 use sqlness::{ConfigBuilder, Runner};
 
-use crate::cmd::SqlnessConfig;
+use crate::cmd::{SqlnessConfig, native_query_hints, parse_query_hints};
 use crate::env::bare::{Env, ServiceProvider, StoreConfig, WalConfig};
 use crate::{protocol_interceptor, util};
 
@@ -110,6 +110,15 @@ pub struct BareCommand {
     /// Enable garbage collection in metasrv and datanodes.
     #[clap(long, default_value = "false")]
     enable_gc: bool,
+
+    /// Ask every statement for the native PromQL route.
+    ///
+    /// Selects both halves the route needs, so a run cannot set one and silently execute the
+    /// existing route: the server's `[query] experimental_native_promql` option is rendered into
+    /// the generated config, and every gRPC statement carries
+    /// `query.experimental_native_promql=true`.
+    #[clap(long, default_value = "false")]
+    enable_native_promql: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -192,6 +201,7 @@ impl BareCommand {
             .test_filter(self.config.test_filter)
             .follow_links(true)
             .env_config_file(self.config.env_config_file)
+            .env_filter(self.config.env_filter.clone())
             .interceptor_registry(interceptor_registry)
             .parallelism(parallelism.instance)
             .env_parallelism(parallelism.env)
@@ -217,6 +227,11 @@ impl BareCommand {
             setup_mysql: self.setup_mysql,
             enable_flat_format: self.enable_flat_format,
             enable_gc: self.enable_gc,
+            enable_native_promql: self.enable_native_promql,
+            query_hints: native_query_hints(
+                self.enable_native_promql,
+                parse_query_hints(&self.config.query_hints),
+            ),
         };
 
         let runner = Runner::new(

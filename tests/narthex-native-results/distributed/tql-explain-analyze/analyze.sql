@@ -1,0 +1,1 @@
+../../../cases/distributed/tql-explain-analyze/analyze.sql
