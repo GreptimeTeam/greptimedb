@@ -119,7 +119,6 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         if column_def.semantic_type() == SemanticType::Tag {
             return error::StorageOnNonFieldColumnSnafu {
                 column: &column_def.name,
-                role: "primary key",
             }
             .fail();
         }

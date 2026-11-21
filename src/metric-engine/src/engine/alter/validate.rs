@@ -53,7 +53,7 @@ mod tests {
     #[test]
     fn test_reject_logical_column_sst_options() {
         let column = ColumnSchema::new("host", ConcreteDataType::string_datatype(), true);
-        for (column_schema, option) in [
+        for (column_schema, message) in [
             (
                 column
                     .clone()
@@ -62,13 +62,13 @@ mod tests {
                         ..Default::default()
                     })
                     .unwrap(),
-                "COMPRESSION",
+                "COMPRESSION is not supported on logical tables",
             ),
             (
                 column
                     .with_storage_options(StorageOptions::default())
                     .unwrap(),
-                "STORAGE",
+                "STORAGE is not supported on metric engine tables",
             ),
         ] {
             let request = RegionAlterRequest {
@@ -86,11 +86,7 @@ mod tests {
             let err =
                 validate_alter_region_requests(&[(RegionId::new(1, 1), request)]).unwrap_err();
             assert_eq!(StatusCode::InvalidArguments, err.status_code());
-            assert!(
-                err.to_string()
-                    .contains(&format!("{option} is not supported on logical tables")),
-                "{err}"
-            );
+            assert!(err.to_string().contains(message), "{err}");
         }
     }
 }

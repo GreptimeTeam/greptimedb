@@ -77,11 +77,10 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "STORAGE option is only supported on field columns, but column {column} is a {role} column"
+        "STORAGE option is only supported on field columns, but column {column} is a primary key column"
     ))]
     StorageOnNonFieldColumn {
         column: String,
-        role: String,
         #[snafu(implicit)]
         location: Location,
     },
